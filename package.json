@@ -20,12 +20,14 @@
     "@types/node": "^22.0.0",
     "drizzle-kit": "^0.30.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0"
+    "vitest": "^3.2.4"
   },
   "peerDependencies": {
     "openclaw": ">=1.0.0"
   },
   "openclaw": {
-    "extensions": ["openclaw.plugin.json"]
+    "extensions": [
+      "openclaw.plugin.json"
+    ]
   }
 }
