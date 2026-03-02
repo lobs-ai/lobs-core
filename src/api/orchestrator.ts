@@ -52,11 +52,16 @@ export async function handleOrchestratorRequest(
       const reflections = db.select().from(agentReflections).orderBy(desc(agentReflections.createdAt)).limit(10).all();
       const initiatives = db.select().from(agentInitiatives).orderBy(desc(agentInitiatives.createdAt)).limit(10).all();
       const sweeps = db.select().from(systemSweeps).orderBy(desc(systemSweeps.createdAt)).limit(5).all();
+      const decisions = db.select().from(initiativeDecisionRecords).orderBy(desc(initiativeDecisionRecords.createdAt)).limit(50).all();
+      const pending = initiatives.filter(i => i.status === "proposed");
+      const approved = decisions.filter(d => d.decision === "approve").length;
+      const lastRefl = reflections[0];
+      const lastSweepRow = sweeps[0];
       return json(res, {
-        recent_reflections: reflections,
-        pending_initiatives: initiatives.filter(i => i.status === "proposed"),
-        recent_sweeps: sweeps,
-        timestamp: new Date().toISOString(),
+        pendingReviews: pending.length,
+        recentApprovalRate: decisions.length > 0 ? { approved, total: decisions.length, days: 30 } : null,
+        lastReflection: lastRefl ? { timestamp: lastRefl.createdAt, agentCount: 1, initiativesProposed: pending.length } : null,
+        lastSweep: lastSweepRow ? { timestamp: lastSweepRow.createdAt, decisionsMade: decisions.length } : null,
       });
     }
 
