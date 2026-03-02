@@ -1,11 +1,3 @@
-/**
- * PAW HTTP Router — single wildcard handler for all /paw/api/* routes.
- *
- * OpenClaw's registerHttpRoute does exact path matching, which doesn't
- * support path parameters (/tasks/:id). Instead, we use registerHttpHandler
- * which receives all HTTP requests and returns true if handled.
- */
-
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { handleTaskRequest } from "./tasks.js";
@@ -20,52 +12,32 @@ import { error } from "./index.js";
 const PREFIX = "/paw/api/";
 
 export function registerPawRouter(api: OpenClawPluginApi): void {
-  (api as any).registerHttpHandler({
-    handler: async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
-      const url = new URL(req.url ?? "/", "http://localhost");
-      const pathname = url.pathname;
+  // registerHttpHandler takes a bare function: (req, res) => Promise<boolean>
+  (api as any).registerHttpHandler(async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const pathname = url.pathname;
 
-      if (!pathname.startsWith(PREFIX)) return false;
+    if (!pathname.startsWith(PREFIX)) return false;
 
-      const rest = pathname.slice(PREFIX.length); // e.g. "tasks", "tasks/abc123", "status/overview"
-      const parts = rest.split("/").filter(Boolean);
-      const resource = parts[0];
-      const id = parts[1];
+    const rest = pathname.slice(PREFIX.length);
+    const parts = rest.split("/").filter(Boolean);
+    const resource = parts[0];
+    const id = parts[1];
 
-      try {
-        switch (resource) {
-          case "tasks":
-            await handleTaskRequest(req, res, id, parts);
-            return true;
-          case "projects":
-            await handleProjectRequest(req, res, id);
-            return true;
-          case "agents":
-            await handleAgentRequest(req, res, id);
-            return true;
-          case "status":
-            await handleStatusRequest(req, res, id);
-            return true;
-          case "inbox":
-            await handleInboxRequest(req, res, id);
-            return true;
-          case "worker":
-            await handleWorkerRequest(req, res, id);
-            return true;
-          case "workflows":
-            await handleWorkflowRequest(req, res, id);
-            return true;
-          default:
-            error(res, `Unknown resource: ${resource}`, 404);
-            return true;
-        }
-      } catch (err) {
-        if (!res.headersSent) {
-          error(res, `Internal error: ${String(err)}`, 500);
-        }
-        return true;
+    try {
+      switch (resource) {
+        case "tasks": await handleTaskRequest(req, res, id, parts); return true;
+        case "projects": await handleProjectRequest(req, res, id); return true;
+        case "agents": await handleAgentRequest(req, res, id); return true;
+        case "status": await handleStatusRequest(req, res, id); return true;
+        case "inbox": await handleInboxRequest(req, res, id); return true;
+        case "worker": await handleWorkerRequest(req, res, id); return true;
+        case "workflows": await handleWorkflowRequest(req, res, id); return true;
+        default: error(res, `Unknown resource: ${resource}`, 404); return true;
       }
-    },
-    pluginId: "paw",
+    } catch (err) {
+      if (!res.headersSent) error(res, `Internal error: ${String(err)}`, 500);
+      return true;
+    }
   });
 }
