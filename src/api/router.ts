@@ -21,6 +21,7 @@ import { handleTopicsRequest } from "./topics.js";
 import { handleTilesRequest } from "./tiles.js";
 import { handleTrackerRequest } from "./tracker.js";
 import { handleWorkflowRunsRequest } from "./workflow-runs.js";
+import { handleKnowledgeRequest } from "./knowledge.js";
 import { error } from "./index.js";
 
 const PREFIXES = ["/paw/api/", "/api/"];
@@ -61,6 +62,7 @@ export function registerPawRouter(api: OpenClawPluginApi): void {
         case "topics":          await handleTopicsRequest(req, res, parts[1], parts); return true;
         case "tiles":           await handleTilesRequest(req, res, parts[1], parts); return true;
         case "tracker":         await handleTrackerRequest(req, res, parts); return true;
+        case "knowledge":       await handleKnowledgeRequest(req, res, parts[1], parts); return true;
         default:                error(res, `Unknown resource: ${resource}`, 404); return true;
       }
     } catch (err) {
