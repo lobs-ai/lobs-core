@@ -7,9 +7,10 @@
  * Replaces: lobs-server (FastAPI + orchestrator daemon)
  */
 
-import type { OpenClawPluginApi, OpenClawPluginDefinition } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { initDb, closeDb } from "./db/connection.js";
 import { runMigrations } from "./db/migrate.js";
+import { seedDefaultWorkflows } from "./workflow/seeds.js";
 import { registerAllRoutes } from "./api/index.js";
 import { registerModelResolveHook } from "./hooks/model-resolve.js";
 import { registerPromptBuildHook } from "./hooks/prompt-build.js";
@@ -23,7 +24,7 @@ import type { PawConfig } from "./util/types.js";
 const DEFAULT_DB_PATH = "~/.openclaw/plugins/paw/paw.db";
 const DEFAULT_SCAN_INTERVAL = 10_000;
 
-const pawPlugin: OpenClawPluginDefinition = {
+const pawPlugin = {
   id: "paw",
   name: "PAW — Personal AI Workforce",
   description: "Multi-agent orchestration, task management, and workflow engine",
@@ -38,6 +39,12 @@ const pawPlugin: OpenClawPluginDefinition = {
     const db = initDb(dbPath);
     runMigrations(db);
     log().info(`paw: database initialized at ${dbPath}`);
+
+    // ── Seed Workflows ────────────────────────────────────────────────
+    const seeded = seedDefaultWorkflows();
+    if (seeded > 0) {
+      log().info(`paw: seeded ${seeded} default workflows`);
+    }
 
     // ── API Routes ────────────────────────────────────────────────────
     registerAllRoutes(api);
@@ -57,10 +64,7 @@ const pawPlugin: OpenClawPluginDefinition = {
     api.registerService({
       id: "paw-orchestrator",
       start: () => {
-        startControlLoop(
-          { config: api.config, stateDir: "", logger: api.logger },
-          scanInterval,
-        );
+        startControlLoop({} as any, scanInterval);
       },
       stop: () => {
         stopControlLoop();
@@ -69,27 +73,40 @@ const pawPlugin: OpenClawPluginDefinition = {
     });
 
     // ── Slash Commands ────────────────────────────────────────────────
-    api.registerCommand({
+    api.registerCommand?.({
       name: "paw",
       description: "PAW status overview",
       handler: async () => {
-        // Phase 5: implement real status
-        return { text: "🐾 PAW orchestrator running." };
+        const { countActiveWorkers } = await import("./orchestrator/worker-manager.js");
+        const { findReadyTasks } = await import("./orchestrator/scanner.js");
+        const active = countActiveWorkers();
+        const ready = findReadyTasks(100).length;
+        return { text: `🐾 PAW orchestrator running.\nActive workers: ${active}\nReady tasks: ${ready}` };
       },
     });
 
     // ── CLI ───────────────────────────────────────────────────────────
-    api.registerCli(
+    api.registerCli?.(
       ({ program }) => {
         const paw = program.command("paw").description("PAW orchestrator commands");
 
         paw.command("status").description("Show orchestrator status").action(async () => {
-          console.log("PAW orchestrator status: running");
-          // Phase 5: real status output
+          const { countActiveWorkers } = await import("./orchestrator/worker-manager.js");
+          const { findReadyTasks } = await import("./orchestrator/scanner.js");
+          console.log(`Active workers: ${countActiveWorkers()}`);
+          console.log(`Ready tasks: ${findReadyTasks(100).length}`);
         });
 
         paw.command("tasks").description("List open tasks").action(async () => {
-          console.log("Open tasks: (not yet implemented)");
+          const { findReadyTasks } = await import("./orchestrator/scanner.js");
+          const tasks = findReadyTasks(50);
+          if (tasks.length === 0) {
+            console.log("No ready tasks.");
+            return;
+          }
+          for (const t of tasks) {
+            console.log(`  ${t.id.slice(0, 8)} [${t.agent}] ${t.title}`);
+          }
         });
       },
       { commands: ["paw"] },

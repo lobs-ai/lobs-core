@@ -1,0 +1,1063 @@
+/**
+ * Seed default workflow definitions on first startup.
+ * Port of lobs-server/app/orchestrator/workflow_seeds.py
+ *
+ * python_call nodes → ts_call nodes (stub implementations).
+ */
+
+import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
+import { getDb } from "../db/connection.js";
+import { workflowDefinitions, workflowSubscriptions } from "../db/schema.js";
+import { log } from "../util/logger.js";
+
+export function seedDefaultWorkflows(): number {
+  const db = getDb();
+  let created = 0;
+
+  for (const defn of DEFAULT_WORKFLOWS) {
+    const existing = db.select().from(workflowDefinitions)
+      .where(eq(workflowDefinitions.name, defn.name))
+      .get();
+
+    let wfId: string;
+
+    if (existing) {
+      wfId = existing.id;
+      db.update(workflowDefinitions).set({
+        description: defn.description,
+        nodes: defn.nodes,
+        edges: defn.edges ?? [],
+        trigger: defn.trigger ?? null,
+        metadata: defn.metadata ?? null,
+        version: (existing.version ?? 1) + 1,
+        updatedAt: new Date().toISOString(),
+      }).where(eq(workflowDefinitions.id, wfId)).run();
+      log().info(`[WORKFLOW_SEED] Updated workflow: ${defn.name} (v${(existing.version ?? 1) + 1})`);
+    } else {
+      wfId = randomUUID();
+      db.insert(workflowDefinitions).values({
+        id: wfId,
+        name: defn.name,
+        description: defn.description,
+        version: 1,
+        nodes: defn.nodes,
+        edges: defn.edges ?? [],
+        trigger: defn.trigger ?? null,
+        metadata: defn.metadata ?? null,
+        isActive: defn.is_active ?? true,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }).run();
+      created++;
+      log().info(`[WORKFLOW_SEED] Created workflow: ${defn.name}`);
+    }
+
+    // Auto-create subscriptions for event-triggered workflows
+    const trigger = defn.trigger as Record<string, unknown> | null | undefined;
+    if (trigger?.["type"] === "event") {
+      const eventPattern = trigger["event_pattern"] as string ?? "";
+      if (eventPattern) {
+        const subExists = db.select().from(workflowSubscriptions)
+          .where(eq(workflowSubscriptions.workflowId, wfId))
+          .get();
+        if (!subExists) {
+          db.insert(workflowSubscriptions).values({
+            id: randomUUID(),
+            workflowId: wfId,
+            eventPattern,
+            filterConditions: (trigger["filter_conditions"] as Record<string, unknown>) ?? null,
+            isActive: true,
+            createdAt: new Date().toISOString(),
+          }).run();
+          log().info(`[WORKFLOW_SEED] Created subscription: ${defn.name} → ${eventPattern}`);
+        }
+      }
+    }
+  }
+
+  return created;
+}
+
+// ── Default Workflows ─────────────────────────────────────────────────────────
+
+const DEFAULT_WORKFLOWS = [
+  // ══════════════════════════════════════════════════════════════════
+  // MASTER TASK ROUTER
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "task-router",
+    description: "Master task router: checks capacity and routes tasks to the correct agent workflow.",
+    trigger: { type: "task_match", agent_types: ["programmer", "researcher", "writer", "architect", "reviewer", "inbox-responder"] },
+    is_active: true,
+    nodes: [
+      {
+        id: "preflight",
+        type: "expression",
+        config: {
+          expressions: {
+            capacity: "workerCapacity()",
+            active: "activeWorkers()",
+            agent_type: 'taskField("agent")',
+            agent_busy: 'agentStatus(taskField("agent")) == "busy"',
+          },
+          goto_if: [
+            { match: "capacity > 0", goto: "route_by_agent" },
+          ],
+          default: "wait_for_capacity",
+        },
+      },
+      {
+        id: "wait_for_capacity",
+        type: "delay",
+        config: { seconds: 30 },
+        on_success: "preflight",
+      },
+      {
+        id: "route_by_agent",
+        type: "branch",
+        config: {
+          conditions: [
+            { match: 'taskField("agent") == "programmer"', goto: "spawn_programmer" },
+            { match: 'taskField("agent") == "researcher"', goto: "spawn_researcher" },
+            { match: 'taskField("agent") == "writer"', goto: "spawn_writer" },
+            { match: 'taskField("agent") == "architect"', goto: "spawn_architect" },
+            { match: 'taskField("agent") == "reviewer"', goto: "spawn_reviewer" },
+            { match: 'taskField("agent") == "inbox-responder"', goto: "spawn_inbox" },
+          ],
+          default: "llm_classify",
+        },
+      },
+      {
+        id: "llm_classify",
+        type: "llm_route",
+        config: {
+          prompt_template: "Task: {task.title}\nDescription: {task.notes}\nAssigned agent: {task.agent}\n\nChoose the best execution path.",
+          candidates: [
+            { id: "spawn_programmer", description: "Code changes, bug fixes, implementation, tests" },
+            { id: "spawn_researcher", description: "Investigation, analysis, comparison, synthesis" },
+            { id: "spawn_writer", description: "Documentation, content, summaries, write-ups" },
+            { id: "spawn_architect", description: "System design, architecture, technical strategy" },
+            { id: "spawn_reviewer", description: "Code review, quality checks, feedback" },
+          ],
+          model_tier: "micro",
+        },
+      },
+      {
+        id: "spawn_programmer",
+        type: "spawn_agent",
+        config: { agent_type: "programmer" },
+        on_success: "run_tests_1",
+        on_failure: { retry: 1, abort_on: ["spawn_error"] },
+      },
+      {
+        id: "run_tests_1",
+        type: "tool_call",
+        config: { command: "/Users/lobs/lobs-server/bin/ci.sh {project.repo_path}", timeout_seconds: 600 },
+        on_success: "tests_gate_1",
+        on_failure: { retry: 0 },
+      },
+      {
+        id: "tests_gate_1",
+        type: "branch",
+        config: {
+          conditions: [
+            { match: "run_tests_1.returncode == 0", goto: "done" },
+            { match: 'contains(run_tests_1.stdout, "no buildable project")', goto: "done" },
+          ],
+          default: "spawn_programmer_fix_1",
+        },
+      },
+      {
+        id: "spawn_programmer_fix_1",
+        type: "spawn_agent",
+        config: {
+          agent_type: "programmer",
+          prompt_template: "CI failed after your implementation. Fix only what's broken.\n\nTask: {task.title}\n\nOriginal notes:\n{task.notes}\n\nCI output:\n{run_tests_1.stdout}\n{run_tests_1.stderr}",
+        },
+        on_success: "run_tests_2",
+        on_failure: { retry: 0, abort_on: ["spawn_error"] },
+      },
+      {
+        id: "run_tests_2",
+        type: "tool_call",
+        config: { command: "/Users/lobs/lobs-server/bin/ci.sh {project.repo_path}", timeout_seconds: 600 },
+        on_success: "tests_gate_2",
+        on_failure: { retry: 0 },
+      },
+      {
+        id: "tests_gate_2",
+        type: "branch",
+        config: {
+          conditions: [{ match: "run_tests_2.returncode == 0", goto: "done" }],
+          default: "spawn_programmer_fix_2",
+        },
+      },
+      {
+        id: "spawn_programmer_fix_2",
+        type: "spawn_agent",
+        config: {
+          agent_type: "programmer",
+          prompt_template: "CI still failing. Final try. Read errors carefully.\n\nTask: {task.title}\n\nCI output:\n{run_tests_2.stdout}\n{run_tests_2.stderr}",
+        },
+        on_success: "run_tests_3",
+        on_failure: { retry: 0, abort_on: ["spawn_error"] },
+      },
+      {
+        id: "run_tests_3",
+        type: "tool_call",
+        config: { command: "/Users/lobs/lobs-server/bin/ci.sh {project.repo_path}", timeout_seconds: 600 },
+        on_success: "tests_gate_3",
+        on_failure: { retry: 0 },
+      },
+      {
+        id: "tests_gate_3",
+        type: "branch",
+        config: {
+          conditions: [{ match: "run_tests_3.returncode == 0", goto: "done" }],
+          default: "tests_failed_terminal",
+        },
+      },
+      {
+        id: "tests_failed_terminal",
+        type: "gate",
+        config: { prompt: "CI still failing after 2 fix attempts. Manual intervention required.", timeout_hours: 24 },
+        on_success: "done",
+      },
+      {
+        id: "spawn_researcher",
+        type: "spawn_agent",
+        config: { agent_type: "researcher" },
+        on_success: "done",
+        on_failure: { retry: 1, abort_on: ["spawn_error"] },
+      },
+      {
+        id: "spawn_writer",
+        type: "spawn_agent",
+        config: { agent_type: "writer", model_tier: "small" },
+        on_success: "done",
+        on_failure: { retry: 1, abort_on: ["spawn_error"] },
+      },
+      {
+        id: "spawn_architect",
+        type: "spawn_agent",
+        config: { agent_type: "architect", model_tier: "strong" },
+        on_success: "done",
+        on_failure: { retry: 1, abort_on: ["spawn_error"] },
+      },
+      {
+        id: "spawn_reviewer",
+        type: "spawn_agent",
+        config: { agent_type: "reviewer" },
+        on_success: "done",
+        on_failure: { retry: 1, abort_on: ["spawn_error"] },
+      },
+      {
+        id: "spawn_inbox",
+        type: "spawn_agent",
+        config: { agent_type: "inbox-responder", model_tier: "medium" },
+        on_success: "done",
+        on_failure: { retry: 0, abort_on: ["spawn_error"] },
+      },
+      {
+        id: "done",
+        type: "cleanup",
+        config: {
+          session_refs: [
+            "spawn_programmer.childSessionKey",
+            "spawn_programmer_fix_1.childSessionKey",
+            "spawn_programmer_fix_2.childSessionKey",
+            "spawn_researcher.childSessionKey",
+            "spawn_writer.childSessionKey",
+            "spawn_architect.childSessionKey",
+            "spawn_reviewer.childSessionKey",
+            "spawn_inbox.childSessionKey",
+          ],
+        },
+      },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "core", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  // LEGACY: code-task (disabled)
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "code-task",
+    description: "Standalone code task workflow (superseded by task-router).",
+    trigger: null,
+    is_active: false,
+    nodes: [
+      {
+        id: "write_code",
+        type: "spawn_agent",
+        config: { agent_type: "programmer", prompt_template: "{task.title}\n\n{task.notes}", timeout_seconds: 900 },
+        on_success: "run_tests",
+        on_failure: { retry: 0, abort_on: ["spawn_error"] },
+      },
+      {
+        id: "run_tests",
+        type: "tool_call",
+        config: { command: "/Users/lobs/lobs-server/bin/ci.sh {project.repo_path}", timeout_seconds: 600 },
+        on_success: "check_tests",
+        on_failure: { retry: 1, fallback: "fix_tests", escalate_after: 3, abort_on: ["timeout"] },
+      },
+      {
+        id: "check_tests",
+        type: "branch",
+        config: {
+          conditions: [{ match: "run_tests.returncode == 0", goto: "run_lint" }],
+          default: "fix_tests",
+        },
+      },
+      {
+        id: "fix_tests",
+        type: "send_to_session",
+        config: {
+          session_ref: "write_code.session_key",
+          message_template: "Tests failed. Fix these errors:\n\nSTDOUT:\n{run_tests.stdout}\n\nSTDERR:\n{run_tests.stderr}",
+        },
+        on_success: "run_tests_retry",
+        on_failure: { retry: 0, abort_on: ["spawn_error"] },
+      },
+      {
+        id: "run_tests_retry",
+        type: "tool_call",
+        config: { command: "/Users/lobs/lobs-server/bin/ci.sh {project.repo_path}", timeout_seconds: 600 },
+        on_success: "check_tests_retry",
+        on_failure: { retry: 0, abort_on: ["timeout"] },
+      },
+      {
+        id: "check_tests_retry",
+        type: "branch",
+        config: {
+          conditions: [{ match: "run_tests_retry.returncode == 0", goto: "run_lint" }],
+          default: "escalate_test_failure",
+        },
+      },
+      {
+        id: "escalate_test_failure",
+        type: "gate",
+        config: { prompt: "Tests failed after fix attempt. Manual review needed.", timeout_hours: 24 },
+        on_success: "cleanup",
+      },
+      {
+        id: "run_lint",
+        type: "tool_call",
+        config: { command: "cd {project.repo_path} && ruff check . 2>&1 || true", timeout_seconds: 120 },
+        on_success: "check_lint",
+        on_failure: { retry: 0, abort_on: ["timeout"] },
+      },
+      {
+        id: "check_lint",
+        type: "branch",
+        config: {
+          conditions: [{ match: "run_lint.returncode == 0", goto: "commit" }],
+          default: "fix_lint",
+        },
+      },
+      {
+        id: "fix_lint",
+        type: "send_to_session",
+        config: { session_ref: "write_code.session_key", message_template: "Lint errors found:\n\n{run_lint.stdout}" },
+        on_success: "run_lint",
+        on_failure: { retry: 0 },
+      },
+      {
+        id: "commit",
+        type: "tool_call",
+        config: {
+          command: "cd {project.repo_path} && git add -A && git diff --cached --quiet || git commit -m 'agent(programmer): {task.title}' --author 'lobs-programmer <thelobsbot@gmail.com>'",
+          timeout_seconds: 30,
+        },
+        on_success: "cleanup",
+        on_failure: { retry: 1 },
+      },
+      {
+        id: "cleanup",
+        type: "cleanup",
+        config: { session_refs: ["write_code.childSessionKey"] },
+      },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "code" },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  // LEGACY: research-task (disabled)
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "research-task",
+    description: "Standalone research task workflow (superseded by task-router).",
+    trigger: null,
+    is_active: false,
+    nodes: [
+      {
+        id: "research",
+        type: "spawn_agent",
+        config: { agent_type: "researcher", prompt_template: "{task.title}\n\n{task.notes}", timeout_seconds: 900 },
+        on_success: "cleanup",
+        on_failure: { retry: 1, abort_on: ["spawn_error"] },
+      },
+      {
+        id: "cleanup",
+        type: "cleanup",
+        config: { session_refs: ["research.childSessionKey"] },
+      },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "research" },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  // CALENDAR SYNC
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "calendar-sync",
+    description: "Sync Google Calendar events to internal calendar and check upcoming events for alerts.",
+    trigger: { type: "schedule", cron: "*/15 * * * *", timezone: "America/New_York" },
+    is_active: true,
+    nodes: [
+      {
+        id: "sync",
+        type: "ts_call",
+        config: { callable: "calendar.sync_google" },
+        on_success: "check_upcoming",
+        on_failure: { retry: 1 },
+      },
+      {
+        id: "check_upcoming",
+        type: "ts_call",
+        config: { callable: "calendar.check_upcoming" },
+        on_success: "eval_alerts",
+        on_failure: { retry: 0 },
+      },
+      {
+        id: "eval_alerts",
+        type: "expression",
+        config: {
+          expressions: {
+            alert_count: 'ctx("check_upcoming.alerts")',
+            has_alerts: 'ctx("check_upcoming.alerts") > 0',
+            current_hour: 'hour("America/New_York")',
+            should_notify: 'ctx("check_upcoming.alerts") > 0 and hour("America/New_York") >= 8 and hour("America/New_York") < 23',
+          },
+          goto_if: [{ match: "should_notify", goto: "notify_alerts" }],
+          default: "done",
+        },
+      },
+      {
+        id: "notify_alerts",
+        type: "notify",
+        config: { channel: "internal", message_template: "📅 {check_upcoming.alerts} upcoming calendar alerts in next 24h" },
+        on_success: "done",
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "integration", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  // EMAIL CHECK
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "email-check",
+    description: "Check email inbox for unread messages and create inbox items for important ones.",
+    trigger: { type: "schedule", cron: "*/30 * * * *", timezone: "America/New_York" },
+    is_active: true,
+    nodes: [
+      {
+        id: "check",
+        type: "ts_call",
+        config: { callable: "email.check_inbox" },
+        on_success: "check_results",
+        on_failure: { retry: 1 },
+      },
+      {
+        id: "check_results",
+        type: "branch",
+        config: {
+          conditions: [{ match: "check.actioned > 0", goto: "notify" }],
+          default: "done",
+        },
+      },
+      {
+        id: "notify",
+        type: "notify",
+        config: { channel: "internal", message_template: "📧 {check.actioned} new emails added to inbox" },
+        on_success: "done",
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "integration", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  // WORK TRACKER — Deadline monitoring
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "tracker-deadlines",
+    description: "Check approaching deadlines every 30 minutes and send reminders.",
+    trigger: { type: "schedule", cron: "*/30 * * * *", timezone: "America/New_York" },
+    is_active: true,
+    nodes: [
+      {
+        id: "check",
+        type: "ts_call",
+        config: { callable: "tracker.check_deadlines" },
+        on_success: "check_results",
+        on_failure: { retry: 1 },
+      },
+      {
+        id: "check_results",
+        type: "branch",
+        config: {
+          conditions: [{ match: "check.notified > 0", goto: "notify" }],
+          default: "done",
+        },
+      },
+      {
+        id: "notify",
+        type: "notify",
+        config: { channel: "internal", message_template: "⏰ {check.notified} deadline reminders sent" },
+        on_success: "done",
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "tracker", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  // DAILY SUMMARY
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "tracker-daily-summary",
+    description: "Generate daily work summary at 7am ET.",
+    trigger: { type: "schedule", cron: "0 7 * * *", timezone: "America/New_York" },
+    is_active: true,
+    nodes: [
+      {
+        id: "gather_stats",
+        type: "expression",
+        config: {
+          expressions: {
+            open_tasks: 'numTasks("open")',
+            pending_tasks: 'numTasks("pending")',
+            active_tasks: 'numTasks("active")',
+            is_weekday: 'dayOfWeek("America/New_York") < 5',
+            unread_inbox: "numUnread()",
+          },
+        },
+        on_success: "summary",
+      },
+      {
+        id: "summary",
+        type: "ts_call",
+        config: { callable: "tracker.daily_summary" },
+        on_success: "check_results",
+        on_failure: { retry: 1 },
+      },
+      {
+        id: "check_results",
+        type: "branch",
+        config: {
+          conditions: [{ match: "summary.summary_created == true", goto: "notify" }],
+          default: "done",
+        },
+      },
+      {
+        id: "notify",
+        type: "notify",
+        config: {
+          channel: "internal",
+          message_template: "📊 Daily summary: {summary.total_minutes}min across {summary.sessions} sessions | Open: {gather_stats.open_tasks} tasks, {gather_stats.unread_inbox} unread inbox",
+        },
+        on_success: "done",
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "tracker", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  // DAILY LEARNING
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "daily-learning",
+    description: "Check active learning plans and generate+deliver the next lesson at 7am ET.",
+    trigger: { type: "schedule", cron: "0 7 * * *", timezone: "America/New_York" },
+    is_active: true,
+    nodes: [
+      {
+        id: "check_plans",
+        type: "ts_call",
+        config: { callable: "learning.check_due" },
+        on_success: "check_results",
+        on_failure: { retry: 1 },
+      },
+      {
+        id: "check_results",
+        type: "branch",
+        config: {
+          conditions: [{ match: "check_plans.lessons_generated > 0", goto: "deliver" }],
+          default: "done",
+        },
+      },
+      {
+        id: "deliver",
+        type: "notify",
+        config: {
+          channel: "discord",
+          message_template: "📚 **Daily Lesson**\n\n{check_plans.lessons[0].content_preview}...",
+        },
+        on_success: "done",
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "learning", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  // CREATE LEARNING PLAN (event-triggered)
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "create-learning-plan",
+    description: "Create a new learning plan when requested. Triggered by learning.plan_requested event.",
+    trigger: { type: "event", event_pattern: "learning.plan_requested" },
+    is_active: true,
+    nodes: [
+      {
+        id: "create",
+        type: "ts_call",
+        config: { callable: "learning.create_plan", args_template: { topic: "{trigger.topic}", goal: "{trigger.goal}", total_days: "{trigger.total_days}" } },
+        on_success: "check_result",
+        on_failure: { retry: 1 },
+      },
+      {
+        id: "check_result",
+        type: "branch",
+        config: {
+          conditions: [{ match: "create.status == ok", goto: "notify_created" }],
+          default: "notify_failed",
+        },
+      },
+      {
+        id: "notify_created",
+        type: "notify",
+        config: { channel: "discord", message_template: "📚 Learning plan created: **{create.topic}** ({create.total_days} days)" },
+        on_success: "done",
+      },
+      {
+        id: "notify_failed",
+        type: "notify",
+        config: { channel: "internal", message_template: "Failed to create learning plan: {create.error}" },
+        on_success: "done",
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "learning", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  // REVIEW SWEEP
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "review-sweep",
+    description: "Periodic scan for completed programmer tasks that lack review.",
+    trigger: { type: "schedule", cron: "0 */6 * * *", timezone: "America/New_York" },
+    is_active: true,
+    nodes: [
+      {
+        id: "scan",
+        type: "ts_call",
+        config: { callable: "upkeep.review_sweep" },
+        on_success: "check_results",
+        on_failure: { retry: 1 },
+      },
+      {
+        id: "check_results",
+        type: "branch",
+        config: {
+          conditions: [{ match: "scan.unreviewed > 0", goto: "notify_lobs" }],
+          default: "done",
+        },
+      },
+      {
+        id: "notify_lobs",
+        type: "notify",
+        config: { channel: "internal", message_template: "Review sweep: {scan.unreviewed} unreviewed programmer tasks in last 48h." },
+        on_success: "done",
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "upkeep", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  // DOC UPKEEP
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "doc-upkeep",
+    description: "Daily scan of project repos for missing READMEs, stale docs, and documentation drift.",
+    trigger: { type: "schedule", cron: "0 8 * * *", timezone: "America/New_York" },
+    is_active: true,
+    nodes: [
+      {
+        id: "scan",
+        type: "ts_call",
+        config: { callable: "upkeep.doc_scan" },
+        on_success: "check_results",
+        on_failure: { retry: 1 },
+      },
+      {
+        id: "check_results",
+        type: "branch",
+        config: {
+          conditions: [{ match: "scan.findings > 0", goto: "spawn_writer" }],
+          default: "done",
+        },
+      },
+      {
+        id: "spawn_writer",
+        type: "spawn_agent",
+        config: {
+          agent_type: "writer",
+          model_tier: "small",
+          prompt_template: "Documentation upkeep run. Issues found:\n\n{scan.details}\n\nFix each finding. Commit with 'docs: <description>'.",
+          timeout_seconds: 600,
+        },
+        on_success: "done",
+        on_failure: { retry: 0, abort_on: ["spawn_error"] },
+      },
+      {
+        id: "done",
+        type: "cleanup",
+        config: { session_refs: ["spawn_writer.childSessionKey"] },
+      },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "upkeep", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  // REFLECTION CYCLE
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "reflection-cycle",
+    description: "Full strategic reflection pipeline with capacity-aware scheduling.",
+    trigger: { type: "schedule", cron: "0 */6 * * *", timezone: "America/New_York" },
+    is_active: true,
+    nodes: [
+      {
+        id: "capacity_check",
+        type: "expression",
+        config: {
+          expressions: {
+            capacity: "workerCapacity()",
+            active: "activeWorkers()",
+            pending: 'numTasks("pending")',
+            should_run: 'workerCapacity() > 0 and numTasks("pending") == 0',
+          },
+          goto_if: [{ match: "should_run", goto: "list_agents" }],
+          default: "defer",
+        },
+      },
+      {
+        id: "defer",
+        type: "notify",
+        config: { channel: "internal", message_template: "Reflection deferred: {capacity_check.active} workers active, {capacity_check.pending} pending tasks" },
+        on_success: "done",
+      },
+      {
+        id: "list_agents",
+        type: "ts_call",
+        config: { callable: "reflection.list_agents" },
+        on_success: "check_agents",
+        on_failure: { retry: 1, abort_on: ["python_error"] },
+      },
+      {
+        id: "check_agents",
+        type: "branch",
+        config: {
+          conditions: [{ match: "list_agents.count == 0", goto: "done" }],
+          default: "build_contexts",
+        },
+      },
+      {
+        id: "build_contexts",
+        type: "ts_call",
+        config: { callable: "reflection.build_contexts" },
+        on_success: "spawn_agents",
+        on_failure: { retry: 1, abort_on: ["python_error"] },
+      },
+      {
+        id: "spawn_agents",
+        type: "ts_call",
+        config: { callable: "reflection.spawn_agents" },
+        on_success: "check_spawned",
+        on_failure: { retry: 1, abort_on: ["python_error"] },
+      },
+      {
+        id: "check_spawned",
+        type: "branch",
+        config: {
+          conditions: [{ match: "spawn_agents.spawned == 0", goto: "done" }],
+          default: "wait_for_completion",
+        },
+      },
+      {
+        id: "wait_for_completion",
+        type: "ts_call",
+        config: { callable: "reflection.check_complete", poll: true },
+        on_success: "run_sweep",
+        on_failure: { retry: 3, abort_on: ["python_error"] },
+      },
+      {
+        id: "run_sweep",
+        type: "ts_call",
+        config: { callable: "reflection.run_sweep" },
+        on_success: "notify_sweep",
+        on_failure: { retry: 2 },
+      },
+      {
+        id: "notify_sweep",
+        type: "notify",
+        config: {
+          channel: "internal",
+          message_template: "Reflection cycle complete. Spawned {spawn_agents.spawned} agents. Sweep: {run_sweep.proposed} proposed, {run_sweep.rejected} rejected.",
+        },
+        on_success: "emit_complete",
+      },
+      {
+        id: "emit_complete",
+        type: "notify",
+        config: { channel: "internal", message_template: "reflection.batch_complete" },
+        on_success: "done",
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "system", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  // DIAGNOSTIC SCAN
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "diagnostic-scan",
+    description: "Detect stalls, failures, idle agents. Skips when system is idle.",
+    trigger: { type: "schedule", cron: "*/30 * * * *", timezone: "UTC" },
+    is_active: true,
+    nodes: [
+      {
+        id: "activity_check",
+        type: "expression",
+        config: {
+          expressions: {
+            open_tasks: 'numTasks("open")',
+            active_workers: "activeWorkers()",
+            has_activity: 'numTasks("open") > 0 or activeWorkers() > 0',
+          },
+          goto_if: [{ match: "has_activity", goto: "run_diagnostics" }],
+          default: "done",
+        },
+      },
+      {
+        id: "run_diagnostics",
+        type: "ts_call",
+        config: { callable: "diagnostics.run_once" },
+        on_success: "check_results",
+        on_failure: { retry: 1, abort_on: ["python_error"] },
+      },
+      {
+        id: "check_results",
+        type: "branch",
+        config: {
+          conditions: [{ match: "run_diagnostics.spawned != 0", goto: "notify" }],
+          default: "done",
+        },
+      },
+      {
+        id: "notify",
+        type: "notify",
+        config: {
+          channel: "internal",
+          message_template: "Diagnostics: {run_diagnostics.triggers} triggers, {run_diagnostics.fired} fired, {run_diagnostics.spawned} spawned.",
+        },
+        on_success: "done",
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "system", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  // DAILY COMPRESSION
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "daily-compression",
+    description: "Compress agent reflections into versioned identity snapshots.",
+    trigger: { type: "schedule", cron: "0 4 * * *", timezone: "America/New_York" },
+    is_active: true,
+    nodes: [
+      {
+        id: "compress",
+        type: "ts_call",
+        config: { callable: "reflection.run_compression" },
+        on_success: "check_results",
+        on_failure: { retry: 1 },
+      },
+      {
+        id: "check_results",
+        type: "branch",
+        config: {
+          conditions: [{ match: "compress.validation_failures != 0", goto: "notify_failures" }],
+          default: "notify_success",
+        },
+      },
+      {
+        id: "notify_failures",
+        type: "notify",
+        config: { channel: "internal", message_template: "Daily compression: {compress.rewritten} rewritten, {compress.validation_failures} validation failures." },
+        on_success: "done",
+      },
+      {
+        id: "notify_success",
+        type: "notify",
+        config: { channel: "internal", message_template: "Daily compression complete: {compress.rewritten} identities updated across {compress.agents} agents." },
+        on_success: "done",
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "system", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  // SCHEDULED EVENTS
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "scheduled-events",
+    description: "Fire due calendar scheduled events and create tasks from them.",
+    trigger: { type: "schedule", cron: "* * * * *", timezone: "UTC" },
+    is_active: true,
+    nodes: [
+      {
+        id: "fire_events",
+        type: "ts_call",
+        config: { callable: "scheduler.fire_due_events" },
+        on_success: "done",
+        on_failure: { retry: 1 },
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "system", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  // GITHUB SYNC
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "github-sync",
+    description: "Sync GitHub issues and PRs for all tracked projects.",
+    trigger: { type: "schedule", cron: "*/15 * * * *", timezone: "UTC" },
+    is_active: true,
+    nodes: [
+      {
+        id: "sync",
+        type: "ts_call",
+        config: { callable: "github_sync.sync_all" },
+        on_success: "done",
+        on_failure: { retry: 2, abort_on: ["timeout"] },
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "system", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  // MEMORY SYNC
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "memory-sync",
+    description: "Sync agent memory files from disk to database.",
+    trigger: { type: "schedule", cron: "0 * * * *", timezone: "UTC" },
+    is_active: true,
+    nodes: [
+      {
+        id: "sync",
+        type: "ts_call",
+        config: { callable: "memory_sync.sync_all" },
+        on_success: "done",
+        on_failure: { retry: 1 },
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "system", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  // SYSTEM CLEANUP
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "system-cleanup",
+    description: "Daily cleanup: delete old workflow runs (7d), purge worker history (14d), fail stale runs (8h).",
+    trigger: { type: "schedule", cron: "0 3 * * *", timezone: "America/New_York" },
+    is_active: true,
+    nodes: [
+      {
+        id: "cleanup",
+        type: "ts_call",
+        config: { callable: "system.cleanup" },
+        on_success: "notify",
+        on_failure: { retry: 1 },
+      },
+      {
+        id: "notify",
+        type: "notify",
+        config: {
+          channel: "internal",
+          message_template: "System cleanup done: {cleanup.workflow_runs_deleted} wf runs deleted, {cleanup.worker_runs_deleted} worker runs deleted, {cleanup.stale_runs_failed} stale runs failed.",
+        },
+        on_success: "done",
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "system", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  // INBOX PROCESSING
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "inbox-processing",
+    description: "Process inbox threads with user responses — analyze with LLM, create tasks, respond, resolve.",
+    trigger: { type: "schedule", cron: "* * * * *", timezone: "UTC" },
+    is_active: true,
+    nodes: [
+      {
+        id: "process",
+        type: "ts_call",
+        config: { callable: "inbox.process_threads" },
+        on_success: "done",
+        on_failure: { retry: 1, abort_on: ["python_error"] },
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "system", system: true },
+  },
+];
