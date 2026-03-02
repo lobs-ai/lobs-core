@@ -39,6 +39,7 @@ export function registerPawRouter(api: OpenClawPluginApi): void {
 
     try {
       switch (resource) {
+        case "health":          res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ status: "ok", version: "0.1.0", uptime: process.uptime() })); return true;
         case "tasks":           await handleTaskRequest(req, res, parts[1], parts); return true;
         case "projects":        await handleProjectRequest(req, res, parts[1], parts); return true;
         case "agents":          await handleAgentRequest(req, res, parts[1]); return true;
