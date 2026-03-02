@@ -1,0 +1,48 @@
+{
+  "id": "paw",
+  "name": "PAW — Personal AI Workforce",
+  "description": "Multi-agent orchestration, task management, and workflow engine for OpenClaw",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "dbPath": {
+        "type": "string",
+        "description": "Path to SQLite database"
+      },
+      "scanIntervalMs": {
+        "type": "number",
+        "description": "Orchestrator scan interval in milliseconds",
+        "default": 10000
+      },
+      "maxConcurrentWorkers": {
+        "type": "number",
+        "description": "Maximum concurrent worker agents",
+        "default": 2
+      },
+      "defaultModelTier": {
+        "type": "string",
+        "enum": ["micro", "small", "medium", "standard", "strong"],
+        "default": "standard"
+      }
+    }
+  },
+  "uiHints": {
+    "dbPath": {
+      "label": "Database Path",
+      "placeholder": "~/.openclaw/plugins/paw/paw.db",
+      "advanced": true
+    },
+    "scanIntervalMs": {
+      "label": "Scan Interval (ms)",
+      "advanced": true
+    },
+    "maxConcurrentWorkers": {
+      "label": "Max Concurrent Workers"
+    },
+    "defaultModelTier": {
+      "label": "Default Model Tier"
+    }
+  }
+}
