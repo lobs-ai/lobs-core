@@ -391,7 +391,7 @@ export function executeCallable(name: string, args: Record<string, unknown>, ctx
   }
   try {
     const result = fn(args, ctx);
-    log().debug(`[CALLABLE] ${name} → ${JSON.stringify(result).slice(0, 100)}`);
+    log().info(`[CALLABLE] ${name} → ok`);
     return result;
   } catch (e) {
     log().error(`[CALLABLE] ${name} threw: ${String(e)}`);
