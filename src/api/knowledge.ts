@@ -26,5 +26,5 @@ export async function handleKnowledgeRequest(
   }
 
   // GET /api/knowledge?search=...  or  GET /api/knowledge (browse)
-  return json(res, { entries: [], path: q.path ?? null, total: 0 });
+  return json(res, { entries: [], path: q.path || null, total: 0 });
 }

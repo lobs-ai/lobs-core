@@ -1,58 +1,55 @@
+import { eq, desc } from "drizzle-orm";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { json, error } from "./index.js";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join, extname } from "node:path";
-import { homedir } from "node:os";
-
-// Documents live in lobs-control state/reports and state/research
-const REPORTS_DIR = join(homedir(), "lobs-control", "state", "reports");
-const DOCS_DIRS = [
-  join(homedir(), "lobs-control", "state", "reports", "delivered"),
-  join(homedir(), "lobs-control", "state", "reports", "pending"),
-];
-
-function listDocs() {
-  const docs: Array<{ id: string; title: string; path: string; type: string; modified_at: string }> = [];
-  for (const dir of DOCS_DIRS) {
-    if (!existsSync(dir)) continue;
-    for (const file of readdirSync(dir)) {
-      if (!file.endsWith(".md") && !file.endsWith(".txt")) continue;
-      const fullPath = join(dir, file);
-      const stat = statSync(fullPath);
-      docs.push({
-        id: Buffer.from(fullPath).toString("base64url"),
-        title: file.replace(/\.(md|txt)$/, ""),
-        path: fullPath,
-        type: "report",
-        modified_at: stat.mtime.toISOString(),
-      });
-    }
-  }
-  return docs;
-}
+import { getDb } from "../db/connection.js";
+import { inboxItems } from "../db/schema.js";
+import { json, error, parseQuery } from "./index.js";
 
 export async function handleDocumentsRequest(
   req: IncomingMessage,
   res: ServerResponse,
-  id?: string,
-  parts: string[] = [],
+  id: string | undefined,
+  parts: string[],
 ): Promise<void> {
-  const sub = parts[2];
+  const db = getDb();
 
-  if (id) {
-    if (sub === "archive") {
-      // Stub: acknowledge
-      return json(res, { archived: true, id });
-    }
-    // Decode id and return content
-    try {
-      const path = Buffer.from(id, "base64url").toString("utf-8");
-      if (existsSync(path)) {
-        return json(res, { id, content: readFileSync(path, "utf-8"), path });
-      }
-    } catch {}
-    return error(res, "Not found", 404);
+  if (id === "search") {
+    return json(res, []);
   }
 
-  return json(res, listDocs());
+  if (id && parts[2] === "archive" && req.method === "POST") {
+    db.delete(inboxItems).where(eq(inboxItems.id, id)).run();
+    return json(res, { archived: true });
+  }
+
+  if (id) {
+    const row = db.select().from(inboxItems).where(eq(inboxItems.id, id)).get();
+    if (!row) return error(res, "Not found", 404);
+    return json(res, mapToDocument(row));
+  }
+
+  // GET /api/documents
+  const rows = db.select().from(inboxItems).orderBy(desc(inboxItems.modifiedAt)).all();
+  return json(res, rows.map(mapToDocument));
+}
+
+function mapToDocument(row: any) {
+  const filename = row.filename || row.title || "untitled";
+  return {
+    id: row.id,
+    title: row.title ?? "Untitled",
+    filename,
+    relativePath: row.relativePath || `documents/${filename}`,
+    content: row.content ?? "",
+    contentIsTruncated: false,
+    source: "writer",
+    status: row.isRead ? "approved" : "pending",
+    topic: null,
+    topicId: null,
+    projectId: null,
+    taskId: null,
+    date: row.modifiedAt ?? new Date().toISOString(),
+    isRead: row.isRead ?? false,
+    isStarred: false,
+    summary: row.summary ?? null,
+  };
 }
