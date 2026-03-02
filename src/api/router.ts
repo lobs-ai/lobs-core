@@ -7,33 +7,60 @@ import { handleStatusRequest } from "./status.js";
 import { handleInboxRequest } from "./inbox.js";
 import { handleWorkerRequest } from "./worker.js";
 import { handleWorkflowRequest } from "./workflows.js";
+import { handleCalendarRequest } from "./calendar.js";
+import { handleOrchestratorRequest } from "./orchestrator.js";
+import { handleChatRequest } from "./chat.js";
+import { handleMemoriesRequest } from "./memories.js";
+import { handleUsageRequest } from "./usage.js";
+import { handleResearchRequest } from "./research.js";
+import { handleDocumentsRequest } from "./documents.js";
+import { handleRoutingRequest } from "./routing.js";
+import { handleTemplatesRequest } from "./templates.js";
+import { handleTextDumpsRequest } from "./text-dumps.js";
+import { handleTopicsRequest } from "./topics.js";
+import { handleTilesRequest } from "./tiles.js";
+import { handleTrackerRequest } from "./tracker.js";
+import { handleWorkflowRunsRequest } from "./workflow-runs.js";
 import { error } from "./index.js";
 
-const PREFIX = "/paw/api/";
+const PREFIXES = ["/paw/api/", "/api/"];
 
 export function registerPawRouter(api: OpenClawPluginApi): void {
-  // registerHttpHandler takes a bare function: (req, res) => Promise<boolean>
   (api as any).registerHttpHandler(async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const pathname = url.pathname;
 
-    if (!pathname.startsWith(PREFIX)) return false;
+    const prefix = PREFIXES.find(p => pathname.startsWith(p));
+    if (!prefix) return false;
 
-    const rest = pathname.slice(PREFIX.length);
+    const rest = pathname.slice(prefix.length);
     const parts = rest.split("/").filter(Boolean);
     const resource = parts[0];
-    const id = parts[1];
 
     try {
       switch (resource) {
-        case "tasks": await handleTaskRequest(req, res, id, parts); return true;
-        case "projects": await handleProjectRequest(req, res, id); return true;
-        case "agents": await handleAgentRequest(req, res, id); return true;
-        case "status": await handleStatusRequest(req, res, id); return true;
-        case "inbox": await handleInboxRequest(req, res, id); return true;
-        case "worker": await handleWorkerRequest(req, res, id); return true;
-        case "workflows": await handleWorkflowRequest(req, res, id); return true;
-        default: error(res, `Unknown resource: ${resource}`, 404); return true;
+        case "tasks":           await handleTaskRequest(req, res, parts[1], parts); return true;
+        case "projects":        await handleProjectRequest(req, res, parts[1], parts); return true;
+        case "agents":          await handleAgentRequest(req, res, parts[1]); return true;
+        case "status":          await handleStatusRequest(req, res, parts[1], parts); return true;
+        case "inbox":           await handleInboxRequest(req, res, parts[1], parts); return true;
+        case "worker":          await handleWorkerRequest(req, res, parts[1], parts); return true;
+        case "workflows":       await handleWorkflowRequest(req, res, parts[1]); return true;
+        case "workflow-runs":   await handleWorkflowRunsRequest(req, res, parts[1], parts); return true;
+        case "calendar":        await handleCalendarRequest(req, res, parts[1], parts); return true;
+        case "orchestrator":    await handleOrchestratorRequest(req, res, parts.slice(1)); return true;
+        case "chat":            await handleChatRequest(req, res, parts[1], parts); return true;
+        case "memories":        await handleMemoriesRequest(req, res, parts[1], parts); return true;
+        case "usage":           await handleUsageRequest(req, res, parts[1]); return true;
+        case "research":        await handleResearchRequest(req, res, parts[1], parts); return true;
+        case "documents":       await handleDocumentsRequest(req, res, parts[1], parts); return true;
+        case "routing":         await handleRoutingRequest(req, res, parts[1]); return true;
+        case "templates":       await handleTemplatesRequest(req, res, parts[1]); return true;
+        case "text-dumps":      await handleTextDumpsRequest(req, res, parts[1]); return true;
+        case "topics":          await handleTopicsRequest(req, res, parts[1], parts); return true;
+        case "tiles":           await handleTilesRequest(req, res, parts[1], parts); return true;
+        case "tracker":         await handleTrackerRequest(req, res, parts); return true;
+        default:                error(res, `Unknown resource: ${resource}`, 404); return true;
       }
     } catch (err) {
       if (!res.headersSent) error(res, `Internal error: ${String(err)}`, 500);

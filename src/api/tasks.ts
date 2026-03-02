@@ -1,9 +1,9 @@
 /**
- * Task CRUD — handles /paw/api/tasks and /paw/api/tasks/:id
+ * Task CRUD — handles /api/tasks and /api/tasks/:id and sub-routes
  */
 
 import { randomUUID } from "node:crypto";
-import { eq, and, inArray, desc } from "drizzle-orm";
+import { eq, and, inArray, desc, lte } from "drizzle-orm";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getDb } from "../db/connection.js";
 import { tasks } from "../db/schema.js";
@@ -16,8 +16,9 @@ export async function handleTaskRequest(
   parts: string[],
 ): Promise<void> {
   const db = getDb();
+  const sub = parts[2]; // sub-route after /:id
 
-  // /paw/api/tasks/open — convenience endpoint
+  // /api/tasks/open — convenience endpoint
   if (id === "open") {
     const rows = db.select().from(tasks)
       .where(inArray(tasks.status, ["inbox", "active", "waiting_on"]))
@@ -26,8 +27,53 @@ export async function handleTaskRequest(
     return json(res, rows);
   }
 
-  // /paw/api/tasks/:id — single task CRUD
+  // /api/tasks/auto-archive — POST
+  if (id === "auto-archive" && req.method === "POST") {
+    const now = new Date().toISOString();
+    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const rows = db.select().from(tasks)
+      .where(and(
+        inArray(tasks.status, ["completed", "rejected"]),
+        lte(tasks.updatedAt, cutoff),
+      ))
+      .all();
+    for (const t of rows) {
+      db.update(tasks).set({ status: "archived", updatedAt: now }).where(eq(tasks.id, t.id)).run();
+    }
+    return json(res, { archived: rows.length });
+  }
+
+  // /api/tasks/:id — single task + sub-routes
   if (id) {
+    // Sub-routes
+    if (sub === "status" && req.method === "PATCH") {
+      const body = await parseBody(req) as Record<string, unknown>;
+      if (!body.status) return error(res, "status required");
+      db.update(tasks).set({ status: body.status as string, updatedAt: new Date().toISOString() }).where(eq(tasks.id, id)).run();
+      return json(res, db.select().from(tasks).where(eq(tasks.id, id)).get());
+    }
+    if (sub === "work-state" && req.method === "PATCH") {
+      const body = await parseBody(req) as Record<string, unknown>;
+      if (!body.work_state) return error(res, "work_state required");
+      db.update(tasks).set({ workState: body.work_state as string, updatedAt: new Date().toISOString() }).where(eq(tasks.id, id)).run();
+      return json(res, db.select().from(tasks).where(eq(tasks.id, id)).get());
+    }
+    if (sub === "review-state" && req.method === "PATCH") {
+      const body = await parseBody(req) as Record<string, unknown>;
+      if (!body.review_state) return error(res, "review_state required");
+      db.update(tasks).set({ reviewState: body.review_state as string, updatedAt: new Date().toISOString() }).where(eq(tasks.id, id)).run();
+      return json(res, db.select().from(tasks).where(eq(tasks.id, id)).get());
+    }
+    if (sub === "archive" && req.method === "POST") {
+      db.update(tasks).set({ status: "archived", updatedAt: new Date().toISOString() }).where(eq(tasks.id, id)).run();
+      return json(res, db.select().from(tasks).where(eq(tasks.id, id)).get());
+    }
+    if (sub === "artifact" && req.method === "GET") {
+      const row = db.select({ artifactPath: tasks.artifactPath }).from(tasks).where(eq(tasks.id, id)).get();
+      if (!row) return error(res, "Not found", 404);
+      return json(res, { artifact_path: row.artifactPath ?? null });
+    }
+
     if (req.method === "GET") {
       const row = db.select().from(tasks).where(eq(tasks.id, id)).get();
       if (!row) return error(res, "Not found", 404);
@@ -58,7 +104,7 @@ export async function handleTaskRequest(
     return error(res, "Method not allowed", 405);
   }
 
-  // /paw/api/tasks — list or create
+  // /api/tasks — list or create
   if (req.method === "GET") {
     const query = parseQuery(req.url ?? "");
     const conditions = [];
