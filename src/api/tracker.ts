@@ -1,28 +1,34 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { json, error } from "./index.js";
+import { json } from "./index.js";
 
 export async function handleTrackerRequest(
   req: IncomingMessage,
   res: ServerResponse,
   parts: string[] = [],
 ): Promise<void> {
-  // parts[0] = "tracker", parts[1..] = sub-path
   const sub = parts.slice(1);
 
-  // /api/tracker/entries
+  // /api/tracker/entries[/:id]
   if (sub[0] === "entries") {
     if (sub[1]) {
-      // GET/PUT/DELETE /api/tracker/entries/:id
       if (req.method === "DELETE") return json(res, { deleted: true });
-      return json(res, { id: sub[1], date: new Date().toISOString(), hours: 0, description: "", projectId: null });
+      return json(res, { id: sub[1], type: "note", rawText: "", duration: null, category: null, dueDate: null, estimatedMinutes: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     }
-    // GET /api/tracker/entries or POST
     return json(res, []);
   }
 
   // /api/tracker/summary
   if (sub[0] === "summary") {
-    return json(res, { totalHours: 0, weeklyHours: 0, projects: [], recentEntries: [] });
+    return json(res, {
+      totalEntries: 0,
+      workSessionsCount: 0,
+      totalMinutesLogged: 0,
+      deadlinesCount: 0,
+      upcomingDeadlines: 0,
+      notesCount: 0,
+      categories: {},
+      last7DaysMinutes: 0,
+    });
   }
 
   // /api/tracker/deadlines
@@ -38,23 +44,19 @@ export async function handleTrackerRequest(
   }
 
   // /api/tracker/:projectId/items[/:itemId]
-  // /api/tracker/:projectId/requests[/:requestId]
-  const projectId = sub[0];
-  const resource = sub[1]; // "items" or "requests"
-
-  if (resource === "items") {
+  if (sub[1] === "items") {
     if (sub[2]) {
-      // single item
       if (req.method === "DELETE") return json(res, { deleted: true });
-      return json(res, { id: sub[2], projectId, title: "", status: "open", difficulty: null, tags: [], notes: null, links: [] });
+      return json(res, { id: sub[2], projectId: sub[0], title: "", status: "open", difficulty: null, tags: [], notes: null, links: [] });
     }
     return json(res, []);
   }
 
-  if (resource === "requests") {
+  // /api/tracker/:projectId/requests[/:requestId]
+  if (sub[1] === "requests") {
     if (sub[2]) {
       if (req.method === "DELETE") return json(res, { deleted: true });
-      return json(res, { id: sub[2], projectId, title: "", status: "pending", query: "" });
+      return json(res, { id: sub[2], projectId: sub[0], title: "", status: "pending", query: "" });
     }
     return json(res, []);
   }
