@@ -119,7 +119,7 @@ export async function handleOrchestratorRequest(
 
       // GET list
       const rows = db.select().from(agentInitiatives).orderBy(desc(agentInitiatives.createdAt)).limit(50).all();
-      return json(res, rows);
+      return json(res, { items: rows });
     }
 
     if (s1 === "sweeps") {
