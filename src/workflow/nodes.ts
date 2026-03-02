@@ -13,6 +13,7 @@ import { getDb } from "../db/connection.js";
 import { tasks, inboxItems, workflowEvents, workflowRuns } from "../db/schema.js";
 import { evaluateCondition, evaluateExpression, interpolate } from "./functions.js";
 import { log } from "../util/logger.js";
+import { executeCallable } from "./callables.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -442,9 +443,18 @@ export class NodeHandlers {
   // ── ts_call ───────────────────────────────────────────────────────────────
 
   private _executeTsCall(nodeDef: NodeDef, run: WorkflowRun): NodeResult {
-    const config = nodeDef.config as { callable?: string };
-    log().info(`[WORKFLOW] ts_call: ${config.callable ?? "?"} (stub — completing)`);
-    return { status: "completed", output: { ts_call_stub: true, callable: config.callable } };
+    const config = nodeDef.config as Record<string, unknown> & { callable?: string };
+    const callable = config.callable ?? "";
+    const args = (config.args as Record<string, unknown>) ?? {};
+    const ctx = {
+      workflowRunId: run.id,
+      nodeId: nodeDef.id,
+      taskId: (run as unknown as Record<string, unknown>).taskId as string | undefined,
+      agentType: (run as unknown as Record<string, unknown>).agentType as string | undefined,
+    };
+    log().info(`[WORKFLOW] ts_call: ${callable}`);
+    const result = executeCallable(callable, args, ctx);
+    return { status: "completed", output: result };
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────

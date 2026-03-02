@@ -299,3 +299,312 @@ export const orchestratorSettings = sqliteTable("orchestrator_settings", {
   value: text("value", { mode: "json" }).notNull(),
   updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
 });
+
+// ─── Agent Capabilities ─────────────────────────────────────────────────
+
+export const agentCapabilities = sqliteTable("agent_capabilities", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  agentType: text("agent_type").notNull(),
+  capability: text("capability").notNull(),
+  confidence: real("confidence").notNull().default(0.5),
+  capabilityMetadata: text("capability_metadata", { mode: "json" }),
+  source: text("source").notNull().default("identity"),
+  ...timestamps,
+});
+
+// ─── Agent Identity Versions ────────────────────────────────────────────
+
+export const agentIdentityVersions = sqliteTable("agent_identity_versions", {
+  id: id(),
+  agentType: text("agent_type").notNull(),
+  version: integer("version").notNull(),
+  identityText: text("identity_text").notNull(),
+  summary: text("summary"),
+  active: integer("active", { mode: "boolean" }).notNull().default(false),
+  windowStart: text("window_start"),
+  windowEnd: text("window_end"),
+  changedHeuristics: text("changed_heuristics", { mode: "json" }),
+  removedRules: text("removed_rules", { mode: "json" }),
+  validationStatus: text("validation_status").notNull().default("pending"),
+  validationReason: text("validation_reason"),
+  createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+});
+
+// ─── System Sweeps ──────────────────────────────────────────────────────
+
+export const systemSweeps = sqliteTable("system_sweeps", {
+  id: id(),
+  sweepType: text("sweep_type").notNull(),
+  status: text("status").notNull().default("pending"),
+  windowStart: text("window_start"),
+  windowEnd: text("window_end"),
+  summary: text("summary", { mode: "json" }),
+  decisions: text("decisions", { mode: "json" }),
+  createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+  completedAt: text("completed_at"),
+});
+
+// ─── Initiative Decision Records ────────────────────────────────────────
+
+export const initiativeDecisionRecords = sqliteTable("initiative_decision_records", {
+  id: id(),
+  initiativeId: text("initiative_id").notNull().references(() => agentInitiatives.id),
+  sweepId: text("sweep_id").references(() => systemSweeps.id),
+  decision: text("decision").notNull(),
+  decidedBy: text("decided_by").notNull().default("lobs"),
+  decisionSummary: text("decision_summary"),
+  overlapWithIds: text("overlap_with_ids", { mode: "json" }),
+  contradictionWithIds: text("contradiction_with_ids", { mode: "json" }),
+  capabilityGap: integer("capability_gap", { mode: "boolean" }).notNull().default(false),
+  sourceReflectionIds: text("source_reflection_ids", { mode: "json" }),
+  taskId: text("task_id").references(() => tasks.id),
+  createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+});
+
+// ─── Task Outcomes & Learnings ──────────────────────────────────────────
+
+export const taskOutcomes = sqliteTable("task_outcomes", {
+  id: id(),
+  taskId: text("task_id").notNull().references(() => tasks.id),
+  workerRunId: text("worker_run_id"),
+  agentType: text("agent_type").notNull(),
+  success: integer("success", { mode: "boolean" }).notNull(),
+  taskCategory: text("task_category"),
+  taskComplexity: text("task_complexity"),
+  contextHash: text("context_hash"),
+  humanFeedback: text("human_feedback"),
+  reviewState: text("review_state"),
+  appliedLearnings: text("applied_learnings", { mode: "json" }),
+  learningDisabled: integer("learning_disabled", { mode: "boolean" }).notNull().default(false),
+  ...timestamps,
+});
+
+export const outcomeLearnings = sqliteTable("outcome_learnings", {
+  id: id(),
+  agentType: text("agent_type").notNull(),
+  patternName: text("pattern_name").notNull(),
+  lessonText: text("lesson_text").notNull(),
+  taskCategory: text("task_category"),
+  taskComplexity: text("task_complexity"),
+  contextHash: text("context_hash"),
+  confidence: real("confidence").notNull().default(1.0),
+  successCount: integer("success_count").notNull().default(0),
+  failureCount: integer("failure_count").notNull().default(0),
+  sourceOutcomeIds: text("source_outcome_ids", { mode: "json" }),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  ...timestamps,
+});
+
+// ─── Routine Registry ───────────────────────────────────────────────────
+
+export const routineRegistry = sqliteTable("routine_registry", {
+  id: id(),
+  name: text("name").notNull().unique(),
+  description: text("description"),
+  trigger: text("trigger"),
+  hook: text("hook"),
+  schedule: text("schedule"),
+  scheduleTimezone: text("schedule_timezone").notNull().default("UTC"),
+  nextRunAt: text("next_run_at"),
+  lastRunAt: text("last_run_at"),
+  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  pausedUntil: text("paused_until"),
+  cooldownSeconds: integer("cooldown_seconds"),
+  maxRunsPerDay: integer("max_runs_per_day"),
+  pendingConfirmation: integer("pending_confirmation", { mode: "boolean" }).notNull().default(false),
+  executionPolicy: text("execution_policy").notNull().default("auto"),
+  policyTier: text("policy_tier").notNull().default("standard"),
+  runCount: integer("run_count").notNull().default(0),
+  config: text("config", { mode: "json" }),
+  ...timestamps,
+});
+
+export const routineAuditEvents = sqliteTable("routine_audit_events", {
+  id: id(),
+  routineId: text("routine_id").notNull().references(() => routineRegistry.id),
+  routineName: text("routine_name").notNull(),
+  action: text("action").notNull(),
+  status: text("status").notNull().default("ok"),
+  message: text("message"),
+  eventMetadata: text("event_metadata", { mode: "json" }),
+  createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+});
+
+// ─── Learning Plans & Lessons ───────────────────────────────────────────
+
+export const learningPlans = sqliteTable("learning_plans", {
+  id: id(),
+  topic: text("topic").notNull(),
+  goal: text("goal"),
+  totalDays: integer("total_days").default(30),
+  currentDay: integer("current_day").default(0),
+  status: text("status").default("active"),
+  scheduleCron: text("schedule_cron").default("0 7 * * *"),
+  scheduleTz: text("schedule_tz").default("America/New_York"),
+  deliveryChannel: text("delivery_channel").default("discord"),
+  planOutline: text("plan_outline", { mode: "json" }),
+  ...timestamps,
+});
+
+export const learningLessons = sqliteTable("learning_lessons", {
+  id: id(),
+  planId: text("plan_id").notNull().references(() => learningPlans.id),
+  dayNumber: integer("day_number").notNull(),
+  title: text("title").notNull(),
+  content: text("content"),
+  summary: text("summary"),
+  deliveredAt: text("delivered_at"),
+  documentPath: text("document_path"),
+  createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+});
+
+// ─── Text Dumps ─────────────────────────────────────────────────────────
+
+export const textDumps = sqliteTable("text_dumps", {
+  id: id(),
+  projectId: text("project_id").references(() => projects.id),
+  text: text("text").notNull(),
+  status: text("status"),
+  taskIds: text("task_ids", { mode: "json" }),
+  ...timestamps,
+});
+
+// ─── Chat Sessions & Messages ───────────────────────────────────────────
+
+export const chatSessions = sqliteTable("chat_sessions", {
+  id: id(),
+  sessionKey: text("session_key").notNull().unique(),
+  label: text("label"),
+  createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  lastMessageAt: text("last_message_at"),
+});
+
+export const chatMessages = sqliteTable("chat_messages", {
+  id: id(),
+  sessionKey: text("session_key").notNull(),
+  role: text("role").notNull(),
+  content: text("content").notNull(),
+  createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+  messageMetadata: text("message_metadata", { mode: "json" }),
+});
+
+// ─── Initiative Messages ────────────────────────────────────────────────
+
+export const initiativeMessages = sqliteTable("initiative_messages", {
+  id: id(),
+  initiativeId: text("initiative_id").notNull().references(() => agentInitiatives.id),
+  author: text("author").notNull(),
+  text: text("text").notNull(),
+  createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+});
+
+// ─── Diagnostic Trigger Events ──────────────────────────────────────────
+
+export const diagnosticTriggerEvents = sqliteTable("diagnostic_trigger_events", {
+  id: id(),
+  triggerType: text("trigger_type").notNull(),
+  triggerKey: text("trigger_key").notNull(),
+  status: text("status").notNull(),
+  suppressionReason: text("suppression_reason"),
+  agentType: text("agent_type"),
+  taskId: text("task_id").references(() => tasks.id),
+  projectId: text("project_id").references(() => projects.id),
+  triggerPayload: text("trigger_payload", { mode: "json" }),
+  diagnosticReflectionId: text("diagnostic_reflection_id").references(() => agentReflections.id),
+  diagnosticResult: text("diagnostic_result", { mode: "json" }),
+  remediationTaskIds: text("remediation_task_ids", { mode: "json" }),
+  outcome: text("outcome", { mode: "json" }),
+  ...timestamps,
+});
+
+// ─── Inbox Threads & Messages ───────────────────────────────────────────
+
+export const inboxThreads = sqliteTable("inbox_threads", {
+  id: id(),
+  docId: text("doc_id").references(() => inboxItems.id),
+  triageStatus: text("triage_status"),
+  lastProcessedMessageId: text("last_processed_message_id"),
+  ...timestamps,
+});
+
+export const inboxMessages = sqliteTable("inbox_messages", {
+  id: id(),
+  threadId: text("thread_id").notNull().references(() => inboxThreads.id),
+  author: text("author").notNull(),
+  text: text("text").notNull(),
+  createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+});
+
+// ─── Webhooks ───────────────────────────────────────────────────────────
+
+export const webhookRegistrations = sqliteTable("webhook_registrations", {
+  id: id(),
+  name: text("name").notNull(),
+  provider: text("provider").notNull(),
+  secret: text("secret").notNull(),
+  eventFilters: text("event_filters", { mode: "json" }),
+  targetAction: text("target_action").notNull(),
+  actionConfig: text("action_config", { mode: "json" }),
+  active: integer("active", { mode: "boolean" }).notNull().default(true),
+  ...timestamps,
+  lastReceivedAt: text("last_received_at"),
+});
+
+export const webhookEvents = sqliteTable("webhook_events", {
+  id: id(),
+  registrationId: text("registration_id").references(() => webhookRegistrations.id),
+  provider: text("provider").notNull(),
+  eventType: text("event_type").notNull(),
+  payload: text("payload", { mode: "json" }).notNull(),
+  headers: text("headers", { mode: "json" }),
+  signatureValid: integer("signature_valid", { mode: "boolean" }).default(false),
+  status: text("status").notNull().default("pending"),
+  processingResult: text("processing_result", { mode: "json" }),
+  createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+  processedAt: text("processed_at"),
+});
+
+// ─── Model Pricing ──────────────────────────────────────────────────────
+
+export const modelPricing = sqliteTable("model_pricing", {
+  id: id(),
+  provider: text("provider").notNull(),
+  model: text("model").notNull(),
+  routeType: text("route_type").notNull().default("api"),
+  inputPer1mUsd: real("input_per_1m_usd").notNull().default(0.0),
+  outputPer1mUsd: real("output_per_1m_usd").notNull().default(0.0),
+  cachedInputPer1mUsd: real("cached_input_per_1m_usd").notNull().default(0.0),
+  effectiveDate: text("effective_date").notNull().default(sql`(datetime('now'))`),
+  active: integer("active", { mode: "boolean" }).notNull().default(true),
+  notes: text("notes"),
+  ...timestamps,
+});
+
+// ─── Research Memos ─────────────────────────────────────────────────────
+
+export const researchMemos = sqliteTable("research_memos", {
+  id: id(),
+  initiativeId: text("initiative_id").notNull().references(() => agentInitiatives.id),
+  taskId: text("task_id").references(() => tasks.id),
+  problem: text("problem").notNull(),
+  userSegment: text("user_segment").notNull(),
+  specTouchpoints: text("spec_touchpoints", { mode: "json" }).notNull(),
+  mvpScope: text("mvp_scope").notNull(),
+  owner: text("owner").notNull(),
+  decision: text("decision").notNull(),
+  rationale: text("rationale").notNull(),
+  staleFlagged: integer("stale_flagged", { mode: "boolean" }).notNull().default(false),
+  ...timestamps,
+});
+
+// ─── Workspaces ─────────────────────────────────────────────────────────
+
+export const workspaces = sqliteTable("workspaces", {
+  id: id(),
+  slug: text("slug").notNull().unique(),
+  name: text("name").notNull(),
+  description: text("description"),
+  isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
+  ...timestamps,
+});

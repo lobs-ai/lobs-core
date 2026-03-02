@@ -286,4 +286,310 @@ export function runMigrations(db: PawDB): void {
   db.run(sql`CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status)`);
   db.run(sql`CREATE INDEX IF NOT EXISTS idx_workflow_events_type ON workflow_events(event_type)`);
   db.run(sql`CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON model_usage_events(timestamp)`);
+
+  // ── Phase 3-5 tables ──────────────────────────────────────────────────
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS agent_capabilities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_type TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0.5,
+    capability_metadata TEXT,
+    source TEXT NOT NULL DEFAULT 'identity',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(agent_type, capability)
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS agent_identity_versions (
+    id TEXT PRIMARY KEY,
+    agent_type TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    identity_text TEXT NOT NULL,
+    summary TEXT,
+    active INTEGER NOT NULL DEFAULT 0,
+    window_start TEXT,
+    window_end TEXT,
+    changed_heuristics TEXT,
+    removed_rules TEXT,
+    validation_status TEXT NOT NULL DEFAULT 'pending',
+    validation_reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(agent_type, version)
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS system_sweeps (
+    id TEXT PRIMARY KEY,
+    sweep_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    window_start TEXT,
+    window_end TEXT,
+    summary TEXT,
+    decisions TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS initiative_decision_records (
+    id TEXT PRIMARY KEY,
+    initiative_id TEXT NOT NULL REFERENCES agent_initiatives(id),
+    sweep_id TEXT REFERENCES system_sweeps(id),
+    decision TEXT NOT NULL,
+    decided_by TEXT NOT NULL DEFAULT 'lobs',
+    decision_summary TEXT,
+    overlap_with_ids TEXT,
+    contradiction_with_ids TEXT,
+    capability_gap INTEGER NOT NULL DEFAULT 0,
+    source_reflection_ids TEXT,
+    task_id TEXT REFERENCES tasks(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS task_outcomes (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    worker_run_id TEXT,
+    agent_type TEXT NOT NULL,
+    success INTEGER NOT NULL,
+    task_category TEXT,
+    task_complexity TEXT,
+    context_hash TEXT,
+    human_feedback TEXT,
+    review_state TEXT,
+    applied_learnings TEXT,
+    learning_disabled INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS outcome_learnings (
+    id TEXT PRIMARY KEY,
+    agent_type TEXT NOT NULL,
+    pattern_name TEXT NOT NULL,
+    lesson_text TEXT NOT NULL,
+    task_category TEXT,
+    task_complexity TEXT,
+    context_hash TEXT,
+    confidence REAL NOT NULL DEFAULT 1.0,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    source_outcome_ids TEXT,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS routine_registry (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT,
+    trigger TEXT,
+    hook TEXT,
+    schedule TEXT,
+    schedule_timezone TEXT NOT NULL DEFAULT 'UTC',
+    next_run_at TEXT,
+    last_run_at TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    paused_until TEXT,
+    cooldown_seconds INTEGER,
+    max_runs_per_day INTEGER,
+    pending_confirmation INTEGER NOT NULL DEFAULT 0,
+    execution_policy TEXT NOT NULL DEFAULT 'auto',
+    policy_tier TEXT NOT NULL DEFAULT 'standard',
+    run_count INTEGER NOT NULL DEFAULT 0,
+    config TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS routine_audit_events (
+    id TEXT PRIMARY KEY,
+    routine_id TEXT NOT NULL REFERENCES routine_registry(id),
+    routine_name TEXT NOT NULL,
+    action TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ok',
+    message TEXT,
+    event_metadata TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS learning_plans (
+    id TEXT PRIMARY KEY,
+    topic TEXT NOT NULL,
+    goal TEXT,
+    total_days INTEGER DEFAULT 30,
+    current_day INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'active',
+    schedule_cron TEXT DEFAULT '0 7 * * *',
+    schedule_tz TEXT DEFAULT 'America/New_York',
+    delivery_channel TEXT DEFAULT 'discord',
+    plan_outline TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS learning_lessons (
+    id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL REFERENCES learning_plans(id),
+    day_number INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    content TEXT,
+    summary TEXT,
+    delivered_at TEXT,
+    document_path TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS text_dumps (
+    id TEXT PRIMARY KEY,
+    project_id TEXT REFERENCES projects(id),
+    text TEXT NOT NULL,
+    status TEXT,
+    task_ids TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS chat_sessions (
+    id TEXT PRIMARY KEY,
+    session_key TEXT NOT NULL UNIQUE,
+    label TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    is_active INTEGER NOT NULL DEFAULT 1,
+    last_message_at TEXT
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS chat_messages (
+    id TEXT PRIMARY KEY,
+    session_key TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    message_metadata TEXT
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS initiative_messages (
+    id TEXT PRIMARY KEY,
+    initiative_id TEXT NOT NULL REFERENCES agent_initiatives(id),
+    author TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS diagnostic_trigger_events (
+    id TEXT PRIMARY KEY,
+    trigger_type TEXT NOT NULL,
+    trigger_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    suppression_reason TEXT,
+    agent_type TEXT,
+    task_id TEXT REFERENCES tasks(id),
+    project_id TEXT REFERENCES projects(id),
+    trigger_payload TEXT,
+    diagnostic_reflection_id TEXT REFERENCES agent_reflections(id),
+    diagnostic_result TEXT,
+    remediation_task_ids TEXT,
+    outcome TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS inbox_threads (
+    id TEXT PRIMARY KEY,
+    doc_id TEXT REFERENCES inbox_items(id),
+    triage_status TEXT,
+    last_processed_message_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS inbox_messages (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL REFERENCES inbox_threads(id),
+    author TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS webhook_registrations (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    secret TEXT NOT NULL,
+    event_filters TEXT,
+    target_action TEXT NOT NULL,
+    action_config TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_received_at TEXT
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS webhook_events (
+    id TEXT PRIMARY KEY,
+    registration_id TEXT REFERENCES webhook_registrations(id),
+    provider TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    headers TEXT,
+    signature_valid INTEGER DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    processing_result TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    processed_at TEXT
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS model_pricing (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    route_type TEXT NOT NULL DEFAULT 'api',
+    input_per_1m_usd REAL NOT NULL DEFAULT 0.0,
+    output_per_1m_usd REAL NOT NULL DEFAULT 0.0,
+    cached_input_per_1m_usd REAL NOT NULL DEFAULT 0.0,
+    effective_date TEXT NOT NULL DEFAULT (datetime('now')),
+    active INTEGER NOT NULL DEFAULT 1,
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS research_memos (
+    id TEXT PRIMARY KEY,
+    initiative_id TEXT NOT NULL REFERENCES agent_initiatives(id),
+    task_id TEXT REFERENCES tasks(id),
+    problem TEXT NOT NULL,
+    user_segment TEXT NOT NULL,
+    spec_touchpoints TEXT NOT NULL,
+    mvp_scope TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    stale_flagged INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS workspaces (
+    id TEXT PRIMARY KEY,
+    slug TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    description TEXT,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  // ── Additional indexes ────────────────────────────────────────────────
+  db.run(sql`CREATE INDEX IF NOT EXISTS idx_capabilities_agent ON agent_capabilities(agent_type)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS idx_identity_versions_agent ON agent_identity_versions(agent_type)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS idx_task_outcomes_task ON task_outcomes(task_id)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS idx_task_outcomes_agent ON task_outcomes(agent_type)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS idx_learnings_agent ON outcome_learnings(agent_type)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS idx_learnings_active ON outcome_learnings(is_active)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS idx_diagnostic_events_type ON diagnostic_trigger_events(trigger_type)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS idx_reflections_agent ON agent_reflections(agent_type)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS idx_initiatives_status ON agent_initiatives(status)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS idx_inbox_threads_status ON inbox_threads(triage_status)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_key)`);
 }
