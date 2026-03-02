@@ -17,17 +17,18 @@ export function clearSessionModelTier(sessionKey: string): void {
 }
 
 export function registerModelResolveHook(api: OpenClawPluginApi): void {
-  api.on("before_model_resolve", (_event, ctx) => {
+  api.on("before_model_resolve", async (_event: unknown, ctx: unknown): Promise<Record<string, unknown>> => {
     const sessionKey = (ctx as Record<string, unknown>).sessionKey as string | undefined;
-    if (!sessionKey) return;
+    if (!sessionKey) return {};
 
     const mapping = sessionTierMap.get(sessionKey);
-    if (!mapping) return;
+    if (!mapping) return {};
 
     const resolved = resolveModelForTier(mapping.tier, mapping.agentType);
     if (resolved) {
       log().info(`[PAW] Model resolved: tier=${mapping.tier} agent=${mapping.agentType} → ${resolved}`);
       return { modelOverride: resolved };
     }
+    return {};
   });
 }
