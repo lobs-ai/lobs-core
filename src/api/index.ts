@@ -1,26 +1,13 @@
 /**
- * API route registration for PAW plugin.
- * All routes are prefixed with /paw/api/
+ * API registration and HTTP helpers for PAW plugin.
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { registerTaskRoutes } from "./tasks.js";
-import { registerProjectRoutes } from "./projects.js";
-import { registerAgentRoutes } from "./agents.js";
-import { registerStatusRoutes } from "./status.js";
-import { registerInboxRoutes } from "./inbox.js";
-import { registerWorkerRoutes } from "./worker.js";
-import { registerWorkflowRoutes } from "./workflows.js";
+import { registerPawRouter } from "./router.js";
 
 export function registerAllRoutes(api: OpenClawPluginApi): void {
-  registerTaskRoutes(api);
-  registerProjectRoutes(api);
-  registerAgentRoutes(api);
-  registerStatusRoutes(api);
-  registerInboxRoutes(api);
-  registerWorkerRoutes(api);
-  registerWorkflowRoutes(api);
+  registerPawRouter(api);
 }
 
 // ─── HTTP Helpers ───────────────────────────────────────────────────────
@@ -32,11 +19,7 @@ export function parseBody(req: IncomingMessage): Promise<unknown> {
     req.on("end", () => {
       const raw = Buffer.concat(chunks).toString("utf-8");
       if (!raw) return resolve({});
-      try {
-        resolve(JSON.parse(raw));
-      } catch {
-        reject(new Error("Invalid JSON body"));
-      }
+      try { resolve(JSON.parse(raw)); } catch { reject(new Error("Invalid JSON body")); }
     });
     req.on("error", reject);
   });
