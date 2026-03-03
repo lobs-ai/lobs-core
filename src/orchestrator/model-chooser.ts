@@ -1,135 +1,161 @@
 /**
  * Model chooser — tier-based model selection with per-agent fallback chains.
- * Port of lobs-server/app/orchestrator/model_chooser.py (simplified).
  *
  * Tiers: micro → small → medium → standard → strong
- * Local models (Ollama/LM Studio) discovered dynamically when available.
+ * Respects OpenClaw agent config model assignments.
+ * Falls back to tier-based cloud defaults when no agent config exists.
  */
 
+import { readFileSync } from "node:fs";
 import { log } from "../util/logger.js";
-
-// ── Model tier definitions ────────────────────────────────────────────────────
 
 export type ModelTier = "micro" | "small" | "medium" | "standard" | "strong";
 
-/**
- * Cloud model chains per tier (ordered by preference).
- * These are OpenRouter-compatible model IDs.
- */
-const CLOUD_MODELS: Record<ModelTier, string[]> = {
+// ── Tier-based model chains (fallbacks when agent config doesn't specify) ─────
+
+const TIER_MODELS: Record<ModelTier, string[]> = {
   micro: [
+    "lmstudio/qwen/qwen3.5-35b-a3b",
     "anthropic/claude-haiku-4-5",
-    "google/gemini-flash-1.5",
-    "openai/gpt-4o-mini",
   ],
   small: [
-    "anthropic/claude-sonnet-4-5",
-    "google/gemini-pro-1.5",
-    "openai/gpt-4o",
+    "anthropic/claude-sonnet-4-6",
+    "openai-codex/gpt-5.3-codex",
   ],
   medium: [
-    "anthropic/claude-sonnet-4-5",
-    "google/gemini-pro-1.5",
-    "openai/gpt-4o",
+    "anthropic/claude-sonnet-4-6",
+    "openai-codex/gpt-5.3-codex",
   ],
   standard: [
-    "anthropic/claude-opus-4-5",
-    "openai/gpt-4o",
-    "google/gemini-pro-1.5",
+    "openai-codex/gpt-5.3-codex",
+    "anthropic/claude-sonnet-4-6",
   ],
   strong: [
-    "anthropic/claude-opus-4-5",
-    "openai/o1",
-    "google/gemini-ultra",
+    "anthropic/claude-opus-4-6",
+    "openai-codex/gpt-5.3-codex",
   ],
 };
 
-/** Per-agent-type default tier override. */
+/** Per-agent-type default tier. */
 const AGENT_TIER_DEFAULTS: Record<string, ModelTier> = {
   programmer: "standard",
   researcher: "standard",
   writer: "small",
   architect: "strong",
   reviewer: "medium",
-  "inbox-responder": "medium",
-  lobs: "standard",
+  "inbox-responder": "micro",
 };
+
+// ── OpenClaw agent config cache ───────────────────────────────────────────────
+
+let agentModelCache: Record<string, string> | null = null;
+
+function loadAgentModels(): Record<string, string> {
+  if (agentModelCache) return agentModelCache;
+  try {
+    const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+    const agents = cfg?.agents?.list ?? [];
+    const result: Record<string, string> = {};
+    for (const agent of agents) {
+      const id = agent.id as string;
+      const model = typeof agent.model === "string"
+        ? agent.model
+        : agent.model?.primary;
+      if (id && model) {
+        result[id] = model;
+      }
+    }
+    agentModelCache = result;
+    log().info(`[MODEL_CHOOSER] Loaded agent models: ${JSON.stringify(result)}`);
+    return result;
+  } catch (e) {
+    log().warn(`[MODEL_CHOOSER] Could not load agent models: ${e}`);
+    return {};
+  }
+}
 
 // ── Main chooser ──────────────────────────────────────────────────────────────
 
 export interface ModelChoice {
   model: string;
   tier: ModelTier;
-  provider: "cloud" | "local";
+  source: "agent-config" | "tier-default";
 }
 
 /**
- * Choose the best available model for a given tier and agent type.
+ * Choose the best model for a given tier and agent type.
  *
- * @param tier Requested tier (default: "standard")
- * @param agentType Optional agent type for per-agent defaults
- * @returns Chosen model ID
+ * Priority:
+ * 1. OpenClaw agent config (agents.list[agentType].model.primary)
+ * 2. Tier-based fallback chain
  */
 export function chooseModel(
   tier?: ModelTier | string,
   agentType?: string,
 ): ModelChoice {
-  // Resolve effective tier
-  let effectiveTier: ModelTier;
-  if (tier && isValidTier(tier)) {
-    effectiveTier = tier as ModelTier;
-  } else if (agentType && agentType in AGENT_TIER_DEFAULTS) {
-    effectiveTier = AGENT_TIER_DEFAULTS[agentType];
-  } else {
-    effectiveTier = "standard";
+  const effectiveTier = resolveTier(tier, agentType);
+
+  // For micro tier, prefer local models (skip agent config)
+  if (agentType && effectiveTier !== "micro") {
+    const agentModels = loadAgentModels();
+    const configModel = agentModels[agentType];
+    if (configModel) {
+      log().debug?.(`[MODEL_CHOOSER] ${agentType} → agent-config: ${configModel}`);
+      return { model: configModel, tier: effectiveTier, source: "agent-config" };
+    }
   }
 
-  const candidates = CLOUD_MODELS[effectiveTier] ?? CLOUD_MODELS.standard;
+  // Fall back to tier-based selection
+  const candidates = TIER_MODELS[effectiveTier] ?? TIER_MODELS.standard;
   const model = candidates[0];
-
   log().debug?.(`[MODEL_CHOOSER] ${agentType ?? "?"} → tier=${effectiveTier} model=${model}`);
-  return { model, tier: effectiveTier, provider: "cloud" };
+  return { model, tier: effectiveTier, source: "tier-default" };
+}
+
+function resolveTier(tier?: string, agentType?: string): ModelTier {
+  if (tier && isValidTier(tier)) return tier as ModelTier;
+  if (agentType && agentType in AGENT_TIER_DEFAULTS) return AGENT_TIER_DEFAULTS[agentType];
+  return "standard";
 }
 
 /**
  * Resolve model tier from task metadata.
- * task.model_tier → agent default → "standard"
  */
 export function resolveTaskTier(task: Record<string, unknown>): ModelTier {
   const rawTier = task["model_tier"] as string | undefined;
   if (rawTier && isValidTier(rawTier)) return rawTier as ModelTier;
-
   const agentType = task["agent"] as string | undefined;
-  if (agentType && agentType in AGENT_TIER_DEFAULTS) {
-    return AGENT_TIER_DEFAULTS[agentType];
-  }
-
+  if (agentType && agentType in AGENT_TIER_DEFAULTS) return AGENT_TIER_DEFAULTS[agentType];
   return "standard";
 }
 
 /**
  * Get escalation model — next tier up from current.
- * Used when a task needs to be retried with a stronger model.
  */
-export function escalationModel(
-  currentTier: ModelTier,
-  agentType?: string,
-): ModelChoice {
+export function escalationModel(currentTier: ModelTier, agentType?: string): ModelChoice {
   const tierOrder: ModelTier[] = ["micro", "small", "medium", "standard", "strong"];
   const currentIdx = tierOrder.indexOf(currentTier);
   const nextTier = tierOrder[Math.min(currentIdx + 1, tierOrder.length - 1)];
   return chooseModel(nextTier, agentType);
 }
 
+/**
+ * Force-select a specific model (e.g., local model for testing).
+ */
+export function forceModel(model: string, tier: ModelTier = "standard"): ModelChoice {
+  return { model, tier, source: "tier-default" };
+}
+
+/** Invalidate the agent model cache (e.g., after config change). */
+export function invalidateModelCache(): void {
+  agentModelCache = null;
+}
+
 function isValidTier(tier: string): boolean {
   return ["micro", "small", "medium", "standard", "strong"].includes(tier);
 }
 
-/**
- * Resolve a specific model for a given tier and agent type.
- * Returns the first model in the tier list, or null if none available.
- * Used by the model resolve hook.
- */
 export function resolveModelForTier(tier: ModelTier, agentType?: string): string | null {
   const { model } = chooseModel(tier, agentType);
   return model ?? null;

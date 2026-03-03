@@ -145,7 +145,7 @@ export class NodeHandlers {
       runId: run.id,
       nodeId: nodeDef.id,
       agentType,
-      modelTier: config.model_tier,
+      modelTier: (run.context?.task as any)?.modelTier ?? (run.context?.task as any)?.model_tier ?? config.model_tier,
       promptTemplate: prompt,
       taskId: run.taskId ?? undefined,
       context: run.context,

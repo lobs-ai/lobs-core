@@ -1,24 +1,17 @@
 /**
  * subagent_spawning / subagent_ended hooks — WorkerManager integration.
- *
- * Tracks worker lifecycle through OpenClaw's native sub-agent events:
- * - On spawn: record worker run, update agent status, enforce project locks
- * - On end: complete worker run, update task status, emit workflow events
- *
- * This replaces the old HTTP polling + bridge pattern entirely.
  */
 
 import { eq, and, isNull } from "drizzle-orm";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { getDb } from "../db/connection.js";
-import { workerRuns, tasks, agentStatus as agentStatusTable } from "../db/schema.js";
+import { workerRuns, tasks, workflowRuns } from "../db/schema.js";
 import { recordWorkerStart, recordWorkerEnd } from "../orchestrator/worker-manager.js";
 import { log } from "../util/logger.js";
 
 export function registerSubagentHooks(api: OpenClawPluginApi): void {
 
   api.on("subagent_spawned", async (event) => {
-    // Only track spawns that came from our workflow engine (tagged with paw metadata)
     const meta = (event as Record<string, unknown>).metadata as Record<string, unknown> | undefined;
     if (!meta?.pawManaged) return;
 
@@ -29,66 +22,101 @@ export function registerSubagentHooks(api: OpenClawPluginApi): void {
     const model = meta.model as string | undefined;
 
     log().info(`[PAW] Worker spawned: session=${sessionKey} agent=${agentType} task=${taskId ?? "none"}`);
-
-    recordWorkerStart({
-      workerId: sessionKey,
-      agentType,
-      taskId,
-      projectId,
-      model,
-    });
+    recordWorkerStart({ workerId: sessionKey, agentType, taskId, projectId, model });
   });
 
   api.on("subagent_ended", async (event) => {
-    const sessionKey = (event as Record<string, unknown>).targetSessionKey as string;
+    const ev = event as Record<string, unknown>;
+    const sessionKey = (ev.targetSessionKey ?? ev.childSessionKey) as string;
     if (!sessionKey) return;
 
-    // Check if this is one of our tracked workers
-    const db = getDb();
-    const run = db.select().from(workerRuns)
-      .where(and(
-        eq(workerRuns.workerId, sessionKey),
-        isNull(workerRuns.endedAt),
-      ))
-      .get();
-
-    if (!run) return; // Not our worker
-
-    const reason = (event as Record<string, unknown>).reason as string | undefined;
+    const reason = ev.reason as string | undefined;
     const succeeded = reason !== "error" && reason !== "timeout";
 
-    log().info(`[PAW] Worker ended: session=${sessionKey} succeeded=${succeeded} reason=${reason}`);
+    log().info(`[PAW] subagent_ended: session=${sessionKey} reason=${reason} succeeded=${succeeded}`);
 
-    // Calculate duration
-    const startedAt = run.startedAt ? new Date(run.startedAt).getTime() : Date.now();
-    const durationSeconds = (Date.now() - startedAt) / 1000;
+    const db = getDb();
 
-    recordWorkerEnd({
-      workerId: sessionKey,
-      agentType: run.agentType ?? "unknown",
-      succeeded,
-      taskId: run.taskId ?? undefined,
-      durationSeconds,
-    });
+    // Strategy 1: Match via worker_runs table
+    const workerRun = db.select().from(workerRuns)
+      .where(and(eq(workerRuns.workerId, sessionKey), isNull(workerRuns.endedAt)))
+      .get();
 
-    // Update linked task status
-    if (run.taskId) {
-      const now = new Date().toISOString();
-      if (succeeded) {
-        db.update(tasks).set({
-          workState: "done",
-          status: "completed",
-          finishedAt: now,
-          updatedAt: now,
-        }).where(eq(tasks.id, run.taskId)).run();
-      } else {
-        db.update(tasks).set({
-          workState: "failed",
-          failureReason: reason ?? "Worker ended without success",
-          retryCount: (db.select().from(tasks).where(eq(tasks.id, run.taskId)).get()?.retryCount ?? 0) + 1,
-          updatedAt: now,
-        }).where(eq(tasks.id, run.taskId)).run();
+    if (workerRun) {
+      const startedAt = workerRun.startedAt ? new Date(workerRun.startedAt).getTime() : Date.now();
+      recordWorkerEnd({
+        workerId: sessionKey,
+        agentType: workerRun.agentType ?? "unknown",
+        succeeded,
+        taskId: workerRun.taskId ?? undefined,
+        durationSeconds: (Date.now() - startedAt) / 1000,
+      });
+
+      if (workerRun.taskId) {
+        updateTaskFromEnd(workerRun.taskId, succeeded, reason);
       }
     }
+
+    // Always: update workflow run nodeStates so _checkSpawnAgent can advance
+    updateWorkflowRunForSession(sessionKey, succeeded, reason);
   });
+}
+
+/**
+ * Find the workflow run that spawned this session and write spawn_result
+ * so the engine's _checkSpawnAgent can advance the node.
+ */
+function updateWorkflowRunForSession(sessionKey: string, succeeded: boolean, reason?: string): void {
+  const db = getDb();
+  const runningRuns = db.select().from(workflowRuns)
+    .where(eq(workflowRuns.status, "running"))
+    .all();
+
+  for (const run of runningRuns) {
+    const nodeStates = (run.nodeStates as Record<string, Record<string, unknown>>) ?? {};
+    for (const [nodeId, ns] of Object.entries(nodeStates)) {
+      if (ns.childSessionKey === sessionKey && ns.status === "running") {
+        log().info(`[PAW] Writing spawn_result for run ${run.id.slice(0, 8)} node=${nodeId} succeeded=${succeeded}`);
+
+        ns.spawn_result = {
+          status: succeeded ? "completed" : "failed",
+          error: succeeded ? undefined : (reason ?? "Agent ended without success"),
+        };
+        nodeStates[nodeId] = ns;
+
+        db.update(workflowRuns).set({
+          nodeStates,
+          updatedAt: new Date().toISOString(),
+        }).where(eq(workflowRuns.id, run.id)).run();
+
+        return;
+      }
+    }
+  }
+
+  log().debug?.(`[PAW] No running workflow run found for session=${sessionKey}`);
+}
+
+function updateTaskFromEnd(taskId: string, succeeded: boolean, reason?: string): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+
+  if (succeeded) {
+    db.update(tasks).set({
+      workState: "done",
+      status: "completed",
+      finishedAt: now,
+      updatedAt: now,
+    }).where(eq(tasks.id, taskId)).run();
+    log().info(`[PAW] Task ${taskId.slice(0, 8)} marked completed`);
+  } else {
+    const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+    db.update(tasks).set({
+      workState: "failed",
+      failureReason: reason ?? "Worker ended without success",
+      retryCount: (task?.retryCount ?? 0) + 1,
+      updatedAt: now,
+    }).where(eq(tasks.id, taskId)).run();
+    log().info(`[PAW] Task ${taskId.slice(0, 8)} marked failed: ${reason}`);
+  }
 }

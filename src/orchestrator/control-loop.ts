@@ -1,22 +1,33 @@
 /**
  * Orchestrator control loop — main scan/dispatch service.
- * Port of lobs-server/app/orchestrator/control_loop.py
  *
  * On each tick:
  * 1. Advance active workflow runs (one step per run)
+ * 1b. Process pending spawn requests (drain queue → gateway /tools/invoke)
  * 2. Process workflow events (event-triggered workflows)
  * 3. Process schedule triggers (cron-triggered workflows)
  * 4. Scan for new ready tasks → match to workflows → start runs
  * 5. Health check active workers (detect stale)
+ *
+ * Spawns route through the "sink" agent session so completion announcements
+ * don't pollute the main session.
  */
 
+import { readFileSync } from "node:fs";
 import type { OpenClawPluginServiceContext } from "openclaw/plugin-sdk";
+import { eq } from "drizzle-orm";
 import { log } from "../util/logger.js";
 import { WorkflowExecutor } from "../workflow/engine.js";
+import { popPendingSpawns, type SpawnRequest } from "../workflow/nodes.js";
+import { getDb } from "../db/connection.js";
+import { workflowRuns } from "../db/schema.js";
 import { findReadyTasks } from "./scanner.js";
 import {
   hasCapacity,
   projectHasActiveWorker,
+  recordWorkerStart,
+  incrementPendingSpawns,
+  decrementPendingSpawns,
   detectStaleWorkers,
   forceTerminateWorker,
 } from "./worker-manager.js";
@@ -24,11 +35,31 @@ import { chooseModel, resolveTaskTier } from "./model-chooser.js";
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let executor: WorkflowExecutor | null = null;
+let gatewayPort: number = 18789;
+let gatewayToken: string = "";
+
+/** Session key for the sink agent — spawns route here to avoid polluting main */
+const SINK_SESSION_KEY = "agent:sink:paw-orchestrator-v2";
 
 export function startControlLoop(ctx: OpenClawPluginServiceContext, intervalMs: number): void {
   log().info(`orchestrator: starting control loop (interval=${intervalMs}ms)`);
 
   executor = new WorkflowExecutor();
+
+  // Read gateway config for spawn API calls
+  try {
+    const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+    gatewayPort = cfg?.gateway?.port ?? 18789;
+    gatewayToken = cfg?.gateway?.auth?.token ?? "";
+    if (gatewayToken) {
+      log().info(`orchestrator: gateway spawn API configured (port=${gatewayPort})`);
+    } else {
+      log().warn("orchestrator: no gateway auth token found — spawn_agent nodes will fail");
+    }
+  } catch (e) {
+    log().warn(`orchestrator: could not read gateway config: ${e}`);
+  }
 
   const tick = () => {
     try {
@@ -68,6 +99,24 @@ function runTick(): void {
     log().error(`orchestrator: advance phase error: ${e}`);
   }
 
+  // ── 1b. Process pending spawn requests ─────────────────────────────────────
+  try {
+    const spawns = popPendingSpawns();
+    for (const req of spawns) {
+      incrementPendingSpawns();
+      processSpawnRequest(req).catch((err) => {
+        log().error(`orchestrator: spawn failed for run ${req.runId.slice(0, 8)}: ${err}`);
+        decrementPendingSpawns();
+    writeSpawnResult(req.runId, req.nodeId, {
+          status: "failed",
+          error: String(err),
+        });
+      });
+    }
+  } catch (e) {
+    log().error(`orchestrator: spawn processing error: ${e}`);
+  }
+
   // ── 2. Process workflow events ─────────────────────────────────────────────
   try {
     const started = executor.processEvents(10);
@@ -91,11 +140,10 @@ function runTick(): void {
   // ── 4. Scan for ready tasks ────────────────────────────────────────────────
   try {
     if (hasCapacity()) {
-      const readyTasks = findReadyTasks(5);
+      const readyTasks = findReadyTasks(1);
       for (const task of readyTasks) {
         if (!hasCapacity()) break;
 
-        // Domain lock: one worker per project
         if (task.projectId && projectHasActiveWorker(task.projectId)) {
           log().debug?.(`orchestrator: project ${task.projectId.slice(0, 8)} already has active worker — skipping task ${task.id.slice(0, 8)}`);
           continue;
@@ -128,4 +176,109 @@ function runTick(): void {
   } catch (e) {
     log().error(`orchestrator: health check error: ${e}`);
   }
+}
+
+// ── Spawn processing ─────────────────────────────────────────────────────────
+
+async function processSpawnRequest(req: SpawnRequest): Promise<void> {
+  if (!gatewayToken) {
+    throw new Error("No gateway auth token configured — cannot spawn agents");
+  }
+
+  const taskCtx = (req.context?.task ?? {}) as Record<string, unknown>;
+  const taskTitle = (taskCtx["title"] as string) ?? "Workflow task";
+  const taskNotes = (taskCtx["notes"] as string) ?? "";
+  const taskPrompt = req.promptTemplate ?? `${taskTitle}\n\n${taskNotes}`.trim();
+
+  const modelChoice = req.modelTier
+    ? chooseModel(req.modelTier, req.agentType)
+    : chooseModel("standard", req.agentType);
+  const model = modelChoice.model;
+
+  log().info(
+    `[SPAWN] Spawning ${req.agentType} for run ${req.runId.slice(0, 8)} ` +
+    `(task=${req.taskId?.slice(0, 8) ?? "none"}, model=${model})`
+  );
+
+  // Route through sink session so completions don't pollute main
+  const response = await fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${gatewayToken}`,
+    },
+    body: JSON.stringify({
+      tool: "sessions_spawn",
+      sessionKey: SINK_SESSION_KEY,
+      args: {
+        task: taskPrompt,
+        agentId: req.agentType,
+        model,
+        mode: "run",
+        cleanup: "keep",
+        runTimeoutSeconds: 900,
+      },
+    }),
+  });
+
+  const data = (await response.json()) as Record<string, unknown>;
+
+  if (!data.ok) {
+    const err = (data.error as Record<string, unknown>)?.message ?? JSON.stringify(data.error);
+    decrementPendingSpawns();
+    throw new Error(`Gateway spawn failed: ${err}`);
+  }
+
+  const details = (data.result as Record<string, unknown>)?.details as Record<string, unknown> | undefined;
+  const childSessionKey = (details?.childSessionKey as string) ?? undefined;
+  const status = (details?.status as string) ?? "unknown";
+
+  if (status === "accepted" && childSessionKey) {
+    log().info(`[SPAWN] Accepted: session=${childSessionKey} run=${req.runId.slice(0, 8)}`);
+
+    recordWorkerStart({
+      workerId: childSessionKey,
+      agentType: req.agentType,
+      taskId: req.taskId,
+      projectId: (taskCtx["projectId"] as string) ?? undefined,
+      model,
+    });
+
+    decrementPendingSpawns();
+    writeSpawnResult(req.runId, req.nodeId, {
+      childSessionKey,
+    });
+  } else {
+    decrementPendingSpawns();
+    throw new Error(`Spawn returned status=${status}: ${JSON.stringify(details)}`);
+  }
+}
+
+function writeSpawnResult(
+  runId: string,
+  nodeId: string,
+  update: Record<string, unknown>,
+): void {
+  const db = getDb();
+  const run = db.select().from(workflowRuns).where(eq(workflowRuns.id, runId)).get();
+  if (!run) {
+    log().error(`[SPAWN] Cannot write result: run ${runId} not found`);
+    return;
+  }
+
+  const nodeStates = (run.nodeStates as Record<string, Record<string, unknown>>) ?? {};
+  const ns = nodeStates[nodeId] ?? {};
+
+  if (update["childSessionKey"]) {
+    ns["childSessionKey"] = update["childSessionKey"];
+  }
+  if (update["status"] === "failed") {
+    ns["spawn_result"] = { status: "failed", error: update["error"] };
+  }
+
+  nodeStates[nodeId] = ns;
+  db.update(workflowRuns).set({
+    nodeStates,
+    updatedAt: new Date().toISOString(),
+  }).where(eq(workflowRuns.id, runId)).run();
 }

@@ -14,6 +14,13 @@ export type PawDB = BetterSQLite3Database<typeof schema>;
 let db: PawDB | null = null;
 let rawDb: Database.Database | null = null;
 
+export function getRawDb(): Database.Database {
+  if (!rawDb) {
+    throw new Error("PAW database not initialized. Call initDb() first.");
+  }
+  return rawDb;
+}
+
 export function getDb(): PawDB {
   if (!db) {
     throw new Error("PAW database not initialized. Call initDb() first.");

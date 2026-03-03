@@ -8,7 +8,7 @@
  */
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { initDb, closeDb } from "./db/connection.js";
+import { initDb, closeDb, getRawDb } from "./db/connection.js";
 import { runMigrations } from "./db/migrate.js";
 import { seedDefaultWorkflows } from "./workflow/seeds.js";
 import { registerAllRoutes } from "./api/index.js";
@@ -39,6 +39,18 @@ const pawPlugin = {
     const db = initDb(dbPath);
     runMigrations(db);
     log().info(`paw: database initialized at ${dbPath}`);
+
+    // ── Startup Recovery ─────────────────────────────────────────────
+    // Reset tasks stuck in "in_progress" from a previous lifecycle (e.g. restart killed workers)
+    try {
+      const raw = getRawDb();
+      raw.exec(`UPDATE tasks SET work_state = 'not_started', updated_at = datetime('now') WHERE status = 'active' AND work_state = 'in_progress'`);
+      raw.exec(`UPDATE workflow_runs SET status = 'cancelled' WHERE status IN ('running', 'pending')`);
+      raw.exec(`UPDATE worker_runs SET ended_at = datetime('now'), succeeded = 0, timeout_reason = 'startup_recovery' WHERE ended_at IS NULL`);
+      log().info("paw: startup recovery — reset stuck tasks, cancelled stale workflow runs, closed orphaned workers");
+    } catch (e) {
+      log().warn(`paw: startup recovery error: ${e}`);
+    }
 
     // ── Seed Workflows ────────────────────────────────────────────────
     const seeded = seedDefaultWorkflows();

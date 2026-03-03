@@ -8,7 +8,7 @@ import { getDb } from "../db/connection.js";
 import { workerRuns, agentStatus as agentStatusTable } from "../db/schema.js";
 import { log } from "../util/logger.js";
 
-export const DEFAULT_MAX_WORKERS = 3;
+export const DEFAULT_MAX_WORKERS = 1;
 
 export interface WorkerInfo {
   workerId: string;
@@ -23,7 +23,7 @@ export interface WorkerInfo {
  * maxWorkers can be overridden per call.
  */
 export function hasCapacity(maxWorkers = DEFAULT_MAX_WORKERS): boolean {
-  return countActiveWorkers() < maxWorkers;
+  return (countActiveWorkers() + getPendingSpawnCount() + countInFlightTaskRuns()) < maxWorkers;
 }
 
 /** Count workers currently running (no endedAt). */
@@ -97,6 +97,7 @@ export function recordWorkerStart(opts: {
   const db = getDb();
   const now = new Date().toISOString();
   try {
+    log().info(`[WORKER_MANAGER] recordWorkerStart: workerId=${opts.workerId} agent=${opts.agentType} task=${opts.taskId ?? "none"}`);
     db.insert(workerRuns).values({
       workerId: opts.workerId,
       agentType: opts.agentType,
@@ -105,6 +106,7 @@ export function recordWorkerStart(opts: {
       model: opts.model ?? null,
       startedAt: now,
     }).run();
+    log().info(`[WORKER_MANAGER] workerRuns insert OK`);
 
     // Update agent status
     db.insert(agentStatusTable)
@@ -127,6 +129,7 @@ export function recordWorkerStart(opts: {
       .run();
   } catch (e) {
     log().error(`[WORKER_MANAGER] recordWorkerStart error: ${e}`);
+    log().error(`[WORKER_MANAGER] Stack: ${e instanceof Error ? e.stack : "N/A"}`);
   }
 }
 
@@ -211,13 +214,48 @@ export function forceTerminateWorker(workerId: string, reason = "timeout"): void
   const db = getDb();
   const now = new Date().toISOString();
   try {
+    // Get the task ID before marking the worker as ended
+    const workerRow = db.select().from(workerRuns)
+      .where(eq(workerRuns.workerId, workerId))
+      .get();
+    const taskId = workerRow?.taskId;
+
     db.update(workerRuns).set({
       endedAt: now,
       succeeded: false,
       timeoutReason: reason,
     }).where(eq(workerRuns.workerId, workerId)).run();
+
+    // Reset the associated task back to not_started so it can be retried
+    if (taskId) {
+      const { getRawDb } = require("../db/connection.js");
+      getRawDb().prepare(`UPDATE tasks SET work_state = 'not_started', updated_at = datetime('now') WHERE id = ? AND work_state = 'in_progress'`).run(taskId);
+      log().warn(`[WORKER_MANAGER] Reset task ${taskId.slice(0, 8)} to not_started after worker termination`);
+    }
+
     log().warn(`[WORKER_MANAGER] Force-terminated worker ${workerId}: ${reason}`);
   } catch (e) {
     log().error(`[WORKER_MANAGER] forceTerminateWorker error: ${e}`);
   }
+}
+
+/** In-flight spawn counter — incremented when spawn queued, decremented when spawn completes/fails */
+let pendingSpawnCount = 0;
+export function incrementPendingSpawns(): void { pendingSpawnCount++; }
+export function decrementPendingSpawns(): void { pendingSpawnCount = Math.max(0, pendingSpawnCount - 1); }
+export function getPendingSpawnCount(): number { return pendingSpawnCount; }
+
+/** Count workflow runs that are in-flight for tasks (running or pending with a task_id) */
+export function countInFlightTaskRuns(): number {
+  const { getDb } = require("../db/connection.js");
+  const { workflowRuns } = require("../db/schema.js");
+  const { inArray, isNotNull, and } = require("drizzle-orm");
+  const db = getDb();
+  const runs = db.select().from(workflowRuns)
+    .where(and(
+      inArray(workflowRuns.status, ["running", "pending"]),
+      isNotNull(workflowRuns.taskId),
+    ))
+    .all();
+  return runs.length;
 }
