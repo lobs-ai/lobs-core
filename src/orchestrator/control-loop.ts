@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 import type { OpenClawPluginServiceContext } from "openclaw/plugin-sdk";
 import { eq } from "drizzle-orm";
 import { log } from "../util/logger.js";
+import { processPendingResumes } from "../index.js";
 import { WorkflowExecutor } from "../workflow/engine.js";
 import { popPendingSpawns, type SpawnRequest } from "../workflow/nodes.js";
 import { getDb } from "../db/connection.js";
@@ -37,6 +38,8 @@ let timer: ReturnType<typeof setInterval> | null = null;
 let executor: WorkflowExecutor | null = null;
 let gatewayPort: number = 18789;
 let gatewayToken: string = "";
+let isFirstTick = true;
+
 
 /** Session key for the sink agent — spawns route here to avoid polluting main */
 const SINK_SESSION_KEY = "agent:sink:paw-orchestrator-v2";
@@ -83,6 +86,12 @@ export function stopControlLoop(): void {
 
 function runTick(): void {
   if (!executor) return;
+
+  // On first tick, resume any in-flight workers from before restart
+  if (isFirstTick) {
+    isFirstTick = false;
+    processPendingResumes().catch(e => log().warn(`paw: processPendingResumes error: ${e}`));
+  }
 
   // ── 1. Advance active runs ─────────────────────────────────────────────────
   try {

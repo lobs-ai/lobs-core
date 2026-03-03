@@ -41,13 +41,36 @@ const pawPlugin = {
     log().info(`paw: database initialized at ${dbPath}`);
 
     // ── Startup Recovery ─────────────────────────────────────────────
-    // Reset tasks stuck in "in_progress" from a previous lifecycle (e.g. restart killed workers)
+    // Resume in-flight workers from previous lifecycle, or reset if unreachable
     try {
       const raw = getRawDb();
-      raw.exec(`UPDATE tasks SET work_state = 'not_started', updated_at = datetime('now') WHERE status = 'active' AND work_state = 'in_progress'`);
+
+      // Find in-progress tasks with associated worker sessions
+      const stuckTasks = raw.prepare(
+        `SELECT t.id as taskId, t.title, wr.worker_id as sessionKey
+         FROM tasks t
+         LEFT JOIN worker_runs wr ON wr.task_id = t.id AND wr.ended_at IS NULL
+         WHERE t.status = 'active' AND t.work_state = 'in_progress'`
+      ).all() as Array<{ taskId: string; title: string; sessionKey: string | null }>;
+
+      if (stuckTasks.length > 0) {
+        log().info(`paw: startup recovery — found ${stuckTasks.length} in-progress tasks, attempting to resume`);
+
+        for (const task of stuckTasks) {
+          if (task.sessionKey) {
+            // Session exists — try to resume by sending a continue message
+            scheduleResume(task.sessionKey, task.taskId, task.title);
+            log().info(`paw: will resume session ${task.sessionKey.slice(0, 40)} for task ${task.taskId.slice(0, 8)} (${task.title.slice(0, 30)})`);
+          } else {
+            // No session — reset to not_started so it gets re-dispatched
+            raw.prepare(`UPDATE tasks SET work_state = 'not_started', updated_at = datetime('now') WHERE id = ?`).run(task.taskId);
+            log().info(`paw: reset orphaned task ${task.taskId.slice(0, 8)} (${task.title.slice(0, 30)}) — no worker session found`);
+          }
+        }
+      }
+
+      // Cancel stale workflow runs (they'll be re-triggered when tasks are re-scanned)
       raw.exec(`UPDATE workflow_runs SET status = 'cancelled' WHERE status IN ('running', 'pending')`);
-      raw.exec(`UPDATE worker_runs SET ended_at = datetime('now'), succeeded = 0, timeout_reason = 'startup_recovery' WHERE ended_at IS NULL`);
-      log().info("paw: startup recovery — reset stuck tasks, cancelled stale workflow runs, closed orphaned workers");
     } catch (e) {
       log().warn(`paw: startup recovery error: ${e}`);
     }
@@ -129,3 +152,88 @@ const pawPlugin = {
 };
 
 export default pawPlugin;
+
+// ── Session Resume Logic ─────────────────────────────────────────────────────
+
+interface ResumeTarget {
+  sessionKey: string;
+  taskId: string;
+  title: string;
+}
+
+const pendingResumes: ResumeTarget[] = [];
+
+function scheduleResume(sessionKey: string, taskId: string, title: string): void {
+  pendingResumes.push({ sessionKey, taskId, title });
+}
+
+/**
+ * After the gateway is fully up, send resume messages to in-flight worker sessions.
+ * Called from the first control-loop tick (delayed to ensure gateway is ready).
+ */
+export async function processPendingResumes(): Promise<void> {
+  if (pendingResumes.length === 0) return;
+
+  // Read gateway config
+  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
+  let port = 18789;
+  let token = "";
+  try {
+    const { readFileSync } = await import("node:fs");
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+    port = cfg?.gateway?.port ?? 18789;
+    token = cfg?.gateway?.auth?.token ?? "";
+  } catch {}
+
+  if (!token) {
+    log().warn("paw: cannot resume sessions — no gateway auth token");
+    // Fall back: reset all pending resumes to not_started
+    const { getRawDb } = await import("./db/connection.js");
+    const raw = getRawDb();
+    for (const r of pendingResumes) {
+      raw.prepare(`UPDATE tasks SET work_state = 'not_started', updated_at = datetime('now') WHERE id = ?`).run(r.taskId);
+    }
+    pendingResumes.length = 0;
+    return;
+  }
+
+  const SINK_SESSION_KEY = "agent:sink:paw-orchestrator-v2";
+
+  for (const resume of pendingResumes) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          tool: "sessions_send",
+          sessionKey: SINK_SESSION_KEY,
+          args: {
+            sessionKey: resume.sessionKey,
+            message: `[System] You were interrupted by a restart. Resume your task: "${resume.title}". Continue where you left off — check what files you've already created and pick up from there. Do NOT start over.`,
+            timeoutSeconds: 0,
+          },
+        }),
+      });
+
+      const data = (await response.json()) as Record<string, unknown>;
+      if (data.ok) {
+        log().info(`paw: resumed session ${resume.sessionKey.slice(0, 40)} for task ${resume.taskId.slice(0, 8)}`);
+      } else {
+        // Session unreachable — reset task
+        log().warn(`paw: could not resume ${resume.sessionKey.slice(0, 40)}: ${JSON.stringify(data.error)}`);
+        const { getRawDb } = await import("./db/connection.js");
+        const raw = getRawDb();
+        raw.prepare(`UPDATE tasks SET work_state = 'not_started', updated_at = datetime('now') WHERE id = ?`).run(resume.taskId);
+      }
+    } catch (e) {
+      log().warn(`paw: resume failed for ${resume.taskId.slice(0, 8)}: ${e}`);
+      const { getRawDb } = await import("./db/connection.js");
+      const raw = getRawDb();
+      raw.prepare(`UPDATE tasks SET work_state = 'not_started', updated_at = datetime('now') WHERE id = ?`).run(resume.taskId);
+    }
+  }
+  pendingResumes.length = 0;
+}
