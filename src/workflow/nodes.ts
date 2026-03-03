@@ -10,7 +10,7 @@ import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
-import { tasks, inboxItems, workflowEvents, workflowRuns } from "../db/schema.js";
+import { tasks, inboxItems, workflowEvents, workflowRuns, workerRuns } from "../db/schema.js";
 import { evaluateCondition, evaluateExpression, interpolate } from "./functions.js";
 import { log } from "../util/logger.js";
 import { executeCallable } from "./callables.js";
@@ -179,6 +179,22 @@ export class NodeHandlers {
       }
       if (task?.workState === "blocked") {
         return { status: "failed", error: task.failureReason ?? "Task blocked", errorType: "task_blocked" };
+      }
+    }
+
+    // For non-task spawns (e.g. reflections), check worker_runs by session key
+    if (!run.taskId && childSessionKey) {
+      const db = getDb();
+      const workerRun = db.select().from(workerRuns)
+        .where(eq(workerRuns.childSessionKey, childSessionKey))
+        .get();
+      if (workerRun?.endedAt) {
+        const summary = workerRun.summary ?? "";
+        return {
+          status: workerRun.succeeded ? "completed" : "failed",
+          output: { worker_completed: true, childSessionKey, summary },
+          sessionKey: childSessionKey,
+        };
       }
     }
 
@@ -445,12 +461,24 @@ export class NodeHandlers {
   private _executeTsCall(nodeDef: NodeDef, run: WorkflowRun): NodeResult {
     const config = nodeDef.config as Record<string, unknown> & { callable?: string };
     const callable = config.callable ?? "";
-    const args = (config.args as Record<string, unknown>) ?? {};
+    const rawArgs = (config.args as Record<string, unknown>) ?? {};
+
+    // Interpolate args from run context — replace {node.field} patterns
+    const args: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(rawArgs)) {
+      if (typeof val === "string" && val.includes("{")) {
+        args[key] = interpolate(val, run.context);
+      } else {
+        args[key] = val;
+      }
+    }
+
     const ctx = {
       workflowRunId: run.id,
       nodeId: nodeDef.id,
       taskId: (run as unknown as Record<string, unknown>).taskId as string | undefined,
       agentType: (run as unknown as Record<string, unknown>).agentType as string | undefined,
+      runContext: run.context, // Pass full context so callables can access it
     };
     log().info(`[WORKFLOW] ts_call: ${callable}`);
     const result = executeCallable(callable, args, ctx);

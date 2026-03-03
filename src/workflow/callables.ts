@@ -172,6 +172,93 @@ function reflectionRunCompression(args: Record<string, unknown>, _ctx: CallableC
   return { ok: true, agents: agents.length, versions_created: passed, results };
 }
 
+
+function reflectionPickNext(args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
+  const hours = (args.window_hours as number) ?? 6;
+  const result = reflectionSvc.pickNextAgent(hours);
+  if (!result) return { ok: true, picked: false, all_reflected: true };
+  return { ok: true, picked: true, agent_type: result.agentType, reflection_id: result.reflectionId };
+}
+
+function reflectionBuildPrompt(args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
+  const agentType = args.agent_type as string;
+  const reflectionId = args.reflection_id as string;
+  if (!agentType || !reflectionId) return { ok: false, error: "agent_type and reflection_id required" };
+  const prompt = reflectionSvc.buildReflectionPrompt(agentType, reflectionId);
+  return { ok: true, prompt, agent_type: agentType, reflection_id: reflectionId };
+}
+
+function reflectionStoreOutput(args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
+  const reflectionId = args.reflection_id as string;
+  let output = args.output as string ?? "";
+  if (!reflectionId) return { ok: false, error: "reflection_id required" };
+
+  // If output is empty/placeholder, try to get from context or mark as no-output
+  if (!output || output === "undefined" || output === "null" || output.trim() === "") {
+    output = "No structured output captured from reflection worker. The worker may have completed without producing parseable results.";
+    log().warn(`[REFLECTION] No output for reflection ${reflectionId.slice(0, 8)}, storing placeholder`);
+  }
+
+  reflectionSvc.storeReflectionOutput(reflectionId, output);
+  return { ok: true, stored: true, reflection_id: reflectionId };
+}
+
+function reflectionSpawnAll(args: Record<string, unknown>, ctx: CallableContext): Record<string, unknown> {
+  const hours = (args.window_hours as number) ?? 6;
+  const agents = reflectionSvc.listAgents();
+  const spawned: string[] = [];
+
+  for (const agent of agents) {
+    const pick = reflectionSvc.pickNextAgent(hours);
+    if (!pick) continue; // Already reflected in window
+
+    const prompt = reflectionSvc.buildReflectionPrompt(pick.agentType, pick.reflectionId);
+
+    // Queue spawn via Gateway API (async, fire-and-forget)
+    const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
+    let gatewayPort = 18789;
+    let gatewayToken = "";
+    try {
+      const { readFileSync } = require("node:fs");
+      const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+      gatewayPort = cfg?.gateway?.port ?? 18789;
+      gatewayToken = cfg?.gateway?.auth?.token ?? "";
+    } catch (_) {}
+
+    if (!gatewayToken) {
+      log().warn("[REFLECTION] No gateway token — cannot spawn reflection workers");
+      return { ok: false, error: "no gateway token" };
+    }
+
+    // Fire-and-forget spawn
+    fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${gatewayToken}` },
+      body: JSON.stringify({
+        tool: "sessions_spawn",
+        sessionKey: "agent:sink:paw-orchestrator-v2",
+        args: {
+          task: prompt,
+          agentId: pick.agentType,
+          model: "anthropic/claude-sonnet-4-6",
+          mode: "run",
+          cleanup: "keep",
+          runTimeoutSeconds: 300,
+        },
+      }),
+    }).then(r => r.json()).then(data => {
+      log().info(`[REFLECTION] Spawned ${pick.agentType} reflection: ${JSON.stringify(data).slice(0, 100)}`);
+    }).catch(e => {
+      log().warn(`[REFLECTION] Spawn ${pick.agentType} failed: ${e}`);
+    });
+
+    spawned.push(pick.agentType);
+  }
+
+  log().info(`[REFLECTION] Spawned ${spawned.length} reflection workers: ${spawned.join(", ")}`);
+  return { ok: true, spawned: spawned.length, agents: spawned };
+}
+
 // ─── Diagnostics ──────────────────────────────────────────────────────────────
 
 function diagnosticsRunOnce(_args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
@@ -346,6 +433,10 @@ const REGISTRY: Record<string, CallableFn | undefined> = {
   "reflection.check_complete": reflectionCheckComplete,
   "reflection.run_sweep": reflectionRunSweep,
   "reflection.run_compression": reflectionRunCompression,
+  "reflection.pick_next": reflectionPickNext,
+  "reflection.build_prompt": reflectionBuildPrompt,
+  "reflection.store_output": reflectionStoreOutput,
+  "reflection.spawn_all": reflectionSpawnAll,
 
   // Diagnostics
   "diagnostics.run_once": diagnosticsRunOnce,

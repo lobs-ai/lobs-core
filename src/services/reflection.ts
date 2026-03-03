@@ -5,9 +5,9 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { eq, and, inArray, gte, lte, desc, max } from "drizzle-orm";
+import { eq, and, inArray, gte, lte, desc, sql } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
-import { agentReflections, agentIdentityVersions, systemSweeps, inboxItems } from "../db/schema.js";
+import { agentReflections, agentIdentityVersions, systemSweeps, inboxItems, workerRuns } from "../db/schema.js";
 import { log } from "../util/logger.js";
 
 const REFLECTION_AGENTS = ["programmer", "researcher", "writer", "architect", "reviewer"];
@@ -22,7 +22,6 @@ export interface ReflectionResult {
 export class ReflectionService {
   /**
    * Create pending reflection records for all execution agents.
-   * Actual spawning is handled by the orchestrator separately.
    */
   createReflectionBatch(windowHours = 6): ReflectionResult {
     const db = getDb();
@@ -69,6 +68,93 @@ export class ReflectionService {
 
     log().info(`[REFLECTION] Created ${created} reflections for ${REFLECTION_AGENTS.length} agents`);
     return { agentsProcessed: REFLECTION_AGENTS.length, reflectionsCreated: created, sweepId };
+  }
+
+  /**
+   * Pick the next agent that should reflect — least recently reflected.
+   * Returns null if all agents reflected within the window.
+   */
+  pickNextAgent(windowHours = 6): { agentType: string; reflectionId: string } | null {
+    const db = getDb();
+    const windowStart = new Date(Date.now() - windowHours * 3600 * 1000).toISOString();
+
+    for (const agent of REFLECTION_AGENTS) {
+      const recent = db.select().from(agentReflections)
+        .where(and(
+          eq(agentReflections.agentType, agent),
+          gte(agentReflections.createdAt, windowStart),
+        ))
+        .limit(1)
+        .get();
+
+      if (!recent) {
+        const id = randomUUID();
+        const now = new Date().toISOString();
+        const windowEnd = new Date();
+        const ws = new Date(windowEnd.getTime() - windowHours * 3600 * 1000);
+        db.insert(agentReflections).values({
+          id,
+          agentType: agent,
+          reflectionType: "strategic",
+          status: "pending",
+          windowStart: ws.toISOString(),
+          windowEnd: windowEnd.toISOString(),
+          contextPacket: {},
+          createdAt: now,
+        }).run();
+        log().info(`[REFLECTION] Picked ${agent} for next reflection (id=${id.slice(0, 8)})`);
+        return { agentType: agent, reflectionId: id };
+      }
+    }
+
+    log().info(`[REFLECTION] All agents reflected within ${windowHours}h window`);
+    return null;
+  }
+
+  /**
+   * Build a reflection prompt for a specific agent.
+   */
+  buildReflectionPrompt(agentType: string, reflectionId: string): string {
+    const db = getDb();
+
+    const recentRuns = db.select().from(workerRuns)
+      .where(eq(workerRuns.agentType, agentType))
+      .orderBy(desc(workerRuns.startedAt))
+      .limit(5)
+      .all();
+
+    const runSummary = recentRuns.length > 0
+      ? recentRuns.map(r =>
+          `- ${r.agentType} task (model=${r.model}, succeeded=${r.succeeded}, ${r.startedAt})`
+        ).join("\n")
+      : "No recent worker runs.";
+
+    return `You are the ${agentType} agent reflecting on your recent work and the system state.
+
+## Your Recent Work
+${runSummary}
+
+## Reflection Task
+Analyze your recent work and the overall system. Produce a structured reflection:
+
+1. **Inefficiencies**: What processes or patterns are wasteful? What could be streamlined?
+2. **System Risks**: What could break? What's fragile? What needs attention?
+3. **Missed Opportunities**: What work should be happening that isn't? What's being overlooked?
+4. **Identity Adjustments**: Should your role, approach, or priorities shift based on recent experience?
+
+Respond in this JSON format:
+\`\`\`json
+{
+  "inefficiencies": ["..."],
+  "systemRisks": ["..."],
+  "missedOpportunities": ["..."],
+  "identityAdjustments": ["..."],
+  "summary": "One paragraph summary of key insights"
+}
+\`\`\`
+
+Reflection ID: ${reflectionId}
+Be honest and specific. Vague observations are worthless.`;
   }
 
   /**
@@ -131,10 +217,10 @@ export class ReflectionService {
       const raw = (result.raw as string) ?? "";
       if (raw.length < QUALITY_MIN_LENGTH) continue;
 
-      // Route high-signal reflections to inbox
       const hasRisks = Array.isArray(result.systemRisks) && (result.systemRisks as unknown[]).length > 0;
       const hasAdjustments = Array.isArray(result.identityAdjustments) && (result.identityAdjustments as unknown[]).length > 0;
-      if (hasRisks || hasAdjustments) {
+      const hasMissed = Array.isArray(result.missedOpportunities) && (result.missedOpportunities as unknown[]).length > 0;
+      if (hasRisks || hasAdjustments || hasMissed) {
         this._routeToInbox(r.agentType, r.id, result);
         routed++;
       }
@@ -165,7 +251,6 @@ export class ReflectionService {
       return { agentType, validationPassed: false };
     }
 
-    // Get current max version
     const maxVer = db.select({ v: agentIdentityVersions.version })
       .from(agentIdentityVersions)
       .where(eq(agentIdentityVersions.agentType, agentType))
@@ -214,7 +299,6 @@ export class ReflectionService {
 
   private _parseReflectionOutput(raw: string): Record<string, unknown> {
     const result: Record<string, unknown> = {};
-    // Try to parse JSON blocks from output
     const jsonMatch = raw.match(/```json\n([\s\S]*?)\n```/);
     if (jsonMatch) {
       try {
@@ -222,9 +306,13 @@ export class ReflectionService {
         return { ...parsed };
       } catch (_) {}
     }
-    // Simple keyword extraction
+    try {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed === "object" && parsed !== null) return parsed;
+    } catch (_) {}
     if (/inefficien/i.test(raw)) result.inefficiencies = [raw.slice(0, 200)];
     if (/risk/i.test(raw)) result.systemRisks = [raw.slice(0, 200)];
+    if (/opportunit/i.test(raw)) result.missedOpportunities = [raw.slice(0, 200)];
     return result;
   }
 
@@ -250,11 +338,26 @@ export class ReflectionService {
     const db = getDb();
     const now = new Date().toISOString();
     try {
+      const parts: string[] = [];
+      if (Array.isArray(result.inefficiencies) && result.inefficiencies.length) {
+        parts.push(`**Inefficiencies:** ${(result.inefficiencies as string[]).join("; ")}`);
+      }
+      if (Array.isArray(result.systemRisks) && result.systemRisks.length) {
+        parts.push(`**Risks:** ${(result.systemRisks as string[]).join("; ")}`);
+      }
+      if (Array.isArray(result.missedOpportunities) && result.missedOpportunities.length) {
+        parts.push(`**Opportunities:** ${(result.missedOpportunities as string[]).join("; ")}`);
+      }
+      if (Array.isArray(result.identityAdjustments) && result.identityAdjustments.length) {
+        parts.push(`**Adjustments:** ${(result.identityAdjustments as string[]).join("; ")}`);
+      }
+      const summary = (result.summary as string) ?? parts[0] ?? "Strategic reflection insight";
+
       db.insert(inboxItems).values({
         id: randomUUID(),
-        title: `🔍 Reflection insight from ${agentType}`,
-        content: `**Agent:** ${agentType}\n**Reflection:** ${reflectionId.slice(0, 8)}\n\n${JSON.stringify(result, null, 2).slice(0, 800)}`,
-        summary: `Strategic reflection insight from ${agentType}`,
+        title: `🔍 ${agentType} reflection: ${summary.slice(0, 80)}`,
+        content: `**Agent:** ${agentType}\n**Reflection:** ${reflectionId.slice(0, 8)}\n\n${parts.join("\n\n")}`,
+        summary,
         isRead: false,
         modifiedAt: now,
       }).run();

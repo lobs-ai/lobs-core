@@ -29,15 +29,17 @@ type WorkflowDefRow = typeof workflowDefinitions.$inferSelect;
 
 function cronMatches(cronExpr: string, now: Date): boolean {
   // Format: "min hour dom mon dow"
+  // Uses UTC accessors — caller must provide a Date whose UTC fields
+  // represent the desired timezone's wall-clock time.
   const parts = cronExpr.trim().split(/\s+/);
   if (parts.length !== 5) return false;
   const [minPat, hourPat, domPat, monPat, dowPat] = parts;
 
-  const m = now.getMinutes();
-  const h = now.getHours();
-  const dom = now.getDate();
-  const mon = now.getMonth() + 1;
-  const dow = now.getDay();
+  const m = now.getUTCMinutes();
+  const h = now.getUTCHours();
+  const dom = now.getUTCDate();
+  const mon = now.getUTCMonth() + 1;
+  const dow = now.getUTCDay();
 
   return (
     matchCronField(minPat, m, 0, 59) &&
@@ -306,13 +308,20 @@ export class WorkflowExecutor {
       const cronExpr = trigger["cron"] as string | undefined;
       if (!cronExpr) continue;
 
-      // Convert to timezone-local date if needed
+      // Build a pseudo-Date whose UTC accessors reflect the target timezone
       const tzName = trigger["timezone"] as string ?? "UTC";
       let localNow: Date;
       try {
-        // Create a date adjusted to the target timezone
-        const offset = getTimezoneOffsetMinutes(tzName, now);
-        localNow = new Date(now.getTime() + offset * 60_000);
+        // Extract wall-clock components in the target timezone
+        const parts = new Intl.DateTimeFormat("en-US", {
+          timeZone: tzName,
+          year: "numeric", month: "2-digit", day: "2-digit",
+          hour: "2-digit", minute: "2-digit", second: "2-digit",
+          hour12: false,
+        }).formatToParts(now);
+        const get = (t: string) => parseInt(parts.find(p => p.type === t)?.value ?? "0", 10);
+        // Construct a Date whose getUTC* methods return the tz-local values
+        localNow = new Date(Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second")));
       } catch {
         localNow = now;
       }
