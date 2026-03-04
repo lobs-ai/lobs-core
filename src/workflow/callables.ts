@@ -225,16 +225,39 @@ ${existingTaskList}
 ## Reflections
 ${reflectionSummaries}`;
 
-  // Use openclaw CLI to send system event (reliable, no auth needed)
-
+  // Spawn a sub-agent to triage reflections autonomously
+  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
+  let gwPort = 18789;
+  let gwToken = "";
   try {
-    execSync(`openclaw system event --text ${JSON.stringify(eventText)} --mode now`, {
-      timeout: 15000,
-      stdio: "pipe",
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+    gwPort = cfg?.gateway?.port ?? 18789;
+    gwToken = cfg?.gateway?.auth?.token ?? "";
+  } catch (_) {}
+
+  if (gwToken) {
+    const triageInstructions = "\n\nYou have access to exec tools. Use sqlite3 to create tasks and inbox items:\n\nTo create a task:\nsqlite3 ~/.openclaw/plugins/paw/paw.db \"INSERT INTO tasks (id, title, status, agent, model_tier, notes, created_at, updated_at) VALUES (lower(hex(randomblob(16))), 'TITLE', 'active', 'AGENT_TYPE', 'TIER', 'NOTES', datetime('now'), datetime('now'));\"\n\nTo create an inbox item (for Rafe to review):\nsqlite3 ~/.openclaw/plugins/paw/paw.db \"INSERT INTO inbox_items (id, title, content, summary, is_read, modified_at) VALUES (lower(hex(randomblob(16))), 'TITLE', 'CONTENT', 'SUMMARY', 0, datetime('now'));\"\n\nAgent types: programmer, writer, researcher, reviewer, architect\nModel tiers: micro (trivial), small (simple), medium (moderate), standard (significant), strong (complex)\n\nAfter creating all items, print a summary of what you created.";
+    fetch(`http://127.0.0.1:${gwPort}/tools/invoke`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${gwToken}` },
+      body: JSON.stringify({
+        tool: "sessions_spawn",
+        sessionKey: "agent:sink:paw-orchestrator-v2",
+        args: {
+          task: eventText + triageInstructions,
+          model: "anthropic/claude-sonnet-4-6",
+          mode: "run",
+          cleanup: "keep",
+          runTimeoutSeconds: 300,
+        },
+      }),
+    }).then(r => r.json()).then(data => {
+      log().info(`[REFLECTION] Triage agent spawned: ${JSON.stringify(data).slice(0, 200)}`);
+    }).catch(e => {
+      log().warn(`[REFLECTION] Failed to spawn triage agent: ${e}`);
     });
-    log().info("[REFLECTION] Sweep event sent to main session");
-  } catch (e) {
-    log().warn(`[REFLECTION] Failed to send sweep event: ${e}`);
+  } else {
+    log().warn("[REFLECTION] No gateway token for triage agent");
   }
 
   // Mark reflections as swept so they don't get re-processed
