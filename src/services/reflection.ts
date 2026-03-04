@@ -316,13 +316,17 @@ Reflection ID: ${reflectionId}`;
         for (const suggestion of suggestions) {
           const size = this._sizeSuggestion(suggestion);
           if (size === "large") {
-            // Large items need human review — send to inbox
-            this._routeSuggestionToInbox(r.agentType, suggestion);
+            // Large items need explicit human approval
+            this._routeSuggestionToInbox(r.agentType, r.id, suggestion, "approval");
             routed++;
           } else {
-            // Small/medium items — propose for Lobs to review
-            const result2 = this._proposeTask(r.agentType, suggestion, size);
-            if (result2 === "proposed") tasksCreated++;
+            // Small/medium items become proposed tasks + inbox suggestions for approval/reject
+            const proposed = this._proposeTask(r.agentType, suggestion, size);
+            if (proposed === "proposed") {
+              tasksCreated++;
+              this._routeSuggestionToInbox(r.agentType, r.id, suggestion, "suggestion");
+              routed++;
+            }
           }
         }
       }
@@ -622,7 +626,7 @@ Reflection ID: ${reflectionId}`;
     return "medium";
   }
 
-  private _routeSuggestionToInbox(agentType: string, suggestion: string): void {
+  private _routeSuggestionToInbox(agentType: string, reflectionId: string, suggestion: string, type: "suggestion" | "approval"): void {
     const db = getDb();
     const now = new Date().toISOString();
     const title = suggestion.split(/[.!?]/)[0].trim().slice(0, 100) || suggestion.slice(0, 100);
@@ -634,10 +638,11 @@ Reflection ID: ${reflectionId}`;
         summary: suggestion.slice(0, 200),
         isRead: false,
         modifiedAt: now,
-        type: "approval",
+        type,
         requiresAction: true,
         actionStatus: "pending",
         sourceAgent: agentType,
+        sourceReflectionId: reflectionId,
       }).run();
     } catch (e) {
       log().warn(`[REFLECTION] Failed to route suggestion to inbox: ${String(e)}`);
