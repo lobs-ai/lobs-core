@@ -528,14 +528,14 @@ Reflection ID: ${reflectionId}`;
     if (activated.length > 0) {
       lines.push("**Accepted (activated):**");
       for (const t of activated) {
-        lines.push(`- "\${(t as Record<string, unknown>).title}" (agent=\${(t as Record<string, unknown>).agent})`);
+        lines.push(`- "${(t as Record<string, unknown>).title}" (agent=${(t as Record<string, unknown>).agent})`);
       }
     }
 
     if (completed.length > 0) {
       lines.push("\n**Completed (from past suggestions):**");
       for (const t of completed) {
-        lines.push(`- "\${(t as Record<string, unknown>).title}" (agent=\${(t as Record<string, unknown>).agent})`);
+        lines.push(`- "${(t as Record<string, unknown>).title}" (agent=${(t as Record<string, unknown>).agent})`);
       }
     }
 
@@ -634,7 +634,7 @@ Reflection ID: ${reflectionId}`;
       db.insert(inboxItems).values({
         id: randomUUID(),
         title: ` ${"\u{1F4CB}"} ${agentType}: ${title}`,
-        content: `**Agent:** ${agentType}\n**Size:** Large (needs review)\n\n${suggestion}`,
+        content: `**Agent:** ${agentType}\n**Type:** ${type}\n\n${suggestion}`,
         summary: suggestion.slice(0, 200),
         isRead: false,
         modifiedAt: now,

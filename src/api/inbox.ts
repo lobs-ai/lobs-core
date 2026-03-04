@@ -6,7 +6,13 @@ import { inboxItems, inboxThreads, inboxMessages, tasks } from "../db/schema.js"
 import { json, error, parseBody } from "./index.js";
 
 function normalizeTitle(title: string): string {
-  return title.replace(/^\s*[📋🔍⚡✅❌:\-\s]+/, "").trim();
+  const cleaned = title.replace(/^\s*[📋🔍⚡✅❌:\-\s]+/, "").trim();
+  const colon = cleaned.indexOf(":");
+  if (colon > 0) {
+    const right = cleaned.slice(colon + 1).trim();
+    if (right) return right;
+  }
+  return cleaned;
 }
 
 function findRelatedProposedTask(inboxTitle: string) {
