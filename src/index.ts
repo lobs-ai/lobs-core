@@ -17,6 +17,7 @@ import { registerPromptBuildHook } from "./hooks/prompt-build.js";
 import { registerSubagentHooks } from "./hooks/subagent.js";
 import { registerToolGateHook } from "./hooks/tool-gate.js";
 import { registerAgentEndHook } from "./hooks/agent-end.js";
+import { registerRestartContinuationHook } from "./hooks/restart-continuation.js";
 import { startControlLoop, stopControlLoop } from "./orchestrator/control-loop.js";
 import { setLogger, log } from "./util/logger.js";
 import type { PawConfig } from "./util/types.js";
@@ -69,8 +70,8 @@ const pawPlugin = {
         }
       }
 
-      // Cancel stale workflow runs (they'll be re-triggered when tasks are re-scanned)
-      raw.exec(`UPDATE workflow_runs SET status = 'cancelled' WHERE status IN ('running', 'pending')`);
+      // Cancel stale workflow runs — only cancel runs older than 5 minutes to avoid killing active ones during hot-reload
+      raw.exec(`UPDATE workflow_runs SET status = 'cancelled' WHERE status IN ('running', 'pending') AND updated_at < datetime('now', '-5 minutes')`);
     } catch (e) {
       log().warn(`paw: startup recovery error: ${e}`);
     }
@@ -91,6 +92,33 @@ const pawPlugin = {
     registerSubagentHooks(api);
     registerToolGateHook(api);
     registerAgentEndHook(api);
+    registerRestartContinuationHook(api);
+
+    // Clean stale subagent runs from disk registry to prevent children count buildup
+    try {
+      const registryPath = `${process.env.HOME}/.openclaw/subagents/runs.json`;
+      const readFs = require("node:fs").readFileSync; const writeFs = require("node:fs").writeFileSync;
+      const data = JSON.parse(readFs(registryPath, "utf8"));
+      const runs = data?.runs ?? {};
+      const now = Date.now();
+      let cleaned = 0;
+      for (const [id, entry] of Object.entries(runs)) {
+        const e = entry as Record<string, unknown>;
+        if (e.endedAt == null) {
+          const started = (e.startedAt as number) ?? 0;
+          if (now - started > 10 * 60 * 1000) { // 10 min old and still "active"
+            e.endedAt = now;
+            e.endReason = "stale-startup-cleanup";
+            cleaned++;
+          }
+        }
+      }
+      if (cleaned > 0) {
+        writeFs(registryPath, JSON.stringify({ ...data, runs }));
+        log().info(`[PAW] Cleaned ${cleaned} stale subagent runs from registry`);
+      }
+    } catch (_) {}
+
     log().info("paw: lifecycle hooks registered");
 
     // ── Orchestrator Service ──────────────────────────────────────────

@@ -292,7 +292,7 @@ const DEFAULT_WORKFLOWS = [
       {
         id: "write_code",
         type: "spawn_agent",
-        config: { agent_type: "programmer", prompt_template: "{task.title}\n\n{task.notes}", timeout_seconds: 900 },
+        config: { agent_type: "programmer", prompt_template: "Project: {project.title}\nRepo path: {project.repo_path}\n\nTask: {task.title}\n\n{task.notes}\n\nIMPORTANT: Work in the repo path above. Read existing code first, then implement the change and git commit.", timeout_seconds: 900 },
         on_success: "run_tests",
         on_failure: { retry: 0, abort_on: ["spawn_error"] },
       },
@@ -396,7 +396,7 @@ const DEFAULT_WORKFLOWS = [
       {
         id: "research",
         type: "spawn_agent",
-        config: { agent_type: "researcher", prompt_template: "{task.title}\n\n{task.notes}", timeout_seconds: 900 },
+        config: { agent_type: "researcher", prompt_template: "Project: {project.title}\nRepo path: {project.repo_path}\n\nTask: {task.title}\n\n{task.notes}", timeout_seconds: 900 },
         on_success: "cleanup",
         on_failure: { retry: 1, abort_on: ["spawn_error"] },
       },
@@ -671,7 +671,7 @@ const DEFAULT_WORKFLOWS = [
   {
     name: "review-sweep",
     description: "Periodic scan for completed programmer tasks that lack review.",
-    trigger: { type: "schedule", cron: "0 */6 * * *", timezone: "America/New_York" },
+    trigger: { type: "schedule", cron: "0 */3 * * *", timezone: "America/New_York" },
     is_active: true,
     nodes: [
       {
@@ -752,8 +752,8 @@ const DEFAULT_WORKFLOWS = [
   // ══════════════════════════════════════════════════════════════════
   {
     name: "reflection-cycle",
-    description: "Full strategic reflection pipeline with capacity-aware scheduling.",
-    trigger: { type: "schedule", cron: "0 */6 * * *", timezone: "America/New_York" },
+    description: "Full strategic reflection pipeline — spawns workers, collects results, sweeps to inbox.",
+    trigger: { type: "schedule", cron: "0 */3 * * *", timezone: "America/New_York" },
     is_active: true,
     nodes: [
       {
@@ -764,9 +764,9 @@ const DEFAULT_WORKFLOWS = [
             capacity: "workerCapacity()",
             active: "activeWorkers()",
             pending: 'numTasks("pending")',
-            should_run: 'workerCapacity() > 0 and numTasks("pending") == 0',
+            should_run: 'workerCapacity() > 0',
           },
-          goto_if: [{ match: "should_run", goto: "list_agents" }],
+          goto_if: [{ match: "should_run", goto: "spawn_all" }],
           default: "defer",
         },
       },
@@ -777,69 +777,40 @@ const DEFAULT_WORKFLOWS = [
         on_success: "done",
       },
       {
-        id: "list_agents",
+        id: "spawn_all",
         type: "ts_call",
-        config: { callable: "reflection.list_agents" },
-        on_success: "check_agents",
+        config: { callable: "reflection.spawn_all" },
+        on_success: "check_results",
         on_failure: { retry: 1, abort_on: ["python_error"] },
       },
       {
-        id: "check_agents",
+        id: "check_results",
         type: "branch",
         config: {
-          conditions: [{ match: "list_agents.count == 0", goto: "done" }],
-          default: "build_contexts",
+          conditions: [{ match: "spawn_all.spawned == 0", goto: "run_sweep" }],
+          default: "wait_for_workers",
         },
       },
       {
-        id: "build_contexts",
-        type: "ts_call",
-        config: { callable: "reflection.build_contexts" },
-        on_success: "spawn_agents",
-        on_failure: { retry: 1, abort_on: ["python_error"] },
-      },
-      {
-        id: "spawn_agents",
-        type: "ts_call",
-        config: { callable: "reflection.spawn_agents" },
-        on_success: "check_spawned",
-        on_failure: { retry: 1, abort_on: ["python_error"] },
-      },
-      {
-        id: "check_spawned",
-        type: "branch",
-        config: {
-          conditions: [{ match: "spawn_agents.spawned == 0", goto: "done" }],
-          default: "wait_for_completion",
-        },
-      },
-      {
-        id: "wait_for_completion",
-        type: "ts_call",
-        config: { callable: "reflection.check_complete", poll: true },
+        id: "wait_for_workers",
+        type: "delay",
+        config: { seconds: 120 },
         on_success: "run_sweep",
-        on_failure: { retry: 3, abort_on: ["python_error"] },
       },
       {
         id: "run_sweep",
         type: "ts_call",
         config: { callable: "reflection.run_sweep" },
-        on_success: "notify_sweep",
+        on_success: "notify_complete",
         on_failure: { retry: 2 },
       },
       {
-        id: "notify_sweep",
+        id: "notify_complete",
         type: "notify",
         config: {
           channel: "internal",
-          message_template: "Reflection cycle complete. Spawned {spawn_agents.spawned} agents. Sweep: {run_sweep.proposed} proposed, {run_sweep.rejected} rejected.",
+          message_template: "Reflection cycle complete. Spawned {spawn_all.spawned}, collected {spawn_all.collected}. Sweep routed {run_sweep.routed} to inbox.",
         },
-        on_success: "emit_complete",
-      },
-      {
-        id: "emit_complete",
-        type: "notify",
-        config: { channel: "internal", message_template: "reflection.batch_complete" },
         on_success: "done",
       },
       { id: "done", type: "cleanup", config: { delete_session: false } },

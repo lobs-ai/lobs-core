@@ -1,9 +1,48 @@
 import { randomUUID } from "node:crypto";
-import { eq, desc } from "drizzle-orm";
+import { and, desc, eq, like } from "drizzle-orm";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getDb } from "../db/connection.js";
-import { inboxItems, inboxThreads, inboxMessages } from "../db/schema.js";
+import { inboxItems, inboxThreads, inboxMessages, tasks } from "../db/schema.js";
 import { json, error, parseBody } from "./index.js";
+
+function normalizeTitle(title: string): string {
+  return title.replace(/^\s*[📋🔍⚡✅❌:\-\s]+/, "").trim();
+}
+
+function findRelatedProposedTask(inboxTitle: string) {
+  const db = getDb();
+  const rawTitle = (inboxTitle || "").trim();
+  const normalized = normalizeTitle(rawTitle);
+  const candidates = [rawTitle, normalized].filter(Boolean);
+  for (const title of candidates) {
+    const task = db.select().from(tasks)
+      .where(and(eq(tasks.title, title), like(tasks.notes, "%Proposed from%")))
+      .get();
+    if (task) return task;
+  }
+  return null;
+}
+
+async function addThreadMessage(itemId: string, text: string, author = "user") {
+  const db = getDb();
+  let thread = db.select().from(inboxThreads).where(eq(inboxThreads.docId, itemId)).get();
+  const now = new Date().toISOString();
+  if (!thread) {
+    const tid = randomUUID();
+    db.insert(inboxThreads).values({ id: tid, docId: itemId, createdAt: now, updatedAt: now }).run();
+    thread = db.select().from(inboxThreads).where(eq(inboxThreads.id, tid)).get()!;
+  }
+  const mid = randomUUID();
+  db.insert(inboxMessages).values({
+    id: mid,
+    threadId: thread.id,
+    author,
+    text,
+    createdAt: now,
+  }).run();
+  db.update(inboxThreads).set({ updatedAt: now }).where(eq(inboxThreads.id, thread.id)).run();
+  return db.select().from(inboxMessages).where(eq(inboxMessages.id, mid)).get();
+}
 
 export async function handleInboxRequest(
   req: IncomingMessage,
@@ -15,14 +54,11 @@ export async function handleInboxRequest(
   const sub = parts[2];
   const sub2 = parts[3];
 
-  // /api/inbox/read-state — batch read state
   if (id === "read-state" && req.method === "POST") {
     const body = await parseBody(req) as Record<string, unknown>;
     const ids = (body.ids as string[]) ?? [];
     const is_read = (body.is_read as boolean) ?? true;
-    for (const iid of ids) {
-      db.update(inboxItems).set({ isRead: is_read }).where(eq(inboxItems.id, iid)).run();
-    }
+    for (const iid of ids) db.update(inboxItems).set({ isRead: is_read }).where(eq(inboxItems.id, iid)).run();
     return json(res, { updated: ids.length });
   }
 
@@ -32,8 +68,53 @@ export async function handleInboxRequest(
       return json(res, db.select().from(inboxItems).where(eq(inboxItems.id, id)).get());
     }
 
+    if (sub === "approve" && req.method === "POST") {
+      const item = db.select().from(inboxItems).where(eq(inboxItems.id, id)).get();
+      if (!item) return error(res, "Not found", 404);
+      db.update(inboxItems).set({ actionStatus: "approved", isRead: true }).where(eq(inboxItems.id, id)).run();
+      const related = findRelatedProposedTask(item.title);
+      if (related) db.update(tasks).set({ status: "active", updatedAt: new Date().toISOString() }).where(eq(tasks.id, related.id)).run();
+      return json(res, { ok: true, related_task_id: related?.id ?? null });
+    }
+
+    if (sub === "reject" && req.method === "POST") {
+      const item = db.select().from(inboxItems).where(eq(inboxItems.id, id)).get();
+      if (!item) return error(res, "Not found", 404);
+      db.update(inboxItems).set({ actionStatus: "rejected", isRead: true }).where(eq(inboxItems.id, id)).run();
+      const related = findRelatedProposedTask(item.title);
+      if (related) db.update(tasks).set({ status: "rejected", updatedAt: new Date().toISOString() }).where(eq(tasks.id, related.id)).run();
+      return json(res, { ok: true, related_task_id: related?.id ?? null });
+    }
+
+    if (sub === "feedback" && req.method === "POST") {
+      const body = await parseBody(req) as Record<string, unknown>;
+      const text = String(body.text ?? "").trim();
+      if (!text) return error(res, "text required");
+
+      const item = db.select().from(inboxItems).where(eq(inboxItems.id, id)).get();
+      if (!item) return error(res, "Not found", 404);
+
+      await addThreadMessage(id, text, "user");
+      db.update(inboxItems).set({ actionStatus: "feedback_pending", isRead: true }).where(eq(inboxItems.id, id)).run();
+
+      const taskId = randomUUID();
+      const now = new Date().toISOString();
+      const agent = item.sourceAgent || "reviewer";
+      db.insert(tasks).values({
+        id: taskId,
+        title: `Respond to inbox feedback: ${item.title}`,
+        status: "inbox",
+        agent,
+        modelTier: "standard",
+        notes: `Feedback for inbox item ${item.id}\n\n${text}`,
+        createdAt: now,
+        updatedAt: now,
+      }).run();
+
+      return json(res, { ok: true, task_id: taskId });
+    }
+
     if (sub === "thread") {
-      // GET /api/inbox/:id/thread — get thread
       if (sub2 === "messages" && req.method === "GET") {
         const thread = db.select().from(inboxThreads).where(eq(inboxThreads.docId, id)).get();
         if (!thread) return json(res, { messages: [] });
@@ -49,23 +130,8 @@ export async function handleInboxRequest(
     if (sub === "response" && req.method === "POST") {
       const body = await parseBody(req) as Record<string, unknown>;
       if (!body.text) return error(res, "text required");
-      // Find or create thread
-      let thread = db.select().from(inboxThreads).where(eq(inboxThreads.docId, id)).get();
-      if (!thread) {
-        const tid = randomUUID();
-        const now = new Date().toISOString();
-        db.insert(inboxThreads).values({ id: tid, docId: id, createdAt: now, updatedAt: now }).run();
-        thread = db.select().from(inboxThreads).where(eq(inboxThreads.id, tid)).get()!;
-      }
-      const mid = randomUUID();
-      db.insert(inboxMessages).values({
-        id: mid,
-        threadId: thread.id,
-        author: (body.author as string) ?? "user",
-        text: body.text as string,
-        createdAt: new Date().toISOString(),
-      }).run();
-      return json(res, db.select().from(inboxMessages).where(eq(inboxMessages.id, mid)).get(), 201);
+      const msg = await addThreadMessage(id, String(body.text), String(body.author ?? "user"));
+      return json(res, msg, 201);
     }
 
     if (req.method === "GET") {
@@ -89,7 +155,17 @@ export async function handleInboxRequest(
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.title) return error(res, "title required");
     const iid = randomUUID();
-    db.insert(inboxItems).values({ id: iid, title: body.title as string, content: (body.content as string) ?? null, isRead: false }).run();
+    db.insert(inboxItems).values({
+      id: iid,
+      title: body.title as string,
+      content: (body.content as string) ?? null,
+      isRead: false,
+      type: (body.type as string) ?? "notice",
+      requiresAction: Boolean(body.requires_action ?? body.requiresAction ?? false),
+      actionStatus: (body.action_status as string) ?? "pending",
+      sourceAgent: (body.source_agent as string) ?? null,
+      sourceReflectionId: (body.source_reflection_id as string) ?? null,
+    }).run();
     return json(res, db.select().from(inboxItems).where(eq(inboxItems.id, iid)).get(), 201);
   }
   return error(res, "Method not allowed", 405);

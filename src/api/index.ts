@@ -5,9 +5,11 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { registerPawRouter } from "./router.js";
+import { registerNexusHandler } from "./nexus.js";
 
 export function registerAllRoutes(api: OpenClawPluginApi): void {
   registerPawRouter(api);
+  registerNexusHandler(api);
 }
 
 // ─── HTTP Helpers ───────────────────────────────────────────────────────

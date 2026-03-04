@@ -19,13 +19,14 @@ import { eq } from "drizzle-orm";
 import { log } from "../util/logger.js";
 import { processPendingResumes } from "../index.js";
 import { WorkflowExecutor } from "../workflow/engine.js";
-import { popPendingSpawns, type SpawnRequest } from "../workflow/nodes.js";
+import { popPendingSpawns, requeueSpawn, type SpawnRequest } from "../workflow/nodes.js";
 import { getDb } from "../db/connection.js";
 import { workflowRuns } from "../db/schema.js";
 import { findReadyTasks } from "./scanner.js";
 import {
   hasCapacity,
   projectHasActiveWorker,
+  projectHasPendingSpawn,
   recordWorkerStart,
   incrementPendingSpawns,
   decrementPendingSpawns,
@@ -112,11 +113,20 @@ function runTick(): void {
   try {
     const spawns = popPendingSpawns();
     for (const req of spawns) {
-      incrementPendingSpawns();
+      const spawnProjectId = (((req.context?.task ?? {}) as Record<string, unknown>)["project_id"] ?? ((req.context?.task ?? {}) as Record<string, unknown>)["projectId"] ?? ((req.context?.project ?? {}) as Record<string, unknown>)["id"]) as string | undefined;
+
+      // Project lock: only one worker per project at a time
+      if (spawnProjectId && (projectHasActiveWorker(spawnProjectId) || projectHasPendingSpawn(spawnProjectId))) {
+        log().info(`orchestrator: project ${spawnProjectId.slice(0, 8)} locked — re-queuing spawn for run ${req.runId.slice(0, 8)}`);
+        requeueSpawn(req);
+        continue;
+      }
+
+      incrementPendingSpawns(spawnProjectId);
       processSpawnRequest(req).catch((err) => {
         log().error(`orchestrator: spawn failed for run ${req.runId.slice(0, 8)}: ${err}`);
-        decrementPendingSpawns();
-    writeSpawnResult(req.runId, req.nodeId, {
+        decrementPendingSpawns(spawnProjectId);
+        writeSpawnResult(req.runId, req.nodeId, {
           status: "failed",
           error: String(err),
         });
@@ -153,8 +163,8 @@ function runTick(): void {
       for (const task of readyTasks) {
         if (!hasCapacity()) break;
 
-        if (task.projectId && projectHasActiveWorker(task.projectId)) {
-          log().debug?.(`orchestrator: project ${task.projectId.slice(0, 8)} already has active worker — skipping task ${task.id.slice(0, 8)}`);
+        if (task.projectId && (projectHasActiveWorker(task.projectId) || projectHasPendingSpawn(task.projectId))) {
+          log().debug?.(`orchestrator: project ${task.projectId.slice(0, 8)} already has active/pending worker — skipping task ${task.id.slice(0, 8)}`);
           continue;
         }
 
@@ -195,9 +205,11 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
   }
 
   const taskCtx = (req.context?.task ?? {}) as Record<string, unknown>;
+  const projectCtx = (req.context?.project ?? {}) as Record<string, unknown>;
   const taskTitle = (taskCtx["title"] as string) ?? "Workflow task";
   const taskNotes = (taskCtx["notes"] as string) ?? "";
   const taskPrompt = req.promptTemplate ?? `${taskTitle}\n\n${taskNotes}`.trim();
+  const repoPath = (projectCtx["repo_path"] as string) || undefined;
 
   const modelChoice = req.modelTier
     ? chooseModel(req.modelTier, req.agentType)
@@ -226,6 +238,7 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
         mode: "run",
         cleanup: "keep",
         runTimeoutSeconds: 900,
+        ...(repoPath ? { cwd: repoPath } : {}),
       },
     }),
   });
@@ -245,20 +258,21 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
   if (status === "accepted" && childSessionKey) {
     log().info(`[SPAWN] Accepted: session=${childSessionKey} run=${req.runId.slice(0, 8)}`);
 
+    const workerProjectId = (taskCtx["projectId"] as string) ?? (taskCtx["project_id"] as string) ?? undefined;
     recordWorkerStart({
       workerId: childSessionKey,
       agentType: req.agentType,
       taskId: req.taskId,
-      projectId: (taskCtx["projectId"] as string) ?? undefined,
+      projectId: workerProjectId,
       model,
     });
 
-    decrementPendingSpawns();
+    decrementPendingSpawns(workerProjectId);
     writeSpawnResult(req.runId, req.nodeId, {
       childSessionKey,
     });
   } else {
-    decrementPendingSpawns();
+    decrementPendingSpawns((taskCtx["projectId"] as string) ?? (taskCtx["project_id"] as string) ?? undefined);
     throw new Error(`Spawn returned status=${status}: ${JSON.stringify(details)}`);
   }
 }

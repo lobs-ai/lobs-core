@@ -124,7 +124,7 @@ export async function handleTaskRequest(
     db.insert(tasks).values({
       id: taskId,
       title: body.title as string,
-      status: (body.status as string) ?? "inbox",
+      status: (body.status as string) ?? "active",
       owner: body.owner as string,
       projectId: body.project_id as string,
       notes: body.notes as string,

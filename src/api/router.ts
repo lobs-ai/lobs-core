@@ -22,6 +22,9 @@ import { handleTilesRequest } from "./tiles.js";
 import { handleTrackerRequest } from "./tracker.js";
 import { handleWorkflowRunsRequest } from "./workflow-runs.js";
 import { handleKnowledgeRequest } from "./knowledge.js";
+import { handleKnowledgeFsRequest } from "./knowledge-fs.js";
+import { handleMemoriesFsRequest } from "./memories-fs.js";
+import { handleReflectionsRequest } from "./reflections.js";
 import { error } from "./index.js";
 
 const PREFIXES = ["/paw/api/", "/api/"];
@@ -29,7 +32,7 @@ const PREFIXES = ["/paw/api/", "/api/"];
 export function registerPawRouter(api: OpenClawPluginApi): void {
   (api as any).registerHttpHandler(async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
     const url = new URL(req.url ?? "/", "http://localhost");
-    const pathname = url.pathname;
+    const pathname = decodeURIComponent(url.pathname);
 
     const prefix = PREFIXES.find(p => pathname.startsWith(p));
     if (!prefix) return false;
@@ -63,6 +66,9 @@ export function registerPawRouter(api: OpenClawPluginApi): void {
         case "tiles":           await handleTilesRequest(req, res, parts[1], parts); return true;
         case "tracker":         await handleTrackerRequest(req, res, parts); return true;
         case "knowledge":       await handleKnowledgeRequest(req, res, parts[1], parts); return true;
+        case "knowledge-fs":    await handleKnowledgeFsRequest(req, res, parts[1], parts); return true;
+        case "memories-fs":     await handleMemoriesFsRequest(req, res, parts[1]); return true;
+        case "reflections":      await handleReflectionsRequest(req, res, parts[1]); return true;
         default:                error(res, `Unknown resource: ${resource}`, 404); return true;
       }
     } catch (err) {

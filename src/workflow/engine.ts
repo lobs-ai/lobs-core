@@ -18,6 +18,7 @@ import {
 } from "../db/schema.js";
 import { NodeHandlers, type WorkflowRun } from "./nodes.js";
 import { evaluateCondition } from "./functions.js";
+import { queueReviewerFollowup } from "../hooks/subagent.js";
 import { log } from "../util/logger.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -193,7 +194,7 @@ export class WorkflowExecutor {
       context["task"] = task;
 
       // Resolve project info
-      const projectId = task["project_id"] as string | undefined;
+      const projectId = (task["project_id"] ?? task["projectId"]) as string | undefined;
       if (projectId) {
         const project = db.select().from(projects).where(eq(projects.id, projectId)).get();
         if (project) {
@@ -630,6 +631,12 @@ export class WorkflowExecutor {
           finishedAt: now,
           updatedAt: now,
         }).where(eq(tasks.id, run.taskId)).run();
+
+        // Queue reviewer followup for programmer tasks
+        const task = db.select().from(tasks).where(eq(tasks.id, run.taskId!)).get();
+        if (task?.agent === "programmer") {
+          queueReviewerFollowup(run.taskId!);
+        }
       } else if (status === "failed") {
         db.update(tasks).set({
           workState: "blocked",

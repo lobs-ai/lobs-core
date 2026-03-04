@@ -1,5 +1,5 @@
 {
-  "name": "openclaw-plugin-paw",
+  "name": "paw",
   "version": "0.1.0",
   "description": "Personal AI Workforce \u2014 multi-agent orchestration plugin for OpenClaw",
   "type": "module",
@@ -28,6 +28,7 @@
   "openclaw": {
     "extensions": [
       "./src/index.ts"
-    ]
+    ],
+    "id": "paw"
   }
 }

@@ -8,7 +8,7 @@ import { getDb } from "../db/connection.js";
 import { workerRuns, agentStatus as agentStatusTable } from "../db/schema.js";
 import { log } from "../util/logger.js";
 
-export const DEFAULT_MAX_WORKERS = 1;
+export const DEFAULT_MAX_WORKERS = 5;
 
 export interface WorkerInfo {
   workerId: string;
@@ -241,9 +241,17 @@ export function forceTerminateWorker(workerId: string, reason = "timeout"): void
 
 /** In-flight spawn counter — incremented when spawn queued, decremented when spawn completes/fails */
 let pendingSpawnCount = 0;
-export function incrementPendingSpawns(): void { pendingSpawnCount++; }
-export function decrementPendingSpawns(): void { pendingSpawnCount = Math.max(0, pendingSpawnCount - 1); }
+const pendingSpawnProjects = new Set<string>();
+export function incrementPendingSpawns(projectId?: string): void {
+  pendingSpawnCount++;
+  if (projectId) pendingSpawnProjects.add(projectId);
+}
+export function decrementPendingSpawns(projectId?: string): void {
+  pendingSpawnCount = Math.max(0, pendingSpawnCount - 1);
+  if (projectId) pendingSpawnProjects.delete(projectId);
+}
 export function getPendingSpawnCount(): number { return pendingSpawnCount; }
+export function projectHasPendingSpawn(projectId: string): boolean { return pendingSpawnProjects.has(projectId); }
 
 /** Count workflow runs that are in-flight for tasks (running or pending with a task_id) */
 export function countInFlightTaskRuns(): number {

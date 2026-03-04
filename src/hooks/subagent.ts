@@ -2,12 +2,15 @@
  * subagent_spawning / subagent_ended hooks — WorkerManager integration.
  */
 
-import { eq, and, isNull } from "drizzle-orm";
+import { eq, and, inArray, isNull, desc } from "drizzle-orm";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { getDb } from "../db/connection.js";
-import { workerRuns, tasks, workflowRuns } from "../db/schema.js";
+import { workerRuns, tasks, workflowRuns, agentReflections, projects } from "../db/schema.js";
 import { recordWorkerStart, recordWorkerEnd } from "../orchestrator/worker-manager.js";
 import { log } from "../util/logger.js";
+import { ReflectionService } from "../services/reflection.js";
+import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 
 export function registerSubagentHooks(api: OpenClawPluginApi): void {
 
@@ -35,6 +38,13 @@ export function registerSubagentHooks(api: OpenClawPluginApi): void {
 
     log().info(`[PAW] subagent_ended: session=${sessionKey} reason=${reason} succeeded=${succeeded}`);
 
+    // ── Reflection result collection ──────────────────────────────────────
+    // Check if this was a reflection worker by looking at the session key pattern
+    // and checking for pending reflections
+    if (succeeded) {
+      setTimeout(() => { try { collectReflectionResult(ev); } catch(e) { log().warn(`[PAW] collectReflectionResult error: ${e}`); } }, 2000);
+    }
+
     const db = getDb();
 
     // Strategy 1: Match via worker_runs table
@@ -53,7 +63,7 @@ export function registerSubagentHooks(api: OpenClawPluginApi): void {
       });
 
       if (workerRun.taskId) {
-        updateTaskFromEnd(workerRun.taskId, succeeded, reason);
+        updateTaskFromEnd(workerRun.taskId, succeeded, reason, workerRun.agentType ?? undefined);
       }
     }
 
@@ -97,20 +107,164 @@ function updateWorkflowRunForSession(sessionKey: string, succeeded: boolean, rea
   log().debug?.(`[PAW] No running workflow run found for session=${sessionKey}`);
 }
 
-function updateTaskFromEnd(taskId: string, succeeded: boolean, reason?: string): void {
+/**
+ * If this subagent was a reflection worker, read its transcript and store the output.
+ */
+function collectReflectionResult(event: Record<string, unknown>): void {
+  const sessionKey = (event.targetSessionKey ?? event.childSessionKey) as string;
+  if (!sessionKey) return;
+
+  const match = sessionKey.match(/^agent:(\w+):subagent:/);
+  if (!match) return;
+  const agentType = match[1];
+
+  const reflectionSvc = new ReflectionService();
+  if (!reflectionSvc.listAgents().includes(agentType)) return;
+
+  const db = getDb();
+  const pending = db.select().from(agentReflections)
+    .where(and(
+      eq(agentReflections.agentType, agentType),
+      inArray(agentReflections.status, ["active", "pending"]),
+    ))
+    .orderBy(desc(agentReflections.createdAt))
+    .limit(1)
+    .get();
+
+  if (!pending) return;
+  log().info(`[PAW] collectReflectionResult: found pending ${pending.id.slice(0, 8)} for ${agentType}`);
+
+  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
+  let gatewayPort = 18789;
+  let gatewayToken = "";
+  try {
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+    gatewayPort = cfg?.gateway?.port ?? 18789;
+    gatewayToken = cfg?.gateway?.auth?.token ?? "";
+  } catch (_) {}
+
+  if (!gatewayToken) return;
+
+  // Use child_process.exec (non-blocking) to avoid event loop deadlock
+  const { exec: execAsync } = require("node:child_process");
+  const payload = JSON.stringify({
+    tool: "sessions_history",
+    sessionKey: "agent:sink:paw-orchestrator-v2",
+    args: { sessionKey: sessionKey, limit: 20, includeTools: true },
+  });
+  const tmpFile = `/tmp/paw-hist-${pending.id.slice(0, 8)}.json`;
+  writeFileSync(tmpFile, payload);
+  log().info(`[PAW] collectReflectionResult: exec curl for ${agentType}...`);
+
+  const cmd = `curl -s -m 10 -X POST "http://127.0.0.1:${gatewayPort}/tools/invoke" -H "Content-Type: application/json" -H "Authorization: Bearer ${gatewayToken}" -d @${tmpFile}`;
+
+  execAsync(cmd, { encoding: "utf8", timeout: 15000 }, (error: Error | null, stdout: string, stderr: string) => {
+    log().info(`[PAW] collectReflectionResult: curl callback for ${agentType}, stdout=${stdout?.length ?? 0}, stderr=${stderr?.length ?? 0}, error=${error?.message ?? "none"}`);
+    try { unlinkSync(tmpFile); } catch (_) {}
+
+    if (error) {
+      log().warn(`[PAW] collectReflectionResult: exec failed for ${agentType}: ${error.message}`);
+      return;
+    }
+
+    try {
+      const historyData = JSON.parse(stdout);
+      const resultObj = historyData?.result as Record<string, unknown> | undefined;
+      const contentArr = resultObj?.content as Array<Record<string, unknown>> | undefined;
+      let messages: Array<Record<string, unknown>> | undefined;
+      if (contentArr?.[0]?.text) {
+        try {
+          const parsed = JSON.parse(contentArr[0].text as string);
+          messages = parsed?.messages as Array<Record<string, unknown>>;
+        } catch (_) {}
+      }
+      if (!messages) messages = (resultObj?.messages) as Array<Record<string, unknown>> | undefined;
+      if (!messages || messages.length === 0) {
+        log().warn(`[PAW] No messages for ${agentType} reflection ${pending.id.slice(0, 8)}`);
+        return;
+      }
+
+      // Extract reflection output from assistant messages
+      let output = "";
+      const allText: string[] = [];
+
+      for (const msg of messages) {
+        if (msg.role !== "assistant") continue;
+        const c = msg.content;
+        const parts: string[] = [];
+        if (typeof c === "string") parts.push(c);
+        else if (Array.isArray(c)) {
+          for (const p of (c as Array<Record<string, unknown>>)) {
+            if (p.type === "text" && typeof p.text === "string") parts.push(p.text as string);
+          }
+        }
+        allText.push(...parts);
+
+        // Look for JSON reflection block
+        for (const text of parts) {
+          const jsonMatch = text.match(/\`\`\`json\s*([\s\S]*?)\`\`\`/);
+          if (jsonMatch) {
+            try {
+              const parsed = JSON.parse(jsonMatch[1].trim());
+              if (parsed.inefficiencies || parsed.concreteSuggestions || parsed.summary) {
+                output = text;
+                break;
+              }
+            } catch (_) {}
+          }
+          if (!output && text.includes('"inefficiencies"') && text.includes('"summary"')) {
+            output = text;
+            break;
+          }
+        }
+        if (output) break;
+      }
+
+      // Fallback: longest text or concatenated
+      if (!output) {
+        const longest = allText.sort((a, b) => b.length - a.length)[0];
+        if (longest && longest.length > 50) output = longest;
+      }
+      if (!output) {
+        const combined = allText.join("\n\n");
+        if (combined.length > 50) output = combined;
+      }
+
+      if (output && output.length > 50) {
+        reflectionSvc.storeReflectionOutput(pending.id, output);
+        log().info(`[PAW] Collected reflection for ${agentType} (${output.length} chars, id=${pending.id.slice(0, 8)})`);
+      } else {
+        log().warn(`[PAW] No usable output for ${agentType} (${allText.length} parts, ${allText.join("").length} chars)`);
+      }
+    } catch (e) {
+      log().warn(`[PAW] collectReflectionResult parse error for ${agentType}: ${e}`);
+    }
+  });
+}
+
+
+function updateTaskFromEnd(taskId: string, succeeded: boolean, reason?: string, agentType?: string): void {
   const db = getDb();
   const now = new Date().toISOString();
+  const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
 
   if (succeeded) {
+    const project = task?.projectId
+      ? db.select().from(projects).where(eq(projects.id, task.projectId)).get()
+      : undefined;
+    const scopePath = task?.artifactPath ?? project?.repoPath ?? undefined;
+
     db.update(tasks).set({
       workState: "done",
-      status: "completed",
-      finishedAt: now,
+      artifactPath: scopePath,
       updatedAt: now,
     }).where(eq(tasks.id, taskId)).run();
-    log().info(`[PAW] Task ${taskId.slice(0, 8)} marked completed`);
+    log().info(`[PAW] Task ${taskId.slice(0, 8)} work_state=done (workflow will finalize status)`);
+
+    if (agentType === "programmer") {
+      queueReviewerFollowup(taskId);
+    }
   } else {
-    const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
     db.update(tasks).set({
       workState: "failed",
       failureReason: reason ?? "Worker ended without success",
@@ -119,4 +273,56 @@ function updateTaskFromEnd(taskId: string, succeeded: boolean, reason?: string):
     }).where(eq(tasks.id, taskId)).run();
     log().info(`[PAW] Task ${taskId.slice(0, 8)} marked failed: ${reason}`);
   }
+}
+
+export function queueReviewerFollowup(taskId: string): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const sourceTask = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+  if (!sourceTask) return;
+
+  const existing = db.select().from(tasks)
+    .where(and(
+      eq(tasks.externalSource, "auto-review"),
+      eq(tasks.externalId, taskId),
+    ))
+    .get();
+  if (existing) return;
+
+  const project = sourceTask.projectId
+    ? db.select().from(projects).where(eq(projects.id, sourceTask.projectId)).get()
+    : undefined;
+  const scopePath = sourceTask.artifactPath ?? project?.repoPath ?? undefined;
+
+  const reviewNotes = [
+    `Auto-review for completed programmer task ${taskId.slice(0, 8)}.`,
+    `Original task: ${sourceTask.title}`,
+    scopePath ? `Scope directory: ${scopePath}` : "Scope directory: project output directory not recorded; inspect changed files from the completed run.",
+    "Focus on quick quality gate: missing tests, missing README/docs, and obvious bugs.",
+  ].join("\n");
+
+  db.insert(tasks).values({
+    id: randomUUID(),
+    title: `Review: ${sourceTask.title}`,
+    status: "active",
+    owner: sourceTask.owner ?? "lobs",
+    workState: "not_started",
+    reviewState: "pending",
+    projectId: sourceTask.projectId,
+    notes: reviewNotes,
+    artifactPath: scopePath,
+    agent: "reviewer",
+    externalSource: "auto-review",
+    externalId: taskId,
+    modelTier: sourceTask.modelTier ?? "standard",
+    createdAt: now,
+    updatedAt: now,
+  }).run();
+
+  db.update(tasks).set({
+    reviewState: "queued",
+    updatedAt: now,
+  }).where(eq(tasks.id, taskId)).run();
+
+  log().info(`[PAW] Auto-queued reviewer follow-up for programmer task ${taskId.slice(0, 8)}`);
 }

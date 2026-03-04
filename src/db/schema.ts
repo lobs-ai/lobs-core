@@ -136,6 +136,11 @@ export const inboxItems = sqliteTable("inbox_items", {
   modifiedAt: text("modified_at"),
   isRead: integer("is_read", { mode: "boolean" }).notNull().default(false),
   summary: text("summary"),
+  type: text("type").notNull().default("notice"),
+  requiresAction: integer("requires_action", { mode: "boolean" }).notNull().default(false),
+  actionStatus: text("action_status").notNull().default("pending"),
+  sourceAgent: text("source_agent"),
+  sourceReflectionId: text("source_reflection_id"),
 });
 
 // ─── Workflow Engine ────────────────────────────────────────────────────
@@ -475,6 +480,9 @@ export const chatSessions = sqliteTable("chat_sessions", {
   id: id(),
   sessionKey: text("session_key").notNull().unique(),
   label: text("label"),
+  summary: text("summary"),
+  summaryUpdatedAt: text("summary_updated_at"),
+  messageCountAtSummary: integer("message_count_at_summary").default(0),
   createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
   isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
   lastMessageAt: text("last_message_at"),

@@ -71,6 +71,10 @@ export function popPendingSpawns(): SpawnRequest[] {
   return _pendingSpawns.splice(0, _pendingSpawns.length);
 }
 
+export function requeueSpawn(req: SpawnRequest): void {
+  _pendingSpawns.push(req);
+}
+
 // ── Main NodeHandlers class ────────────────────────────────────────────────────
 
 export class NodeHandlers {

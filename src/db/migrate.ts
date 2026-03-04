@@ -120,7 +120,12 @@ export function runMigrations(db: PawDB): void {
     content TEXT,
     modified_at TEXT,
     is_read INTEGER NOT NULL DEFAULT 0,
-    summary TEXT
+    summary TEXT,
+    type TEXT NOT NULL DEFAULT 'notice',
+    requires_action INTEGER NOT NULL DEFAULT 0,
+    action_status TEXT NOT NULL DEFAULT 'pending',
+    source_agent TEXT,
+    source_reflection_id TEXT
   )`);
 
   db.run(sql`CREATE TABLE IF NOT EXISTS workflow_definitions (
@@ -592,4 +597,14 @@ export function runMigrations(db: PawDB): void {
   db.run(sql`CREATE INDEX IF NOT EXISTS idx_initiatives_status ON agent_initiatives(status)`);
   db.run(sql`CREATE INDEX IF NOT EXISTS idx_inbox_threads_status ON inbox_threads(triage_status)`);
   db.run(sql`CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_key)`);
+
+  // ── Chat summary columns (idempotent) ─────────────────────────────────
+  try { db.run(sql`ALTER TABLE chat_sessions ADD COLUMN summary TEXT`); } catch {}
+  try { db.run(sql`ALTER TABLE chat_sessions ADD COLUMN summary_updated_at TEXT`); } catch {}
+  try { db.run(sql`ALTER TABLE chat_sessions ADD COLUMN message_count_at_summary INTEGER DEFAULT 0`); } catch {}
+  try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN type TEXT NOT NULL DEFAULT 'notice'`); } catch {}
+  try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN requires_action INTEGER NOT NULL DEFAULT 0`); } catch {}
+  try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN action_status TEXT NOT NULL DEFAULT 'pending'`); } catch {}
+  try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN source_agent TEXT`); } catch {}
+  try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN source_reflection_id TEXT`); } catch {}
 }

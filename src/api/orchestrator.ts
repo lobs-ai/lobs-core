@@ -9,8 +9,10 @@ import {
   initiativeDecisionRecords,
   systemSweeps,
   initiativeMessages,
+  tasks as tasksTable,
 } from "../db/schema.js";
 import { json, error, parseBody } from "./index.js";
+import { executeCallable, type CallableContext } from "../workflow/callables.js";
 
 export async function handleOrchestratorRequest(
   req: IncomingMessage,
@@ -132,6 +134,65 @@ export async function handleOrchestratorRequest(
     }
 
     return error(res, "Unknown intelligence endpoint", 404);
+  }
+
+
+  // POST /api/orchestrator/trigger-reflection
+  if (s0 === "trigger-reflection" && req.method === "POST") {
+    const body = (await parseBody(req)) as Record<string, unknown> ?? {};
+    const windowHours = (body.window_hours as number) ?? 3;
+    const ctx: CallableContext = { runId: "manual-trigger", nodeId: "manual", nodeStates: {} };
+    const result = executeCallable("reflection.spawn_all", { window_hours: windowHours }, ctx);
+    return json(res, result);
+  }
+
+  // POST /api/orchestrator/trigger-sweep
+  if (s0 === "trigger-sweep" && req.method === "POST") {
+    const body = (await parseBody(req)) as Record<string, unknown> ?? {};
+    const sinceHours = (body.since_hours as number) ?? 24;
+    const ctx: CallableContext = { runId: "manual-sweep", nodeId: "manual", nodeStates: {} };
+    const result = executeCallable("reflection.run_sweep", { since_hours: sinceHours }, ctx);
+    return json(res, result);
+  }
+
+  // GET /api/orchestrator/proposed-tasks
+  if (s0 === "proposed-tasks" && req.method === "GET") {
+    const rows = db.select().from(tasksTable).where(eq(tasksTable.status, "proposed")).orderBy(desc(tasksTable.createdAt)).all();
+    return json(res, { count: rows.length, tasks: rows });
+  }
+
+  // POST /api/orchestrator/proposed-tasks/:id/activate — activate a proposed task
+  if (s0 === "proposed-tasks" && s1 && s2 === "activate" && req.method === "POST") {
+    const body = (await parseBody(req)) as Record<string, unknown> ?? {};
+    const updates: Record<string, unknown> = { status: "active", updatedAt: new Date().toISOString() };
+    if (body.title) updates.title = body.title;
+    if (body.agent) updates.agent = body.agent;
+    if (body.notes) updates.notes = body.notes;
+    if (body.model_tier) updates.modelTier = body.model_tier;
+    db.update(tasksTable).set(updates).where(eq(tasksTable.id, s1)).run();
+    return json(res, { ok: true, activated: s1 });
+  }
+
+  // POST /api/orchestrator/proposed-tasks/:id/reject
+  if (s0 === "proposed-tasks" && s1 && s2 === "reject" && req.method === "POST") {
+    // Capture before deleting so reflections can learn from rejections
+    const task = db.select().from(tasksTable).where(eq(tasksTable.id, s1)).get();
+    if (task) {
+      const body = (await parseBody(req)) as Record<string, unknown> ?? {};
+      const reason = (body.reason as string) ?? "";
+      db.insert(orchestratorSettings).values({
+        key: "rejected_suggestion:" + s1.slice(0, 8),
+        value: JSON.stringify({
+          title: (task as Record<string, unknown>).title,
+          agent: (task as Record<string, unknown>).agent,
+          reason,
+          rejectedAt: new Date().toISOString(),
+        }),
+        updatedAt: new Date().toISOString(),
+      }).onConflictDoNothing().run();
+    }
+    db.delete(tasksTable).where(eq(tasksTable.id, s1)).run();
+    return json(res, { ok: true, deleted: s1 });
   }
 
   return error(res, "Unknown orchestrator endpoint", 404);

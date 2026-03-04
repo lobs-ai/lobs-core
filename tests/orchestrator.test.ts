@@ -14,6 +14,7 @@ import {
   forceTerminateWorker,
 } from "../src/orchestrator/worker-manager.js";
 import { findReadyTasks, findRetryableTasks } from "../src/orchestrator/scanner.js";
+import { queueReviewerFollowup } from "../src/hooks/subagent.js";
 import {
   chooseModel,
   resolveTaskTier,
@@ -175,6 +176,68 @@ describe("Scanner", () => {
 
     const retryable = findRetryableTasks(100);
     expect(retryable.some(t => t.id === taskId)).toBe(false);
+  });
+});
+
+
+
+describe("Reviewer auto-followup", () => {
+  it("queues a reviewer task for completed programmer output", () => {
+    const db = getDb();
+    const projectId = randomUUID();
+    const sourceTaskId = randomUUID();
+
+    db.insert(projects).values({
+      id: projectId,
+      title: "PAW",
+      type: "kanban",
+      repoPath: "/tmp/paw-output",
+    }).run();
+
+    db.insert(tasks).values({
+      id: sourceTaskId,
+      title: "Implement feature X",
+      status: "completed",
+      workState: "done",
+      agent: "programmer",
+      projectId,
+    }).run();
+
+    queueReviewerFollowup(sourceTaskId);
+
+    const reviewTask = db.select().from(tasks).where(and(
+      eq(tasks.externalSource, "auto-review"),
+      eq(tasks.externalId, sourceTaskId),
+    )).get();
+
+    expect(reviewTask).toBeDefined();
+    expect(reviewTask?.agent).toBe("reviewer");
+    expect(reviewTask?.status).toBe("active");
+    expect(reviewTask?.artifactPath).toBe("/tmp/paw-output");
+    expect(reviewTask?.notes).toContain("Scope directory: /tmp/paw-output");
+  });
+
+  it("does not create duplicate reviewer follow-up tasks", () => {
+    const db = getDb();
+    const sourceTaskId = randomUUID();
+
+    db.insert(tasks).values({
+      id: sourceTaskId,
+      title: "Fix bug Y",
+      status: "completed",
+      workState: "done",
+      agent: "programmer",
+    }).run();
+
+    queueReviewerFollowup(sourceTaskId);
+    queueReviewerFollowup(sourceTaskId);
+
+    const reviewTasks = db.select().from(tasks).where(and(
+      eq(tasks.externalSource, "auto-review"),
+      eq(tasks.externalId, sourceTaskId),
+    )).all();
+
+    expect(reviewTasks.length).toBe(1);
   });
 });
 

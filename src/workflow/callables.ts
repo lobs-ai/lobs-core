@@ -7,7 +7,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { eq, and, lte, gte, desc, isNull } from "drizzle-orm";
+import { eq, and, lte, gte, desc, isNull, inArray } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import {
   tasks, projects, inboxItems, inboxThreads, scheduledEvents,
@@ -21,6 +21,8 @@ import { GmailService } from "../integrations/gmail.js";
 import { GitHubSyncService } from "../integrations/github.js";
 import { ReflectionService } from "../services/reflection.js";
 import { LearningService } from "../services/learning.js";
+import { execSync } from "node:child_process";
+import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
 
 export interface CallableContext {
   workflowRunId?: string;
@@ -148,21 +150,115 @@ function reflectionBuildContexts(_args: Record<string, unknown>, _ctx: CallableC
 }
 
 function reflectionSpawnAgents(args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
-  const hours = (args.window_hours as number) ?? 6;
+  const hours = (args.window_hours as number) ?? 3;
   const result = reflectionSvc.createReflectionBatch(hours);
   return { ok: true, ...result };
 }
 
 function reflectionCheckComplete(args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
-  const windowStart = (args.window_start as string) ?? new Date(Date.now() - 6 * 3600 * 1000).toISOString();
+  const windowStart = (args.window_start as string) ?? new Date(Date.now() - 3 * 3600 * 1000).toISOString();
   const result = reflectionSvc.checkComplete(windowStart);
   return { ok: true, ...result };
 }
 
 function reflectionRunSweep(args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
-  const hours = (args.since_hours as number) ?? 24;
-  const result = reflectionSvc.runSweep(hours);
-  return { ok: true, ...result };
+  const hours = (args.since_hours as number) ?? 48;
+  const db = getDb();
+  const since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+
+  // Gather completed reflections
+  const reflections = db.select().from(agentReflections)
+    .where(and(
+      eq(agentReflections.status, "completed"),
+      gte(agentReflections.createdAt, since),
+    ))
+    .orderBy(desc(agentReflections.createdAt))
+    .all();
+
+  if (reflections.length === 0) {
+    log().info("[REFLECTION] Sweep: no completed reflections to process");
+    return { ok: true, processed: 0, note: "no reflections" };
+  }
+
+  // Gather existing active/proposed tasks for dedup context
+  const existingTasks = db.select().from(tasks)
+    .where(inArray(tasks.status, ["active", "proposed"]))
+    .orderBy(desc(tasks.updatedAt))
+    .limit(30)
+    .all();
+
+  // Build reflection summaries
+  const reflectionSummaries = reflections.map(r => {
+    const result = r.result as Record<string, unknown> | null;
+    if (!result) return null;
+    const parts: string[] = [`### ${r.agentType} (${r.createdAt})`];
+    if (result.summary) parts.push(`Summary: ${result.summary}`);
+    if (Array.isArray(result.inefficiencies) && result.inefficiencies.length)
+      parts.push("Inefficiencies:\n" + (result.inefficiencies as string[]).map(s => `- ${s}`).join("\n"));
+    if (Array.isArray(result.systemRisks) && result.systemRisks.length)
+      parts.push("Risks:\n" + (result.systemRisks as string[]).map(s => `- ${s}`).join("\n"));
+    if (Array.isArray(result.missedOpportunities) && result.missedOpportunities.length)
+      parts.push("Missed Opportunities:\n" + (result.missedOpportunities as string[]).map(s => `- ${s}`).join("\n"));
+    if (Array.isArray(result.concreteSuggestions) && result.concreteSuggestions.length)
+      parts.push("Suggestions:\n" + (result.concreteSuggestions as string[]).map(s => `- ${s}`).join("\n"));
+    return parts.join("\n");
+  }).filter(Boolean).join("\n\n---\n\n");
+
+  const existingTaskList = existingTasks.map(t =>
+    `- [${(t as any).status}] ${(t as any).title} (agent: ${(t as any).agent || "?"})`
+  ).join("\n") || "(none)";
+
+  // Send as system event to main session for LLM triage
+  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
+  let gatewayPort = 18789;
+  let gatewayToken = "";
+  try {
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+    gatewayPort = cfg?.gateway?.port ?? 18789;
+    gatewayToken = cfg?.gateway?.auth?.token ?? "";
+  } catch (_) {}
+
+  if (!gatewayToken) {
+    log().warn("[REFLECTION] No gateway token for sweep event");
+    return { ok: false, error: "no gateway token" };
+  }
+
+  const eventText = `[Reflection Sweep] ${reflections.length} agent reflections need triage.
+
+Review these reflections and take action:
+1. **Create tasks** (via sqlite3) for concrete, actionable work agents can do autonomously. Rewrite suggestions into clear task titles — don't copy verbatim. Merge duplicates across agents. Assign the right agent type and model_tier.
+2. **Create inbox items** (via sqlite3) for large/risky/strategic changes that need Rafe's approval.
+3. **Skip** noise, duplicates, or things already covered by existing tasks.
+
+Be selective — 3 good tasks beat 10 mediocre ones. Check existing tasks to avoid duplicates.
+
+## Existing Tasks
+${existingTaskList}
+
+## Reflections
+${reflectionSummaries}`;
+
+  const baseUrl = `http://127.0.0.1:${gatewayPort}`;
+  fetch(`${baseUrl}/tools/invoke`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${gatewayToken}` },
+    body: JSON.stringify({
+      tool: "cron",
+      sessionKey: "agent:main",
+      args: { action: "wake", text: eventText, mode: "now" },
+    }),
+  }).then(r => r.json()).then(data => {
+    log().info(`[REFLECTION] Sweep event sent to main: ${JSON.stringify(data).slice(0, 120)}`);
+  }).catch(e => {
+    log().warn(`[REFLECTION] Failed to send sweep event: ${e}`);
+  });
+
+  // Mark reflections as swept so they don't get re-processed
+  for (const r of reflections) {
+    db.update(agentReflections).set({ status: "swept" }).where(eq(agentReflections.id, r.id)).run();
+  }
+  log().info(`[REFLECTION] Sweep: gathered ${reflections.length} reflections, marked swept, sent to main for triage`);
+  return { ok: true, processed: reflections.length, sentToMain: true };
 }
 
 function reflectionRunCompression(args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
@@ -174,7 +270,7 @@ function reflectionRunCompression(args: Record<string, unknown>, _ctx: CallableC
 
 
 function reflectionPickNext(args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
-  const hours = (args.window_hours as number) ?? 6;
+  const hours = (args.window_hours as number) ?? 3;
   const result = reflectionSvc.pickNextAgent(hours);
   if (!result) return { ok: true, picked: false, all_reflected: true };
   return { ok: true, picked: true, agent_type: result.agentType, reflection_id: result.reflectionId };
@@ -203,51 +299,57 @@ function reflectionStoreOutput(args: Record<string, unknown>, _ctx: CallableCont
   return { ok: true, stored: true, reflection_id: reflectionId };
 }
 
-function reflectionSpawnAll(args: Record<string, unknown>, ctx: CallableContext): Record<string, unknown> {
-  const hours = (args.window_hours as number) ?? 6;
-  const agents = reflectionSvc.listAgents();
+function reflectionSpawnAll(args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
+  const hours = (args.window_hours as number) ?? 3;
+
+  // Read gateway config
+  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
+  let gatewayPort = 18789;
+  let gatewayToken = "";
+  try {
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+    gatewayPort = cfg?.gateway?.port ?? 18789;
+    gatewayToken = cfg?.gateway?.auth?.token ?? "";
+  } catch (_) {}
+
+  if (!gatewayToken) {
+    log().warn("[REFLECTION] No gateway token — cannot spawn reflection workers");
+    return { ok: false, error: "no gateway token" };
+  }
+
+  const baseUrl = `http://127.0.0.1:${gatewayPort}`;
+
+  // Pick agents that need reflection and spawn async
   const spawned: string[] = [];
 
-  for (const agent of agents) {
+  for (const _agent of reflectionSvc.listAgents()) {
     const pick = reflectionSvc.pickNextAgent(hours);
-    if (!pick) continue; // Already reflected in window
+    if (!pick) continue;
 
     const prompt = reflectionSvc.buildReflectionPrompt(pick.agentType, pick.reflectionId);
 
-    // Queue spawn via Gateway API (async, fire-and-forget)
-    const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-    let gatewayPort = 18789;
-    let gatewayToken = "";
-    try {
-      const { readFileSync } = require("node:fs");
-      const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-      gatewayPort = cfg?.gateway?.port ?? 18789;
-      gatewayToken = cfg?.gateway?.auth?.token ?? "";
-    } catch (_) {}
+    // Async spawn via fetch (fire-and-forget — result collection handled by subagent_ended hook)
+    const payload = JSON.stringify({
+      tool: "sessions_spawn",
+      sessionKey: "agent:sink:paw-orchestrator-v2",
+      args: {
+        task: prompt,
+        agentId: pick.agentType,
+        model: "anthropic/claude-sonnet-4-6",
+        mode: "run",
+        cleanup: "keep",
+        runTimeoutSeconds: 300,
+        maxTokens: 16384,
+        metadata: { pawReflection: true, reflectionId: pick.reflectionId, agentType: pick.agentType },
+      },
+    });
 
-    if (!gatewayToken) {
-      log().warn("[REFLECTION] No gateway token — cannot spawn reflection workers");
-      return { ok: false, error: "no gateway token" };
-    }
-
-    // Fire-and-forget spawn
-    fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
+    fetch(`${baseUrl}/tools/invoke`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${gatewayToken}` },
-      body: JSON.stringify({
-        tool: "sessions_spawn",
-        sessionKey: "agent:sink:paw-orchestrator-v2",
-        args: {
-          task: prompt,
-          agentId: pick.agentType,
-          model: "anthropic/claude-sonnet-4-6",
-          mode: "run",
-          cleanup: "keep",
-          runTimeoutSeconds: 300,
-        },
-      }),
+      body: payload,
     }).then(r => r.json()).then(data => {
-      log().info(`[REFLECTION] Spawned ${pick.agentType} reflection: ${JSON.stringify(data).slice(0, 100)}`);
+      log().info(`[REFLECTION] Spawned ${pick.agentType} (reflection=${pick.reflectionId.slice(0, 8)}): ${JSON.stringify(data).slice(0, 120)}`);
     }).catch(e => {
       log().warn(`[REFLECTION] Spawn ${pick.agentType} failed: ${e}`);
     });
@@ -255,7 +357,12 @@ function reflectionSpawnAll(args: Record<string, unknown>, ctx: CallableContext)
     spawned.push(pick.agentType);
   }
 
-  log().info(`[REFLECTION] Spawned ${spawned.length} reflection workers: ${spawned.join(", ")}`);
+  if (spawned.length === 0) {
+    log().info("[REFLECTION] All agents reflected within window, nothing to spawn");
+  } else {
+    log().info(`[REFLECTION] Spawned ${spawned.length} reflection workers: ${spawned.join(", ")}`);
+  }
+
   return { ok: true, spawned: spawned.length, agents: spawned };
 }
 

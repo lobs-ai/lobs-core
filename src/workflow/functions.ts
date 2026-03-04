@@ -19,7 +19,7 @@ export function workerCapacity(): number {
       .where(sql`${workerRuns.endedAt} IS NULL AND ${workerRuns.startedAt} IS NOT NULL`)
       .get();
     const active = row?.ct ?? 0;
-    const maxWorkers = 3;
+    const maxWorkers = 5;
     return Math.max(0, maxWorkers - active);
   } catch (e) {
     log().warn(`workerCapacity() error: ${e}`);
