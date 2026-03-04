@@ -209,19 +209,6 @@ function reflectionRunSweep(args: Record<string, unknown>, _ctx: CallableContext
   ).join("\n") || "(none)";
 
   // Send as system event to main session for LLM triage
-  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-  let gatewayPort = 18789;
-  let gatewayToken = "";
-  try {
-    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    gatewayPort = cfg?.gateway?.port ?? 18789;
-    gatewayToken = cfg?.gateway?.auth?.token ?? "";
-  } catch (_) {}
-
-  if (!gatewayToken) {
-    log().warn("[REFLECTION] No gateway token for sweep event");
-    return { ok: false, error: "no gateway token" };
-  }
 
   const eventText = `[Reflection Sweep] ${reflections.length} agent reflections need triage.
 
@@ -238,20 +225,17 @@ ${existingTaskList}
 ## Reflections
 ${reflectionSummaries}`;
 
-  const baseUrl = `http://127.0.0.1:${gatewayPort}`;
-  fetch(`${baseUrl}/tools/invoke`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${gatewayToken}` },
-    body: JSON.stringify({
-      tool: "cron",
-      sessionKey: "agent:main",
-      args: { action: "wake", text: eventText, mode: "now" },
-    }),
-  }).then(r => r.json()).then(data => {
-    log().info(`[REFLECTION] Sweep event sent to main: ${JSON.stringify(data).slice(0, 120)}`);
-  }).catch(e => {
+  // Use openclaw CLI to send system event (reliable, no auth needed)
+
+  try {
+    execSync(`openclaw system event --text ${JSON.stringify(eventText)} --mode now`, {
+      timeout: 15000,
+      stdio: "pipe",
+    });
+    log().info("[REFLECTION] Sweep event sent to main session");
+  } catch (e) {
     log().warn(`[REFLECTION] Failed to send sweep event: ${e}`);
-  });
+  }
 
   // Mark reflections as swept so they don't get re-processed
   for (const r of reflections) {
