@@ -7,6 +7,33 @@ import { log } from "../util/logger.js";
 
 export function registerRestartContinuationHook(api: any): void {
   api.on("gateway_start", async () => {
+    // Clean up orphaned state from pre-restart
+    setTimeout(() => {
+      try {
+        const Database = require("better-sqlite3");
+        const { join } = require("node:path");
+        const { homedir } = require("node:os");
+        const dbPath = process.env.PAW_DB_PATH ?? join(homedir(), ".openclaw/plugins/paw/paw.db");
+        const db = new Database(dbPath);
+        
+        // Fail orphaned worker runs (no ended_at)
+        const orphaned = db.prepare("UPDATE worker_runs SET ended_at = datetime('now'), succeeded = 0, timeout_reason = 'orphaned on restart' WHERE ended_at IS NULL").run();
+        if (orphaned.changes > 0) log().info(`[PAW] Restart cleanup: failed ${orphaned.changes} orphaned worker runs`);
+        
+        // Reset busy agents to idle
+        const agents = db.prepare("UPDATE agent_status SET status = 'idle', current_task_id = NULL WHERE status = 'busy'").run();
+        if (agents.changes > 0) log().info(`[PAW] Restart cleanup: reset ${agents.changes} busy agents to idle`);
+        
+        // Reset tasks that were "running" back to active
+        const tasks = db.prepare("UPDATE tasks SET status = 'active', updated_at = datetime('now') WHERE status = 'running'").run();
+        if (tasks.changes > 0) log().info(`[PAW] Restart cleanup: reset ${tasks.changes} running tasks to active`);
+        
+        db.close();
+      } catch (e) {
+        log().warn(`[PAW] Restart cleanup error: ${e}`);
+      }
+    }, 2000);
+
     // Delay 5s to let gateway fully initialize
     setTimeout(async () => {
       try {

@@ -243,10 +243,33 @@ function collectReflectionResult(event: Record<string, unknown>): void {
 }
 
 
+function computeEvalMetrics(taskId: string, succeeded: boolean): Record<string, unknown> {
+  const db = getDb();
+  // Count how many worker runs were spawned for this task
+  const allRuns = db.select().from(workerRuns)
+    .where(eq(workerRuns.taskId, taskId))
+    .all();
+  const spawn_count = allRuns.length;
+
+  // Sum cost across all runs for this task
+  const cost_usd = allRuns.reduce((acc, r) => acc + (r.totalCostUsd ?? 0), 0);
+
+  // Check if the most recent successful run has a summary (work_summary proxy)
+  const lastRun = allRuns
+    .filter(r => r.endedAt)
+    .sort((a, b) => (b.endedAt ?? "").localeCompare(a.endedAt ?? ""))[0];
+  const work_summary_present = !!(lastRun?.summary && lastRun.summary.trim().length > 0);
+
+  return { spawn_count, cost_usd: Math.round(cost_usd * 1e6) / 1e6, work_summary_present, succeeded, logged_at: new Date().toISOString() };
+}
+
 function updateTaskFromEnd(taskId: string, succeeded: boolean, reason?: string, agentType?: string): void {
   const db = getDb();
   const now = new Date().toISOString();
   const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+
+  const evalMetrics = computeEvalMetrics(taskId, succeeded);
+  log().info(`[PAW] Task ${taskId.slice(0, 8)} eval_metrics=${JSON.stringify(evalMetrics)}`);
 
   if (succeeded) {
     const project = task?.projectId
@@ -257,6 +280,7 @@ function updateTaskFromEnd(taskId: string, succeeded: boolean, reason?: string, 
     db.update(tasks).set({
       workState: "done",
       artifactPath: scopePath,
+      evalMetrics,
       updatedAt: now,
     }).where(eq(tasks.id, taskId)).run();
     log().info(`[PAW] Task ${taskId.slice(0, 8)} work_state=done (workflow will finalize status)`);
@@ -269,6 +293,7 @@ function updateTaskFromEnd(taskId: string, succeeded: boolean, reason?: string, 
       workState: "failed",
       failureReason: reason ?? "Worker ended without success",
       retryCount: (task?.retryCount ?? 0) + 1,
+      evalMetrics,
       updatedAt: now,
     }).where(eq(tasks.id, taskId)).run();
     log().info(`[PAW] Task ${taskId.slice(0, 8)} marked failed: ${reason}`);

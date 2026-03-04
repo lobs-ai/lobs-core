@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import { eq, and, lte, gte, desc, isNull, inArray } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import {
-  tasks, projects, inboxItems, inboxThreads, scheduledEvents,
+  tasks, projects, inboxItems, inboxThreads, inboxMessages, scheduledEvents,
   agentProfiles, agentStatus, workerRuns, modelUsageEvents,
   orchestratorSettings, routineRegistry, routineAuditEvents,
   systemSweeps, agentReflections, outcomeLearnings, learningPlans,
@@ -212,12 +212,18 @@ function reflectionRunSweep(args: Record<string, unknown>, _ctx: CallableContext
 
   const eventText = `[Reflection Sweep] ${reflections.length} agent reflections need triage.
 
-Review these reflections and take action:
-1. **Create tasks** (via sqlite3) for concrete, actionable work agents can do autonomously. Rewrite suggestions into clear task titles — don't copy verbatim. Merge duplicates across agents. Assign the right agent type and model_tier.
-2. **Create inbox items** (via sqlite3) for large/risky/strategic changes that need Rafe's approval.
-3. **Skip** noise, duplicates, or things already covered by existing tasks.
+Review these reflections and classify each suggestion by impact:
+- **High impact**: Strategic decisions, architecture changes, risky refactors, anything that needs human judgment → Create an **inbox item** for Rafe to review.
+- **Medium impact**: Useful improvements, bug fixes, tooling enhancements → Create a **task** directly.
+- **Low impact**: Small fixes, doc updates, minor cleanup → Create a **task** directly.
+- **Noise/duplicates**: Skip entirely.
 
-Be selective — 3 good tasks beat 10 mediocre ones. Check existing tasks to avoid duplicates.
+Rules:
+- Rewrite suggestions into clear, actionable task titles — don't copy verbatim from reflections.
+- Merge duplicates across agents into single items.
+- Check existing tasks to avoid duplicates.
+- Be selective — 3 good tasks beat 10 mediocre ones.
+- Assign the right agent type and model_tier for each task.
 
 ## Existing Tasks
 ${existingTaskList}
@@ -236,7 +242,7 @@ ${reflectionSummaries}`;
   } catch (_) {}
 
   if (gwToken) {
-    const triageInstructions = "\n\nYou have access to exec tools. Use sqlite3 to create tasks and inbox items:\n\nTo create a task:\nsqlite3 ~/.openclaw/plugins/paw/paw.db \"INSERT INTO tasks (id, title, status, agent, model_tier, notes, created_at, updated_at) VALUES (lower(hex(randomblob(16))), 'TITLE', 'active', 'AGENT_TYPE', 'TIER', 'NOTES', datetime('now'), datetime('now'));\"\n\nTo create an inbox item (for Rafe to review):\nsqlite3 ~/.openclaw/plugins/paw/paw.db \"INSERT INTO inbox_items (id, title, content, summary, is_read, modified_at) VALUES (lower(hex(randomblob(16))), 'TITLE', 'CONTENT', 'SUMMARY', 0, datetime('now'));\"\n\nAgent types: programmer, writer, researcher, reviewer, architect\nModel tiers: micro (trivial), small (simple), medium (moderate), standard (significant), strong (complex)\n\nAfter creating all items, print a summary of what you created.";
+    const triageInstructions = "\n\nYou have access to CLI tools for creating tasks and inbox items. Use these instead of raw SQL:\n\nTo create a task (medium/low impact — auto-assigned to agents):\npaw-task create --title \"TITLE\" --agent AGENT_TYPE --tier TIER --notes \"NOTES\"\n\nTo create an inbox item (high impact only — needs Rafe's review):\npaw-inbox create --title \"TITLE\" --content \"DETAILED CONTENT\" --summary \"ONE LINE SUMMARY\" --type suggestion --action --agent SOURCE_AGENT\n\nTo check existing tasks (avoid duplicates):\npaw-task list --status active\n\nAgent types: programmer, writer, researcher, reviewer, architect\nModel tiers: micro (trivial), small (simple), medium (moderate), standard (significant), strong (complex)\n\nAfter creating all items, print a summary of what you created.";
     fetch(`http://127.0.0.1:${gwPort}/tools/invoke`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${gwToken}` },
@@ -245,6 +251,7 @@ ${reflectionSummaries}`;
         sessionKey: "agent:sink:paw-orchestrator-v2",
         args: {
           task: eventText + triageInstructions,
+          agentId: "main",
           model: "anthropic/claude-sonnet-4-6",
           mode: "run",
           cleanup: "keep",
@@ -510,16 +517,95 @@ function systemCleanup(_args: Record<string, unknown>, _ctx: CallableContext): R
 
 function inboxProcessThreads(_args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
   const db = getDb();
-  // Find unread inbox items and group into threads by title prefix
-  const unread = db.select().from(inboxItems).where(eq(inboxItems.isRead, false)).all();
-  // Simple grouping: find duplicate titles
-  const seen = new Map<string, number>();
-  for (const item of unread) {
-    const key = (item.title ?? "").slice(0, 40);
-    seen.set(key, (seen.get(key) ?? 0) + 1);
+
+  // Find approved items that haven't been processed yet
+  const approved = db.select().from(inboxItems)
+    .where(and(
+      eq(inboxItems.actionStatus, "approved"),
+      eq(inboxItems.requiresAction, true),
+    ))
+    .all();
+
+  // Also find items with unprocessed user comments (from threads)
+  const withComments = db.select().from(inboxItems)
+    .where(and(
+      eq(inboxItems.requiresAction, true),
+      eq(inboxItems.actionStatus, "pending"),
+    ))
+    .all()
+    .filter(item => {
+      const thread = db.select().from(inboxThreads).where(eq(inboxThreads.docId, item.id)).get();
+      if (!thread) return false;
+      const msgs = db.select().from(inboxMessages).where(eq(inboxMessages.threadId, (thread as any).id)).all();
+      return msgs.some((m: any) => m.role === "user");
+    });
+
+  const toProcess = [...approved, ...withComments];
+  if (toProcess.length === 0) {
+    return { ok: true, processed: 0, note: "no items to process" };
   }
-  const duplicates = [...seen.entries()].filter(([, count]) => count > 1).length;
-  return { ok: true, unread_items: unread.length, potential_threads: duplicates };
+
+  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
+  let gwPort = 18789;
+  let gwToken = "";
+  try {
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+    gwPort = cfg?.gateway?.port ?? 18789;
+    gwToken = cfg?.gateway?.auth?.token ?? "";
+  } catch (_) {}
+
+  if (!gwToken) {
+    return { ok: false, error: "no gateway token" };
+  }
+
+  const itemSummaries = toProcess.map(item => {
+    const typ = (item as any).type ?? "suggestion";
+    const src = (item as any).sourceAgent ?? "unknown";
+    const detail = item.content ?? item.summary ?? "no details";
+    return "- " + item.title + " (id: " + item.id + ")\n  Type: " + typ + "\n  Content: " + detail + "\n  Source: " + src + "\n  Status: " + (item as any).actionStatus;
+  }).join("\n\n");
+
+  const prompt = [
+    "[Inbox Processing] " + toProcess.length + " inbox item(s) need processing.",
+    "",
+    "These items were reviewed by Rafe. For approved items, process each one:",
+    "- If it needs a task: use paw-task create",
+    "- If it needs research: create a researcher task",
+    "- If it needs architecture: create an architect task", 
+    "- If Rafe left comments: read them and respond appropriately",
+    "- Use your judgment on what each item needs",
+    "",
+    "After processing each item, mark it done:",
+    "  paw-inbox approve <id>   (if not already approved)",
+    "",
+    "## Items",
+    itemSummaries,
+  ].join("\n");
+
+  fetch("http://127.0.0.1:" + gwPort + "/tools/invoke", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + gwToken },
+    body: JSON.stringify({
+      tool: "sessions_spawn",
+      sessionKey: "agent:sink:paw-orchestrator-v2",
+      args: {
+        task: prompt,
+        agentId: "main",
+        model: "anthropic/claude-sonnet-4-6",
+        mode: "run",
+        cleanup: "keep",
+        runTimeoutSeconds: 300,
+      },
+    }),
+  }).catch(e => log().error("[INBOX] spawn failed: " + e));
+
+  // Mark items as processing to prevent re-spawn on next cycle
+  for (const item of toProcess) {
+    db.update(inboxItems).set({ actionStatus: "processing" }).where(eq(inboxItems.id, item.id)).run();
+  }
+
+  log().info("[INBOX] Processing agent spawned for " + toProcess.length + " items");
+  return { ok: true, processed: toProcess.length, items: toProcess.map(i => i.id) };
 }
 
 // ─── Registry ─────────────────────────────────────────────────────────────────

@@ -607,4 +607,7 @@ export function runMigrations(db: PawDB): void {
   try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN action_status TEXT NOT NULL DEFAULT 'pending'`); } catch {}
   try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN source_agent TEXT`); } catch {}
   try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN source_reflection_id TEXT`); } catch {}
+
+  // ── Eval metrics on tasks (idempotent) ────────────────────────────────
+  try { db.run(sql`ALTER TABLE tasks ADD COLUMN eval_metrics TEXT`); } catch {}
 }

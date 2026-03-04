@@ -15,7 +15,7 @@
 
 import { readFileSync } from "node:fs";
 import type { OpenClawPluginServiceContext } from "openclaw/plugin-sdk";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { log } from "../util/logger.js";
 import { processPendingResumes } from "../index.js";
 import { WorkflowExecutor } from "../workflow/engine.js";
@@ -28,6 +28,7 @@ import {
   projectHasActiveWorker,
   projectHasPendingSpawn,
   recordWorkerStart,
+  recordWorkerEnd,
   incrementPendingSpawns,
   decrementPendingSpawns,
   detectStaleWorkers,
@@ -44,6 +45,63 @@ let isFirstTick = true;
 
 /** Session key for the sink agent — spawns route here to avoid polluting main */
 const SINK_SESSION_KEY = "agent:sink:paw-orchestrator-v2";
+
+
+/**
+ * Check if a worker session is still alive and making progress.
+ * Returns true if the session exists AND has been updated in the last 5 minutes.
+ * This allows slow local models to run as long as they're making progress,
+ * while detecting dead sessions that stopped advancing.
+ */
+async function checkSessionAlive(sessionKey: string): Promise<boolean> {
+  try {
+    const cfgPath = process.env.OPENCLAW_CONFIG ?? process.env.HOME + "/.openclaw/openclaw.json";
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+    const port = cfg?.gateway?.port ?? 18789;
+    const token = cfg?.gateway?.auth?.token ?? "";
+
+    const resp = await fetch("http://127.0.0.1:" + port + "/tools/invoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+      body: JSON.stringify({
+        tool: "sessions_list",
+        sessionKey: "agent:sink:paw-orchestrator-v2",
+        args: { activeMinutes: 120, limit: 100 },
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!resp.ok) return true; // assume alive if we can't check
+
+    const data = (await resp.json()) as any;
+    const respContent = data?.result?.content;
+    let sessions: any[] = [];
+    if (Array.isArray(respContent)) {
+      for (const c of respContent) {
+        if (c.type === "text" && c.text) {
+          try { sessions = JSON.parse(c.text)?.sessions ?? []; } catch {}
+        }
+      }
+    }
+
+    const session = sessions.find((s: any) => s.key === sessionKey);
+    if (!session) return false; // session doesn't exist at all
+
+    // Check if session has been updated recently (within 5 min)
+    const updatedAt = session.updatedAt as number;
+    const ageMs = Date.now() - updatedAt;
+    const STALE_THRESHOLD_MS = 5 * 60 * 1000;
+
+    if (ageMs > STALE_THRESHOLD_MS) {
+      log().debug?.("checkSessionAlive: session " + sessionKey.slice(0, 30) + " exists but stale (" + Math.round(ageMs / 60000) + "min since update)");
+      return false;
+    }
+
+    return true; // session exists and recently active
+  } catch {
+    return true; // assume alive on error
+  }
+}
 
 export function startControlLoop(ctx: OpenClawPluginServiceContext, intervalMs: number): void {
   log().info(`orchestrator: starting control loop (interval=${intervalMs}ms)`);
@@ -99,8 +157,18 @@ function runTick(): void {
     const activeRuns = executor.getActiveRuns(20);
     let advanced = 0;
     for (const run of activeRuns) {
-      const didWork = executor.advance(run);
-      if (didWork) advanced++;
+      // Keep advancing until the run blocks (waiting for spawn, delay, etc.)
+      let passes = 0;
+      while (passes < 5) {
+        const didWork = executor.advance(run);
+        if (!didWork) break;
+        passes++;
+        advanced++;
+        // Re-fetch run state for next iteration
+        const updated = executor.getActiveRuns(1).find(r => r.id === run.id) ?? null;
+        if (!updated || updated.status !== "running") break;
+        Object.assign(run, updated);
+      }
     }
     if (advanced > 0) {
       log().debug?.(`orchestrator: advanced ${advanced}/${activeRuns.length} runs`);
@@ -159,7 +227,7 @@ function runTick(): void {
   // ── 4. Scan for ready tasks ────────────────────────────────────────────────
   try {
     if (hasCapacity()) {
-      const readyTasks = findReadyTasks(1);
+      const readyTasks = findReadyTasks(5);
       for (const task of readyTasks) {
         if (!hasCapacity()) break;
 
@@ -185,7 +253,68 @@ function runTick(): void {
     log().error(`orchestrator: scan phase error: ${e}`);
   }
 
-  // ── 5. Worker health check (stale detection) ───────────────────────────────
+  // ── 5a. Worker liveness check (progress-based) ─────────────────────────────
+  // Check worker_runs with no ended_at — if session is dead, mark failed.
+  try {
+    const liveDb = getDb();
+    const { workerRuns: wrTable } = require("../db/schema.js");
+    const { isNull } = require("drizzle-orm");
+    const openWorkers = liveDb.select().from(wrTable).where(isNull(wrTable.endedAt)).all();
+    for (const w of openWorkers) {
+      const sessionKey = w.workerId;
+      if (!sessionKey) continue;
+      const runningMin = (Date.now() - new Date(w.startedAt).getTime()) / 60000;
+      if (runningMin < 5) continue; // give new workers time
+
+      checkSessionAlive(sessionKey).then((alive: boolean) => {
+        if (!alive) {
+          log().warn("orchestrator: worker " + w.id + " (" + w.agentType + ") session dead after " + Math.round(runningMin) + "min — marking failed");
+          recordWorkerEnd({ workerId: sessionKey, agentType: w.agentType, succeeded: false, summary: "session dead — no progress" });
+        }
+      }).catch(() => {});
+    }
+  } catch (e) {
+    log().error("orchestrator: worker liveness error: " + String(e));
+  }
+
+  // ── 5b. Stale workflow run cleanup (progress-based) ────────────────────────
+  // Cancel workflow runs stuck >10min. For spawn nodes with a session key,
+  // check if the session is still alive (allows slow local models to run).
+  try {
+    const staleDb = getDb();
+    const staleThreshold = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const staleRuns = staleDb.select().from(workflowRuns)
+      .where(and(eq(workflowRuns.status, "running")))
+      .all()
+      .filter((r: any) => r.updatedAt && r.updatedAt < staleThreshold);
+
+    for (const run of staleRuns) {
+      const nodeStates = (run.nodeStates ?? {}) as Record<string, any>;
+      const currentNs = nodeStates[run.currentNode ?? ""] ?? {};
+      const childKey = currentNs["childSessionKey"] as string | undefined;
+
+      if (childKey && run.currentNode?.startsWith("spawn_")) {
+        // Spawn node with session — check liveness async
+        checkSessionAlive(childKey).then((alive: boolean) => {
+          if (alive) {
+            staleDb.update(workflowRuns).set({ updatedAt: new Date().toISOString() }).where(eq(workflowRuns.id, run.id)).run();
+          } else {
+            staleDb.update(workflowRuns).set({ status: "failed", updatedAt: new Date().toISOString() }).where(eq(workflowRuns.id, run.id)).run();
+            log().warn("orchestrator: failed stale run " + run.id.slice(0, 8) + " — worker session gone");
+          }
+        }).catch(() => {});
+      } else {
+        // Not a spawn node or no session — fail it
+        staleDb.update(workflowRuns).set({ status: "failed", updatedAt: new Date().toISOString() }).where(eq(workflowRuns.id, run.id)).run();
+        const mins = Math.round((Date.now() - new Date(run.updatedAt).getTime()) / 60000);
+        log().warn("orchestrator: failed stale run " + run.id.slice(0, 8) + " (node=" + run.currentNode + ", stuck >" + mins + "min)");
+      }
+    }
+  } catch (e) {
+    log().error("orchestrator: stale workflow cleanup error: " + String(e));
+  }
+
+  // ── 6. Worker health check (legacy) ───────────────────────────────────────
   try {
     const staleWorkers = detectStaleWorkers(120);
     for (const workerId of staleWorkers) {

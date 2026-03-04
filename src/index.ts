@@ -23,7 +23,7 @@ import { setLogger, log } from "./util/logger.js";
 import type { PawConfig } from "./util/types.js";
 
 const DEFAULT_DB_PATH = "~/.openclaw/plugins/paw/paw.db";
-const DEFAULT_SCAN_INTERVAL = 10_000;
+const DEFAULT_SCAN_INTERVAL = 3_000;
 
 const pawPlugin = {
   id: "paw",

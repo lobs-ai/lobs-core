@@ -149,17 +149,22 @@ export function recordWorkerEnd(opts: {
   const db = getDb();
   const now = new Date().toISOString();
   try {
-    db.update(workerRuns).set({
+    const updatePayload: Record<string, unknown> = {
       endedAt: now,
       succeeded: opts.succeeded,
       summary: opts.summary ?? null,
-      model: opts.model ?? null,
       inputTokens: opts.inputTokens ?? 0,
       outputTokens: opts.outputTokens ?? 0,
       totalTokens: (opts.inputTokens ?? 0) + (opts.outputTokens ?? 0),
       totalCostUsd: opts.totalCostUsd ?? null,
       durationSeconds: opts.durationSeconds ?? null,
-    }).where(eq(workerRuns.workerId, opts.workerId)).run();
+    };
+    // Only overwrite model if caller explicitly provides one — preserve the
+    // value recorded at spawn time (which has the actual chosen model).
+    if (opts.model !== undefined) {
+      updatePayload.model = opts.model;
+    }
+    db.update(workerRuns).set(updatePayload).where(eq(workerRuns.workerId, opts.workerId)).run();
 
     // Update agent status
     db.insert(agentStatusTable)

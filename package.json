@@ -30,5 +30,10 @@
       "./src/index.ts"
     ],
     "id": "paw"
+  },
+  "bin": {
+    "paw-task": "./src/cli/paw-task.ts",
+    "paw-inbox": "./src/cli/paw-inbox.ts",
+    "paw-status": "./src/cli/paw-status.ts"
   }
 }
