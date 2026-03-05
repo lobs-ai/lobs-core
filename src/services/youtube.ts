@@ -256,7 +256,7 @@ export class YouTubeService {
     try { unlinkSync(errPath(id)); } catch {}
   }
 
-  /** Run AI analysis in a single main-agent session. */
+  /** Run AI analysis: two main-agent sessions (summary + reflection). */
   async processAI(id: string): Promise<void> {
     const db = getDb();
     const video = db.select().from(youtubeVideos).where(eq(youtubeVideos.id, id)).get();
@@ -265,55 +265,58 @@ export class YouTubeService {
     const title = video.title ?? "Unknown";
     const channel = video.channel ?? "Unknown";
     const transcript = video.transcript;
+    const duration = video.durationSeconds ? Math.round(video.durationSeconds / 60) + " min" : "unknown";
 
-    // Already done?
-    if (video.videoSummary && video.reflection) {
-      db.update(youtubeVideos)
-        .set({ status: "ready", updatedAt: new Date().toISOString() })
-        .where(eq(youtubeVideos.id, id)).run();
-      return;
-    }
-
-    log().info(`[YOUTUBE] Spawning main agent for analysis of "${title}"`);
-
-    // Single spawn — main agent does full analysis in one pass
-    const result = await spawnAndWait(
-      `Analyze this YouTube video transcript and produce two sections separated by the exact line "---REFLECTION---" on its own line.
-
-**SECTION 1 — SUMMARY:** Write a natural, readable summary as if explaining the video to a smart friend. Use markdown headers and bullets where helpful. Cover what the video is about, key ideas and insights, notable claims or quotes, and why it matters. Be thorough but conversational.
-
-**SECTION 2 — REFLECTION:** After writing the summary, put "---REFLECTION---" on its own line, then write your own reflection on what this means for us — our AI agent architecture, multi-agent systems, workflow automation, and anything relevant to building the best personal AI agent setup. Be opinionated and specific about what we should learn or steal from this.
+    // Step 1: Summary (skip if already done)
+    let videoSummary = video.videoSummary ?? "";
+    if (!videoSummary || videoSummary.length < 100) {
+      log().info(`[YOUTUBE] Spawning main agent for summary of "${title}"`);
+      videoSummary = await spawnAndWait(
+        `Write a natural, readable summary of this YouTube video as if explaining it to a smart friend. Use markdown headers and bullets where helpful. Cover what the video is about, the key ideas and insights, notable claims or quotes, and why it matters. Be thorough but conversational.
 
 Title: ${title}
 Channel: ${channel}
-Duration: ${video.durationSeconds ? Math.round(video.durationSeconds / 60) + " min" : "unknown"}
+Duration: ${duration}
 
 TRANSCRIPT:
 ${transcript.slice(0, 80000)}`,
-      300000,
-      "main"
-    );
+        300000, "main"
+      );
+      // Save immediately for crash resilience
+      db.update(youtubeVideos)
+        .set({ videoSummary, updatedAt: new Date().toISOString() })
+        .where(eq(youtubeVideos.id, id)).run();
+      log().info(`[YOUTUBE] Summary done for "${title}" (${videoSummary.length} chars)`);
+    }
 
-    // Split on the separator
-    const sepRe = /---\s*REFLECTION\s*---/i;
-    const parts = result.split(sepRe);
-    const videoSummary = (parts[0] || "").trim();
-    const reflection = (parts[1] || "").trim();
+    // Step 2: Reflection (skip if already done)
+    let reflection = video.reflection ?? "";
+    if (!reflection || reflection === "No reflection generated." || reflection.length < 100) {
+      log().info(`[YOUTUBE] Spawning main agent for reflection on "${title}"`);
+      reflection = await spawnAndWait(
+        `Write a thoughtful reflection on this YouTube video focused on what it means for us — our AI agent architecture, multi-agent PAW orchestrator, workflow automation, and building the best personal AI agent setup. Be opinionated and specific about what we should learn or adopt.
 
-    if (!videoSummary || videoSummary.length < 100) {
-      throw new Error("Analysis produced insufficient summary");
+Title: ${title}
+Channel: ${channel}
+Duration: ${duration}
+
+VIDEO SUMMARY:
+${videoSummary}`,
+        300000, "main"
+      );
+      log().info(`[YOUTUBE] Reflection done for "${title}" (${reflection.length} chars)`);
     }
 
     db.update(youtubeVideos)
       .set({
         status: "ready",
         videoSummary,
-        reflection: reflection || "No reflection generated.",
+        reflection,
         chunkSummaries: JSON.stringify(["single-pass"]),
         updatedAt: new Date().toISOString(),
       })
       .where(eq(youtubeVideos.id, id)).run();
-    log().info(`[YOUTUBE] ✅ Fully processed "${title}" (summary: ${videoSummary.length} chars, reflection: ${reflection.length} chars)`);
+    log().info(`[YOUTUBE] ✅ Fully processed "${title}"`);
   }
 
 
