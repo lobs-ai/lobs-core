@@ -1,3 +1,4 @@
+import { appendFileSync } from "node:fs";
 import { inferProjectId } from "../util/project-inference.js";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, like } from "drizzle-orm";
@@ -90,6 +91,16 @@ export async function handleInboxRequest(
       db.update(inboxItems).set({ actionStatus: "rejected", isRead: true }).where(eq(inboxItems.id, id)).run();
       const related = findRelatedProposedTask(item.title);
       if (related) db.update(tasks).set({ status: "rejected", updatedAt: new Date().toISOString() }).where(eq(tasks.id, related.id)).run();
+      // Log rejection to shared learnings
+      try {
+        const date = new Date().toISOString().split("T")[0];
+        const agent = related?.agent ?? "unknown";
+        const title = item.title?.slice(0, 80) ?? "untitled";
+        appendFileSync(
+          process.env.HOME + "/lobs-shared-memory/learnings.md",
+          `- **[${date}] ${agent}** — Task rejected: "${title}". Review task notes for what went wrong.\n`
+        );
+      } catch {}
       return json(res, { ok: true, related_task_id: related?.id ?? null });
     }
 
@@ -102,6 +113,15 @@ export async function handleInboxRequest(
       if (!item) return error(res, "Not found", 404);
 
       await addThreadMessage(id, text, "user");
+      // Log feedback to shared learnings
+      try {
+        const date = new Date().toISOString().split("T")[0];
+        const title = item.title?.slice(0, 60) ?? "untitled";
+        appendFileSync(
+          process.env.HOME + "/lobs-shared-memory/learnings.md",
+          `- **[${date}] feedback** — On "${title}": ${text.slice(0, 200)}\n`
+        );
+      } catch {}
       db.update(inboxItems).set({ actionStatus: "feedback_pending", isRead: true }).where(eq(inboxItems.id, id)).run();
 
       const taskId = randomUUID();
