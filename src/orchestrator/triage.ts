@@ -1,27 +1,17 @@
 /**
- * Post-completion triage — routes worker output to a Lobs triage session
- * that decides whether to create follow-up tasks, dismiss, or escalate.
+ * Post-completion triage — creates follow-up tasks based on simple rules.
+ * Lightweight inline approach instead of spawning a full triage session.
  */
 
 import { getDb } from "../db/connection.js";
-import { tasks, projects, workerRuns } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { tasks, projects } from "../db/schema.js";
+import { eq, and } from "drizzle-orm";
 import { log } from "../util/logger.js";
-
+import { inferProjectId } from "../util/project-inference.js";
+import { randomUUID } from "crypto";
 import { getGatewayConfig } from "./control-loop.js";
 
 const SINK_SESSION_KEY = "agent:sink:paw-orchestrator-v2";
-
-interface TriagePayload {
-  taskId: string;
-  taskTitle: string;
-  agentType: string;
-  projectName: string | null;
-  projectId: string | null;
-  succeeded: boolean;
-  summary: string;
-  modelTier: string | null;
-}
 
 /**
  * Collect the worker's output summary from session history.
@@ -54,33 +44,69 @@ async function collectWorkerOutput(sessionKey: string): Promise<string> {
       } catch { /* ignore */ }
     }
     if (!messages) messages = result?.messages as Array<Record<string, unknown>> | undefined;
-    if (!messages) return "(no output captured)";
+    if (!messages) return "";
 
-    // Get the last few assistant messages
     const assistantTexts: string[] = [];
     for (const msg of messages) {
       if (msg.role !== "assistant") continue;
       const c = msg.content;
-      if (typeof c === "string") {
-        assistantTexts.push(c);
-      } else if (Array.isArray(c)) {
+      if (typeof c === "string") assistantTexts.push(c);
+      else if (Array.isArray(c)) {
         for (const p of (c as Array<Record<string, unknown>>)) {
           if (p.type === "text" && typeof p.text === "string") assistantTexts.push(p.text as string);
         }
       }
     }
 
-    // Return last ~2000 chars of assistant output
     const combined = assistantTexts.join("\n\n");
-    return combined.length > 2000 ? combined.slice(-2000) : combined;
+    return combined.length > 3000 ? combined.slice(-3000) : combined;
   } catch (e) {
     log().warn(`[TRIAGE] Failed to collect output for ${sessionKey}: ${e}`);
-    return "(failed to collect output)";
+    return "";
   }
 }
 
+function createFollowUpTask(opts: {
+  title: string;
+  agent: string;
+  modelTier: string;
+  projectId: string | null;
+  notes: string;
+}): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const id = randomUUID();
+
+  // Dedup: check if similar task already exists
+  const existing = db.select().from(tasks)
+    .where(and(
+      eq(tasks.title, opts.title),
+      eq(tasks.status, "active"),
+    ))
+    .get();
+  if (existing) {
+    log().debug?.(`[TRIAGE] Skipping duplicate task: ${opts.title.slice(0, 40)}`);
+    return;
+  }
+
+  db.insert(tasks).values({
+    id,
+    title: opts.title,
+    status: "active",
+    agent: opts.agent,
+    modelTier: opts.modelTier,
+    projectId: opts.projectId ?? inferProjectId(opts.title, opts.notes) ?? null,
+    notes: opts.notes,
+    workState: "not_started",
+    createdAt: now,
+    updatedAt: now,
+  } as any).run();
+
+  log().info(`[TRIAGE] Created follow-up: "${opts.title.slice(0, 50)}" (${opts.agent}, ${opts.modelTier})`);
+}
+
 /**
- * Send a completed worker's output to the triage session for follow-up decisions.
+ * Rule-based triage for completed workers.
  */
 export async function triageWorkerCompletion(
   taskId: string,
@@ -92,7 +118,7 @@ export async function triageWorkerCompletion(
 
   const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
   if (!task) {
-    log().warn(`[TRIAGE] Task ${taskId.slice(0, 8)} not found — skipping triage`);
+    log().warn(`[TRIAGE] Task ${taskId.slice(0, 8)} not found`);
     return;
   }
 
@@ -100,93 +126,76 @@ export async function triageWorkerCompletion(
     ? db.select().from(projects).where(eq(projects.id, task.projectId)).get()
     : undefined;
 
-  const summary = await collectWorkerOutput(sessionKey);
+  const repoPath = project?.repoPath ?? task.artifactPath ?? "";
 
-  const payload: TriagePayload = {
-    taskId,
-    taskTitle: task.title,
-    agentType,
-    projectName: project?.title ?? null,
-    projectId: task.projectId ?? null,
-    succeeded,
-    summary,
-    modelTier: task.modelTier ?? null,
-  };
+  log().info(`[TRIAGE] Triaging ${agentType} task ${taskId.slice(0, 8)}: "${task.title.slice(0, 50)}" (succeeded=${succeeded})`);
 
-  const triagePrompt = buildTriagePrompt(payload);
-
-  try {
-    const { port, token } = getGatewayConfig();
-    const response = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        tool: "sessions_spawn",
-        sessionKey: SINK_SESSION_KEY,
-        args: {
-          task: triagePrompt,
-          agentId: "programmer",
-          model: "anthropic/claude-sonnet-4-6",
-          mode: "run",
-          cleanup: "keep",
-          runTimeoutSeconds: 120,
-        },
-      }),
-    });
-
-    const data = (await response.json()) as Record<string, unknown>;
-    if (data.ok) {
-      log().info(`[TRIAGE] Spawned triage for task ${taskId.slice(0, 8)} (${agentType})`);
-    } else {
-      log().warn(`[TRIAGE] Failed to spawn triage: ${JSON.stringify(data.error)}`);
-    }
-  } catch (e) {
-    log().error(`[TRIAGE] Spawn error: ${e}`);
+  if (!succeeded) {
+    // Failed tasks: don't auto-create follow-ups, let spawn guard handle retries
+    log().info(`[TRIAGE] Task ${taskId.slice(0, 8)} failed — no automatic follow-up (spawn guard handles retries)`);
+    return;
   }
-}
 
-function buildTriagePrompt(p: TriagePayload): string {
-  return `You are Lobs, triaging the output of a completed worker agent. Based on the output, decide what follow-up actions are needed.
+  switch (agentType) {
+    case "programmer": {
+      // Programmer → create reviewer task
+      createFollowUpTask({
+        title: `Review: ${task.title}`,
+        agent: "reviewer",
+        modelTier: "small",
+        projectId: task.projectId,
+        notes: `Review the programmer output for this task.\n\nTask: ${task.title}\n\nNotes:\n${task.notes ?? ""}\n\nRepo: ${repoPath}\n\nCheck for: missing tests, obvious bugs, correctness. Be direct and actionable.`,
+      });
+      break;
+    }
 
-## Completed Task
-- **Title:** ${p.taskTitle}
-- **Agent:** ${p.agentType}
-- **Project:** ${p.projectName ?? "none"} (${p.projectId ?? "no project"})
-- **Succeeded:** ${p.succeeded}
-- **Model tier:** ${p.modelTier ?? "unknown"}
+    case "architect": {
+      // Architect → collect output and create programmer task if design is implementation-ready
+      const output = await collectWorkerOutput(sessionKey);
+      if (output && (output.includes("implement") || output.includes("build") || output.includes("create") || output.includes("should be"))) {
+        createFollowUpTask({
+          title: `Implement: ${task.title}`,
+          agent: "programmer",
+          modelTier: "standard",
+          projectId: task.projectId,
+          notes: `Implement the design from the architect.\n\nOriginal task: ${task.title}\n\nArchitect output:\n${output.slice(0, 2000)}\n\nRepo: ${repoPath}`,
+        });
+      }
+      break;
+    }
 
-## Worker Output
-${p.summary}
+    case "researcher": {
+      // Researcher → collect output and create tasks if findings are actionable
+      const output = await collectWorkerOutput(sessionKey);
+      if (output && output.length > 200) {
+        // Create a writer task to document findings
+        createFollowUpTask({
+          title: `Document research: ${task.title}`,
+          agent: "writer",
+          modelTier: "small",
+          projectId: task.projectId,
+          notes: `Document the research findings.\n\nOriginal task: ${task.title}\n\nResearch output:\n${output.slice(0, 2000)}`,
+        });
+      }
+      break;
+    }
 
-## Your Job
-Analyze the output and create follow-up tasks if appropriate. Use sqlite3 to insert tasks directly:
+    case "reviewer": {
+      // Reviewer → check if issues were found
+      const output = await collectWorkerOutput(sessionKey);
+      if (output && (output.includes("NEEDS FIX") || output.includes("must fix") || output.includes("critical"))) {
+        createFollowUpTask({
+          title: `Fix review issues: ${task.title.replace("Review: ", "")}`,
+          agent: "programmer",
+          modelTier: "standard",
+          projectId: task.projectId,
+          notes: `Fix the issues found in code review.\n\nReview output:\n${output.slice(0, 2000)}\n\nRepo: ${repoPath}`,
+        });
+      }
+      break;
+    }
 
-\`\`\`bash
-sqlite3 ~/.openclaw/plugins/paw/paw.db "INSERT INTO tasks (id, title, status, agent, model_tier, project_id, notes, work_state, created_at, updated_at) VALUES (lower(hex(randomblob(16))), 'TITLE', 'active', 'AGENT_TYPE', 'TIER', 'PROJECT_ID', 'NOTES', 'not_started', datetime('now'), datetime('now'));"
-\`\`\`
-
-### Decision Guide
-- **programmer** completed → create a \`reviewer\` task (tier: small) to review the code changes
-- **researcher** completed → if findings are actionable, create \`programmer\`/\`architect\`/\`writer\` tasks as appropriate
-- **architect** completed → if design is ready for implementation, create \`programmer\` tasks to build it
-- **writer** completed → usually no follow-up needed unless docs reference unimplemented features
-- **reviewer** completed → if review found issues, create a \`programmer\` fix task; otherwise no follow-up
-- **Failed tasks** → assess if retryable or needs different approach; create a new task if worth retrying with adjusted notes
-
-### Rules
-- Only create tasks that are clearly warranted by the output
-- Use the same project_id as the source task
-- Keep task titles concise and actionable
-- For reviewer follow-ups after programmer, include the repo path and what to review in notes
-- Don't create tasks for trivial/cosmetic issues unless they're quick wins
-- If nothing needs follow-up, just say so and exit
-
-### Available Agents & Tiers
-- Agents: programmer, researcher, writer, architect, reviewer
-- Tiers: micro (local/free), small, medium, standard, strong
-
-Act now — analyze the output and create any needed tasks.`;
+    default:
+      log().debug?.(`[TRIAGE] No follow-up rules for agent type: ${agentType}`);
+  }
 }
