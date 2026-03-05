@@ -48,7 +48,7 @@ let _cfg: CircuitBreakerConfig | null = null;
 export function loadConfig(): CircuitBreakerConfig {
   if (_cfg) return _cfg;
   const defaults: CircuitBreakerConfig = {
-    failureThreshold: 3,
+    failureThreshold: 10,
     cooldownMinutes: 30,
     windowMinutes: 60,
     enabled: true,
@@ -250,9 +250,8 @@ export function classifyOutcome(params: {
   outputLength?: number;
 }): FailureReason | null {
   if (params.succeeded) {
-    if (typeof params.outputLength === "number" && params.outputLength < 10) {
-      return "empty_output";
-    }
+    // empty_output is expected for file-write agents (YouTube, meetings)
+    // Don't treat it as a failure
     return null;
   }
 
