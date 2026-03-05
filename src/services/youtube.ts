@@ -52,15 +52,15 @@ async function gatewayInvoke(tool: string, args: Record<string, unknown>, timeou
   return data?.result?.details ?? data?.result ?? data;
 }
 
-async function spawnAndWait(task: string, timeoutMs = 900000, agentId = "main"): Promise<string> {
-  // Spawn a persistent session, send task, read full response
+async function spawnAndWait(task: string, timeoutMs = 900000, agentId = "researcher"): Promise<string> {
+  // Spawn a run session
   const spawnResult = await gatewayInvoke("sessions_spawn", {
-    task: "You are a YouTube video analyzer. Wait for instructions.",
-    mode: "session",
+    task,
+    mode: "run",
     agentId,
     thinking: "off",
-    thread: true,
-    timeoutSeconds: Math.floor(timeoutMs / 1000),
+    runTimeoutSeconds: Math.floor(timeoutMs / 1000),
+    cleanup: "keep",
   });
 
   const sessionKey = spawnResult?.childSessionKey ?? spawnResult?.sessionKey;
@@ -68,27 +68,65 @@ async function spawnAndWait(task: string, timeoutMs = 900000, agentId = "main"):
     log().info("[YOUTUBE] spawnResult: " + JSON.stringify(spawnResult).slice(0, 500));
     throw new Error("No session key from spawn");
   }
+  log().info("[YOUTUBE] Spawned " + sessionKey);
 
-  // Send the actual task and wait for response  
-  const sendResult = await gatewayInvoke("sessions_send", {
-    sessionKey,
-    message: task,
-    timeoutSeconds: Math.floor(timeoutMs / 1000),
-  });
+  // Extract session ID from key for transcript path
+  // Key format: agent:main:subagent:<uuid>
+  const parts = sessionKey.split(":");
+  const subId = parts[parts.length - 1];
 
-  // Extract response text
-  const response = sendResult?.reply ?? sendResult?.response ?? sendResult?.text ?? sendResult?.content ?? "";
-  const text = typeof response === "string" ? response
-    : Array.isArray(response) ? response.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
-    : JSON.stringify(response);
+  // Poll for transcript file to appear with assistant response
+  const possiblePaths = [
+    `/private/tmp/openclaw-sink/${subId}.jsonl`,
+    `${process.env.HOME}/.openclaw/workspace/${subId}.jsonl`,
+    `${process.env.HOME}/.openclaw/workspace-researcher/${subId}.jsonl`,
+    `/tmp/openclaw-sink/${subId}.jsonl`,
+  ];
 
-  if (!text || text.length < 50) {
-    log().info("[YOUTUBE] sendResult: " + JSON.stringify(sendResult).slice(0, 500));
-    throw new Error("Session returned insufficient response (" + text.length + " chars)");
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 10000));
+
+    // Try to find and read transcript
+    for (const tp of possiblePaths) {
+      if (!existsSync(tp)) continue;
+      try {
+        const lines = readFileSync(tp, "utf-8").trim().split("\n");
+        for (let i = lines.length - 1; i >= 0; i--) {
+          const msg = JSON.parse(lines[i]);
+          if (msg.role === "assistant" && msg.stopReason === "stop") {
+            const content = msg.content;
+            const text = typeof content === "string" ? content
+              : Array.isArray(content) ? content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
+              : "";
+            if (text.length > 50) {
+              log().info("[YOUTUBE] Got " + text.length + " chars from transcript " + tp);
+              return text;
+            }
+          }
+        }
+      } catch {}
+    }
+
+    // Also try sessions_history as fallback (may be truncated but better than nothing)
+    try {
+      const history = await gatewayInvoke("sessions_history", { sessionKey, limit: 3, includeTools: false });
+      const messages = history?.messages ?? history ?? [];
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i];
+        if (msg.role === "assistant" && msg.stopReason === "stop") {
+          const text = typeof msg.content === "string" ? msg.content
+            : Array.isArray(msg.content) ? msg.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
+            : "";
+          if (text.length > 50) {
+            log().info("[YOUTUBE] Got " + text.length + " chars from history (may be truncated)");
+            return text;
+          }
+        }
+      }
+    } catch {}
   }
-
-  log().info("[YOUTUBE] Got " + text.length + " chars from session");
-  return text;
+  throw new Error("Session timed out");
 }
 
 
