@@ -52,42 +52,49 @@ async function gatewayInvoke(tool: string, args: Record<string, unknown>, timeou
   return data?.result?.details ?? data?.result ?? data;
 }
 
-async function spawnAndWait(task: string, timeoutMs = 600000, agentId = "researcher"): Promise<string> {
+async function spawnAndWait(task: string, timeoutMs = 600000, agentId = "main"): Promise<string> {
+  const outFile = `/tmp/yt-ai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`;
+
+  // The agent's SOLE task is to write analysis to a file.
+  // This bypasses the gateway's 4000-char tool result truncation.
+  const wrappedTask = `You are a video analysis writer. Your ONLY job is to write your analysis directly to a file.
+
+DO NOT reply with the analysis in chat. Instead, use the Write tool to write it to: ${outFile}
+
+Here is what to write:
+
+${task}
+
+Remember: Write the COMPLETE analysis to ${outFile} using the Write tool. That file is your only output.`;
+
   const spawnResult = await gatewayInvoke("sessions_spawn", {
-    task,
+    task: wrappedTask,
     mode: "run",
     agentId,
     thinking: "off",
     runTimeoutSeconds: Math.floor(timeoutMs / 1000),
-    cleanup: "keep",
+    cleanup: "delete",
   });
 
-  const sessionKey = spawnResult?.childSessionKey ?? spawnResult?.sessionKey;
-  if (!sessionKey) throw new Error("No session key from spawn");
-  log().info("[YOUTUBE] Spawned " + sessionKey);
+  log().info("[YOUTUBE] Spawned agent → " + outFile);
 
-  // Poll sessions_history for completion
+  // Poll for the output file
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 8000));
-    try {
-      const history = await gatewayInvoke("sessions_history", { sessionKey, limit: 3, includeTools: false });
-      const messages = history?.messages ?? history ?? [];
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const msg = messages[i];
-        if (msg.role === "assistant" && msg.stopReason === "stop") {
-          const text = typeof msg.content === "string" ? msg.content
-            : Array.isArray(msg.content) ? msg.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
-            : "";
-          if (text.trim().length > 50) {
-            log().info("[YOUTUBE] Got " + text.length + " chars from session");
-            return text;
-          }
-        }
+    await new Promise(r => setTimeout(r, 5000));
+    if (existsSync(outFile)) {
+      const text = readFileSync(outFile, "utf-8").trim();
+      if (text.length > 100) {
+        log().info("[YOUTUBE] Got " + text.length + " chars from " + outFile);
+        try { unlinkSync(outFile); } catch {}
+        return text;
       }
-    } catch {}
+    }
   }
-  throw new Error("Session timed out");
+
+  // Cleanup and fail
+  try { unlinkSync(outFile); } catch {}
+  throw new Error("Timed out waiting for output file: " + outFile);
 }
 
 
@@ -292,7 +299,7 @@ export class YouTubeService {
     if (!videoSummary || videoSummary.length < 100) {
       log().info(`[YOUTUBE] Spawning main agent for summary of "${title}"`);
       videoSummary = await spawnAndWait(
-        `Write a focused summary of this YouTube video (~3000 chars max). Use markdown. Cover: what it's about, key ideas, notable claims, and why it matters. Be concise and conversational — hit the important points, skip filler.
+        `Write a natural, conversational summary of this YouTube video. Cover what it's about, the key ideas and insights, notable claims or quotes, and why it matters. Be thorough — don't cut corners.
 
 Title: ${title}
 Channel: ${channel}
@@ -314,7 +321,7 @@ ${transcript.slice(0, 80000)}`,
     if (!reflection || reflection === "No reflection generated.") {
       log().info(`[YOUTUBE] Spawning main agent for reflection on "${title}"`);
       reflection = await spawnAndWait(
-        `Write a thoughtful reflection on this YouTube video focused on what it means for us — our AI agent architecture, multi-agent PAW orchestrator, workflow automation, and building the best personal AI agent setup. Be opinionated and specific about what we should learn or adopt.
+        `Write a thoughtful, opinionated reflection on what this video means for our AI agent setup — the PAW orchestrator, multi-agent architecture, workflow automation, and building the best personal AI agent. Be specific about what we should learn, adopt, or ignore. Don't hold back.
 
 Title: ${title}
 Channel: ${channel}
