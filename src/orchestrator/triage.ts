@@ -127,7 +127,7 @@ export async function triageWorkerCompletion(
         args: {
           task: triagePrompt,
           agentId: "main",
-          model: "anthropic/claude-sonnet-4-6",
+          model: "lmstudio/qwen/qwen3.5-35b-a3b",
           mode: "run",
           cleanup: "keep",
           runTimeoutSeconds: 120,
