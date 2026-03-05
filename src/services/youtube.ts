@@ -160,11 +160,14 @@ export class YouTubeService {
         }
       }
 
-      // 2. Check "processing" videos that have transcript but no summary (stuck)
+      // 2. Check "processing" videos OR "ready" videos missing reflection
       const processing = db.select().from(youtubeVideos)
         .where(eq(youtubeVideos.status, "processing")).all();
-      for (const video of processing) {
-        if (video.transcript && video.transcript.length > 10 && !video.videoSummary && !aiProcessingSet.has(video.id)) {
+      const needsReflection = db.select().from(youtubeVideos)
+        .where(eq(youtubeVideos.status, "ready")).all()
+        .filter(v => v.transcript && (!v.reflection || v.reflection === "No reflection generated." || v.reflection.length < 100));
+      for (const video of [...processing, ...needsReflection]) {
+        if (video.transcript && video.transcript.length > 10 && (!video.videoSummary || !video.reflection || video.reflection === "No reflection generated." || video.reflection.length < 100) && !aiProcessingSet.has(video.id)) {
           const age = Date.now() - new Date(video.updatedAt ?? video.createdAt).getTime();
           if (age > 120000) {
             log().info(`[YOUTUBE] Recovery: resuming AI for "${video.title || video.id.slice(0,8)}"`);
