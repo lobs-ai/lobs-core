@@ -124,20 +124,40 @@ export class YouTubeService {
       updateStatus("downloading");
       log().info(`[YOUTUBE] Downloading + transcribing: ${video.videoUrl}`);
 
-      const result = await new Promise<any>((resolve, reject) => {
-        execFile(PYTHON, [INGESTER_PATH, video.videoUrl], {
-          maxBuffer: 100 * 1024 * 1024,
-          timeout: 600000, // 10 min for long videos
-        }, (err, stdout, stderr) => {
-          if (err) return reject(new Error(`Ingestion failed: ${err.message}\n${stderr}`));
-          // Find the RESULT: line
-          const lines = stdout.split("\n");
-          const resultLine = lines.find(l => l.startsWith("RESULT:"));
-          if (!resultLine) return reject(new Error("No RESULT line in output"));
-          try { resolve(JSON.parse(resultLine.slice(7))); }
-          catch (e) { reject(new Error("Failed to parse result JSON")); }
-        });
-      });
+      // Spawn detached so gateway restarts don't kill transcription
+      const outFile = `/tmp/yt-ingest-${id}.json`;
+      const errFile = `/tmp/yt-ingest-${id}.err`;
+      const { spawn: spawnProc } = await import("node:child_process");
+      const safeUrl = video.videoUrl.replace(/'/g, "'\\''");
+      const child = spawnProc("/bin/sh", ["-c",
+        `${PYTHON} ${INGESTER_PATH} '${safeUrl}' > '${outFile}.tmp' 2>'${errFile}' && mv '${outFile}.tmp' '${outFile}'`
+      ], { detached: true, stdio: "ignore" });
+      child.unref();
+      log().info(`[YOUTUBE] Spawned detached ingester pid=${child.pid} for ${id}`);
+
+      // Poll for result file (every 10s, up to 20min)
+      const fs = await import("node:fs");
+      const deadline = Date.now() + 1200000;
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 10000));
+        if (fs.existsSync(outFile)) break;
+        // Check if process died with error
+        if (fs.existsSync(errFile) && !fs.existsSync(`${outFile}.tmp`)) {
+          try { process.kill(child.pid!, 0); } catch {
+            const errContent = fs.readFileSync(errFile, "utf-8").trim();
+            if (errContent) throw new Error(`Ingestion failed: ${errContent}`);
+          }
+        }
+      }
+      if (!fs.existsSync(outFile)) throw new Error("Ingestion timed out (20min)");
+
+      const rawOut = fs.readFileSync(outFile, "utf-8");
+      const resultLine = rawOut.split("\n").find((l: string) => l.startsWith("RESULT:"));
+      if (!resultLine) throw new Error(`No RESULT line in output: ${rawOut.slice(0, 200)}`);
+      let result: any;
+      try { result = JSON.parse(resultLine.slice(7)); }
+      catch { throw new Error("Failed to parse result JSON"); }
+      try { fs.unlinkSync(outFile); fs.unlinkSync(errFile); } catch {}
 
         transcript = result.transcript;
         title = result.title;

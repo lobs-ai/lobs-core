@@ -149,6 +149,21 @@ ${body.text}`;
       db.update(tasks).set({ workState: body.work_state as string, updatedAt: new Date().toISOString() }).where(eq(tasks.id, id)).run();
       return json(res, db.select().from(tasks).where(eq(tasks.id, id)).get());
     }
+    if (sub === "blocked-by" && req.method === "PATCH") {
+      // Set task dependencies: body = { blocked_by: string[] | null }
+      const body = await parseBody(req) as Record<string, unknown>;
+      const blockedBy = body.blocked_by;
+      if (blockedBy !== null && !Array.isArray(blockedBy)) {
+        return error(res, "blocked_by must be an array of task IDs or null");
+      }
+      const rowCheck = db.select({ id: tasks.id }).from(tasks).where(eq(tasks.id, id)).get();
+      if (!rowCheck) return error(res, "Not found", 404);
+      db.update(tasks).set({
+        blockedBy: blockedBy as string[] | null,
+        updatedAt: new Date().toISOString(),
+      }).where(eq(tasks.id, id)).run();
+      return json(res, db.select().from(tasks).where(eq(tasks.id, id)).get());
+    }
     if (sub === "review-state" && req.method === "PATCH") {
       const body = await parseBody(req) as Record<string, unknown>;
       if (!body.review_state) return error(res, "review_state required");
@@ -179,7 +194,7 @@ ${body.text}`;
         work_state: "workState", review_state: "reviewState",
         project_id: "projectId", notes: "notes", agent: "agent",
         model_tier: "modelTier", failure_reason: "failureReason",
-        escalation_tier: "escalationTier", retry_count: "retryCount",
+        escalation_tier: "escalationTier", retry_count: "retryCount", blocked_by: "blockedBy",
       };
       for (const [apiKey, schemaKey] of Object.entries(fieldMap)) {
         if (apiKey in body) update[schemaKey] = body[apiKey];
