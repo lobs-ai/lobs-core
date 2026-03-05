@@ -14,6 +14,7 @@ const INFRA_PATTERNS: Array<[RegExp, string]> = [
   [/All models failed/i, "all_models_failed"],
   [/FailoverError/i, "failover_exhausted"],
   [/rate.?limit|429|too many requests/i, "rate_limited"],
+  [/session.?dead|session.*no.*progress/i, "session_dead"],
 ];
 
 interface CircuitState {

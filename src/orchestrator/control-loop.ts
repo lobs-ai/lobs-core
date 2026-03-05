@@ -328,13 +328,16 @@ function runTick(): void {
               staleDb.update(workflowRuns).set({ status: "failed", updatedAt: new Date().toISOString() }).where(eq(workflowRuns.id, run.id)).run();
               const mins = Math.round((Date.now() - new Date(run.updatedAt).getTime()) / 60000);
               log().warn("orchestrator: failed stale spawn run " + run.id.slice(0, 8) + " — worker session " + childKey.slice(0, 30) + " gone after " + mins + "min (possible drain)");
-              // Clean up dangling workerRuns row so capacity is freed immediately
+              // Clean up dangling workerRuns row so capacity is freed and circuit breaker fires
               try {
                 const { workerRuns: wrTable } = require("../db/schema.js");
-                staleDb.update(wrTable)
-                  .set({ endedAt: new Date().toISOString(), succeeded: false, timeoutReason: "session_dead" })
-                  .where(eq(wrTable.workerId, childKey))
-                  .run();
+                const wrRow = staleDb.select().from(wrTable).where(eq(wrTable.workerId, childKey)).get() as any;
+                recordWorkerEnd({
+                  workerId: childKey,
+                  agentType: wrRow?.agentType ?? "unknown",
+                  succeeded: false,
+                  summary: `session_dead: stale after ${mins}min`,
+                });
               } catch {}
             }
           }).catch(() => {});

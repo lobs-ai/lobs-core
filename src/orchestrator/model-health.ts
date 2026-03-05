@@ -4,7 +4,7 @@
  * States: closed → open → half_open → closed
  *
  * - 3 consecutive failures → OPEN
- * - After recovery window (default 45 min) → HALF_OPEN
+ * - After recovery window (default 30 min) → HALF_OPEN
  * - Probe success → CLOSED; probe fail → OPEN (timer reset)
  * - chooseHealthyModel() walks fallback chain, returns first non-OPEN
  * - All OPEN → degrade gracefully (returns first model with warning)
@@ -33,7 +33,7 @@ export interface ModelHealthRow {
 }
 
 const DEFAULT_FAILURE_THRESHOLD = 3;
-const DEFAULT_RECOVERY_MINUTES = 45;
+const DEFAULT_RECOVERY_MINUTES = 30;
 
 function getSettings(): { threshold: number; recoveryMinutes: number; enabled: boolean } {
   try {

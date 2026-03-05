@@ -234,6 +234,8 @@ export function forceTerminateWorker(workerId: string, reason = "timeout"): void
       .where(eq(workerRuns.workerId, workerId))
       .get();
     const taskId = workerRow?.taskId;
+    const model = workerRow?.model;
+    const agentType = workerRow?.agentType;
 
     db.update(workerRuns).set({
       endedAt: now,
@@ -246,6 +248,12 @@ export function forceTerminateWorker(workerId: string, reason = "timeout"): void
       const { getRawDb } = require("../db/connection.js");
       getRawDb().prepare(`UPDATE tasks SET work_state = 'not_started', updated_at = datetime('now') WHERE id = ? AND work_state = 'in_progress'`).run(taskId);
       log().warn(`[WORKER_MANAGER] Reset task ${taskId.slice(0, 8)} to not_started after worker termination`);
+    }
+
+    // Feed timeout back into model health circuit breaker
+    if (model && agentType) {
+      recordRunOutcome(model, agentType, false, `worker terminated: ${reason}`);
+      log().warn(`[WORKER_MANAGER] Recorded failure for circuit breaker: model=${model} agentType=${agentType} reason=${reason}`);
     }
 
     log().warn(`[WORKER_MANAGER] Force-terminated worker ${workerId}: ${reason}`);

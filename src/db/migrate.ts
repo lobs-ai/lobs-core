@@ -643,6 +643,12 @@ export function runMigrations(db: PawDB): void {
     PRIMARY KEY (model, agent_type)
   )`);
   try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_model_health_state ON model_health(state)`); } catch {}
+
+  // ── Seed default circuit_breaker settings (INSERT OR IGNORE — safe to run on every migration) ──
+  try {
+    db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)
+      VALUES ('circuit_breaker', '{"enabled":true,"failure_threshold":3,"recovery_minutes":30}', datetime('now'))`);
+  } catch {}
 }
 
 // ── Model Health circuit breaker table ──────────────────────────────────────
