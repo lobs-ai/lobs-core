@@ -87,6 +87,11 @@ export async function handleMeetingsRequest(
     return json(res, rows);
   }
 
+  // Action items sub-routes (must be before GET /:id)
+  if (id === "action-items" || parts[2] === "action-items") {
+    return handleMeetingActionItemsRequest(req, res, id, parts);
+  }
+
   // GET /api/meetings/:id
   if (id && req.method === "GET") {
     const meeting = svc.get(id);
@@ -161,11 +166,6 @@ ${meeting.summary}
     const analysisSvc = new MeetingAnalysisService();
     analysisSvc.analyze(id).catch(() => {});
     return json(res, { ok: true, status: "processing" });
-  }
-
-  // Action items sub-routes
-  if (id === "action-items" || parts[2] === "action-items") {
-    return handleMeetingActionItemsRequest(req, res, id, parts);
   }
 
   return error(res, "Method not allowed", 405);
