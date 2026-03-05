@@ -93,22 +93,27 @@ const AGENT_TIER_DEFAULTS: Record<string, ModelTier> = {
 
 // ── OpenClaw agent config cache ───────────────────────────────────────────────
 
-let agentModelCache: Record<string, string> | null = null;
+interface AgentModelConfig {
+  primary: string;
+  fallbacks: string[];
+}
 
-function loadAgentModels(): Record<string, string> {
+let agentModelCache: Record<string, AgentModelConfig> | null = null;
+
+function loadAgentModels(): Record<string, AgentModelConfig> {
   if (agentModelCache) return agentModelCache;
   try {
     const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
     const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
     const agents = cfg?.agents?.list ?? [];
-    const result: Record<string, string> = {};
+    const result: Record<string, AgentModelConfig> = {};
     for (const agent of agents) {
       const id = agent.id as string;
-      const model = typeof agent.model === "string"
-        ? agent.model
-        : agent.model?.primary;
-      if (id && model) {
-        result[id] = model;
+      const modelCfg = agent.model;
+      const primary = typeof modelCfg === "string" ? modelCfg : modelCfg?.primary;
+      const fallbacks: string[] = Array.isArray(modelCfg?.fallbacks) ? modelCfg.fallbacks : [];
+      if (id && primary) {
+        result[id] = { primary, fallbacks };
       }
     }
     agentModelCache = result;
@@ -144,10 +149,10 @@ export function chooseModel(
   // For micro tier, prefer local models (skip agent config)
   if (agentType && effectiveTier !== "micro") {
     const agentModels = loadAgentModels();
-    const configModel = agentModels[agentType];
-    if (configModel) {
-      log().debug?.(`[MODEL_CHOOSER] ${agentType} → agent-config: ${configModel}`);
-      return { model: configModel, tier: effectiveTier, source: "agent-config" };
+    const configEntry = agentModels[agentType];
+    if (configEntry) {
+      log().debug?.(`[MODEL_CHOOSER] ${agentType} → agent-config: ${configEntry.primary}`);
+      return { model: configEntry.primary, tier: effectiveTier, source: "agent-config" };
     }
   }
 
@@ -161,20 +166,34 @@ export function chooseModel(
 /**
  * Build the full fallback chain for a given model + agent type.
  *
- * Strategy:
- * 1. Use AGENT_FALLBACK_CHAINS[agentType] if defined (cross-tier, ordered by preference).
- *    - If preferred model is already first in chain, return as-is.
- *    - If preferred model is elsewhere in chain, move it to front.
- *    - If preferred model is not in chain at all, prepend it.
- * 2. Fall back to [preferredModel, ...TIER_MODELS[tier]] if no agent chain.
+ * Priority order for chain construction:
+ * 1. Agent config (openclaw.json): [primary, ...fallbacks]
+ *    — preferred model is already first; fallbacks from config follow.
+ * 2. Hardcoded AGENT_FALLBACK_CHAINS[agentType] (cross-tier defaults).
+ * 3. Tier-level TIER_MODELS fallbacks.
  *
  * The result is the ordered list of models to attempt for health-aware dispatch.
+ * chooseHealthyModel() will walk this list and skip any with open circuits.
  */
 export function buildFallbackChain(
   preferredModel: string,
   tier: ModelTier,
   agentType?: string,
 ): string[] {
+  // 1. Use openclaw.json agent config fallbacks if available
+  if (agentType) {
+    const agentModels = loadAgentModels();
+    const configEntry = agentModels[agentType];
+    if (configEntry && configEntry.fallbacks.length > 0) {
+      // Build chain: preferred model first, then config fallbacks (deduped)
+      const rest = configEntry.fallbacks.filter(m => m !== preferredModel);
+      const chain = [preferredModel, ...rest];
+      log().debug?.(`[MODEL_CHOOSER] ${agentType} fallback chain (from config): ${chain.join(" → ")}`);
+      return chain;
+    }
+  }
+
+  // 2. Hardcoded per-agent fallback chains (cross-tier defaults)
   if (agentType && AGENT_FALLBACK_CHAINS[agentType]) {
     const chain = AGENT_FALLBACK_CHAINS[agentType];
     // If preferred model matches chain head, use chain as-is
@@ -183,7 +202,8 @@ export function buildFallbackChain(
     const rest = chain.filter(m => m !== preferredModel);
     return [preferredModel, ...rest];
   }
-  // No agent-specific chain — use tier fallbacks
+
+  // 3. No agent-specific chain — use tier fallbacks
   const tierModels = TIER_MODELS[tier] ?? TIER_MODELS.standard;
   const tierFallbacks = tierModels.filter(m => m !== preferredModel);
   return [preferredModel, ...tierFallbacks];
