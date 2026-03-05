@@ -108,6 +108,18 @@ export class YouTubeService {
       const video = db.select().from(youtubeVideos).where(eq(youtubeVideos.id, id)).get();
       if (!video) return;
 
+      let transcript = video.transcript ?? "";
+      let title = video.title ?? "";
+      let channel = video.channel ?? "";
+      let chunks: string[];
+
+      // Skip download+transcribe if transcript already exists (reprocess case)
+      if (transcript && transcript.length > 10) {
+        log().info(`[YOUTUBE] Reprocessing "${title}" — skipping download/transcribe`);
+        updateStatus("processing");
+        chunks = video.chunks ? JSON.parse(video.chunks as string) : chunkTranscript(transcript);
+      } else {
+
       // Step 1: Download + Transcribe
       updateStatus("downloading");
       log().info(`[YOUTUBE] Downloading + transcribing: ${video.videoUrl}`);
@@ -127,6 +139,10 @@ export class YouTubeService {
         });
       });
 
+        transcript = result.transcript;
+        title = result.title;
+        channel = result.channel;
+
       updateStatus("transcribing", {
         videoId: result.video_id,
         title: result.title,
@@ -140,18 +156,20 @@ export class YouTubeService {
         segments: JSON.stringify(result.segments),
       });
 
-      log().info(`[YOUTUBE] Transcribed "${result.title}" (${result.duration_seconds}s)`);
+      log().info(`[YOUTUBE] Transcribed "${title}" (${result.duration_seconds}s)`);
 
       // Step 2: Chunk
-      const chunks = chunkTranscript(result.transcript);
+        chunks = chunkTranscript(result.transcript);
       updateStatus("processing", { chunks: JSON.stringify(chunks) });
+      }
+
 
       // Step 3: Summarize chunks
-      log().info(`[YOUTUBE] Summarizing ${chunks.length} chunks for "${result.title}"`);
+      log().info(`[YOUTUBE] Summarizing ${chunks.length} chunks for "${title}"`);
       const chunkSummaries: string[] = [];
       for (let i = 0; i < chunks.length; i++) {
         const summary = await spawnAndWait(
-          `Summarize this transcript chunk (${i + 1}/${chunks.length}) from the video "${result.title}" by ${result.channel}. ` +
+          `Summarize this transcript chunk (${i + 1}/${chunks.length}) from the video "${title}" by ${channel}. ` +
           `Extract key ideas, technical insights, and important statements. Be concise but thorough.\n\nCHUNK:\n${chunks[i]}`
         );
         chunkSummaries.push(summary);
@@ -161,10 +179,10 @@ export class YouTubeService {
         .where(eq(youtubeVideos.id, id)).run();
 
       // Step 4: Video summary
-      log().info(`[YOUTUBE] Generating video summary for "${result.title}"`);
+      log().info(`[YOUTUBE] Generating video summary for "${title}"`);
       const videoSummary = await spawnAndWait(
         `Generate a comprehensive summary of this video.\n\n` +
-        `Title: ${result.title}\nChannel: ${result.channel}\n\n` +
+        `Title: ${title}\nChannel: ${channel}\n\n` +
         `Structure your summary as:\n- Core topic\n- Key concepts and ideas\n- Important insights\n- Notable quotes or statements\n- Potential applications\n\n` +
         `CHUNK SUMMARIES:\n${chunkSummaries.join("\n\n---\n\n")}`
       );
@@ -173,18 +191,18 @@ export class YouTubeService {
         .where(eq(youtubeVideos.id, id)).run();
 
       // Step 5: Reflection
-      log().info(`[YOUTUBE] Generating reflection for "${result.title}"`);
+      log().info(`[YOUTUBE] Generating reflection for "${title}"`);
       const reflection = await spawnAndWait(
         `Reflect on this video and extract insights relevant to building AI agent systems, ` +
         `machine learning, system architecture, and software engineering.\n\n` +
-        `Title: ${result.title}\nChannel: ${result.channel}\n\n` +
+        `Title: ${title}\nChannel: ${channel}\n\n` +
         `Consider:\n- Important ideas and their implications\n- Connections to AI agent architecture (multi-agent systems, orchestrators, tool use)\n` +
         `- Contradictions or debates worth noting\n- New research directions suggested\n- Questions worth exploring further\n- Practical applications\n\n` +
         `VIDEO SUMMARY:\n${videoSummary}\n\nKEY CHUNKS:\n${chunkSummaries.slice(0, 5).join("\n\n---\n\n")}`
       );
 
       updateStatus("ready", { reflection });
-      log().info(`[YOUTUBE] ✅ Fully processed "${result.title}"`);
+      log().info(`[YOUTUBE] ✅ Fully processed "${title}"`);
 
     } catch (e: any) {
       log().error(`[YOUTUBE] Failed for ${id}: ${e.message}`);
