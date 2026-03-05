@@ -51,6 +51,7 @@ async function spawnAndWait(task: string, timeoutMs = 180000, agentId = "main"):
     mode: "session",
     agentId,
     thinking: "off",
+    thread: true,
     timeoutSeconds: Math.floor(timeoutMs / 1000),
   });
 
