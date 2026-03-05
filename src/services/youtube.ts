@@ -44,7 +44,7 @@ async function gatewayInvoke(tool: string, args: Record<string, unknown>): Promi
   return data?.result?.details ?? data?.result ?? data;
 }
 
-async function spawnAndWait(task: string, timeoutMs = 180000, agentId = "main"): Promise<string> {
+async function spawnAndWait(task: string, timeoutMs = 900000, agentId = "main"): Promise<string> {
   // Spawn a persistent session, send task, read full response
   const spawnResult = await gatewayInvoke("sessions_spawn", {
     task: "You are a YouTube video analyzer. Wait for instructions.",
@@ -293,7 +293,7 @@ Duration: ${duration}
 
 TRANSCRIPT:
 ${transcript.slice(0, 80000)}`,
-        300000, "main"
+        900000, "main"
       );
       // Save immediately for crash resilience
       db.update(youtubeVideos)
@@ -315,7 +315,7 @@ Duration: ${duration}
 
 VIDEO SUMMARY:
 ${videoSummary}`,
-        300000, "main"
+        900000, "main"
       );
       log().info(`[YOUTUBE] Reflection done for "${title}" (${reflection.length} chars)`);
     }
