@@ -69,7 +69,7 @@ async function spawnAndWait(task: string, timeoutMs = 900000, agentId = "main"):
   });
 
   // Extract response text
-  const response = sendResult?.response ?? sendResult?.text ?? sendResult?.content ?? "";
+  const response = sendResult?.reply ?? sendResult?.response ?? sendResult?.text ?? sendResult?.content ?? "";
   const text = typeof response === "string" ? response
     : Array.isArray(response) ? response.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
     : JSON.stringify(response);
