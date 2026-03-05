@@ -143,7 +143,7 @@ export class YouTubeService {
           const tmpFile = resultTmpPath(video.id);
           const ef = errPath(video.id);
           if (!existsSync(tmpFile) && !existsSync(ef)) {
-            const age = Date.now() - new Date(video.updatedAt ?? video.createdAt).getTime();
+            const age = Date.now() - new Date((video.updatedAt ?? video.createdAt) + 'Z').getTime();
             if (age > 120000) {
               log().info(`[YOUTUBE] Recovery: restarting stale download for ${video.id.slice(0,8)}`);
               this.spawnIngester(video.id, video.videoUrl);
@@ -164,12 +164,13 @@ export class YouTubeService {
       // 2. Check "processing" videos OR "ready" videos missing reflection
       const processing = db.select().from(youtubeVideos)
         .where(eq(youtubeVideos.status, "processing")).all();
+      for (const v of processing) { const age = Date.now() - new Date((v.updatedAt ?? v.createdAt) + 'Z').getTime(); log().info("[YOUTUBE] Recovery check: " + v.id.slice(0,8) + " tx=" + (v.transcript?.length ?? 0) + " sum=" + (v.videoSummary?.length ?? 0) + " aiSet=" + aiProcessingSet.has(v.id) + " age=" + Math.round(age/1000) + "s"); }
       const needsReflection = db.select().from(youtubeVideos)
         .where(eq(youtubeVideos.status, "ready")).all()
         .filter(v => v.transcript && (!v.reflection || v.reflection === "No reflection generated."));
       for (const video of [...processing, ...needsReflection]) {
         if (video.transcript && video.transcript.length > 10 && (!video.videoSummary || !video.reflection || video.reflection === "No reflection generated.") && !aiProcessingSet.has(video.id)) {
-          const age = Date.now() - new Date(video.updatedAt ?? video.createdAt).getTime();
+          const age = Date.now() - new Date((video.updatedAt ?? video.createdAt) + 'Z').getTime();
           if (age > 120000) {
             log().info(`[YOUTUBE] Recovery: resuming AI for "${video.title || video.id.slice(0,8)}"`);
             aiProcessingSet.add(video.id);
