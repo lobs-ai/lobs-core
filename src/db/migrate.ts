@@ -611,4 +611,7 @@ export function runMigrations(db: PawDB): void {
   // ── Eval metrics on tasks (idempotent) ────────────────────────────────
   try { db.run(sql`ALTER TABLE tasks ADD COLUMN eval_metrics TEXT`); } catch {}
   try { db.run(sql`ALTER TABLE tasks ADD COLUMN spawn_count INTEGER DEFAULT 0`); } catch {}
+
+  // ── Prompt A/B variant on worker_runs (idempotent) ───────────────────────
+  try { db.run(sql`ALTER TABLE worker_runs ADD COLUMN prompt_variant TEXT NOT NULL DEFAULT 'A'`); } catch {}
 }

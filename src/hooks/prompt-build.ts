@@ -5,6 +5,12 @@
  * - Task title, notes, and requirements
  * - Project context (repo path, type)
  * - Agent-specific instructions
+ *
+ * A/B Variant:
+ *   Variant A (control):   context-first ordering  (task_id hash % 2 === 0)
+ *   Variant B (treatment): task-first ordering     (task_id hash % 2 === 1)
+ *
+ * The assigned variant is stored in worker_runs.prompt_variant for analysis.
  */
 
 import { eq, and, isNull } from "drizzle-orm";
@@ -12,6 +18,18 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { getDb } from "../db/connection.js";
 import { workerRuns, tasks, projects } from "../db/schema.js";
 import { log } from "../util/logger.js";
+
+/**
+ * Deterministic A/B assignment based on task_id.
+ * Uses the last 8 hex chars of the task id as a numeric hash → 50/50 split.
+ * Falls back to "A" if the id can't be parsed.
+ */
+function assignVariant(taskId: string): "A" | "B" {
+  const hex = taskId.replace(/-/g, "").slice(-8);
+  const num = parseInt(hex, 16);
+  if (isNaN(num)) return "A";
+  return num % 2 === 0 ? "A" : "B";
+}
 
 export function registerPromptBuildHook(api: OpenClawPluginApi): void {
   api.on("before_prompt_build", async (_event, ctx) => {
@@ -37,20 +55,39 @@ export function registerPromptBuildHook(api: OpenClawPluginApi): void {
       project = db.select().from(projects).where(eq(projects.id, task.projectId)).get();
     }
 
-    // Build context injection
-    const lines: string[] = [
-      `<paw-task-context>`,
-      `Task: ${task.title}`,
-    ];
-    if (task.notes) lines.push(`Notes: ${task.notes}`);
-    if (task.agent) lines.push(`Agent Role: ${task.agent}`);
-    if (project) {
-      lines.push(`Project: ${project.title}`);
-      if (project.repoPath) lines.push(`Repo: ${project.repoPath}`);
-    }
-    lines.push(`</paw-task-context>`);
+    // Determine and persist A/B variant
+    const variant = assignVariant(task.id);
+    db.update(workerRuns)
+      .set({ promptVariant: variant })
+      .where(eq(workerRuns.id, run.id))
+      .run();
 
-    log().debug?.(`[PAW] Injecting task context for session ${sessionKey}`);
+    log().debug?.(`[PAW] Prompt variant ${variant} for task ${task.id} (session ${sessionKey})`);
+
+    // ── Build context blocks ──────────────────────────────────────────
+
+    const taskBlock: string[] = [`Task: ${task.title}`];
+    if (task.notes) taskBlock.push(`Notes: ${task.notes}`);
+    if (task.agent) taskBlock.push(`Agent Role: ${task.agent}`);
+
+    const projectBlock: string[] = [];
+    if (project) {
+      projectBlock.push(`Project: ${project.title}`);
+      if (project.repoPath) projectBlock.push(`Repo: ${project.repoPath}`);
+    }
+
+    // ── Assemble prompt according to variant ──────────────────────────
+
+    let innerLines: string[];
+    if (variant === "B") {
+      // Variant B (treatment): task-first — model anchors on goal immediately
+      innerLines = [...taskBlock, ...projectBlock];
+    } else {
+      // Variant A (control): context-first
+      innerLines = [...projectBlock, ...taskBlock];
+    }
+
+    const lines = [`<paw-task-context>`, ...innerLines, `</paw-task-context>`];
 
     return {
       prependContext: lines.join("\n"),

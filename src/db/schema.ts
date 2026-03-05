@@ -125,6 +125,7 @@ export const workerRuns = sqliteTable("worker_runs", {
   agentType: text("agent_type"),
   projectId: text("project_id"),
   durationSeconds: real("duration_seconds"),
+  promptVariant: text("prompt_variant").notNull().default("A"),
 });
 
 // ─── Inbox ──────────────────────────────────────────────────────────────
