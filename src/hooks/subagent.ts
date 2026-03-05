@@ -7,6 +7,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { getDb } from "../db/connection.js";
 import { workerRuns, tasks, workflowRuns, agentReflections, projects, modelUsageEvents } from "../db/schema.js";
 import { recordWorkerStart, recordWorkerEnd } from "../orchestrator/worker-manager.js";
+import { triageWorkerCompletion } from "../orchestrator/triage.js";
 import { log } from "../util/logger.js";
 import { ReflectionService } from "../services/reflection.js";
 import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
@@ -77,7 +78,7 @@ export function registerSubagentHooks(api: OpenClawPluginApi): void {
       });
 
       if (workerRun.taskId) {
-        updateTaskFromEnd(workerRun.taskId, succeeded, reason, workerRun.agentType ?? undefined);
+        updateTaskFromEnd(workerRun.taskId, succeeded, reason, workerRun.agentType ?? undefined, sessionKey);
       }
     }
 
@@ -400,7 +401,7 @@ function collectReflectionResult(event: Record<string, unknown>): void {
 
         // Look for JSON reflection block
         for (const text of parts) {
-          const jsonMatch = text.match(/\`\`\`json\s*([\s\S]*?)\`\`\`/);
+          const jsonMatch = text.match(/```json\s*([\s\S]*?)```/);
           if (jsonMatch) {
             try {
               const parsed = JSON.parse(jsonMatch[1].trim());
@@ -461,7 +462,7 @@ function computeEvalMetrics(taskId: string, succeeded: boolean): Record<string, 
   return { spawn_count, cost_usd: Math.round(cost_usd * 1e6) / 1e6, work_summary_present, succeeded, logged_at: new Date().toISOString() };
 }
 
-function updateTaskFromEnd(taskId: string, succeeded: boolean, reason?: string, agentType?: string): void {
+function updateTaskFromEnd(taskId: string, succeeded: boolean, reason?: string, agentType?: string, sessionKey?: string): void {
   const db = getDb();
   const now = new Date().toISOString();
   const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
@@ -483,9 +484,10 @@ function updateTaskFromEnd(taskId: string, succeeded: boolean, reason?: string, 
     }).where(eq(tasks.id, taskId)).run();
     log().info(`[PAW] Task ${taskId.slice(0, 8)} work_state=done (workflow will finalize status)`);
 
-    if (agentType === "programmer") {
-      queueReviewerFollowup(taskId);
-    }
+    // Route to triage session for follow-up decisions
+    triageWorkerCompletion(taskId, sessionKey!, agentType ?? "unknown", true).catch(e => {
+      log().warn(`[PAW] Triage spawn failed for task ${taskId.slice(0, 8)}: ${e}`);
+    });
   } else {
     db.update(tasks).set({
       workState: "failed",
@@ -495,6 +497,12 @@ function updateTaskFromEnd(taskId: string, succeeded: boolean, reason?: string, 
       updatedAt: now,
     }).where(eq(tasks.id, taskId)).run();
     log().info(`[PAW] Task ${taskId.slice(0, 8)} marked failed: ${reason}`);
+    // Also triage failures — might warrant a retry with different approach
+    if (sessionKey) {
+      triageWorkerCompletion(taskId, sessionKey, agentType ?? "unknown", false).catch(e => {
+        log().warn(`[PAW] Triage spawn failed for failed task ${taskId.slice(0, 8)}: ${e}`);
+      });
+    }
   }
 }
 
