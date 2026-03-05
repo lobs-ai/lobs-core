@@ -77,6 +77,15 @@ Remember: Write the COMPLETE analysis to ${outFile} using the Write tool. That f
     cleanup: "delete",
   });
 
+  // Exclude this session from circuit breaker tracking — YouTube agents write
+  // output to files via the Write tool, so their chat response is intentionally
+  // empty/short. Without exclusion the CB misclassifies them as empty_output failures.
+  const childSessionKey = (spawnResult as Record<string, unknown>)?.childSessionKey as string | undefined;
+  if (childSessionKey) {
+    excludeSessionFromCircuitBreaker(childSessionKey);
+    log().info("[YOUTUBE] Excluded session from CB: " + childSessionKey);
+  }
+
   log().info("[YOUTUBE] Spawned agent → " + outFile);
 
   // Poll for the output file
