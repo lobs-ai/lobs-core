@@ -125,7 +125,7 @@ ${body.text}`;
         projectId: t.project_id || inferProjectId(t.title, t.notes),
         notes: t.notes,
         agent: t.agent,
-        modelTier: t.model_tier,
+        modelTier: t.model_tier ?? "standard",
         createdAt: now,
         updatedAt: now,
       }).run();
@@ -220,7 +220,7 @@ ${body.text}`;
       projectId: (body.project_id as string) || inferProjectId(body.title as string, body.notes as string | null),
       notes: body.notes as string,
       agent: body.agent as string,
-      modelTier: body.model_tier as string,
+      modelTier: (body.model_tier as string) ?? "standard",
       createdAt: now,
       updatedAt: now,
     }).run();

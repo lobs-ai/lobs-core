@@ -92,6 +92,7 @@ export class GitHubSyncService {
           status,
           projectId,
           externalSource: "github",
+          modelTier: "standard",
           externalId,
           externalUpdatedAt: issue.updatedAt,
           githubIssueNumber: issue.number,

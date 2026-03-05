@@ -535,6 +535,7 @@ export function queueReviewerFollowup(taskId: string): void {
     notes: reviewNotes,
     artifactPath: scopePath,
     agent: "reviewer",
+    modelTier: "standard",
     externalSource: "auto-review",
     externalId: taskId,
     modelTier: sourceTask.modelTier ?? "standard",
