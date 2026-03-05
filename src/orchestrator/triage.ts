@@ -1,20 +1,49 @@
 /**
- * Post-completion triage — creates follow-up tasks based on simple rules.
- * Lightweight inline approach instead of spawning a full triage session.
+ * Post-completion triage — queues completed worker results for batch review by Lobs.
+ * 
+ * Flow:
+ * 1. Worker completes → triageWorkerCompletion() queues result in triage_queue
+ * 2. flushTriageQueue() runs periodically (called from control loop)
+ * 3. Sends batch summary to Lobs via sessions_send on main session
+ * 4. Lobs reviews and creates follow-up tasks
  */
 
 import { getDb } from "../db/connection.js";
 import { tasks, projects } from "../db/schema.js";
-import { eq, and } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { log } from "../util/logger.js";
-import { inferProjectId } from "../util/project-inference.js";
 import { randomUUID } from "crypto";
 import { getGatewayConfig } from "./control-loop.js";
 
 const SINK_SESSION_KEY = "agent:sink:paw-orchestrator-v2";
+const MAIN_SESSION_KEY = "agent:main";
+const FLUSH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const FLUSH_THRESHOLD = 3; // flush if this many items queued
+
+let lastFlushTime = Date.now();
 
 /**
- * Collect the worker's output summary from session history.
+ * Ensure triage_queue table exists.
+ */
+function ensureTable(): void {
+  const db = getDb();
+  db.run({ sql: `CREATE TABLE IF NOT EXISTS triage_queue (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    task_title TEXT NOT NULL,
+    agent_type TEXT NOT NULL,
+    project_id TEXT,
+    project_name TEXT,
+    succeeded INTEGER NOT NULL DEFAULT 1,
+    worker_output TEXT,
+    repo_path TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    triaged_at TEXT
+  )`, params: [] } as any);
+}
+
+/**
+ * Collect worker output from session history.
  */
 async function collectWorkerOutput(sessionKey: string): Promise<string> {
   try {
@@ -59,54 +88,15 @@ async function collectWorkerOutput(sessionKey: string): Promise<string> {
     }
 
     const combined = assistantTexts.join("\n\n");
-    return combined.length > 3000 ? combined.slice(-3000) : combined;
+    return combined.length > 1500 ? combined.slice(-1500) : combined;
   } catch (e) {
     log().warn(`[TRIAGE] Failed to collect output for ${sessionKey}: ${e}`);
     return "";
   }
 }
 
-function createFollowUpTask(opts: {
-  title: string;
-  agent: string;
-  modelTier: string;
-  projectId: string | null;
-  notes: string;
-}): void {
-  const db = getDb();
-  const now = new Date().toISOString();
-  const id = randomUUID();
-
-  // Dedup: check if similar task already exists
-  const existing = db.select().from(tasks)
-    .where(and(
-      eq(tasks.title, opts.title),
-      eq(tasks.status, "active"),
-    ))
-    .get();
-  if (existing) {
-    log().debug?.(`[TRIAGE] Skipping duplicate task: ${opts.title.slice(0, 40)}`);
-    return;
-  }
-
-  db.insert(tasks).values({
-    id,
-    title: opts.title,
-    status: "active",
-    agent: opts.agent,
-    modelTier: opts.modelTier,
-    projectId: opts.projectId ?? inferProjectId(opts.title, opts.notes) ?? null,
-    notes: opts.notes,
-    workState: "not_started",
-    createdAt: now,
-    updatedAt: now,
-  } as any).run();
-
-  log().info(`[TRIAGE] Created follow-up: "${opts.title.slice(0, 50)}" (${opts.agent}, ${opts.modelTier})`);
-}
-
 /**
- * Rule-based triage for completed workers.
+ * Queue a completed worker for batch triage.
  */
 export async function triageWorkerCompletion(
   taskId: string,
@@ -115,87 +105,109 @@ export async function triageWorkerCompletion(
   succeeded: boolean,
 ): Promise<void> {
   const db = getDb();
+  ensureTable();
 
   const task = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
-  if (!task) {
-    log().warn(`[TRIAGE] Task ${taskId.slice(0, 8)} not found`);
-    return;
-  }
+  if (!task) return;
 
   const project = task.projectId
     ? db.select().from(projects).where(eq(projects.id, task.projectId)).get()
     : undefined;
 
-  const repoPath = project?.repoPath ?? task.artifactPath ?? "";
+  const output = await collectWorkerOutput(sessionKey);
 
-  log().info(`[TRIAGE] Triaging ${agentType} task ${taskId.slice(0, 8)}: "${task.title.slice(0, 50)}" (succeeded=${succeeded})`);
+  const stmt = db.run({
+    sql: `INSERT INTO triage_queue (id, task_id, task_title, agent_type, project_id, project_name, succeeded, worker_output, repo_path, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+    params: [
+      randomUUID(),
+      taskId,
+      task.title,
+      agentType,
+      task.projectId ?? null,
+      project?.title ?? null,
+      succeeded ? 1 : 0,
+      output || null,
+      project?.repoPath ?? task.artifactPath ?? null,
+    ],
+  } as any);
 
-  if (!succeeded) {
-    // Failed tasks: don't auto-create follow-ups, let spawn guard handle retries
-    log().info(`[TRIAGE] Task ${taskId.slice(0, 8)} failed — no automatic follow-up (spawn guard handles retries)`);
-    return;
+  log().info(`[TRIAGE] Queued ${agentType} task ${taskId.slice(0, 8)}: "${task.title.slice(0, 50)}" (succeeded=${succeeded})`);
+}
+
+/**
+ * Check if it's time to flush the triage queue, and send to Lobs if so.
+ * Called from the control loop every tick.
+ */
+export async function maybeFlushTriageQueue(): Promise<void> {
+  const db = getDb();
+  ensureTable();
+
+  const pending = db.all({
+    sql: `SELECT * FROM triage_queue WHERE triaged_at IS NULL ORDER BY created_at ASC`,
+    params: [],
+  } as any) as any[];
+
+  if (pending.length === 0) return;
+
+  const timeSinceFlush = Date.now() - lastFlushTime;
+  if (pending.length < FLUSH_THRESHOLD && timeSinceFlush < FLUSH_INTERVAL_MS) return;
+
+  // Build the batch message
+  let message = `**🔍 Triage Queue — ${pending.length} completed tasks need review**\n\n`;
+  message += `Review each and decide: create follow-up tasks, mark as done, or dismiss.\n`;
+  message += `Use sqlite3 to create tasks: \`sqlite3 ~/.openclaw/plugins/paw/paw.db "INSERT INTO tasks ..."\`\n\n`;
+
+  for (const item of pending) {
+    const status = item.succeeded ? "✅" : "❌";
+    message += `---\n`;
+    message += `${status} **${item.task_title}**\n`;
+    message += `Agent: ${item.agent_type} | Project: ${item.project_name ?? "none"}\n`;
+    if (item.repo_path) message += `Repo: ${item.repo_path}\n`;
+    if (item.worker_output) {
+      const preview = item.worker_output.length > 500 
+        ? item.worker_output.slice(-500) + "..."
+        : item.worker_output;
+      message += `Output:\n\`\`\`\n${preview}\n\`\`\`\n`;
+    }
+    message += `\n`;
   }
 
-  switch (agentType) {
-    case "programmer": {
-      // Programmer → create reviewer task
-      createFollowUpTask({
-        title: `Review: ${task.title}`,
-        agent: "reviewer",
-        modelTier: "small",
-        projectId: task.projectId,
-        notes: `Review the programmer output for this task.\n\nTask: ${task.title}\n\nNotes:\n${task.notes ?? ""}\n\nRepo: ${repoPath}\n\nCheck for: missing tests, obvious bugs, correctness. Be direct and actionable.`,
-      });
-      break;
-    }
+  message += `---\n`;
+  message += `For each: create reviewer/programmer/writer tasks as needed, or dismiss if no follow-up required.\n`;
+  message += `After triaging, the queue will auto-clear.`;
 
-    case "architect": {
-      // Architect → collect output and create programmer task if design is implementation-ready
-      const output = await collectWorkerOutput(sessionKey);
-      if (output && (output.includes("implement") || output.includes("build") || output.includes("create") || output.includes("should be"))) {
-        createFollowUpTask({
-          title: `Implement: ${task.title}`,
-          agent: "programmer",
-          modelTier: "standard",
-          projectId: task.projectId,
-          notes: `Implement the design from the architect.\n\nOriginal task: ${task.title}\n\nArchitect output:\n${output.slice(0, 2000)}\n\nRepo: ${repoPath}`,
-        });
-      }
-      break;
-    }
+  try {
+    const { port, token } = getGatewayConfig();
+    const response = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        tool: "sessions_send",
+        sessionKey: SINK_SESSION_KEY,
+        args: {
+          sessionKey: MAIN_SESSION_KEY,
+          message: `[System Message] Triage batch ready:\n\n${message}`,
+        },
+      }),
+    });
 
-    case "researcher": {
-      // Researcher → collect output and create tasks if findings are actionable
-      const output = await collectWorkerOutput(sessionKey);
-      if (output && output.length > 200) {
-        // Create a writer task to document findings
-        createFollowUpTask({
-          title: `Document research: ${task.title}`,
-          agent: "writer",
-          modelTier: "small",
-          projectId: task.projectId,
-          notes: `Document the research findings.\n\nOriginal task: ${task.title}\n\nResearch output:\n${output.slice(0, 2000)}`,
-        });
-      }
-      break;
+    const data = (await response.json()) as Record<string, unknown>;
+    if (data.ok) {
+      // Mark as triaged
+      db.run({
+        sql: `UPDATE triage_queue SET triaged_at = datetime('now') WHERE triaged_at IS NULL`,
+        params: [],
+      } as any);
+      lastFlushTime = Date.now();
+      log().info(`[TRIAGE] Flushed ${pending.length} items to Lobs for review`);
+    } else {
+      log().warn(`[TRIAGE] Failed to send triage batch: ${JSON.stringify(data.error)}`);
     }
-
-    case "reviewer": {
-      // Reviewer → check if issues were found
-      const output = await collectWorkerOutput(sessionKey);
-      if (output && (output.includes("NEEDS FIX") || output.includes("must fix") || output.includes("critical"))) {
-        createFollowUpTask({
-          title: `Fix review issues: ${task.title.replace("Review: ", "")}`,
-          agent: "programmer",
-          modelTier: "standard",
-          projectId: task.projectId,
-          notes: `Fix the issues found in code review.\n\nReview output:\n${output.slice(0, 2000)}\n\nRepo: ${repoPath}`,
-        });
-      }
-      break;
-    }
-
-    default:
-      log().debug?.(`[TRIAGE] No follow-up rules for agent type: ${agentType}`);
+  } catch (e) {
+    log().error(`[TRIAGE] Flush error: ${e}`);
   }
 }

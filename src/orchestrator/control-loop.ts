@@ -22,6 +22,7 @@ import { WorkflowExecutor } from "../workflow/engine.js";
 import { popPendingSpawns, requeueSpawn, type SpawnRequest } from "../workflow/nodes.js";
 import { getDb } from "../db/connection.js";
 import { workflowRuns, tasks as tasksTable } from "../db/schema.js";
+import { maybeFlushTriageQueue } from "./triage.js";
 import { findReadyTasks } from "./scanner.js";
 import {
   hasCapacity,
@@ -357,6 +358,9 @@ function runTick(): void {
   } catch (e) {
     log().error("orchestrator: stale workflow cleanup error: " + String(e));
   }
+
+  // ── 5c. Triage queue flush ────────────────────────────────────────────────
+  maybeFlushTriageQueue().catch(e => log().error(`orchestrator: triage flush error: ${e}`));
 
   // ── 6. Worker health check (legacy) ───────────────────────────────────────
   try {
