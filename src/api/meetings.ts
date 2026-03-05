@@ -100,6 +100,61 @@ export async function handleMeetingsRequest(
     return json(res, { ok: true });
   }
 
+  // POST /api/meetings/:id/share — send summary to Discord
+  if (id && parts[2] === "share" && req.method === "POST") {
+    const meeting = svc.get(id);
+    if (!meeting) return error(res, "Meeting not found", 404);
+
+    const db = getDb();
+    const items = db.select().from(meetingActionItems)
+      .where(eq(meetingActionItems.meetingId, id)).all();
+
+    let msg = `📋 **${meeting.title || 'Meeting'}** — ${new Date(meeting.createdAt).toLocaleString()}
+`;
+    if (meeting.summary) msg += `
+${meeting.summary}
+`;
+    if (items.length > 0) {
+      const grouped: Record<string, typeof items> = {};
+      items.forEach(i => {
+        const k = i.assignee || 'unassigned';
+        if (!grouped[k]) grouped[k] = [];
+        grouped[k].push(i);
+      });
+      msg += `
+**Action Items:**`;
+      Object.entries(grouped).forEach(([assignee, group]) => {
+        msg += `
+@${assignee}:`;
+        group.forEach(i => { msg += `
+  • ${i.description}`; });
+      });
+    }
+
+    // Send via gateway message tool
+    try {
+      const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
+      const { readFileSync } = await import("node:fs");
+      const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+      const port = cfg?.gateway?.port ?? 18789;
+      const token = cfg?.gateway?.auth?.token ?? "";
+
+      const r = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+        body: JSON.stringify({
+          tool: "message",
+          args: { action: "send", channel: "discord", target: "user:644578016298795010", message: msg },
+          sessionKey: "agent:sink:paw-orchestrator-v2",
+        }),
+      });
+      if (!r.ok) throw new Error(`Discord send failed: ${r.status}`);
+      return json(res, { ok: true, sent: "discord" });
+    } catch (e: any) {
+      return error(res, e.message, 500);
+    }
+  }
+
   // POST /api/meetings/:id/analyze — trigger (re-)analysis
   if (id && parts[2] === "analyze" && req.method === "POST") {
     const { MeetingAnalysisService } = await import("../services/meeting-analysis.js");
