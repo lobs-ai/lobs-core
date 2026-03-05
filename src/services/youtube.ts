@@ -44,11 +44,11 @@ async function gatewayInvoke(tool: string, args: Record<string, unknown>): Promi
   return data?.result?.details ?? data?.result ?? data;
 }
 
-async function spawnAndWait(task: string, timeoutMs = 180000): Promise<string> {
+async function spawnAndWait(task: string, timeoutMs = 180000, agentId = "main"): Promise<string> {
   const spawnResult = await gatewayInvoke("sessions_spawn", {
     task,
     mode: "run",
-    model: "openai-codex/gpt-5.3-codex",
+    agentId,
     runTimeoutSeconds: Math.floor(timeoutMs / 1000),
     cleanup: "keep",
   });
@@ -256,7 +256,7 @@ export class YouTubeService {
     try { unlinkSync(errPath(id)); } catch {}
   }
 
-  /** Run AI summarization pipeline (resumable). */
+  /** Run AI analysis in a single main-agent session. */
   async processAI(id: string): Promise<void> {
     const db = getDb();
     const video = db.select().from(youtubeVideos).where(eq(youtubeVideos.id, id)).get();
@@ -264,53 +264,56 @@ export class YouTubeService {
 
     const title = video.title ?? "Unknown";
     const channel = video.channel ?? "Unknown";
-    const chunks: string[] = video.chunks ? JSON.parse(video.chunks as string) : chunkTranscript(video.transcript);
+    const transcript = video.transcript;
 
-    // Resume chunk summaries from where we left off
-    let chunkSummaries: string[] = [];
-    if (video.chunkSummaries) {
-      try { chunkSummaries = JSON.parse(video.chunkSummaries as string); } catch {}
-    }
-
-    for (let i = chunkSummaries.length; i < chunks.length; i++) {
-      log().info(`[YOUTUBE] Summarizing chunk ${i + 1}/${chunks.length} for "${title}"`);
-      const summary = await spawnAndWait(
-        `Summarize this transcript chunk (${i + 1}/${chunks.length}) from the video "${title}" by ${channel}. ` +
-        `Extract key ideas, technical insights, and important statements. Be concise but thorough.\n\nCHUNK:\n${chunks[i]}`
-      );
-      chunkSummaries.push(summary);
-      // Save after each chunk for crash resilience
+    // Already done?
+    if (video.videoSummary && video.reflection) {
       db.update(youtubeVideos)
-        .set({ chunkSummaries: JSON.stringify(chunkSummaries), updatedAt: new Date().toISOString() })
+        .set({ status: "ready", updatedAt: new Date().toISOString() })
         .where(eq(youtubeVideos.id, id)).run();
+      return;
     }
 
-    // Video summary
-    let videoSummary = video.videoSummary ?? "";
-    if (!videoSummary) {
-      log().info(`[YOUTUBE] Generating video summary for "${title}"`);
-      videoSummary = await spawnAndWait(
-        `Write a natural, readable summary of this video as if explaining it to a smart friend. Use markdown headers and bullets where helpful but write conversationally — NOT a formal report. Do NOT use "What Changed", "Evidence", or "Decisions and Tradeoffs" sections.\n\nTitle: ${title}\nChannel: ${channel}\n\nCover: what the video is about, the key ideas and insights, notable claims or quotes, and why it matters.\n\nCHUNK SUMMARIES:\n${chunkSummaries.join("\n\n---\n\n")}`
-      );
-    }
+    log().info(`[YOUTUBE] Spawning main agent for analysis of "${title}"`);
 
-    // Reflection
-    let reflection = video.reflection ?? "";
-    if (!reflection) {
-      log().info(`[YOUTUBE] Generating reflection for "${title}"`);
-      reflection = await spawnAndWait(
-        `Write a thoughtful reflection on this video focused on what it means for building AI agent systems. Write naturally — no "What Changed", "Evidence", or "Decisions and Tradeoffs" sections. Just your analysis in readable prose with markdown headers where useful.\n\n` +
-        `Title: ${title}\nChannel: ${channel}\n\n` +
-        `Consider: implications, connections to multi-agent architecture, debates, research directions, practical applications.\n\n` +
-        `VIDEO SUMMARY:\n${videoSummary}\n\nKEY CHUNKS:\n${chunkSummaries.slice(0, 5).join("\n\n---\n\n")}`
-      );
+    // Single spawn — main agent does full analysis in one pass
+    const result = await spawnAndWait(
+      `Analyze this YouTube video transcript and produce two sections separated by "---REFLECTION---":\n\n` +
+      `**SECTION 1 — SUMMARY:** Write a natural, readable summary as if explaining the video to a smart friend. ` +
+      `Use markdown headers and bullets where helpful. Cover what the video is about, key ideas and insights, ` +
+      `notable claims or quotes, and why it matters. Be thorough but conversational.\n\n` +
+      `**SECTION 2 — REFLECTION:** After the "---REFLECTION---" separator, write your own reflection on what ` +
+      `this means for us — our AI agent architecture, multi-agent systems, workflow automation, and anything ` +
+      `relevant to building the best personal AI agent setup. Be opinionated and specific about what we should ` +
+      `learn or steal from this.\n\n` +
+      `Title: ${title}\nChannel: ${channel}\nDuration: ${video.durationSeconds ? Math.round(video.durationSeconds / 60) + " min" : "unknown"}\n\n` +
+      `TRANSCRIPT:\n${transcript.slice(0, 80000)}`,
+      300000,
+      "main"
+    );
+
+    // Split on the separator
+    const sepRe = /---\s*REFLECTION\s*---/i;
+    const parts = result.split(sepRe);
+    const videoSummary = (parts[0] || "").trim();
+    const reflection = (parts[1] || "").trim();
+
+    if (!videoSummary || videoSummary.length < 100) {
+      throw new Error("Analysis produced insufficient summary");
     }
 
     db.update(youtubeVideos)
-      .set({ status: "ready", reflection, updatedAt: new Date().toISOString() })
+      .set({
+        status: "ready",
+        videoSummary,
+        reflection: reflection || "No reflection generated.",
+        chunkSummaries: JSON.stringify(["single-pass"]),
+        updatedAt: new Date().toISOString(),
+      })
       .where(eq(youtubeVideos.id, id)).run();
-    log().info(`[YOUTUBE] ✅ Fully processed "${title}"`);
+    log().info(`[YOUTUBE] ✅ Fully processed "${title}" (summary: ${videoSummary.length} chars, reflection: ${reflection.length} chars)`);
   }
+
 
   /** Submit a URL for ingestion. */
   submit(url: string, projectId?: string): string {
