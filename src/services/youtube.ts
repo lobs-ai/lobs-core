@@ -52,15 +52,9 @@ async function gatewayInvoke(tool: string, args: Record<string, unknown>, timeou
   return data?.result?.details ?? data?.result ?? data;
 }
 
-async function spawnAndWait(task: string, timeoutMs = 900000, agentId = "researcher"): Promise<string> {
-  const outFile = `/tmp/yt-analysis-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`;
-
-  const wrappedTask = task + `\n\n` +
-    `CRITICAL INSTRUCTION: After writing your analysis, you MUST save your COMPLETE response to the file ${outFile} using the write tool. ` +
-    `Write the ENTIRE analysis to that file — do not truncate or summarize. This is required for the pipeline to work.`;
-
+async function spawnAndWait(task: string, timeoutMs = 600000, agentId = "researcher"): Promise<string> {
   const spawnResult = await gatewayInvoke("sessions_spawn", {
-    task: wrappedTask,
+    task,
     mode: "run",
     agentId,
     thinking: "off",
@@ -69,29 +63,31 @@ async function spawnAndWait(task: string, timeoutMs = 900000, agentId = "researc
   });
 
   const sessionKey = spawnResult?.childSessionKey ?? spawnResult?.sessionKey;
-  if (!sessionKey) {
-    log().info("[YOUTUBE] spawnResult: " + JSON.stringify(spawnResult).slice(0, 500));
-    throw new Error("No session key from spawn");
-  }
-  log().info("[YOUTUBE] Spawned " + sessionKey + " → " + outFile);
+  if (!sessionKey) throw new Error("No session key from spawn");
+  log().info("[YOUTUBE] Spawned " + sessionKey);
 
-  // Poll for the output file
+  // Poll sessions_history for completion
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 10000));
-    if (existsSync(outFile)) {
-      const text = readFileSync(outFile, "utf-8").trim();
-      if (text.length > 100) {
-        log().info("[YOUTUBE] Got " + text.length + " chars from file " + outFile);
-        try { unlinkSync(outFile); } catch {}
-        return text;
+    await new Promise(r => setTimeout(r, 8000));
+    try {
+      const history = await gatewayInvoke("sessions_history", { sessionKey, limit: 3, includeTools: false });
+      const messages = history?.messages ?? history ?? [];
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i];
+        if (msg.role === "assistant" && msg.stopReason === "stop") {
+          const text = typeof msg.content === "string" ? msg.content
+            : Array.isArray(msg.content) ? msg.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
+            : "";
+          if (text.trim().length > 50) {
+            log().info("[YOUTUBE] Got " + text.length + " chars from session");
+            return text;
+          }
+        }
       }
-    }
+    } catch {}
   }
-
-  // Cleanup and fail
-  try { unlinkSync(outFile); } catch {}
-  throw new Error("Session timed out — output file never appeared");
+  throw new Error("Session timed out");
 }
 
 
@@ -296,7 +292,7 @@ export class YouTubeService {
     if (!videoSummary || videoSummary.length < 100) {
       log().info(`[YOUTUBE] Spawning main agent for summary of "${title}"`);
       videoSummary = await spawnAndWait(
-        `Write a natural, readable summary of this YouTube video as if explaining it to a smart friend. Use markdown headers and bullets where helpful. Cover what the video is about, the key ideas and insights, notable claims or quotes, and why it matters. Be thorough but conversational.
+        `Write a focused summary of this YouTube video (~3000 chars max). Use markdown. Cover: what it's about, key ideas, notable claims, and why it matters. Be concise and conversational — hit the important points, skip filler.
 
 Title: ${title}
 Channel: ${channel}
