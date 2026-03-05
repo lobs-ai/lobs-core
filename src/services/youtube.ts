@@ -49,7 +49,7 @@ async function spawnAndWait(task: string, timeoutMs = 180000, agentId = "main"):
     task,
     mode: "run",
     agentId,
-    thinking: "none",
+    thinking: "off",
     runTimeoutSeconds: Math.floor(timeoutMs / 1000),
     cleanup: "keep",
   });
