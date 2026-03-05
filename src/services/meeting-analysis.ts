@@ -5,11 +5,11 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { eq } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { meetings, meetingActionItems, tasks } from "../db/schema.js";
 import { log } from "../util/logger.js";
-import { readFileSync } from "node:fs";
 
 function gatewayCfg(): { port: number; token: string } {
   const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
@@ -31,48 +31,45 @@ async function gatewayInvoke(tool: string, args: Record<string, unknown>): Promi
   return data?.result?.details ?? data?.result ?? data;
 }
 
-async function spawnAndWait(task: string, timeoutMs = 120000): Promise<string> {
-  // Spawn the session
+async function spawnAndWait(task: string, timeoutMs = 300000): Promise<string> {
+  const outFile = `/tmp/yt-ai-meeting-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`;
+
+  const wrappedTask = `You are a meeting analysis writer. Your ONLY job is to write your analysis directly to a file.
+
+DO NOT reply with the analysis in chat. Instead, use the Write tool to write it to: ${outFile}
+
+Here is what to write:
+
+${task}
+
+Remember: Write the COMPLETE analysis to ${outFile} using the Write tool. That file is your only output.`;
+
   const spawnResult = await gatewayInvoke("sessions_spawn", {
-    task,
+    task: wrappedTask,
     mode: "run",
     model: "anthropic/claude-sonnet-4-6",
+    thinking: "off",
     runTimeoutSeconds: Math.floor(timeoutMs / 1000),
-    cleanup: "keep",
+    cleanup: "delete",
   });
 
-  const sessionKey = spawnResult.childSessionKey;
-  if (!sessionKey) throw new Error("No session key from spawn: " + JSON.stringify(spawnResult));
+  log().info("[MEETING_ANALYSIS] Spawned agent → " + outFile);
 
-  // Poll for completion
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 5000));
-
-    try {
-      const history = await gatewayInvoke("sessions_history", {
-        sessionKey,
-        limit: 5,
-        includeTools: false,
-      });
-
-      const messages = history?.messages ?? history ?? [];
-      // Look for the last assistant message
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const msg = messages[i];
-        if (msg.role === "assistant") {
-          const text = typeof msg.content === "string" ? msg.content
-            : Array.isArray(msg.content) ? msg.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
-            : "";
-          if (text.trim() && text.trim().length > 20 && msg.stopReason === "stop") return text;
-        }
+    if (existsSync(outFile)) {
+      const text = readFileSync(outFile, "utf-8").trim();
+      if (text.length > 50) {
+        log().info("[MEETING_ANALYSIS] Got " + text.length + " chars from " + outFile);
+        try { unlinkSync(outFile); } catch {}
+        return text;
       }
-    } catch (e) {
-      log().debug?.(`[MEETING_ANALYSIS] Poll error: ${e}`);
     }
   }
 
-  throw new Error("Analysis session timed out");
+  try { unlinkSync(outFile); } catch {}
+  throw new Error("Timed out waiting for analysis output file");
 }
 
 const ANALYSIS_PROMPT = `You are analyzing a meeting transcript. Return ONLY valid JSON (no markdown, no code fences) with this exact structure:
