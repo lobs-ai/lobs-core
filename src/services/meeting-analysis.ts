@@ -78,6 +78,8 @@ async function spawnAndWait(task: string, timeoutMs = 120000): Promise<string> {
 const ANALYSIS_PROMPT = `You are analyzing a meeting transcript. Return ONLY valid JSON (no markdown, no code fences) with this exact structure:
 
 {
+  "title": "short descriptive title for this meeting",
+  "participants": ["lowercase first names of people speaking"],
   "summary": "2-4 sentence summary of the meeting",
   "decisions": ["list of key decisions made"],
   "action_items": [
@@ -90,12 +92,14 @@ const ANALYSIS_PROMPT = `You are analyzing a meeting transcript. Return ONLY val
 }
 
 Rules:
+- Infer the meeting title from the content discussed
+- Identify participants from speaker patterns and names mentioned
 - For assignee, use lowercase first names: "rafe", "lobs", "alex", etc.
 - If an action item is for the AI assistant / Lobs, use "lobs"
 - If unclear who should do it, set assignee to null
 - Be specific in action item descriptions
 - Only include actual commitments/tasks, not discussion points
-- If the meeting is just a test with no real content, return empty arrays for decisions and action_items
+- If the meeting is just a test with no real content, return empty arrays
 
 TRANSCRIPT:
 `;
@@ -123,15 +127,21 @@ export class MeetingAnalysisService {
       if (!jsonMatch) throw new Error("No JSON found in response: " + responseText.slice(0, 200));
       const analysis = JSON.parse(jsonMatch[0]);
 
-      // Store summary
-      db.update(meetings)
-        .set({
-          summary: analysis.summary,
-          analysisStatus: "completed",
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(meetings.id, meetingId))
-        .run();
+      // Store summary, title, participants (from AI analysis)
+      const updates: Record<string, any> = {
+        summary: analysis.summary,
+        analysisStatus: "completed",
+        updatedAt: new Date().toISOString(),
+      };
+      // Auto-fill title if it was untitled
+      if (analysis.title && (!meeting.title || meeting.title === "Untitled Meeting" || meeting.title?.endsWith(".webm"))) {
+        updates.title = analysis.title;
+      }
+      // Auto-fill participants if empty
+      if (analysis.participants?.length && !meeting.participants) {
+        updates.participants = JSON.stringify(analysis.participants);
+      }
+      db.update(meetings).set(updates).where(eq(meetings.id, meetingId)).run();
 
       // Store action items
       for (const item of analysis.action_items ?? []) {
