@@ -23,6 +23,7 @@ import { popPendingSpawns, requeueSpawn, type SpawnRequest } from "../workflow/n
 import { getDb } from "../db/connection.js";
 import { workflowRuns, tasks as tasksTable } from "../db/schema.js";
 import { maybeFlushTriageQueue } from "./triage.js";
+import { buildTaskContext } from "../util/task-context.js";
 import { findReadyTasks } from "./scanner.js";
 import {
   hasCapacity,
@@ -36,7 +37,7 @@ import {
   forceTerminateWorker,
 } from "./worker-manager.js";
 import { chooseModel, resolveTaskTier, TIER_MODELS, buildFallbackChain } from "./model-chooser.js";
-import { chooseHealthyModel } from "./model-health.js";
+import { chooseHealthyModel, seedModelHealthFromHistory } from "./model-health.js";
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let executor: WorkflowExecutor | null = null;
@@ -128,6 +129,11 @@ export function startControlLoop(ctx: OpenClawPluginServiceContext, intervalMs: 
   } catch (e) {
     log().warn(`orchestrator: could not read gateway config: ${e}`);
   }
+
+  // Backfill model_health from recent worker_runs on startup (Phase 4)
+  // Seeds total_runs/total_failures from last 24h so circuit breaker has
+  // accurate history after restarts. Only touches rows that do not exist yet.
+  seedModelHealthFromHistory(24);
 
   const tick = () => {
     try {
@@ -457,7 +463,8 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
   const gitReminder = (req.agentType === "programmer" || req.agentType === "architect") && repoPath
     ? `\n\n⚠️ IMPORTANT: When you are done, you MUST run: git add -A && git commit -m "agent(${req.agentType}): <brief summary>"\nDo NOT finish without committing your changes.`
     : "";
-  const finalPrompt = taskPrompt + gitReminder;
+  const taskContext = buildTaskContext({ projectId: (taskCtx["project_id"] as string) ?? undefined, agentType: req.agentType });
+  const finalPrompt = taskPrompt + gitReminder + taskContext;
 
   // ── Circuit-breaker-aware model selection ────────────────────────────────
   const modelChoice = req.modelTier

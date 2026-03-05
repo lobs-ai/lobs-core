@@ -252,3 +252,87 @@ export function setManualOverride(model: string, agentType: string, override: st
     log().warn("[MODEL_HEALTH] setManualOverride error: " + String(e));
   }
 }
+
+/**
+ * Backfill model_health from recent worker_runs history.
+ * Called once on orchestrator startup to give the circuit breaker accurate
+ * context from before the restart. Only seeds rows that don't already exist.
+ *
+ * Design doc rule: orphaned-on-restart runs do NOT count as consecutive_failures —
+ * those are infrastructure failures. Seed totals only; consecutive_failures starts at 0.
+ * The circuit breaker will engage naturally going forward.
+ */
+export function seedModelHealthFromHistory(lookbackHours = 24): void {
+  try {
+    const db = getDb() as any;
+
+    // Query recent worker_runs grouped by (model, agent_type)
+    const rows = db.prepare(`
+      SELECT
+        model,
+        agent_type,
+        COUNT(*) as total_runs,
+        SUM(CASE WHEN succeeded = 0 AND timeout_reason IN ('session_dead', 'session_timeout') THEN 1 ELSE 0 END) as total_failures,
+        MAX(CASE WHEN succeeded = 0 THEN ended_at END) as last_failure_at,
+        MAX(CASE WHEN succeeded = 1 THEN ended_at END) as last_success_at
+      FROM worker_runs
+      WHERE model IS NOT NULL
+        AND agent_type IS NOT NULL
+        AND started_at > datetime('now', '-' || ? || ' hours')
+      GROUP BY model, agent_type
+    `).all(lookbackHours) as Array<{
+      model: string;
+      agent_type: string;
+      total_runs: number;
+      total_failures: number;
+      last_failure_at: string | null;
+      last_success_at: string | null;
+    }>;
+
+    if (rows.length === 0) {
+      log().info("[MODEL_HEALTH] Boot seed: no recent worker_runs found (nothing to seed)");
+      return;
+    }
+
+    const now = new Date().toISOString();
+    let seeded = 0;
+    let skipped = 0;
+
+    for (const row of rows) {
+      // Only seed if no existing row — don't overwrite live circuit state
+      const existing = db.prepare(
+        "SELECT model FROM model_health WHERE model = ? AND agent_type = ?"
+      ).get(row.model, row.agent_type);
+
+      if (existing) {
+        skipped++;
+        continue;
+      }
+
+      db.prepare(`
+        INSERT INTO model_health
+          (model, agent_type, state, consecutive_failures, total_failures, total_runs,
+           last_failure_at, last_success_at, opened_at, recovery_after,
+           last_error_summary, manual_override, created_at, updated_at)
+        VALUES (?, ?, 'closed', 0, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)
+      `).run(
+        row.model,
+        row.agent_type,
+        row.total_failures,
+        row.total_runs,
+        row.last_failure_at,
+        row.last_success_at,
+        now,
+        now,
+      );
+      seeded++;
+    }
+
+    log().info(
+      `[MODEL_HEALTH] Boot seed: seeded ${seeded} model/agent_type pairs from last ${lookbackHours}h of worker_runs` +
+      (skipped > 0 ? ` (${skipped} already existed, skipped)` : "")
+    );
+  } catch (e) {
+    log().warn("[MODEL_HEALTH] seedModelHealthFromHistory error: " + String(e));
+  }
+}

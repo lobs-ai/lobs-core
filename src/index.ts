@@ -18,6 +18,7 @@ import { registerSubagentHooks } from "./hooks/subagent.js";
 import { registerToolGateHook } from "./hooks/tool-gate.js";
 import { registerAgentEndHook } from "./hooks/agent-end.js";
 import { registerRestartContinuationHook } from "./hooks/restart-continuation.js";
+import { registerCircuitBreakerHooks } from "./hooks/circuit-breaker.js";
 import { startControlLoop, stopControlLoop } from "./orchestrator/control-loop.js";
 import { setLogger, log } from "./util/logger.js";
 import type { PawConfig } from "./util/types.js";
@@ -93,6 +94,7 @@ const pawPlugin = {
     registerToolGateHook(api);
     registerAgentEndHook(api);
     registerRestartContinuationHook(api);
+    registerCircuitBreakerHooks(api);
 
     // Clean stale subagent runs from disk registry to prevent children count buildup
     try {

@@ -41,7 +41,7 @@ export function unregisterSessionFromCircuitBreaker(sessionKey: string): void {
 export function registerCircuitBreakerHooks(api: OpenClawPluginApi): void {
 
   // ── llm_input — track session start time ──────────────────────────────────
-  api.on("llm_input", (event, ctx) => {
+  api.on("llm_input", async (event: any, ctx: any) => {
     const sessionKey = ctx.sessionKey;
     if (!sessionKey) return;
     const model = `${event.provider}/${event.model}`;
@@ -61,7 +61,7 @@ export function registerCircuitBreakerHooks(api: OpenClawPluginApi): void {
   });
 
   // ── llm_output — track last output length + record success ───────────────
-  api.on("llm_output", (event, ctx) => {
+  api.on("llm_output", async (event: any, ctx: any) => {
     const sessionKey = ctx.sessionKey;
     if (!sessionKey) return;
     const meta = sessionMeta.get(sessionKey);
@@ -80,7 +80,7 @@ export function registerCircuitBreakerHooks(api: OpenClawPluginApi): void {
   });
 
   // ── agent_end — record final success/failure ──────────────────────────────
-  api.on("agent_end", (event, ctx) => {
+  api.on("agent_end", async (event: any, ctx: any) => {
     const sessionKey = ctx.sessionKey;
     if (!sessionKey) return;
     const meta = sessionMeta.get(sessionKey);

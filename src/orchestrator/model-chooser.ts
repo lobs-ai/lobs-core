@@ -239,7 +239,7 @@ export function resolveModelForTier(tier: ModelTier, agentType?: string): string
 
 // ── Circuit-breaker-aware model selection ────────────────────────────────────
 
-import { chooseHealthyModel as _chooseHealthyModel, buildFallbackChain as _chainHelper } from "../services/circuit-breaker.js";
+import { chooseHealthyModel as _cbChooseHealthy } from "../services/circuit-breaker.js";
 
 /**
  * Choose the healthiest model for a given tier + agent type, skipping any
@@ -257,8 +257,8 @@ export function chooseHealthyModelForAgent(
 ): string | null {
   const choice = chooseModel(tier as ModelTier | undefined, agentType);
   const chain = buildFallbackChain(choice.model, choice.tier, agentType);
-  return _chooseHealthyModel(chain, taskType ?? agentType ?? "__global__");
+  return _cbChooseHealthy(chain, taskType ?? agentType ?? "__global__");
 }
 
-// Re-export the low-level helper for callers that already have a chain
-export { _chooseHealthyModel as chooseHealthyModel };
+// Re-export for callers that already have a chain built
+export { _cbChooseHealthy as chooseHealthyModel };

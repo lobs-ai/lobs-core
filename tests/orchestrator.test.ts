@@ -277,3 +277,85 @@ describe("Model Chooser", () => {
     expect(escalated.tier).toBe("strong");
   });
 });
+
+import {
+  seedModelHealthFromHistory,
+  recordRunOutcome,
+  getHealthSnapshot,
+  resetCircuit,
+} from "../src/orchestrator/model-health.js";
+
+describe("seedModelHealthFromHistory (Phase 4 boot seed)", () => {
+  beforeEach(() => {
+    // Clean slate
+    const db = getDb() as any;
+    db.prepare("DELETE FROM model_health").run();
+    db.prepare("DELETE FROM worker_runs WHERE model LIKE 'test-seed/%'").run();
+  });
+
+  it("seeds model_health rows from recent worker_runs", () => {
+    const db = getDb() as any;
+    const now = new Date().toISOString();
+    const ago1h = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+    // Insert synthetic worker_run history
+    db.prepare(`
+      INSERT INTO worker_runs (id, model, agent_type, task_id, worker_id, started_at, ended_at, succeeded, timeout_reason)
+      VALUES
+        ('wr-seed-1', 'test-seed/modelA', 'programmer', 'task-1', 'sess-1', ?, ?, 1, NULL),
+        ('wr-seed-2', 'test-seed/modelA', 'programmer', 'task-2', 'sess-2', ?, ?, 0, 'session_dead'),
+        ('wr-seed-3', 'test-seed/modelA', 'programmer', 'task-3', 'sess-3', ?, ?, 0, 'session_dead'),
+        ('wr-seed-4', 'test-seed/modelB', 'reviewer',   'task-4', 'sess-4', ?, ?, 1, NULL)
+    `).run(ago1h, now, ago1h, now, ago1h, now, ago1h, now);
+
+    seedModelHealthFromHistory(24);
+
+    const snapshot = getHealthSnapshot();
+    const modelA = snapshot.find(r => r.model === 'test-seed/modelA' && r.agentType === 'programmer');
+    const modelB = snapshot.find(r => r.model === 'test-seed/modelB' && r.agentType === 'reviewer');
+
+    expect(modelA).toBeDefined();
+    expect(modelA!.totalRuns).toBe(3);
+    expect(modelA!.totalFailures).toBe(2);
+    expect(modelA!.consecutiveFailures).toBe(0); // boot seed never sets consecutive failures
+    expect(modelA!.state).toBe('closed');         // starts closed; circuit engages from new runs
+
+    expect(modelB).toBeDefined();
+    expect(modelB!.totalRuns).toBe(1);
+    expect(modelB!.totalFailures).toBe(0);
+    expect(modelB!.state).toBe('closed');
+  });
+
+  it("does not overwrite existing model_health rows", () => {
+    const db = getDb() as any;
+    const now = new Date().toISOString();
+    const ago1h = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+    // Pre-existing live state (e.g. circuit already tripped)
+    db.prepare(`
+      INSERT INTO model_health (model, agent_type, state, consecutive_failures, total_failures, total_runs, created_at, updated_at)
+      VALUES ('test-seed/modelC', 'programmer', 'open', 5, 5, 5, ?, ?)
+    `).run(now, now);
+
+    // History that would conflict
+    db.prepare(`
+      INSERT INTO worker_runs (id, model, agent_type, task_id, worker_id, started_at, ended_at, succeeded, timeout_reason)
+      VALUES ('wr-seed-5', 'test-seed/modelC', 'programmer', 'task-5', 'sess-5', ?, ?, 0, 'session_dead')
+    `).run(ago1h, now);
+
+    seedModelHealthFromHistory(24);
+
+    const row = db.prepare("SELECT * FROM model_health WHERE model = ? AND agent_type = ?")
+      .get('test-seed/modelC', 'programmer');
+
+    // Should NOT have been overwritten
+    expect(row.state).toBe('open');
+    expect(row.consecutive_failures).toBe(5);
+  });
+
+  it("is a no-op when worker_runs table is empty", () => {
+    seedModelHealthFromHistory(24);
+    const snapshot = getHealthSnapshot();
+    expect(snapshot.length).toBe(0);
+  });
+});

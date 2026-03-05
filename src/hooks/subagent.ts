@@ -8,6 +8,7 @@ import { getDb } from "../db/connection.js";
 import { workerRuns, tasks, workflowRuns, agentReflections, projects, modelUsageEvents } from "../db/schema.js";
 import { recordWorkerStart, recordWorkerEnd } from "../orchestrator/worker-manager.js";
 import { triageWorkerCompletion } from "../orchestrator/triage.js";
+import { onSuccess, onFailure, classifyOutcome } from "../services/circuit-breaker.js";
 import { log } from "../util/logger.js";
 import { ReflectionService } from "../services/reflection.js";
 import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
@@ -76,6 +77,21 @@ export function registerSubagentHooks(api: OpenClawPluginApi): void {
         durationSeconds,
         usage,
       });
+
+      // ── Circuit breaker: record outcome ───────────────────────────────────
+      const cbModel = usage.model ?? workerRun.model ?? "unknown";
+      const cbTaskType = workerRun.agentType ?? "__global__";
+      const cbFailure = classifyOutcome({
+        succeeded,
+        reason,
+        durationMs: durationSeconds * 1000,
+        outputLength: (usage.outputTokens ?? 0) * 4, // rough chars estimate
+      });
+      if (cbFailure) {
+        onFailure(cbModel, cbTaskType, cbFailure);
+      } else {
+        onSuccess(cbModel, cbTaskType);
+      }
 
       if (workerRun.taskId) {
         updateTaskFromEnd(workerRun.taskId, succeeded, reason, workerRun.agentType ?? undefined, sessionKey);
