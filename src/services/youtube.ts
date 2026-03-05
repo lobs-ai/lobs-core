@@ -290,13 +290,8 @@ export class YouTubeService {
     if (!videoSummary) {
       log().info(`[YOUTUBE] Generating video summary for "${title}"`);
       videoSummary = await spawnAndWait(
-        `Generate a comprehensive summary of this video.\n\nTitle: ${title}\nChannel: ${channel}\n\n` +
-        `Structure: Core topic, Key concepts, Important insights, Notable quotes, Potential applications.\n\n` +
-        `CHUNK SUMMARIES:\n${chunkSummaries.join("\n\n---\n\n")}`
+        `Write a natural, readable summary of this video as if explaining it to a smart friend. Use markdown headers and bullets where helpful but write conversationally — NOT a formal report. Do NOT use "What Changed", "Evidence", or "Decisions and Tradeoffs" sections.\n\nTitle: ${title}\nChannel: ${channel}\n\nCover: what the video is about, the key ideas and insights, notable claims or quotes, and why it matters.\n\nCHUNK SUMMARIES:\n${chunkSummaries.join("\n\n---\n\n")}`
       );
-      db.update(youtubeVideos)
-        .set({ videoSummary, updatedAt: new Date().toISOString() })
-        .where(eq(youtubeVideos.id, id)).run();
     }
 
     // Reflection
@@ -304,7 +299,7 @@ export class YouTubeService {
     if (!reflection) {
       log().info(`[YOUTUBE] Generating reflection for "${title}"`);
       reflection = await spawnAndWait(
-        `Reflect on this video and extract insights for building AI agent systems.\n\n` +
+        `Write a thoughtful reflection on this video focused on what it means for building AI agent systems. Write naturally — no "What Changed", "Evidence", or "Decisions and Tradeoffs" sections. Just your analysis in readable prose with markdown headers where useful.\n\n` +
         `Title: ${title}\nChannel: ${channel}\n\n` +
         `Consider: implications, connections to multi-agent architecture, debates, research directions, practical applications.\n\n` +
         `VIDEO SUMMARY:\n${videoSummary}\n\nKEY CHUNKS:\n${chunkSummaries.slice(0, 5).join("\n\n---\n\n")}`
