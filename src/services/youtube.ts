@@ -13,7 +13,7 @@ import { eq, desc } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { youtubeVideos } from "../db/schema.js";
 import { log } from "../util/logger.js";
-import { readFileSync, existsSync, unlinkSync } from "node:fs";
+import { readFileSync, existsSync, unlinkSync, readdirSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
 
 const INGESTER_PATH = `${process.env.HOME}/lobs-youtube-ingester/ingest.py`;
@@ -76,21 +76,30 @@ async function spawnAndWait(task: string, timeoutMs = 900000, agentId = "researc
   const subId = parts[parts.length - 1];
 
   // Poll for transcript file to appear with assistant response
+  // Transcript files live in ~/.openclaw/agents/{agentType}/sessions/{sessionId}.jsonl
+  // The sessionKey is like "agent:researcher:subagent:<uuid>" — the sessionId is the actual file UUID
+  // But we need the session ID, not the subagent UUID. Poll sessions_list to get it.
   const possiblePaths = [
-    `/private/tmp/openclaw-sink/${subId}.jsonl`,
-    `${process.env.HOME}/.openclaw/workspace/${subId}.jsonl`,
-    `${process.env.HOME}/.openclaw/workspace-researcher/${subId}.jsonl`,
-    `/tmp/openclaw-sink/${subId}.jsonl`,
+    `${process.env.HOME}/.openclaw/agents/researcher/sessions`,
+    `${process.env.HOME}/.openclaw/agents/main/sessions`,
+    `${process.env.HOME}/.openclaw/agents/sink/sessions`,
   ];
 
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 10000));
 
-    // Try to find and read transcript
-    for (const tp of possiblePaths) {
-      if (!existsSync(tp)) continue;
-      try {
+    // Try to find transcript by scanning session dirs for recent files
+    for (const dir of possiblePaths) {
+      if (!existsSync(dir)) continue;
+      // Look for any jsonl files modified in last 2 minutes
+      let files: string[];
+      try { files = readdirSync(dir).filter(f => f.endsWith(".jsonl")); } catch { continue; }
+      for (const file of files) {
+        const tp = dir + "/" + file;
+        try {
+          const stat = statSync(tp);
+          if (Date.now() - stat.mtimeMs > 120000) continue;
         const lines = readFileSync(tp, "utf-8").trim().split("\n");
         for (let i = lines.length - 1; i >= 0; i--) {
           const msg = JSON.parse(lines[i]);
@@ -105,7 +114,8 @@ async function spawnAndWait(task: string, timeoutMs = 900000, agentId = "researc
             }
           }
         }
-      } catch {}
+        } catch {}
+      }
     }
 
     // Also try sessions_history as fallback (may be truncated but better than nothing)
