@@ -480,7 +480,21 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
     : { model: primaryModel, degraded: false };
 
   if (circuitDegraded) {
-    log().warn(`[SPAWN] All models circuit-open for ${req.agentType}; degrading to ${model}`);
+    // Design doc: do NOT dispatch when all models are open — leave task queued so it retries
+    // after the cooldown expires.
+    log().error(
+      `[SPAWN] ⚠️  All models circuit-open for ${req.agentType} ` +
+      `(chain=${fallbackChain.join(", ")}). Blocking dispatch — task will requeue after cooldown.`
+    );
+    decrementPendingSpawns(
+      (taskCtx["projectId"] as string) ?? (taskCtx["project_id"] as string) ?? undefined,
+      req.agentType
+    );
+    writeSpawnResult(req.runId, req.nodeId, {
+      status: "failed",
+      error: `all_models_unhealthy: all circuit breakers open for ${req.agentType}. Task requeued — will retry after cooldown expires.`,
+    });
+    return;
   }
 
   // ── Spawn count guard ────────────────────────────────────────────────────
