@@ -53,9 +53,14 @@ async function gatewayInvoke(tool: string, args: Record<string, unknown>, timeou
 }
 
 async function spawnAndWait(task: string, timeoutMs = 900000, agentId = "researcher"): Promise<string> {
-  // Spawn a run session
+  const outFile = `/tmp/yt-analysis-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`;
+
+  const wrappedTask = task + `\n\n` +
+    `CRITICAL INSTRUCTION: After writing your analysis, you MUST save your COMPLETE response to the file ${outFile} using the write tool. ` +
+    `Write the ENTIRE analysis to that file — do not truncate or summarize. This is required for the pipeline to work.`;
+
   const spawnResult = await gatewayInvoke("sessions_spawn", {
-    task,
+    task: wrappedTask,
     mode: "run",
     agentId,
     thinking: "off",
@@ -68,75 +73,25 @@ async function spawnAndWait(task: string, timeoutMs = 900000, agentId = "researc
     log().info("[YOUTUBE] spawnResult: " + JSON.stringify(spawnResult).slice(0, 500));
     throw new Error("No session key from spawn");
   }
-  log().info("[YOUTUBE] Spawned " + sessionKey);
+  log().info("[YOUTUBE] Spawned " + sessionKey + " → " + outFile);
 
-  // Extract session ID from key for transcript path
-  // Key format: agent:main:subagent:<uuid>
-  const parts = sessionKey.split(":");
-  const subId = parts[parts.length - 1];
-
-  // Poll for transcript file to appear with assistant response
-  // Transcript files live in ~/.openclaw/agents/{agentType}/sessions/{sessionId}.jsonl
-  // The sessionKey is like "agent:researcher:subagent:<uuid>" — the sessionId is the actual file UUID
-  // But we need the session ID, not the subagent UUID. Poll sessions_list to get it.
-  const possiblePaths = [
-    `${process.env.HOME}/.openclaw/agents/researcher/sessions`,
-    `${process.env.HOME}/.openclaw/agents/main/sessions`,
-    `${process.env.HOME}/.openclaw/agents/sink/sessions`,
-  ];
-
+  // Poll for the output file
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 10000));
-
-    // Try to find transcript by scanning session dirs for recent files
-    for (const dir of possiblePaths) {
-      if (!existsSync(dir)) continue;
-      // Look for any jsonl files modified in last 2 minutes
-      let files: string[];
-      try { files = readdirSync(dir).filter(f => f.endsWith(".jsonl")); } catch { continue; }
-      for (const file of files) {
-        const tp = dir + "/" + file;
-        try {
-          const stat = statSync(tp);
-          if (Date.now() - stat.mtimeMs > 120000) continue;
-        const lines = readFileSync(tp, "utf-8").trim().split("\n");
-        for (let i = lines.length - 1; i >= 0; i--) {
-          const msg = JSON.parse(lines[i]);
-          if (msg.role === "assistant" && msg.stopReason === "stop") {
-            const content = msg.content;
-            const text = typeof content === "string" ? content
-              : Array.isArray(content) ? content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
-              : "";
-            if (text.length > 50) {
-              log().info("[YOUTUBE] Got " + text.length + " chars from transcript " + tp);
-              return text;
-            }
-          }
-        }
-        } catch {}
+    if (existsSync(outFile)) {
+      const text = readFileSync(outFile, "utf-8").trim();
+      if (text.length > 100) {
+        log().info("[YOUTUBE] Got " + text.length + " chars from file " + outFile);
+        try { unlinkSync(outFile); } catch {}
+        return text;
       }
     }
-
-    // Also try sessions_history as fallback (may be truncated but better than nothing)
-    try {
-      const history = await gatewayInvoke("sessions_history", { sessionKey, limit: 3, includeTools: false });
-      const messages = history?.messages ?? history ?? [];
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const msg = messages[i];
-        if (msg.role === "assistant" && msg.stopReason === "stop") {
-          const text = typeof msg.content === "string" ? msg.content
-            : Array.isArray(msg.content) ? msg.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
-            : "";
-          if (text.length > 50) {
-            log().info("[YOUTUBE] Got " + text.length + " chars from history (may be truncated)");
-            return text;
-          }
-        }
-      }
-    } catch {}
   }
-  throw new Error("Session timed out");
+
+  // Cleanup and fail
+  try { unlinkSync(outFile); } catch {}
+  throw new Error("Session timed out — output file never appeared");
 }
 
 
