@@ -680,3 +680,28 @@ export const meetingActionItems = sqliteTable("meeting_action_items", {
   taskId: text("task_id").references(() => tasks.id),  // linked PAW task if auto-created
   ...timestamps,
 });
+
+// ─── YouTube Videos ─────────────────────────────────────────────────────
+
+export const youtubeVideos = sqliteTable("youtube_videos", {
+  id: id(),
+  videoId: text("video_id"),              // YouTube video ID
+  videoUrl: text("video_url").notNull(),
+  title: text("title"),
+  channel: text("channel"),
+  publishDate: text("publish_date"),
+  thumbnail: text("thumbnail"),
+  description: text("description"),
+  language: text("language"),
+  durationSeconds: real("duration_seconds"),
+  transcript: text("transcript"),
+  segments: text("segments"),             // JSON array
+  chunks: text("chunks"),                 // JSON array of chunk texts
+  chunkSummaries: text("chunk_summaries"),// JSON array of summaries
+  videoSummary: text("video_summary"),
+  reflection: text("reflection"),
+  status: text("status").notNull().default("pending"), // pending/downloading/transcribing/processing/ready/failed
+  error: text("error"),
+  projectId: text("project_id").references(() => projects.id),
+  ...timestamps,
+});

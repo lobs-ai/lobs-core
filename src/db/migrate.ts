@@ -681,6 +681,33 @@ export function runMigrations(db: PawDB): void {
   try { db.run(sql`ALTER TABLE meetings ADD COLUMN summary TEXT`); } catch {}
   try { db.run(sql`ALTER TABLE meetings ADD COLUMN analysis_status TEXT DEFAULT 'pending'`); } catch {}
 
+  // ── YouTube Videos ────────────────────────────────────────────────────
+  db.run(sql`CREATE TABLE IF NOT EXISTS youtube_videos (
+    id               TEXT PRIMARY KEY,
+    video_id         TEXT,
+    video_url        TEXT NOT NULL,
+    title            TEXT,
+    channel          TEXT,
+    publish_date     TEXT,
+    thumbnail        TEXT,
+    description      TEXT,
+    language         TEXT,
+    duration_seconds REAL,
+    transcript       TEXT,
+    segments         TEXT,
+    chunks           TEXT,
+    chunk_summaries  TEXT,
+    video_summary    TEXT,
+    reflection       TEXT,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    error            TEXT,
+    project_id       TEXT REFERENCES projects(id),
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_youtube_video_id ON youtube_videos(video_id)`); } catch {}
+  try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_youtube_status ON youtube_videos(status)`); } catch {}
+
   // ── Seed default circuit_breaker settings (INSERT OR IGNORE — safe to run on every migration) ──
   try {
     db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)

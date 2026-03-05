@@ -26,6 +26,7 @@ import { handleKnowledgeFsRequest } from "./knowledge-fs.js";
 import { handleMemoriesFsRequest } from "./memories-fs.js";
 import { handleReflectionsRequest } from "./reflections.js";
 import { handleMeetingsRequest, handleMeetingActionItemsRequest } from "./meetings.js";
+import { handleYouTubeRequest } from "./youtube.js";
 import { error } from "./index.js";
 
 const PREFIXES = ["/paw/api/", "/api/"];
@@ -71,6 +72,7 @@ export function registerPawRouter(api: OpenClawPluginApi): void {
         case "memories-fs":     await handleMemoriesFsRequest(req, res, parts[1]); return true;
         case "reflections":      await handleReflectionsRequest(req, res, parts[1], parts); return true;
         case "meetings":         await handleMeetingsRequest(req, res, parts[1], parts); return true;
+        case "youtube":          await handleYouTubeRequest(req, res, parts[1], parts); return true;
         default:                error(res, `Unknown resource: ${resource}`, 404); return true;
       }
     } catch (err) {
