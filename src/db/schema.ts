@@ -626,3 +626,26 @@ export const workspaces = sqliteTable("workspaces", {
   isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
   ...timestamps,
 });
+
+// ─── Model Health (circuit breaker) ──────────────────────────────────────────
+
+export const modelHealth = sqliteTable("model_health", {
+  // SQLite doesn't support composite PKs via drizzle easily — use row-level unique
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  model: text("model").notNull(),
+  agentType: text("agent_type").notNull(),
+  state: text("state").notNull().default("closed"),
+  consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+  totalFailures: integer("total_failures").notNull().default(0),
+  totalRuns: integer("total_runs").notNull().default(0),
+  lastFailureAt: text("last_failure_at"),
+  lastSuccessAt: text("last_success_at"),
+  openedAt: text("opened_at"),
+  recoveryAfter: text("recovery_after"),
+  lastErrorSummary: text("last_error_summary"),
+  manualOverride: text("manual_override"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (t) => ({
+  uniqModelAgent: uniqueIndex("model_health_model_agent").on(t.model, t.agentType),
+}));

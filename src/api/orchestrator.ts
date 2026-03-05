@@ -13,6 +13,7 @@ import {
 } from "../db/schema.js";
 import { json, error, parseBody } from "./index.js";
 import { executeCallable, type CallableContext } from "../workflow/callables.js";
+import { getHealthSnapshot, resetCircuit, setManualOverride } from "../orchestrator/model-health.js";
 
 export async function handleOrchestratorRequest(
   req: IncomingMessage,
@@ -193,6 +194,27 @@ export async function handleOrchestratorRequest(
     }
     db.delete(tasksTable).where(eq(tasksTable.id, s1)).run();
     return json(res, { ok: true, deleted: s1 });
+  }
+
+  // GET /api/orchestrator/model-health
+  if (s0 === "model-health" && req.method === "GET") {
+    return json(res, { rows: getHealthSnapshot() });
+  }
+
+  // POST /api/orchestrator/model-health/reset  { model, agentType }
+  if (s0 === "model-health" && s1 === "reset" && req.method === "POST") {
+    const body = await parseBody(req) as Record<string, string>;
+    if (!body.model || !body.agentType) return error(res, "model and agentType required", 400);
+    resetCircuit(body.model, body.agentType);
+    return json(res, { ok: true });
+  }
+
+  // POST /api/orchestrator/model-health/override  { model, agentType, override }
+  if (s0 === "model-health" && s1 === "override" && req.method === "POST") {
+    const body = await parseBody(req) as Record<string, string>;
+    if (!body.model || !body.agentType) return error(res, "model and agentType required", 400);
+    setManualOverride(body.model, body.agentType, body.override ?? null);
+    return json(res, { ok: true });
   }
 
   return error(res, "Unknown orchestrator endpoint", 404);

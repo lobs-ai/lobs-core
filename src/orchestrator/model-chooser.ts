@@ -13,7 +13,7 @@ export type ModelTier = "micro" | "small" | "medium" | "standard" | "strong";
 
 // ── Tier-based model chains (fallbacks when agent config doesn't specify) ─────
 
-const TIER_MODELS: Record<ModelTier, string[]> = {
+export const TIER_MODELS: Record<ModelTier, string[]> = {
   micro: [
     "lmstudio/qwen/qwen3.5-35b-a3b",
     "anthropic/claude-haiku-4-5",

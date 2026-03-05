@@ -8,8 +8,8 @@ import { tasks, projects, workerRuns } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 import { log } from "../util/logger.js";
 
-const GATEWAY_PORT = process.env.OPENCLAW_PORT ?? "4152";
-const GATEWAY_TOKEN = process.env.OPENCLAW_AUTH_TOKEN ?? process.env.AUTH_TOKEN ?? "";
+import { getGatewayConfig } from "./control-loop.js";
+
 const SINK_SESSION_KEY = "agent:sink:paw-orchestrator-v2";
 
 interface TriagePayload {
@@ -28,11 +28,12 @@ interface TriagePayload {
  */
 async function collectWorkerOutput(sessionKey: string): Promise<string> {
   try {
-    const response = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/tools/invoke`, {
+    const { port, token } = getGatewayConfig();
+    const response = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${GATEWAY_TOKEN}`,
+        "Authorization": `Bearer ${token}`,
       },
       body: JSON.stringify({
         tool: "sessions_history",
@@ -115,11 +116,12 @@ export async function triageWorkerCompletion(
   const triagePrompt = buildTriagePrompt(payload);
 
   try {
-    const response = await fetch(`http://127.0.0.1:${GATEWAY_PORT}/tools/invoke`, {
+    const { port, token } = getGatewayConfig();
+    const response = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${GATEWAY_TOKEN}`,
+        "Authorization": `Bearer ${token}`,
       },
       body: JSON.stringify({
         tool: "sessions_spawn",

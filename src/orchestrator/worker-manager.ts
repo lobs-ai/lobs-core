@@ -7,6 +7,7 @@ import { eq, and, isNull } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { workerRuns, agentStatus as agentStatusTable } from "../db/schema.js";
 import { log } from "../util/logger.js";
+import { recordRunOutcome } from "./model-health.js";
 
 export const DEFAULT_MAX_WORKERS = 5;
 
@@ -188,6 +189,16 @@ export function recordWorkerEnd(opts: {
         },
       })
       .run();
+
+    // ── Circuit breaker: record outcome for model health ──────────────────
+    if (opts.agentType) {
+      // Fetch model from the worker_run row (stored at spawn time)
+      const wr = db.select().from(workerRuns).where(eq(workerRuns.workerId, opts.workerId)).get();
+      const model = opts.model ?? (wr as any)?.model;
+      if (model) {
+        recordRunOutcome(model, opts.agentType, opts.succeeded, opts.summary ?? '');
+      }
+    }
   } catch (e) {
     log().error(`[WORKER_MANAGER] recordWorkerEnd error: ${e}`);
   }

@@ -34,12 +34,17 @@ import {
   detectStaleWorkers,
   forceTerminateWorker,
 } from "./worker-manager.js";
-import { chooseModel, resolveTaskTier } from "./model-chooser.js";
+import { chooseModel, resolveTaskTier, TIER_MODELS } from "./model-chooser.js";
+import { chooseHealthyModel } from "./model-health.js";
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let executor: WorkflowExecutor | null = null;
 let gatewayPort: number = 18789;
 let gatewayToken: string = "";
+
+export function getGatewayConfig(): { port: number; token: string } {
+  return { port: gatewayPort, token: gatewayToken };
+}
 let isFirstTick = true;
 
 
@@ -447,10 +452,24 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
     : "";
   const finalPrompt = taskPrompt + gitReminder;
 
+  // ── Circuit-breaker-aware model selection ────────────────────────────────
   const modelChoice = req.modelTier
     ? chooseModel(req.modelTier, req.agentType)
     : chooseModel("standard", req.agentType);
-  const model = modelChoice.model;
+
+  // Build fallback chain: primary model from tier config + any tier-level alternatives
+  const primaryModel = modelChoice.model;
+  const tierKey = (modelChoice.tier ?? "standard") as keyof typeof TIER_MODELS;
+  const tierFallbacks = (TIER_MODELS[tierKey] ?? []).filter((m: string) => m !== primaryModel);
+  const fallbackChain = [primaryModel, ...tierFallbacks];
+
+  const { model, degraded: circuitDegraded } = req.agentType
+    ? chooseHealthyModel(fallbackChain, req.agentType)
+    : { model: primaryModel, degraded: false };
+
+  if (circuitDegraded) {
+    log().warn(`[SPAWN] All models circuit-open for ${req.agentType}; degrading to ${model}`);
+  }
 
   // ── Spawn count guard ────────────────────────────────────────────────────
   if (req.taskId) {

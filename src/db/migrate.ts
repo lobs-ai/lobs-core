@@ -623,4 +623,27 @@ export function runMigrations(db: PawDB): void {
   try { db.run(sql`ALTER TABLE tasks ADD COLUMN scheduled_end TEXT`); } catch {}
   try { db.run(sql`ALTER TABLE tasks ADD COLUMN calendar_event_id TEXT`); } catch {}
   try { db.run(sql`ALTER TABLE tasks ADD COLUMN actual_minutes INTEGER`); } catch {}
+
+  // ── model_health: circuit breaker per (model, agent_type) ──────────────────
+  db.run(sql`CREATE TABLE IF NOT EXISTS model_health (
+    model                TEXT NOT NULL,
+    agent_type           TEXT NOT NULL,
+    state                TEXT NOT NULL DEFAULT 'closed',
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    total_failures       INTEGER NOT NULL DEFAULT 0,
+    total_runs           INTEGER NOT NULL DEFAULT 0,
+    last_failure_at      TEXT,
+    last_success_at      TEXT,
+    opened_at            TEXT,
+    recovery_after       TEXT,
+    last_error_summary   TEXT,
+    manual_override      TEXT,
+    created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (model, agent_type)
+  )`);
+  try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_model_health_state ON model_health(state)`); } catch {}
 }
+
+// ── Model Health circuit breaker table ──────────────────────────────────────
+// Added: 2026-03-04 — tracks (model, agent_type) circuit state for dispatch routing
