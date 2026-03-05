@@ -36,6 +36,51 @@ export const TIER_MODELS: Record<ModelTier, string[]> = {
   ],
 };
 
+/**
+ * Per-agent-type fallback chains for circuit-breaker routing.
+ *
+ * Ordered from cheapest/preferred → more capable/expensive.
+ * When the preferred model is OPEN (circuit breaker), the next entry is tried.
+ * These chains intentionally cross tier boundaries — e.g., a programmer task
+ * prefers local qwen (cheap/micro) but escalates to codex or claude when OPEN.
+ *
+ * Used by chooseHealthyModel() in model-health.ts as the authoritative
+ * fallback order. The within-tier TIER_MODELS fallbacks are only used when no
+ * agent-type chain is defined here.
+ */
+export const AGENT_FALLBACK_CHAINS: Record<string, string[]> = {
+  programmer: [
+    "lmstudio/qwen/qwen3.5-35b-a3b",    // tier: micro — local, cheap
+    "openai-codex/gpt-5.3-codex",         // tier: standard — cloud fallback
+    "anthropic/claude-sonnet-4-6",         // tier: standard — final fallback
+  ],
+  architect: [
+    "anthropic/claude-opus-4-6",           // tier: strong — best for design
+    "openai-codex/gpt-5.3-codex",          // tier: standard — fallback
+    "anthropic/claude-sonnet-4-6",         // tier: standard — final fallback
+  ],
+  reviewer: [
+    "openai-codex/gpt-5.3-codex",         // tier: standard — preferred
+    "anthropic/claude-sonnet-4-6",         // tier: standard — fallback
+    "anthropic/claude-opus-4-6",           // tier: strong — final fallback
+  ],
+  researcher: [
+    "openai-codex/gpt-5.3-codex",
+    "anthropic/claude-sonnet-4-6",
+    "anthropic/claude-opus-4-6",
+  ],
+  writer: [
+    "anthropic/claude-sonnet-4-6",        // tier: small — preferred
+    "openai-codex/gpt-5.3-codex",
+    "anthropic/claude-opus-4-6",
+  ],
+  "inbox-responder": [
+    "lmstudio/qwen/qwen3.5-35b-a3b",     // tier: micro — cheapest
+    "anthropic/claude-haiku-4-5",
+    "anthropic/claude-sonnet-4-6",
+  ],
+};
+
 /** Per-agent-type default tier. */
 const AGENT_TIER_DEFAULTS: Record<string, ModelTier> = {
   programmer: "standard",
@@ -113,6 +158,37 @@ export function chooseModel(
   return { model, tier: effectiveTier, source: "tier-default" };
 }
 
+/**
+ * Build the full fallback chain for a given model + agent type.
+ *
+ * Strategy:
+ * 1. Use AGENT_FALLBACK_CHAINS[agentType] if defined (cross-tier, ordered by preference).
+ *    - If preferred model is already first in chain, return as-is.
+ *    - If preferred model is elsewhere in chain, move it to front.
+ *    - If preferred model is not in chain at all, prepend it.
+ * 2. Fall back to [preferredModel, ...TIER_MODELS[tier]] if no agent chain.
+ *
+ * The result is the ordered list of models to attempt for health-aware dispatch.
+ */
+export function buildFallbackChain(
+  preferredModel: string,
+  tier: ModelTier,
+  agentType?: string,
+): string[] {
+  if (agentType && AGENT_FALLBACK_CHAINS[agentType]) {
+    const chain = AGENT_FALLBACK_CHAINS[agentType];
+    // If preferred model matches chain head, use chain as-is
+    if (chain[0] === preferredModel) return chain;
+    // Move preferred model to front; keep rest of chain
+    const rest = chain.filter(m => m !== preferredModel);
+    return [preferredModel, ...rest];
+  }
+  // No agent-specific chain — use tier fallbacks
+  const tierModels = TIER_MODELS[tier] ?? TIER_MODELS.standard;
+  const tierFallbacks = tierModels.filter(m => m !== preferredModel);
+  return [preferredModel, ...tierFallbacks];
+}
+
 function resolveTier(tier?: string, agentType?: string): ModelTier {
   if (tier && isValidTier(tier)) return tier as ModelTier;
   if (agentType && agentType in AGENT_TIER_DEFAULTS) return AGENT_TIER_DEFAULTS[agentType];
@@ -160,3 +236,29 @@ export function resolveModelForTier(tier: ModelTier, agentType?: string): string
   const { model } = chooseModel(tier, agentType);
   return model ?? null;
 }
+
+// ── Circuit-breaker-aware model selection ────────────────────────────────────
+
+import { chooseHealthyModel as _chooseHealthyModel, buildFallbackChain as _chainHelper } from "../services/circuit-breaker.js";
+
+/**
+ * Choose the healthiest model for a given tier + agent type, skipping any
+ * open-circuit breaker models.
+ *
+ * @param tier        Agent model tier
+ * @param agentType   Agent role (e.g., "programmer")
+ * @param taskType    Task type for per-bucket tracking (defaults to agentType)
+ * @returns           Model string, or null if all are open (caller should fall back)
+ */
+export function chooseHealthyModelForAgent(
+  tier: ModelTier | string | undefined,
+  agentType: string | undefined,
+  taskType?: string,
+): string | null {
+  const choice = chooseModel(tier as ModelTier | undefined, agentType);
+  const chain = buildFallbackChain(choice.model, choice.tier, agentType);
+  return _chooseHealthyModel(chain, taskType ?? agentType ?? "__global__");
+}
+
+// Re-export the low-level helper for callers that already have a chain
+export { _chooseHealthyModel as chooseHealthyModel };

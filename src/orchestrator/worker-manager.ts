@@ -196,7 +196,22 @@ export function recordWorkerEnd(opts: {
       const wr = db.select().from(workerRuns).where(eq(workerRuns.workerId, opts.workerId)).get();
       const model = opts.model ?? (wr as any)?.model;
       if (model) {
-        recordRunOutcome(model, opts.agentType, opts.succeeded, opts.summary ?? '');
+        // Orphan exclusion: runs that lived >= 60s before being marked failed are likely
+        // restart orphans (the agent session was killed by a gateway restart, not a model
+        // bug). Don't penalise the model circuit breaker for these.
+        const durationSec = opts.durationSeconds
+          ?? ((wr as any)?.startedAt
+              ? (Date.now() - new Date((wr as any).startedAt).getTime()) / 1000
+              : null);
+        const isOrphan = !opts.succeeded && durationSec != null && durationSec >= 60;
+        if (isOrphan) {
+          log().info(
+            `[WORKER_MANAGER] Skipping circuit-breaker for ${model}/${opts.agentType}: ` +
+            `orphan run (duration=${Math.round(durationSec)}s >= 60s)`
+          );
+        } else {
+          recordRunOutcome(model, opts.agentType, opts.succeeded, opts.summary ?? '');
+        }
       }
     }
   } catch (e) {
@@ -251,9 +266,23 @@ export function forceTerminateWorker(workerId: string, reason = "timeout"): void
     }
 
     // Feed timeout back into model health circuit breaker
+    // Orphan exclusion: if the worker had been running >= 60s it was likely killed by a
+    // gateway restart (orphan), not a genuine model failure. Don't open the circuit.
     if (model && agentType) {
-      recordRunOutcome(model, agentType, false, `worker terminated: ${reason}`);
-      log().warn(`[WORKER_MANAGER] Recorded failure for circuit breaker: model=${model} agentType=${agentType} reason=${reason}`);
+      const startedAt = (workerRow as any)?.startedAt;
+      const durationSec = startedAt
+        ? (Date.now() - new Date(startedAt).getTime()) / 1000
+        : null;
+      const isOrphan = durationSec != null && durationSec >= 60;
+      if (isOrphan) {
+        log().info(
+          `[WORKER_MANAGER] Skipping circuit-breaker for ${model}/${agentType}: ` +
+          `orphan termination (duration=${Math.round(durationSec)}s >= 60s, reason=${reason})`
+        );
+      } else {
+        recordRunOutcome(model, agentType, false, `worker terminated: ${reason}`);
+        log().warn(`[WORKER_MANAGER] Recorded failure for circuit breaker: model=${model} agentType=${agentType} reason=${reason}`);
+      }
     }
 
     log().warn(`[WORKER_MANAGER] Force-terminated worker ${workerId}: ${reason}`);

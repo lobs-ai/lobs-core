@@ -35,7 +35,7 @@ import {
   detectStaleWorkers,
   forceTerminateWorker,
 } from "./worker-manager.js";
-import { chooseModel, resolveTaskTier, TIER_MODELS } from "./model-chooser.js";
+import { chooseModel, resolveTaskTier, TIER_MODELS, buildFallbackChain } from "./model-chooser.js";
 import { chooseHealthyModel } from "./model-health.js";
 
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -464,11 +464,9 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
     ? chooseModel(req.modelTier, req.agentType)
     : chooseModel("standard", req.agentType);
 
-  // Build fallback chain: primary model from tier config + any tier-level alternatives
+  // Build fallback chain: uses AGENT_FALLBACK_CHAINS if available, else tier-level alternatives
   const primaryModel = modelChoice.model;
-  const tierKey = (modelChoice.tier ?? "standard") as keyof typeof TIER_MODELS;
-  const tierFallbacks = (TIER_MODELS[tierKey] ?? []).filter((m: string) => m !== primaryModel);
-  const fallbackChain = [primaryModel, ...tierFallbacks];
+  const fallbackChain = buildFallbackChain(primaryModel, modelChoice.tier, req.agentType);
 
   const { model, degraded: circuitDegraded } = req.agentType
     ? chooseHealthyModel(fallbackChain, req.agentType)

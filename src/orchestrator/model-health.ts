@@ -102,11 +102,23 @@ function resolveState(row: ModelHealthRow): CircuitState {
   return row.state;
 }
 
-function openCircuit(row: ModelHealthRow, recoveryMinutes: number): void {
+/**
+ * Exponential cooldown schedule based on consecutive failures.
+ * 3 failures → 30 min, 4 → 1h, 5 → 3h, 6+ → 12h
+ */
+function cooldownMinutes(consecutiveFailures: number): number {
+  if (consecutiveFailures <= 3) return 30;
+  if (consecutiveFailures === 4) return 60;
+  if (consecutiveFailures === 5) return 180;
+  return 720; // 12 hours
+}
+
+function openCircuit(row: ModelHealthRow, _recoveryMinutes: number): void {
   const now = new Date();
+  const minutes = cooldownMinutes(row.consecutiveFailures);
   row.state = "open";
   row.openedAt = now.toISOString();
-  row.recoveryAfter = new Date(now.getTime() + recoveryMinutes * 60_000).toISOString();
+  row.recoveryAfter = new Date(now.getTime() + minutes * 60_000).toISOString();
   save(row);
   log().warn("[MODEL_HEALTH] ⚠️  Circuit OPENED: " + row.model + "/" + row.agentType +
     " (failures=" + row.consecutiveFailures + ", recovery_after=" + row.recoveryAfter + ")");
@@ -143,6 +155,12 @@ export function recordRunOutcome(
         row.recoveryAfter = null;
         save(row);
         log().info("[MODEL_HEALTH] ✅ Circuit CLOSED: " + model + "/" + agentType + " (probe succeeded)");
+        try {
+          const db = getDb() as any;
+          db.prepare(
+            "INSERT INTO control_loop_events (event_type, payload, created_at) VALUES ('circuit_closed', ?, ?)"
+          ).run(JSON.stringify({ model, agent_type: agentType, reason: "probe_success" }), new Date().toISOString());
+        } catch { /* non-fatal */ }
       } else {
         save(row);
       }
