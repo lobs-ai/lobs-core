@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { eq, and, inArray, gte, lte, desc, sql } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { agentReflections, agentIdentityVersions, systemSweeps, inboxItems, workerRuns, tasks as tasksTable, projects as projectsTable, orchestratorSettings } from "../db/schema.js";
+import { inferProjectId } from "../util/project-inference.js";
 import { log } from "../util/logger.js";
 
 const REFLECTION_AGENTS = ["programmer", "researcher", "writer", "architect", "reviewer"];
@@ -489,6 +490,7 @@ Reflection ID: ${reflectionId}`;
         status: "proposed",
         agent: agentType,
         modelTier: "standard",
+        projectId: inferProjectId(title, suggestion),
         notes: `[Proposed from ${agentType} reflection, size=${size}]\n\n${suggestion}`,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -528,14 +530,14 @@ Reflection ID: ${reflectionId}`;
     if (activated.length > 0) {
       lines.push("**Accepted (activated):**");
       for (const t of activated) {
-        lines.push(`- "${(t as Record<string, unknown>).title}" (agent=${(t as Record<string, unknown>).agent})`);
+        lines.push(`- "${t.title}" (agent=${t.agent ?? "unassigned"})`);
       }
     }
 
     if (completed.length > 0) {
       lines.push("\n**Completed (from past suggestions):**");
       for (const t of completed) {
-        lines.push(`- "${(t as Record<string, unknown>).title}" (agent=${(t as Record<string, unknown>).agent})`);
+        lines.push(`- "${t.title}" (agent=${t.agent ?? "unassigned"})`);
       }
     }
 
