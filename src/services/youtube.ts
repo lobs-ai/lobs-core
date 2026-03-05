@@ -45,36 +45,43 @@ async function gatewayInvoke(tool: string, args: Record<string, unknown>): Promi
 }
 
 async function spawnAndWait(task: string, timeoutMs = 180000, agentId = "main"): Promise<string> {
+  // Spawn a persistent session, send task, read full response
   const spawnResult = await gatewayInvoke("sessions_spawn", {
-    task,
-    mode: "run",
+    task: "You are a YouTube video analyzer. Wait for instructions.",
+    mode: "session",
     agentId,
     thinking: "off",
-    runTimeoutSeconds: Math.floor(timeoutMs / 1000),
-    cleanup: "keep",
+    timeoutSeconds: Math.floor(timeoutMs / 1000),
   });
-  const sessionKey = spawnResult.childSessionKey;
-  if (!sessionKey) throw new Error("No session key from spawn");
 
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 5000));
-    try {
-      const history = await gatewayInvoke("sessions_history", { sessionKey, limit: 5, includeTools: false });
-      const messages = history?.messages ?? history ?? [];
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const msg = messages[i];
-        if (msg.role === "assistant") {
-          const text = typeof msg.content === "string" ? msg.content
-            : Array.isArray(msg.content) ? msg.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
-            : "";
-          if (text.trim() && text.trim().length > 50 && msg.stopReason === "stop") return text;
-        }
-      }
-    } catch {}
+  const sessionKey = spawnResult?.childSessionKey ?? spawnResult?.sessionKey;
+  if (!sessionKey) {
+    log().info("[YOUTUBE] spawnResult: " + JSON.stringify(spawnResult).slice(0, 500));
+    throw new Error("No session key from spawn");
   }
-  throw new Error("Session timed out");
+
+  // Send the actual task and wait for response  
+  const sendResult = await gatewayInvoke("sessions_send", {
+    sessionKey,
+    message: task,
+    timeoutSeconds: Math.floor(timeoutMs / 1000),
+  });
+
+  // Extract response text
+  const response = sendResult?.response ?? sendResult?.text ?? sendResult?.content ?? "";
+  const text = typeof response === "string" ? response
+    : Array.isArray(response) ? response.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
+    : JSON.stringify(response);
+
+  if (!text || text.length < 50) {
+    log().info("[YOUTUBE] sendResult: " + JSON.stringify(sendResult).slice(0, 500));
+    throw new Error("Session returned insufficient response (" + text.length + " chars)");
+  }
+
+  log().info("[YOUTUBE] Got " + text.length + " chars from session");
+  return text;
 }
+
 
 function chunkTranscript(transcript: string): string[] {
   const words = transcript.split(/\s+/);
