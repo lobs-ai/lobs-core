@@ -1,18 +1,28 @@
 /**
  * YouTube Ingestion Service — download, transcribe, chunk, summarize, reflect.
+ * 
+ * Architecture: crash-resilient pipeline.
+ * - Download+transcribe runs as a detached process writing to /tmp/yt-ingest-{id}.json
+ * - A recovery loop (every 30s) picks up completed result files and resumes processing
+ * - Each stage checks DB state and resumes from where it left off
+ * - Gateway restarts don't lose progress — detached processes survive, results persist on disk
  */
 
 import { randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
 import { eq, desc } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { youtubeVideos } from "../db/schema.js";
 import { log } from "../util/logger.js";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync, unlinkSync } from "node:fs";
+import { spawn } from "node:child_process";
 
 const INGESTER_PATH = `${process.env.HOME}/lobs-youtube-ingester/ingest.py`;
 const PYTHON = `${process.env.HOME}/lobs-meeting-transcriber/.venv/bin/python3`;
-const CHUNK_SIZE = 1500; // ~tokens per chunk
+const CHUNK_SIZE = 1500;
+
+function resultPath(id: string) { return `/tmp/yt-ingest-${id}.json`; }
+function resultTmpPath(id: string) { return `/tmp/yt-ingest-${id}.json.tmp`; }
+function errPath(id: string) { return `/tmp/yt-ingest-${id}.err`; }
 
 function gatewayCfg(): { port: number; token: string } {
   const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
@@ -42,7 +52,6 @@ async function spawnAndWait(task: string, timeoutMs = 180000): Promise<string> {
     runTimeoutSeconds: Math.floor(timeoutMs / 1000),
     cleanup: "keep",
   });
-
   const sessionKey = spawnResult.childSessionKey;
   if (!sessionKey) throw new Error("No session key from spawn");
 
@@ -58,7 +67,6 @@ async function spawnAndWait(task: string, timeoutMs = 180000): Promise<string> {
           const text = typeof msg.content === "string" ? msg.content
             : Array.isArray(msg.content) ? msg.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
             : "";
-          // Skip short garbage responses ("OK", acknowledgments) — need substantive content
           if (text.trim() && text.trim().length > 50 && msg.stopReason === "stop") return text;
         }
       }
@@ -76,94 +84,158 @@ function chunkTranscript(transcript: string): string[] {
   return chunks;
 }
 
-export class YouTubeService {
-  /** Submit a URL for ingestion. Returns immediately, processing is async. */
-  submit(url: string, projectId?: string): string {
-    const db = getDb();
-    const id = randomUUID();
-    db.insert(youtubeVideos).values({
-      id,
-      videoUrl: url,
-      status: "pending",
-      projectId: projectId ?? null,
-    }).run();
+// ─── Recovery lock ───
+let recoveryRunning = false;
+let recoveryTimer: ReturnType<typeof setInterval> | null = null;
+// Track which videos are currently being AI-processed to avoid double-processing
+const aiProcessingSet = new Set<string>();
 
-    // Fire and forget
-    this.process(id).catch(e => log().error(`[YOUTUBE] Process failed for ${id}: ${e.message}`));
-    return id;
+export class YouTubeService {
+
+  /** Start the recovery loop — call once on plugin init. */
+  startRecoveryLoop() {
+    if (recoveryTimer) return;
+    setTimeout(() => this.recoverIncomplete(), 15000);
+    recoveryTimer = setInterval(() => this.recoverIncomplete(), 30000);
+    log().info("[YOUTUBE] Recovery loop started (30s interval)");
   }
 
-  /** Full ingestion pipeline. */
-  async process(id: string): Promise<void> {
-    const db = getDb();
+  stopRecoveryLoop() {
+    if (recoveryTimer) { clearInterval(recoveryTimer); recoveryTimer = null; }
+  }
 
-    const updateStatus = (status: string, extra: Record<string, any> = {}) => {
-      db.update(youtubeVideos)
-        .set({ status, updatedAt: new Date().toISOString(), ...extra })
-        .where(eq(youtubeVideos.id, id))
-        .run();
-    };
-
+  /** Check for videos that need attention and resume them. */
+  async recoverIncomplete() {
+    if (recoveryRunning) return;
+    recoveryRunning = true;
     try {
-      const video = db.select().from(youtubeVideos).where(eq(youtubeVideos.id, id)).get();
-      if (!video) return;
+      const db = getDb();
 
-      let transcript = video.transcript ?? "";
-      let title = video.title ?? "";
-      let channel = video.channel ?? "";
-      let chunks: string[];
-
-      // Skip download+transcribe if transcript already exists (reprocess case)
-      if (transcript && transcript.length > 10) {
-        log().info(`[YOUTUBE] Reprocessing "${title}" — skipping download/transcribe`);
-        updateStatus("processing");
-        chunks = video.chunks ? JSON.parse(video.chunks as string) : chunkTranscript(transcript);
-      } else {
-
-      // Step 1: Download + Transcribe
-      updateStatus("downloading");
-      log().info(`[YOUTUBE] Downloading + transcribing: ${video.videoUrl}`);
-
-      // Spawn detached so gateway restarts don't kill transcription
-      const outFile = `/tmp/yt-ingest-${id}.json`;
-      const errFile = `/tmp/yt-ingest-${id}.err`;
-      const { spawn: spawnProc } = await import("node:child_process");
-      const safeUrl = video.videoUrl.replace(/'/g, "'\\''");
-      const child = spawnProc("/bin/sh", ["-c",
-        `${PYTHON} ${INGESTER_PATH} '${safeUrl}' > '${outFile}.tmp' 2>'${errFile}' && mv '${outFile}.tmp' '${outFile}'`
-      ], { detached: true, stdio: "ignore" });
-      child.unref();
-      log().info(`[YOUTUBE] Spawned detached ingester pid=${child.pid} for ${id}`);
-
-      // Poll for result file (every 10s, up to 20min)
-      const fs = await import("node:fs");
-      const deadline = Date.now() + 1200000;
-      while (Date.now() < deadline) {
-        await new Promise(r => setTimeout(r, 10000));
-        if (fs.existsSync(outFile)) break;
-        // Check if process died with error
-        if (fs.existsSync(errFile) && !fs.existsSync(`${outFile}.tmp`)) {
-          try { process.kill(child.pid!, 0); } catch {
-            const errContent = fs.readFileSync(errFile, "utf-8").trim();
-            if (errContent) throw new Error(`Ingestion failed: ${errContent}`);
+      // 1. Check "downloading" videos for completed result files
+      const downloading = db.select().from(youtubeVideos)
+        .where(eq(youtubeVideos.status, "downloading")).all();
+      for (const video of downloading) {
+        const outFile = resultPath(video.id);
+        if (existsSync(outFile)) {
+          log().info(`[YOUTUBE] Recovery: found completed result for "${video.title || video.id.slice(0,8)}"`);
+          try {
+            this.ingestResultFile(video.id, outFile);
+            // Don't await AI processing here — let it run async
+            if (!aiProcessingSet.has(video.id)) {
+              aiProcessingSet.add(video.id);
+              this.processAI(video.id)
+                .catch(e => {
+                  log().error(`[YOUTUBE] AI processing failed for ${video.id}: ${e.message}`);
+                  db.update(youtubeVideos)
+                    .set({ status: "failed", error: e.message, updatedAt: new Date().toISOString() })
+                    .where(eq(youtubeVideos.id, video.id)).run();
+                })
+                .finally(() => aiProcessingSet.delete(video.id));
+            }
+          } catch (e: any) {
+            log().error(`[YOUTUBE] Recovery ingest failed for ${video.id}: ${e.message}`);
+            db.update(youtubeVideos)
+              .set({ status: "failed", error: e.message, updatedAt: new Date().toISOString() })
+              .where(eq(youtubeVideos.id, video.id)).run();
+          }
+        } else {
+          const tmpFile = resultTmpPath(video.id);
+          const ef = errPath(video.id);
+          if (!existsSync(tmpFile) && !existsSync(ef)) {
+            const age = Date.now() - new Date(video.updatedAt ?? video.createdAt).getTime();
+            if (age > 120000) {
+              log().info(`[YOUTUBE] Recovery: restarting stale download for ${video.id.slice(0,8)}`);
+              this.spawnIngester(video.id, video.videoUrl);
+            }
+          } else if (existsSync(ef) && !existsSync(tmpFile)) {
+            const errContent = readFileSync(ef, "utf-8").trim();
+            if (errContent) {
+              log().error(`[YOUTUBE] Recovery: ingester crashed for ${video.id.slice(0,8)}: ${errContent.slice(0,200)}`);
+              db.update(youtubeVideos)
+                .set({ status: "failed", error: errContent, updatedAt: new Date().toISOString() })
+                .where(eq(youtubeVideos.id, video.id)).run();
+              try { unlinkSync(ef); } catch {}
+            }
           }
         }
       }
-      if (!fs.existsSync(outFile)) throw new Error("Ingestion timed out (20min)");
 
-      const rawOut = fs.readFileSync(outFile, "utf-8");
-      const resultLine = rawOut.split("\n").find((l: string) => l.startsWith("RESULT:"));
-      if (!resultLine) throw new Error(`No RESULT line in output: ${rawOut.slice(0, 200)}`);
-      let result: any;
-      try { result = JSON.parse(resultLine.slice(7)); }
-      catch { throw new Error("Failed to parse result JSON"); }
-      try { fs.unlinkSync(outFile); fs.unlinkSync(errFile); } catch {}
+      // 2. Check "processing" videos that have transcript but no summary (stuck)
+      const processing = db.select().from(youtubeVideos)
+        .where(eq(youtubeVideos.status, "processing")).all();
+      for (const video of processing) {
+        if (video.transcript && video.transcript.length > 10 && !video.videoSummary && !aiProcessingSet.has(video.id)) {
+          const age = Date.now() - new Date(video.updatedAt ?? video.createdAt).getTime();
+          if (age > 120000) {
+            log().info(`[YOUTUBE] Recovery: resuming AI for "${video.title || video.id.slice(0,8)}"`);
+            aiProcessingSet.add(video.id);
+            this.processAI(video.id)
+              .catch(e => {
+                log().error(`[YOUTUBE] AI recovery failed for ${video.id}: ${e.message}`);
+                getDb().update(youtubeVideos)
+                  .set({ status: "failed", error: e.message, updatedAt: new Date().toISOString() })
+                  .where(eq(youtubeVideos.id, video.id)).run();
+              })
+              .finally(() => aiProcessingSet.delete(video.id));
+          }
+        }
+      }
 
-        transcript = result.transcript;
-        title = result.title;
-        channel = result.channel;
+      // 3. Start pending videos (one at a time)
+      const activeCount = downloading.length + processing.filter(v => aiProcessingSet.has(v.id)).length;
+      if (activeCount === 0) {
+        const pending = db.select().from(youtubeVideos)
+          .where(eq(youtubeVideos.status, "pending")).all();
+        if (pending.length > 0) {
+          const video = pending[0];
+          log().info(`[YOUTUBE] Recovery: starting pending video ${video.id.slice(0,8)}`);
+          this.process(video.id).catch(e =>
+            log().error(`[YOUTUBE] Process failed for ${video.id}: ${e.message}`)
+          );
+        }
+      }
+    } catch (e: any) {
+      log().error(`[YOUTUBE] Recovery loop error: ${e.message}`);
+    } finally {
+      recoveryRunning = false;
+    }
+  }
 
-      updateStatus("transcribing", {
+  /** Spawn the detached ingester process. */
+  private spawnIngester(id: string, url: string) {
+    const db = getDb();
+    const outFile = resultPath(id);
+    const ef = errPath(id);
+    const safeUrl = url.replace(/'/g, "'\\''");
+
+    db.update(youtubeVideos)
+      .set({ status: "downloading", updatedAt: new Date().toISOString() })
+      .where(eq(youtubeVideos.id, id)).run();
+
+    const child = spawn("/bin/sh", ["-c",
+      `${PYTHON} ${INGESTER_PATH} '${safeUrl}' > '${outFile}.tmp' 2>'${ef}' && mv '${outFile}.tmp' '${outFile}'`
+    ], { detached: true, stdio: "ignore" });
+    child.unref();
+    log().info(`[YOUTUBE] Spawned detached ingester pid=${child.pid} for ${id.slice(0,8)}`);
+  }
+
+  /** Read a completed result file and write metadata + transcript to DB. */
+  private ingestResultFile(id: string, outFile: string) {
+    const db = getDb();
+    const rawOut = readFileSync(outFile, "utf-8");
+    const resultLine = rawOut.split("\n").find((l: string) => l.startsWith("RESULT:"));
+    if (!resultLine) throw new Error(`No RESULT line in output: ${rawOut.slice(0, 200)}`);
+
+    let result: any;
+    try { result = JSON.parse(resultLine.slice(7)); }
+    catch { throw new Error("Failed to parse result JSON"); }
+
+    const transcript = result.transcript;
+    const chunks = chunkTranscript(transcript);
+
+    db.update(youtubeVideos)
+      .set({
+        status: "processing",
         videoId: result.video_id,
         title: result.title,
         channel: result.channel,
@@ -172,58 +244,116 @@ export class YouTubeService {
         description: result.description,
         language: result.language,
         durationSeconds: result.duration_seconds,
-        transcript: result.transcript,
+        transcript,
         segments: JSON.stringify(result.segments),
-      });
+        chunks: JSON.stringify(chunks),
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(youtubeVideos.id, id)).run();
 
-      log().info(`[YOUTUBE] Transcribed "${title}" (${result.duration_seconds}s)`);
+    log().info(`[YOUTUBE] Ingested "${result.title}" (${result.duration_seconds}s, ${transcript.length} chars, ${chunks.length} chunks)`);
+    try { unlinkSync(outFile); } catch {}
+    try { unlinkSync(errPath(id)); } catch {}
+  }
 
-      // Step 2: Chunk
-        chunks = chunkTranscript(result.transcript);
-      updateStatus("processing", { chunks: JSON.stringify(chunks) });
-      }
+  /** Run AI summarization pipeline (resumable). */
+  async processAI(id: string): Promise<void> {
+    const db = getDb();
+    const video = db.select().from(youtubeVideos).where(eq(youtubeVideos.id, id)).get();
+    if (!video || !video.transcript) throw new Error("No transcript found");
 
+    const title = video.title ?? "Unknown";
+    const channel = video.channel ?? "Unknown";
+    const chunks: string[] = video.chunks ? JSON.parse(video.chunks as string) : chunkTranscript(video.transcript);
 
-      // Step 3: Summarize chunks
-      log().info(`[YOUTUBE] Summarizing ${chunks.length} chunks for "${title}"`);
-      const chunkSummaries: string[] = [];
-      for (let i = 0; i < chunks.length; i++) {
-        const summary = await spawnAndWait(
-          `Summarize this transcript chunk (${i + 1}/${chunks.length}) from the video "${title}" by ${channel}. ` +
-          `Extract key ideas, technical insights, and important statements. Be concise but thorough.\n\nCHUNK:\n${chunks[i]}`
-        );
-        chunkSummaries.push(summary);
-      }
+    // Resume chunk summaries from where we left off
+    let chunkSummaries: string[] = [];
+    if (video.chunkSummaries) {
+      try { chunkSummaries = JSON.parse(video.chunkSummaries as string); } catch {}
+    }
+
+    for (let i = chunkSummaries.length; i < chunks.length; i++) {
+      log().info(`[YOUTUBE] Summarizing chunk ${i + 1}/${chunks.length} for "${title}"`);
+      const summary = await spawnAndWait(
+        `Summarize this transcript chunk (${i + 1}/${chunks.length}) from the video "${title}" by ${channel}. ` +
+        `Extract key ideas, technical insights, and important statements. Be concise but thorough.\n\nCHUNK:\n${chunks[i]}`
+      );
+      chunkSummaries.push(summary);
+      // Save after each chunk for crash resilience
       db.update(youtubeVideos)
         .set({ chunkSummaries: JSON.stringify(chunkSummaries), updatedAt: new Date().toISOString() })
         .where(eq(youtubeVideos.id, id)).run();
+    }
 
-      // Step 4: Video summary
+    // Video summary
+    let videoSummary = video.videoSummary ?? "";
+    if (!videoSummary) {
       log().info(`[YOUTUBE] Generating video summary for "${title}"`);
-      const videoSummary = await spawnAndWait(
-        `Generate a comprehensive summary of this video.\n\n` +
-        `Title: ${title}\nChannel: ${channel}\n\n` +
-        `Structure your summary as:\n- Core topic\n- Key concepts and ideas\n- Important insights\n- Notable quotes or statements\n- Potential applications\n\n` +
+      videoSummary = await spawnAndWait(
+        `Generate a comprehensive summary of this video.\n\nTitle: ${title}\nChannel: ${channel}\n\n` +
+        `Structure: Core topic, Key concepts, Important insights, Notable quotes, Potential applications.\n\n` +
         `CHUNK SUMMARIES:\n${chunkSummaries.join("\n\n---\n\n")}`
       );
       db.update(youtubeVideos)
         .set({ videoSummary, updatedAt: new Date().toISOString() })
         .where(eq(youtubeVideos.id, id)).run();
+    }
 
-      // Step 5: Reflection
+    // Reflection
+    let reflection = video.reflection ?? "";
+    if (!reflection) {
       log().info(`[YOUTUBE] Generating reflection for "${title}"`);
-      const reflection = await spawnAndWait(
-        `Reflect on this video and extract insights relevant to building AI agent systems, ` +
-        `machine learning, system architecture, and software engineering.\n\n` +
+      reflection = await spawnAndWait(
+        `Reflect on this video and extract insights for building AI agent systems.\n\n` +
         `Title: ${title}\nChannel: ${channel}\n\n` +
-        `Consider:\n- Important ideas and their implications\n- Connections to AI agent architecture (multi-agent systems, orchestrators, tool use)\n` +
-        `- Contradictions or debates worth noting\n- New research directions suggested\n- Questions worth exploring further\n- Practical applications\n\n` +
+        `Consider: implications, connections to multi-agent architecture, debates, research directions, practical applications.\n\n` +
         `VIDEO SUMMARY:\n${videoSummary}\n\nKEY CHUNKS:\n${chunkSummaries.slice(0, 5).join("\n\n---\n\n")}`
       );
+    }
 
-      updateStatus("ready", { reflection });
-      log().info(`[YOUTUBE] ✅ Fully processed "${title}"`);
+    db.update(youtubeVideos)
+      .set({ status: "ready", reflection, updatedAt: new Date().toISOString() })
+      .where(eq(youtubeVideos.id, id)).run();
+    log().info(`[YOUTUBE] ✅ Fully processed "${title}"`);
+  }
 
+  /** Submit a URL for ingestion. */
+  submit(url: string, projectId?: string): string {
+    const db = getDb();
+    const id = randomUUID();
+    db.insert(youtubeVideos).values({
+      id, videoUrl: url, status: "pending", projectId: projectId ?? null,
+    }).run();
+    // Recovery loop will pick it up, but also fire immediately
+    this.process(id).catch(e => log().error(`[YOUTUBE] Process failed for ${id}: ${e.message}`));
+    return id;
+  }
+
+  /** Full ingestion pipeline. */
+  async process(id: string): Promise<void> {
+    const db = getDb();
+    const video = db.select().from(youtubeVideos).where(eq(youtubeVideos.id, id)).get();
+    if (!video) return;
+
+    try {
+      const transcript = video.transcript ?? "";
+      if (transcript && transcript.length > 10) {
+        // Reprocess: skip download, just re-run AI
+        log().info(`[YOUTUBE] Reprocessing "${video.title}" — skipping download/transcribe`);
+        db.update(youtubeVideos)
+          .set({ status: "processing", updatedAt: new Date().toISOString() })
+          .where(eq(youtubeVideos.id, id)).run();
+        if (!video.chunks) {
+          const chunks = chunkTranscript(transcript);
+          db.update(youtubeVideos)
+            .set({ chunks: JSON.stringify(chunks), updatedAt: new Date().toISOString() })
+            .where(eq(youtubeVideos.id, id)).run();
+        }
+        await this.processAI(id);
+      } else {
+        // Fresh: spawn detached ingester, recovery loop handles the rest
+        this.spawnIngester(id, video.videoUrl);
+      }
     } catch (e: any) {
       log().error(`[YOUTUBE] Failed for ${id}: ${e.message}`);
       db.update(youtubeVideos)

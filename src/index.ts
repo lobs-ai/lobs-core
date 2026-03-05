@@ -20,6 +20,7 @@ import { registerAgentEndHook } from "./hooks/agent-end.js";
 import { registerRestartContinuationHook } from "./hooks/restart-continuation.js";
 import { registerCircuitBreakerHooks } from "./hooks/circuit-breaker.js";
 import { startControlLoop, stopControlLoop } from "./orchestrator/control-loop.js";
+import { YouTubeService } from "./services/youtube.js";
 import { setLogger, log } from "./util/logger.js";
 import type { PawConfig } from "./util/types.js";
 
@@ -130,9 +131,11 @@ const pawPlugin = {
       id: "paw-orchestrator",
       start: () => {
         startControlLoop({} as any, scanInterval);
+        const ytSvc = new YouTubeService(); ytSvc.startRecoveryLoop(); (globalThis as any).__ytSvc = ytSvc;
       },
       stop: () => {
         stopControlLoop();
+        try { (globalThis as any).__ytSvc?.stopRecoveryLoop(); } catch {}
         closeDb();
       },
     });
