@@ -649,3 +649,34 @@ export const modelHealth = sqliteTable("model_health", {
 }, (t) => ({
   uniqModelAgent: uniqueIndex("model_health_model_agent").on(t.model, t.agentType),
 }));
+
+// ─── Meetings ────────────────────────────────────────────────────────────
+
+export const meetings = sqliteTable("meetings", {
+  id: id(),
+  title: text("title"),
+  filename: text("filename"),
+  language: text("language"),
+  durationSeconds: real("duration_seconds"),
+  transcript: text("transcript").notNull(),
+  segments: text("segments"),
+  participants: text("participants"),
+  projectId: text("project_id").references(() => projects.id),
+  meetingType: text("meeting_type").default("general"),
+  summary: text("summary"),
+  analysisStatus: text("analysis_status").default("pending"), // pending/processing/completed/failed
+  ...timestamps,
+});
+
+// ─── Meeting Action Items ───────────────────────────────────────────────
+
+export const meetingActionItems = sqliteTable("meeting_action_items", {
+  id: id(),
+  meetingId: text("meeting_id").notNull().references(() => meetings.id),
+  description: text("description").notNull(),
+  assignee: text("assignee"),          // name: "rafe", "lobs", "alex", etc.
+  status: text("status").notNull().default("pending"), // pending/in_progress/completed
+  dueDate: text("due_date"),
+  taskId: text("task_id").references(() => tasks.id),  // linked PAW task if auto-created
+  ...timestamps,
+});

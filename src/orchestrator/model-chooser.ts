@@ -50,7 +50,6 @@ export const TIER_MODELS: Record<ModelTier, string[]> = {
  */
 export const AGENT_FALLBACK_CHAINS: Record<string, string[]> = {
   programmer: [
-    "lmstudio/qwen/qwen3.5-35b-a3b",    // tier: micro — local, cheap
     "openai-codex/gpt-5.3-codex",         // tier: standard — cloud fallback
     "anthropic/claude-sonnet-4-6",         // tier: standard — final fallback
   ],

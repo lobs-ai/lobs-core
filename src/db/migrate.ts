@@ -644,6 +644,43 @@ export function runMigrations(db: PawDB): void {
   )`);
   try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_model_health_state ON model_health(state)`); } catch {}
 
+  // ── Meetings ─────────────────────────────────────────────────────────────
+  db.run(sql`CREATE TABLE IF NOT EXISTS meetings (
+    id               TEXT PRIMARY KEY,
+    title            TEXT,
+    filename         TEXT,
+    language         TEXT,
+    duration_seconds REAL,
+    transcript       TEXT NOT NULL,
+    segments         TEXT,
+    participants     TEXT,
+    project_id       TEXT REFERENCES projects(id),
+    meeting_type     TEXT DEFAULT 'general',
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_meetings_project_id ON meetings(project_id)`); } catch {}
+  try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_meetings_created_at ON meetings(created_at)`); } catch {}
+
+  // ── Meeting Action Items ──────────────────────────────────────────────
+  db.run(sql`CREATE TABLE IF NOT EXISTS meeting_action_items (
+    id               TEXT PRIMARY KEY,
+    meeting_id       TEXT NOT NULL REFERENCES meetings(id),
+    description      TEXT NOT NULL,
+    assignee         TEXT,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    due_date         TEXT,
+    task_id          TEXT REFERENCES tasks(id),
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_action_items_meeting ON meeting_action_items(meeting_id)`); } catch {}
+  try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_action_items_assignee ON meeting_action_items(assignee)`); } catch {}
+
+  // ── Add summary + analysis_status to meetings ────────────────────────
+  try { db.run(sql`ALTER TABLE meetings ADD COLUMN summary TEXT`); } catch {}
+  try { db.run(sql`ALTER TABLE meetings ADD COLUMN analysis_status TEXT DEFAULT 'pending'`); } catch {}
+
   // ── Seed default circuit_breaker settings (INSERT OR IGNORE — safe to run on every migration) ──
   try {
     db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)
@@ -674,3 +711,4 @@ export function runMigrations(db: PawDB): void {
 
 // ── Model Health circuit breaker table ──────────────────────────────────────
 // Added: 2026-03-04 — tracks (model, agent_type) circuit state for dispatch routing
+
