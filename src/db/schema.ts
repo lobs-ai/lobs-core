@@ -254,6 +254,7 @@ export const agentReflections = sqliteTable("agent_reflections", {
   inefficiencies: text("inefficiencies", { mode: "json" }),
   systemRisks: text("system_risks", { mode: "json" }),
   missedOpportunities: text("missed_opportunities", { mode: "json" }),
+  newIdeas: text("new_ideas", { mode: "json" }),
   identityAdjustments: text("identity_adjustments", { mode: "json" }),
   createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
   completedAt: text("completed_at"),

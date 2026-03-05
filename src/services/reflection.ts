@@ -224,7 +224,8 @@ ${this._getSuggestionOutcomes()}
 ## Reflection Instructions
 1. **First, investigate.** Read files in your workspace and shared memory. Check git history. Look at project state. Spend time understanding before opining.
 2. **Then reflect.** Based on what you found AND the data above, write your structured reflection.
-3. **Be concrete.** Reference specific files, tasks, projects, and patterns.
+3. **Think forward, not just backward.** Don't just identify problems — propose new capabilities, integrations, and workflows that would make the system more valuable. What should we build that we haven't thought of? What would save Rafe time he doesn't even realize he's spending?
+4. **Be concrete.** Reference specific files, tasks, projects, and patterns. Vague suggestions like "improve error handling" are useless — say exactly what, where, and how.
 
 Output your reflection as a JSON block (this MUST appear in your final message):
 ${"```"}json
@@ -273,6 +274,7 @@ Reflection ID: ${reflectionId}`;
       inefficiencies: parsed.inefficiencies ?? null,
       systemRisks: parsed.systemRisks ?? null,
       missedOpportunities: parsed.missedOpportunities ?? null,
+      newIdeas: parsed.newIdeas ?? null,
       identityAdjustments: parsed.identityAdjustments ?? null,
       completedAt: new Date().toISOString(),
     }).where(eq(agentReflections.id, reflectionId)).run();
@@ -304,12 +306,22 @@ Reflection ID: ${reflectionId}`;
       const hasRisks = Array.isArray(result.systemRisks) && (result.systemRisks as unknown[]).length > 0;
       const hasAdjustments = Array.isArray(result.identityAdjustments) && (result.identityAdjustments as unknown[]).length > 0;
       const hasMissed = Array.isArray(result.missedOpportunities) && (result.missedOpportunities as unknown[]).length > 0;
+      const hasNewIdeas = Array.isArray(result.newIdeas) && (result.newIdeas as unknown[]).length > 0;
       const hasSuggestions = Array.isArray(result.concreteSuggestions) && (result.concreteSuggestions as unknown[]).length > 0;
 
       // Route non-actionable insights (risks, adjustments, opportunities) to inbox
-      if ((hasRisks || hasAdjustments || hasMissed) && !hasSuggestions) {
+      if ((hasRisks || hasAdjustments || hasMissed) && !hasSuggestions && !hasNewIdeas) {
         this._routeToInbox(r.agentType, r.id, result);
         routed++;
+      }
+
+      // Route new ideas to inbox as proposals needing approval
+      if (hasNewIdeas) {
+        const ideas = result.newIdeas as string[];
+        for (const idea of ideas) {
+          this._routeSuggestionToInbox(r.agentType, r.id, `[NEW IDEA] ${idea}`, "approval");
+          routed++;
+        }
       }
 
       // Process each suggestion individually: size it, then route accordingly
@@ -426,7 +438,7 @@ Reflection ID: ${reflectionId}`;
       } catch (_) {}
 
       // Handle truncated JSON: extract individual array fields with regex
-      const fields = ["inefficiencies", "systemRisks", "missedOpportunities", "concreteSuggestions", "identityAdjustments", "summary"];
+      const fields = ["inefficiencies", "systemRisks", "missedOpportunities", "newIdeas", "concreteSuggestions", "identityAdjustments", "summary"];
       for (const field of fields) {
         if (field === "summary") {
           const m = jsonStr.match(new RegExp(`"summary"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, "s"));
@@ -675,6 +687,9 @@ Reflection ID: ${reflectionId}`;
       }
       if (Array.isArray(result.missedOpportunities) && result.missedOpportunities.length) {
         parts.push(`**Opportunities:** ${(result.missedOpportunities as string[]).join("; ")}`);
+      }
+      if (Array.isArray(result.newIdeas) && result.newIdeas.length) {
+        parts.push(`**New Ideas:** ${(result.newIdeas as string[]).join("; ")}`);
       }
       if (Array.isArray(result.identityAdjustments) && result.identityAdjustments.length) {
         parts.push(`**Adjustments:** ${(result.identityAdjustments as string[]).join("; ")}`);
