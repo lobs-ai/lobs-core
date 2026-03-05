@@ -22,6 +22,22 @@ const sessionMeta = new Map<string, {
   lastOutputLength: number;
 }>();
 
+// Sessions explicitly excluded from circuit breaker tracking.
+// Used for sessions whose empty/short response is expected by design
+// (e.g. YouTube analysis agents that write output to files via the Write tool).
+const excludedSessions = new Set<string>();
+
+/**
+ * Exclude a session from circuit breaker tracking.
+ * Call immediately after spawning a session whose short response is expected
+ * (e.g. YouTube analysis agents that write output to files).
+ */
+export function excludeSessionFromCircuitBreaker(sessionKey: string): void {
+  excludedSessions.add(sessionKey);
+  // Also remove from sessionMeta in case llm_input already registered it
+  sessionMeta.delete(sessionKey);
+}
+
 /**
  * Register the session's model + task type so circuit breaker can track it.
  * Called externally by the orchestrator when spawning a worker.
@@ -44,6 +60,7 @@ export function registerCircuitBreakerHooks(api: OpenClawPluginApi): void {
   api.on("llm_input", async (event: any, ctx: any) => {
     const sessionKey = ctx.sessionKey;
     if (!sessionKey) return;
+    if (excludedSessions.has(sessionKey)) return;
     const model = `${event.provider}/${event.model}`;
     if (!sessionMeta.has(sessionKey)) {
       // Auto-register with __global__ task type for non-PAW sessions
@@ -64,6 +81,7 @@ export function registerCircuitBreakerHooks(api: OpenClawPluginApi): void {
   api.on("llm_output", async (event: any, ctx: any) => {
     const sessionKey = ctx.sessionKey;
     if (!sessionKey) return;
+    if (excludedSessions.has(sessionKey)) return;
     const meta = sessionMeta.get(sessionKey);
     if (!meta) return;
 
@@ -83,6 +101,11 @@ export function registerCircuitBreakerHooks(api: OpenClawPluginApi): void {
   api.on("agent_end", async (event: any, ctx: any) => {
     const sessionKey = ctx.sessionKey;
     if (!sessionKey) return;
+    if (excludedSessions.has(sessionKey)) {
+      excludedSessions.delete(sessionKey);
+      sessionMeta.delete(sessionKey);
+      return;
+    }
     const meta = sessionMeta.get(sessionKey);
     if (!meta) return;
 

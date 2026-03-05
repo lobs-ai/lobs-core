@@ -72,31 +72,41 @@ Remember: Write the COMPLETE analysis to ${outFile} using the Write tool. That f
   throw new Error("Timed out waiting for analysis output file");
 }
 
-const ANALYSIS_PROMPT = `You are analyzing a meeting transcript. Return ONLY valid JSON (no markdown, no code fences) with this exact structure:
+const ANALYSIS_PROMPT = `You are analyzing a meeting transcript. Your job is to deeply understand what was discussed and produce a thorough analysis — not just extract what was explicitly said, but think about what should happen next.
+
+Return ONLY valid JSON (no markdown, no code fences) with this exact structure:
 
 {
   "title": "short descriptive title for this meeting",
   "participants": ["lowercase first names of people speaking"],
-  "summary": "2-4 sentence summary of the meeting",
-  "decisions": ["list of key decisions made"],
+  "summary": "Thorough summary covering: what was discussed, key points made by each participant, decisions reached, open questions, and overall tone/urgency. Be detailed — this is the permanent record of the meeting.",
+  "decisions": ["list of key decisions made or conclusions reached"],
+  "topics_discussed": ["list of major topics/themes covered"],
+  "open_questions": ["unresolved questions or things that need follow-up discussion"],
   "action_items": [
     {
-      "description": "what needs to be done",
+      "description": "specific, actionable task description",
       "assignee": "person's name (lowercase) or null if unassigned",
-      "due_date": "YYYY-MM-DD or null if not mentioned"
+      "due_date": "YYYY-MM-DD or null if not mentioned",
+      "priority": "high/medium/low",
+      "source": "explicit or inferred"
     }
   ]
 }
 
-Rules:
-- Infer the meeting title from the content discussed
-- Identify participants from speaker patterns and names mentioned
-- For assignee, use lowercase first names: "rafe", "lobs", "alex", etc.
-- If an action item is for the AI assistant / Lobs, use "lobs"
+Rules for action items:
+- Include EXPLICIT action items (things someone said they'd do or asked someone to do)
+- Also include INFERRED action items — things that clearly need to happen based on the discussion but weren't formally assigned. Mark these with "source": "inferred"
+- For bugs, issues, or problems discussed: create an action item to fix each one
+- For feature ideas discussed positively: create an action item to implement or spec each one
+- For decisions made: create action items for any follow-up work the decision requires
+- Be specific: "Fix the drag-to-reorder bug in assessments" not "Fix bugs"
+- Use lowercase first names for assignee: "rafe", "lobs", etc.
+- If it's work for the AI agent system, assignee is "lobs"
 - If unclear who should do it, set assignee to null
-- Be specific in action item descriptions
-- Only include actual commitments/tasks, not discussion points
+- Prioritize: blocking bugs = high, features discussed enthusiastically = medium, nice-to-haves = low
 - If the meeting is just a test with no real content, return empty arrays
+- Do NOT duplicate items — if the same issue is mentioned multiple times, consolidate into one item
 
 TRANSCRIPT:
 `;

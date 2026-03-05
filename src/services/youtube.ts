@@ -15,6 +15,7 @@ import { youtubeVideos } from "../db/schema.js";
 import { log } from "../util/logger.js";
 import { readFileSync, existsSync, unlinkSync, readdirSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { excludeSessionFromCircuitBreaker } from "../hooks/circuit-breaker.js";
 
 const INGESTER_PATH = `${process.env.HOME}/lobs-youtube-ingester/ingest.py`;
 const PYTHON = `${process.env.HOME}/lobs-meeting-transcriber/.venv/bin/python3`;
