@@ -58,6 +58,10 @@ export class GoogleCalendarService {
       expiry_date: token.expiry ? new Date(token.expiry).getTime() : undefined,
     });
 
+    // Fix for Node 25: gaxios tries import('node-fetch') (CJS) which fails in ESM.
+    // Inject native fetch so token refresh works.
+    (oAuth2Client as any).transporter.defaults.fetchImplementation = globalThis.fetch;
+
     oAuth2Client.on("tokens", (newTokens) => {
       const existing = JSON.parse(readFileSync(TOKEN_FILE, "utf8"));
       const merged = {
