@@ -154,7 +154,7 @@ const DEFAULT_WORKFLOWS = [
         id: "git_commit_push",
         type: "tool_call",
         config: {
-          command: 'cd {project.repo_path} && git add -A && (git diff --cached --quiet && echo "nothing to commit" || (git commit -m "agent(programmer): {task.title}" --author "lobs-programmer <thelobsbot@gmail.com>" && git push))',
+          command: 'if [ -z "{project.repo_path}" ] || [ ! -d "{project.repo_path}/.git" ]; then echo "no git repo — skipping commit"; else cd {project.repo_path} && git add -A && (git diff --cached --quiet && echo "nothing to commit" || (git commit -m "agent(programmer): {task.title}" --author "lobs-architect <thelobsbot@gmail.com>" && git push)); fi',
           timeout_seconds: 60,
         },
         on_success: "run_tests_1",
@@ -192,7 +192,7 @@ const DEFAULT_WORKFLOWS = [
         id: "git_commit_push_fix1",
         type: "tool_call",
         config: {
-          command: 'cd {project.repo_path} && git add -A && (git diff --cached --quiet && echo "nothing to commit" || (git commit -m "agent(programmer): fix - {task.title}" --author "lobs-programmer <thelobsbot@gmail.com>" && git push))',
+          command: 'if [ -z "{project.repo_path}" ] || [ ! -d "{project.repo_path}/.git" ]; then echo "no git repo — skipping commit"; else cd {project.repo_path} && git add -A && (git diff --cached --quiet && echo "nothing to commit" || (git commit -m "agent(programmer): fix - {task.title}" --author "lobs-architect <thelobsbot@gmail.com>" && git push)); fi',
           timeout_seconds: 60,
         },
         on_success: "run_tests_2",
@@ -227,7 +227,7 @@ const DEFAULT_WORKFLOWS = [
         id: "git_commit_push_fix2",
         type: "tool_call",
         config: {
-          command: 'cd {project.repo_path} && git add -A && (git diff --cached --quiet && echo "nothing to commit" || (git commit -m "agent(programmer): fix2 - {task.title}" --author "lobs-programmer <thelobsbot@gmail.com>" && git push))',
+          command: 'if [ -z "{project.repo_path}" ] || [ ! -d "{project.repo_path}/.git" ]; then echo "no git repo — skipping commit"; else cd {project.repo_path} && git add -A && (git diff --cached --quiet && echo "nothing to commit" || (git commit -m "agent(programmer): fix2 - {task.title}" --author "lobs-architect <thelobsbot@gmail.com>" && git push)); fi',
           timeout_seconds: 60,
         },
         on_success: "run_tests_3",
