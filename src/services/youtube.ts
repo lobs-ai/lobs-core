@@ -32,13 +32,21 @@ function gatewayCfg(): { port: number; token: string } {
   } catch { return { port: 18789, token: "" }; }
 }
 
-async function gatewayInvoke(tool: string, args: Record<string, unknown>): Promise<any> {
+async function gatewayInvoke(tool: string, args: Record<string, unknown>, timeoutMs = 900000): Promise<any> {
   const { port, token } = gatewayCfg();
-  const r = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-    body: JSON.stringify({ tool, args, sessionKey: "agent:sink:paw-orchestrator-v2" }),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let r: Response;
+  try {
+    r = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+      body: JSON.stringify({ tool, args, sessionKey: "agent:sink:paw-orchestrator-v2" }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   if (!r.ok) throw new Error(`Gateway ${tool} failed (${r.status}): ${await r.text()}`);
   const data = (await r.json()) as any;
   return data?.result?.details ?? data?.result ?? data;
