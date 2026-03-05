@@ -278,16 +278,18 @@ export class YouTubeService {
 
     // Single spawn — main agent does full analysis in one pass
     const result = await spawnAndWait(
-      `Analyze this YouTube video transcript and produce two sections separated by "---REFLECTION---":\n\n` +
-      `**SECTION 1 — SUMMARY:** Write a natural, readable summary as if explaining the video to a smart friend. ` +
-      `Use markdown headers and bullets where helpful. Cover what the video is about, key ideas and insights, ` +
-      `notable claims or quotes, and why it matters. Be thorough but conversational.\n\n` +
-      `**SECTION 2 — REFLECTION:** After the "---REFLECTION---" separator, write your own reflection on what ` +
-      `this means for us — our AI agent architecture, multi-agent systems, workflow automation, and anything ` +
-      `relevant to building the best personal AI agent setup. Be opinionated and specific about what we should ` +
-      `learn or steal from this.\n\n` +
-      `Title: ${title}\nChannel: ${channel}\nDuration: ${video.durationSeconds ? Math.round(video.durationSeconds / 60) + " min" : "unknown"}\n\n` +
-      `TRANSCRIPT:\n${transcript.slice(0, 80000)}`,
+      `Analyze this YouTube video transcript and produce two sections separated by the exact line "---REFLECTION---" on its own line.
+
+**SECTION 1 — SUMMARY:** Write a natural, readable summary as if explaining the video to a smart friend. Use markdown headers and bullets where helpful. Cover what the video is about, key ideas and insights, notable claims or quotes, and why it matters. Be thorough but conversational.
+
+**SECTION 2 — REFLECTION:** After writing the summary, put "---REFLECTION---" on its own line, then write your own reflection on what this means for us — our AI agent architecture, multi-agent systems, workflow automation, and anything relevant to building the best personal AI agent setup. Be opinionated and specific about what we should learn or steal from this.
+
+Title: ${title}
+Channel: ${channel}
+Duration: ${video.durationSeconds ? Math.round(video.durationSeconds / 60) + " min" : "unknown"}
+
+TRANSCRIPT:
+${transcript.slice(0, 80000)}`,
       300000,
       "main"
     );
