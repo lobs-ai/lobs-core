@@ -42,22 +42,21 @@ export function findReadyTasks(limit = 10): ReadyTask[] {
       .orderBy(tasks.agent, tasks.updatedAt)
       .all();
     
-    // Diversify: pick up to limit tasks, prioritizing one per agent type first
-    const byAgent = new Map<string, typeof rows>();
+    // Diversify: round-robin across agent:project combos so no combo starves
+    const byCombo = new Map<string, typeof rows>();
     for (const r of rows) {
-      const a = r.agent ?? "unknown";
-      if (!byAgent.has(a)) byAgent.set(a, []);
-      byAgent.get(a)!.push(r);
+      const key = `${r.agent ?? "unknown"}:${r.projectId ?? "none"}`;
+      if (!byCombo.has(key)) byCombo.set(key, []);
+      byCombo.get(key)!.push(r);
     }
     const diversified: typeof rows = [];
-    // Round-robin across agent types
     let added = true;
     let round = 0;
     while (added && diversified.length < limit) {
       added = false;
-      for (const [, agentRows] of byAgent) {
-        if (round < agentRows.length && diversified.length < limit) {
-          diversified.push(agentRows[round]);
+      for (const [, comboRows] of byCombo) {
+        if (round < comboRows.length && diversified.length < limit) {
+          diversified.push(comboRows[round]);
           added = true;
         }
       }
