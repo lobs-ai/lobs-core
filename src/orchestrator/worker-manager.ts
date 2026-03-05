@@ -199,15 +199,18 @@ export function recordWorkerEnd(opts: {
         // Orphan exclusion: runs that lived >= 60s before being marked failed are likely
         // restart orphans (the agent session was killed by a gateway restart, not a model
         // bug). Don't penalise the model circuit breaker for these.
+        // EXCEPTION: orchestrator_timeout and session_dead are genuine failures — always record.
         const durationSec = opts.durationSeconds
           ?? ((wr as any)?.startedAt
               ? (Date.now() - new Date((wr as any).startedAt).getTime()) / 1000
               : null);
-        const isOrphan = !opts.succeeded && durationSec != null && durationSec >= 60;
+        const storedTimeoutReason = (wr as any)?.timeoutReason as string | null | undefined;
+        const isGenuineFailure = storedTimeoutReason === "orchestrator_timeout" || storedTimeoutReason === "session_dead";
+        const isOrphan = !opts.succeeded && !isGenuineFailure && durationSec != null && durationSec >= 60;
         if (isOrphan) {
           log().info(
             `[WORKER_MANAGER] Skipping circuit-breaker for ${model}/${opts.agentType}: ` +
-            `orphan run (duration=${Math.round(durationSec)}s >= 60s)`
+            `orphan run (duration=${Math.round(durationSec)}s >= 60s, reason=${storedTimeoutReason ?? "none"})`
           );
         } else {
           recordRunOutcome(model, opts.agentType, opts.succeeded, opts.summary ?? '');

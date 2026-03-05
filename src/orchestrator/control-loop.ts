@@ -307,7 +307,7 @@ function runTick(): void {
   try {
     const staleDb = getDb();
     const staleThreshold10 = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-    const staleThreshold3  = new Date(Date.now() -  3 * 60 * 1000).toISOString();
+    const staleThreshold3  = new Date(Date.now() -  8 * 60 * 1000).toISOString();
     const staleThreshold2  = new Date(Date.now() -  2 * 60 * 1000).toISOString();
     const staleRuns = staleDb.select().from(workflowRuns)
       .where(and(eq(workflowRuns.status, "running")))
