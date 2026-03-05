@@ -64,7 +64,7 @@ async function spawnAndWait(task: string, timeoutMs = 120000): Promise<string> {
           const text = typeof msg.content === "string" ? msg.content
             : Array.isArray(msg.content) ? msg.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
             : "";
-          if (text.trim()) return text;
+          if (text.trim() && text.trim().length > 20 && msg.stopReason === "stop") return text;
         }
       }
     } catch (e) {
