@@ -165,9 +165,9 @@ export class YouTubeService {
         .where(eq(youtubeVideos.status, "processing")).all();
       const needsReflection = db.select().from(youtubeVideos)
         .where(eq(youtubeVideos.status, "ready")).all()
-        .filter(v => v.transcript && (!v.reflection || v.reflection === "No reflection generated." || v.reflection.length < 100));
+        .filter(v => v.transcript && (!v.reflection || v.reflection === "No reflection generated."));
       for (const video of [...processing, ...needsReflection]) {
-        if (video.transcript && video.transcript.length > 10 && (!video.videoSummary || !video.reflection || video.reflection === "No reflection generated." || video.reflection.length < 100) && !aiProcessingSet.has(video.id)) {
+        if (video.transcript && video.transcript.length > 10 && (!video.videoSummary || !video.reflection || video.reflection === "No reflection generated.") && !aiProcessingSet.has(video.id)) {
           const age = Date.now() - new Date(video.updatedAt ?? video.createdAt).getTime();
           if (age > 120000) {
             log().info(`[YOUTUBE] Recovery: resuming AI for "${video.title || video.id.slice(0,8)}"`);
@@ -294,7 +294,7 @@ ${transcript.slice(0, 80000)}`,
 
     // Step 2: Reflection (skip if already done)
     let reflection = video.reflection ?? "";
-    if (!reflection || reflection === "No reflection generated." || reflection.length < 100) {
+    if (!reflection || reflection === "No reflection generated.") {
       log().info(`[YOUTUBE] Spawning main agent for reflection on "${title}"`);
       reflection = await spawnAndWait(
         `Write a thoughtful reflection on this YouTube video focused on what it means for us — our AI agent architecture, multi-agent PAW orchestrator, workflow automation, and building the best personal AI agent setup. Be opinionated and specific about what we should learn or adopt.
