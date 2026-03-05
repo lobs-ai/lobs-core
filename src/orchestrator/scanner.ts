@@ -19,6 +19,7 @@ export interface ReadyTask {
   notes: string | null;
   escalationTier: number | null;
   retryCount: number | null;
+  spawnCount: number | null;
 }
 
 /**
@@ -32,15 +33,38 @@ export interface ReadyTask {
 export function findReadyTasks(limit = 10): ReadyTask[] {
   const db = getDb();
   try {
+    // Order by agent type to ensure diverse agent selection, not just programmers
     const rows = db.select().from(tasks)
       .where(and(
         eq(tasks.status, "active"),
         eq(tasks.workState, "not_started"),
       ))
-      .limit(limit)
+      .orderBy(tasks.agent, tasks.updatedAt)
       .all();
+    
+    // Diversify: pick up to limit tasks, prioritizing one per agent type first
+    const byAgent = new Map<string, typeof rows>();
+    for (const r of rows) {
+      const a = r.agent ?? "unknown";
+      if (!byAgent.has(a)) byAgent.set(a, []);
+      byAgent.get(a)!.push(r);
+    }
+    const diversified: typeof rows = [];
+    // Round-robin across agent types
+    let added = true;
+    let round = 0;
+    while (added && diversified.length < limit) {
+      added = false;
+      for (const [, agentRows] of byAgent) {
+        if (round < agentRows.length && diversified.length < limit) {
+          diversified.push(agentRows[round]);
+          added = true;
+        }
+      }
+      round++;
+    }
 
-    return rows
+    return diversified
       .filter(r => r.agent != null)
       .map(r => ({
         id: r.id,
@@ -53,6 +77,7 @@ export function findReadyTasks(limit = 10): ReadyTask[] {
         notes: r.notes,
         escalationTier: r.escalationTier,
         retryCount: r.retryCount,
+        spawnCount: r.spawnCount,
       }));
   } catch (e) {
     log().error(`[SCANNER] findReadyTasks error: ${e}`);
@@ -88,6 +113,7 @@ export function findRetryableTasks(limit = 5): ReadyTask[] {
         notes: r.notes,
         escalationTier: r.escalationTier,
         retryCount: r.retryCount,
+        spawnCount: r.spawnCount,
       }));
   } catch (e) {
     log().error(`[SCANNER] findRetryableTasks error: ${e}`);

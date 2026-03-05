@@ -178,10 +178,10 @@ export class NodeHandlers {
     if (run.taskId) {
       const db = getDb();
       const task = db.select().from(tasks).where(eq(tasks.id, run.taskId)).get();
-      if (task?.workState === "completed") {
+      if (task?.workState === "completed" || task?.workState === "done") {
         return { status: "completed", output: { task_completed: true, childSessionKey } };
       }
-      if (task?.workState === "blocked") {
+      if (task?.workState === "blocked" || task?.workState === "failed") {
         return { status: "failed", error: task.failureReason ?? "Task blocked", errorType: "task_blocked" };
       }
     }

@@ -23,7 +23,7 @@ export interface WorkerInfo {
  * maxWorkers can be overridden per call.
  */
 export function hasCapacity(maxWorkers = DEFAULT_MAX_WORKERS): boolean {
-  return (countActiveWorkers() + getPendingSpawnCount() + countInFlightTaskRuns()) < maxWorkers;
+  return (countActiveWorkers() + getPendingSpawnCount()) < maxWorkers;
 }
 
 /** Count workers currently running (no endedAt). */
@@ -70,14 +70,13 @@ export function getActiveWorkers(): WorkerInfo[] {
  * Check if a project already has an active worker (domain lock).
  * One worker per project at a time.
  */
-export function projectHasActiveWorker(projectId: string): boolean {
+export function projectHasActiveWorker(projectId: string, agentType?: string): boolean {
   const db = getDb();
   try {
+    const conditions = [eq(workerRuns.projectId, projectId), isNull(workerRuns.endedAt)];
+    if (agentType) conditions.push(eq(workerRuns.agentType, agentType));
     const rows = db.select().from(workerRuns)
-      .where(and(
-        eq(workerRuns.projectId, projectId),
-        isNull(workerRuns.endedAt),
-      ))
+      .where(and(...conditions))
       .all();
     return rows.some(r => r.startedAt != null);
   } catch (e) {
@@ -246,17 +245,22 @@ export function forceTerminateWorker(workerId: string, reason = "timeout"): void
 
 /** In-flight spawn counter — incremented when spawn queued, decremented when spawn completes/fails */
 let pendingSpawnCount = 0;
-const pendingSpawnProjects = new Set<string>();
-export function incrementPendingSpawns(projectId?: string): void {
+const pendingSpawnKeys = new Set<string>();
+export function incrementPendingSpawns(projectId?: string, agentType?: string): void {
   pendingSpawnCount++;
-  if (projectId) pendingSpawnProjects.add(projectId);
+  if (projectId) pendingSpawnKeys.add(agentType ? `${projectId}:${agentType}` : projectId);
 }
-export function decrementPendingSpawns(projectId?: string): void {
+export function decrementPendingSpawns(projectId?: string, agentType?: string): void {
   pendingSpawnCount = Math.max(0, pendingSpawnCount - 1);
-  if (projectId) pendingSpawnProjects.delete(projectId);
+  if (projectId) pendingSpawnKeys.delete(agentType ? `${projectId}:${agentType}` : projectId);
 }
 export function getPendingSpawnCount(): number { return pendingSpawnCount; }
-export function projectHasPendingSpawn(projectId: string): boolean { return pendingSpawnProjects.has(projectId); }
+export function projectHasPendingSpawn(projectId: string, agentType?: string): boolean {
+  if (agentType) return pendingSpawnKeys.has(`${projectId}:${agentType}`);
+  // fallback: check if any key starts with projectId
+  for (const k of pendingSpawnKeys) { if (k.startsWith(projectId)) return true; }
+  return false;
+}
 
 /** Count workflow runs that are in-flight for tasks (running or pending with a task_id) */
 export function countInFlightTaskRuns(): number {

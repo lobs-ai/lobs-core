@@ -147,8 +147,18 @@ const DEFAULT_WORKFLOWS = [
         id: "spawn_programmer",
         type: "spawn_agent",
         config: { agent_type: "programmer" },
-        on_success: "run_tests_1",
+        on_success: "git_commit_push",
         on_failure: { retry: 1, abort_on: ["spawn_error"] },
+      },
+      {
+        id: "git_commit_push",
+        type: "tool_call",
+        config: {
+          command: 'cd {project.repo_path} && git add -A && (git diff --cached --quiet && echo "nothing to commit" || (git commit -m "agent(programmer): {task.title}" --author "lobs-programmer <thelobsbot@gmail.com>" && git push))',
+          timeout_seconds: 60,
+        },
+        on_success: "run_tests_1",
+        on_failure: { retry: 0 },
       },
       {
         id: "run_tests_1",
@@ -175,8 +185,18 @@ const DEFAULT_WORKFLOWS = [
           agent_type: "programmer",
           prompt_template: "CI failed after your implementation. Fix only what's broken.\n\nTask: {task.title}\n\nOriginal notes:\n{task.notes}\n\nCI output:\n{run_tests_1.stdout}\n{run_tests_1.stderr}",
         },
-        on_success: "run_tests_2",
+        on_success: "git_commit_push_fix1",
         on_failure: { retry: 0, abort_on: ["spawn_error"] },
+      },
+      {
+        id: "git_commit_push_fix1",
+        type: "tool_call",
+        config: {
+          command: 'cd {project.repo_path} && git add -A && (git diff --cached --quiet && echo "nothing to commit" || (git commit -m "agent(programmer): fix - {task.title}" --author "lobs-programmer <thelobsbot@gmail.com>" && git push))',
+          timeout_seconds: 60,
+        },
+        on_success: "run_tests_2",
+        on_failure: { retry: 0 },
       },
       {
         id: "run_tests_2",
@@ -200,8 +220,18 @@ const DEFAULT_WORKFLOWS = [
           agent_type: "programmer",
           prompt_template: "CI still failing. Final try. Read errors carefully.\n\nTask: {task.title}\n\nCI output:\n{run_tests_2.stdout}\n{run_tests_2.stderr}",
         },
-        on_success: "run_tests_3",
+        on_success: "git_commit_push_fix2",
         on_failure: { retry: 0, abort_on: ["spawn_error"] },
+      },
+      {
+        id: "git_commit_push_fix2",
+        type: "tool_call",
+        config: {
+          command: 'cd {project.repo_path} && git add -A && (git diff --cached --quiet && echo "nothing to commit" || (git commit -m "agent(programmer): fix2 - {task.title}" --author "lobs-programmer <thelobsbot@gmail.com>" && git push))',
+          timeout_seconds: 60,
+        },
+        on_success: "run_tests_3",
+        on_failure: { retry: 0 },
       },
       {
         id: "run_tests_3",
@@ -254,8 +284,18 @@ const DEFAULT_WORKFLOWS = [
         id: "spawn_architect",
         type: "spawn_agent",
         config: { agent_type: "architect", model_tier: "strong" },
-        on_success: "done",
+        on_success: "git_commit_push_architect",
         on_failure: { retry: 1, abort_on: ["spawn_error"] },
+      },
+      {
+        id: "git_commit_push_architect",
+        type: "tool_call",
+        config: {
+          command: 'cd {project.repo_path} && git add -A && (git diff --cached --quiet && echo "nothing to commit" || (git commit -m "agent(architect): {task.title}" --author "lobs-architect <thelobsbot@gmail.com>" && git push))',
+          timeout_seconds: 60,
+        },
+        on_success: "done",
+        on_failure: { retry: 0 },
       },
       {
         id: "spawn_reviewer",

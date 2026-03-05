@@ -199,7 +199,63 @@ function scheduleResume(sessionKey: string, taskId: string, title: string): void
  * After the gateway is fully up, send resume messages to in-flight worker sessions.
  * Called from the first control-loop tick (delayed to ensure gateway is ready).
  */
+
+/**
+ * On restart: immediately fail workflow runs stuck at spawn_* nodes with no
+ * corresponding active worker. These occur when the gateway drained mid-spawn —
+ * the spawn call never completed, leaving the run at a spawn node forever and
+ * consuming a capacity slot via countInFlightTaskRuns().
+ */
+async function failStaleSpawnRuns(): Promise<void> {
+  try {
+    const { getDb } = await import("./db/connection.js");
+    const { workflowRuns, workerRuns } = await import("./db/schema.js");
+    const { eq, isNull } = await import("drizzle-orm");
+    const db = getDb();
+
+    // All running workflow runs currently at a spawn node
+    const spawnStuck = db.select().from(workflowRuns)
+      .where(eq(workflowRuns.status, "running"))
+      .all()
+      .filter((r: any) => r.currentNode?.startsWith("spawn_"));
+
+    if (spawnStuck.length === 0) return;
+    log().info(`paw: checking ${spawnStuck.length} run(s) stuck at spawn nodes on restart`);
+
+    // Build set of active worker session keys for quick lookup
+    const activeWorkerKeys = new Set(
+      db.select().from(workerRuns).where(isNull(workerRuns.endedAt)).all()
+        .map((w: any) => w.workerId).filter(Boolean)
+    );
+
+    for (const run of spawnStuck) {
+      const nodeStates = (run.nodeStates ?? {}) as Record<string, any>;
+      const currentNs = nodeStates[run.currentNode ?? ""] ?? {};
+      const childKey = currentNs["childSessionKey"] as string | undefined;
+
+      // If there's no active worker for this spawn, the spawn was lost in the drain
+      if (!childKey || !activeWorkerKeys.has(childKey)) {
+        db.update(workflowRuns)
+          .set({ status: "failed", updatedAt: new Date().toISOString() })
+          .where(eq(workflowRuns.id, run.id))
+          .run();
+        log().warn(
+          `paw: restart cleanup — failed stale spawn run ${run.id.slice(0, 8)} ` +
+          `(node=${run.currentNode}` +
+          (childKey ? `, session=${childKey.slice(0, 30)}` : ", no session") +
+          ") — no active worker"
+        );
+      }
+    }
+  } catch (e) {
+    log().warn(`paw: failStaleSpawnRuns error: ${e}`);
+  }
+}
+
 export async function processPendingResumes(): Promise<void> {
+  // Always clean up stale spawn runs on restart, regardless of pendingResumes
+  await failStaleSpawnRuns();
+
   if (pendingResumes.length === 0) return;
 
   // Read gateway config

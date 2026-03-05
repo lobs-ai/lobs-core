@@ -5,7 +5,7 @@
 import { eq, and, inArray, isNull, desc } from "drizzle-orm";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { getDb } from "../db/connection.js";
-import { workerRuns, tasks, workflowRuns, agentReflections, projects } from "../db/schema.js";
+import { workerRuns, tasks, workflowRuns, agentReflections, projects, modelUsageEvents } from "../db/schema.js";
 import { recordWorkerStart, recordWorkerEnd } from "../orchestrator/worker-manager.js";
 import { log } from "../util/logger.js";
 import { ReflectionService } from "../services/reflection.js";
@@ -54,12 +54,26 @@ export function registerSubagentHooks(api: OpenClawPluginApi): void {
 
     if (workerRun) {
       const startedAt = workerRun.startedAt ? new Date(workerRun.startedAt).getTime() : Date.now();
+      const usage = await collectWorkerUsage(sessionKey);
+      const durationSeconds = (Date.now() - startedAt) / 1000;
       recordWorkerEnd({
         workerId: sessionKey,
         agentType: workerRun.agentType ?? "unknown",
         succeeded,
         taskId: workerRun.taskId ?? undefined,
-        durationSeconds: (Date.now() - startedAt) / 1000,
+        durationSeconds,
+        model: usage.model ?? (workerRun.model ?? undefined),
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        totalCostUsd: usage.totalCostUsd,
+      });
+
+      insertModelUsageEvent({
+        workerRun,
+        sessionKey,
+        succeeded,
+        durationSeconds,
+        usage,
       });
 
       if (workerRun.taskId) {
@@ -70,6 +84,151 @@ export function registerSubagentHooks(api: OpenClawPluginApi): void {
     // Always: update workflow run nodeStates so _checkSpawnAgent can advance
     updateWorkflowRunForSession(sessionKey, succeeded, reason);
   });
+}
+
+type WorkerUsageSnapshot = {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  totalCostUsd: number;
+  model?: string;
+  provider?: string;
+};
+
+async function collectWorkerUsage(sessionKey: string): Promise<WorkerUsageSnapshot> {
+  try {
+    const statusRaw = await invokeGatewayTool("session_status", { sessionKey });
+    const statusParsed = extractUsageSnapshot(statusRaw);
+    if (statusParsed.totalTokens > 0 || statusParsed.totalCostUsd > 0) return statusParsed;
+  } catch (e) {
+    log().debug?.(`[PAW] session_status usage unavailable for ${sessionKey}: ${e}`);
+  }
+
+  try {
+    const historyRaw = await invokeGatewayTool("sessions_history", { sessionKey, limit: 150, includeTools: true });
+    return extractUsageSnapshot(historyRaw);
+  } catch (e) {
+    log().warn(`[PAW] sessions_history usage fetch failed for ${sessionKey}: ${e}`);
+    return { inputTokens: 0, outputTokens: 0, totalTokens: 0, totalCostUsd: 0 };
+  }
+}
+
+function extractUsageSnapshot(payload: unknown): WorkerUsageSnapshot {
+  const candidates: WorkerUsageSnapshot[] = [];
+
+  const walk = (value: unknown) => {
+    if (!value || typeof value !== "object") return;
+    const obj = value as Record<string, unknown>;
+
+    const input = toNum(obj.inputTokens ?? obj.input_tokens ?? obj.input ?? obj.promptTokens ?? obj.prompt_tokens);
+    const output = toNum(obj.outputTokens ?? obj.output_tokens ?? obj.output ?? obj.completionTokens ?? obj.completion_tokens);
+    const total = toNum(obj.totalTokens ?? obj.total_tokens ?? obj.total) || (input + output);
+    const cost = toNum(obj.totalCostUsd ?? obj.total_cost_usd ?? obj.estimatedCostUsd ?? obj.estimated_cost_usd ?? obj.totalCost ?? obj.total_cost ?? obj.costUsd ?? obj.cost_usd);
+
+    if (input > 0 || output > 0 || total > 0 || cost > 0) {
+      candidates.push({
+        inputTokens: input,
+        outputTokens: output,
+        totalTokens: total,
+        totalCostUsd: cost,
+        model: asStr(obj.model ?? obj.modelName ?? obj.model_name),
+        provider: asStr(obj.provider),
+      });
+    }
+
+    for (const v of Object.values(obj)) {
+      if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === "object") walk(v);
+    }
+  };
+
+  walk(payload);
+  if (candidates.length === 0) return { inputTokens: 0, outputTokens: 0, totalTokens: 0, totalCostUsd: 0 };
+  candidates.sort((a, b) => (b.totalTokens - a.totalTokens) || (b.totalCostUsd - a.totalCostUsd));
+  return candidates[0];
+}
+
+function toNum(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+function asStr(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
+}
+
+function inferProvider(model?: string, provider?: string): string {
+  if (provider && provider.trim()) return provider.trim();
+  if (!model) return "unknown";
+  const norm = model.toLowerCase();
+  if (norm.includes("openai") || norm.includes("gpt") || norm.includes("codex")) return "openai";
+  if (norm.includes("anthropic") || norm.includes("claude")) return "anthropic";
+  if (norm.includes("gemini") || norm.includes("google")) return "google";
+  if (norm.includes("mistral")) return "mistral";
+  if (norm.includes("llama") || norm.includes("meta")) return "meta";
+  const slash = model.indexOf("/");
+  return slash > 0 ? model.slice(0, slash) : "unknown";
+}
+
+function insertModelUsageEvent(opts: {
+  workerRun: typeof workerRuns.$inferSelect;
+  sessionKey: string;
+  succeeded: boolean;
+  durationSeconds: number;
+  usage: WorkerUsageSnapshot;
+}): void {
+  const db = getDb();
+  const model = opts.usage.model ?? opts.workerRun.model ?? "unknown";
+  const provider = inferProvider(model, opts.usage.provider);
+  try {
+    db.insert(modelUsageEvents).values({
+      id: randomUUID(),
+      timestamp: new Date().toISOString(),
+      provider,
+      model,
+      taskType: opts.workerRun.taskId ?? opts.workerRun.agentType ?? "worker",
+      routeType: "worker",
+      status: opts.succeeded ? "success" : "error",
+      requests: 1,
+      inputTokens: opts.usage.inputTokens,
+      outputTokens: opts.usage.outputTokens,
+      cachedTokens: 0,
+      estimatedCostUsd: opts.usage.totalCostUsd,
+      latencyMs: Math.max(0, Math.round((opts.durationSeconds || 0) * 1000)),
+      budgetLane: null,
+      source: `worker:${opts.sessionKey}`,
+    }).run();
+  } catch (e) {
+    log().warn(`[PAW] Failed to insert model_usage_events for ${opts.sessionKey}: ${e}`);
+  }
+}
+
+async function invokeGatewayTool(tool: string, args: Record<string, unknown>): Promise<unknown> {
+  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
+  let gatewayPort = 18789;
+  let gatewayToken = "";
+  try {
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+    gatewayPort = cfg?.gateway?.port ?? 18789;
+    gatewayToken = cfg?.gateway?.auth?.token ?? "";
+  } catch {}
+  if (!gatewayToken) throw new Error("No gateway token configured");
+
+  const resp = await fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${gatewayToken}`,
+    },
+    body: JSON.stringify({
+      tool,
+      sessionKey: "agent:sink:paw-orchestrator-v2",
+      args,
+    }),
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!resp.ok) throw new Error(`${tool} failed (${resp.status})`);
+  const data = (await resp.json()) as Record<string, unknown>;
+  return (data.result as Record<string, unknown> | undefined)?.details ?? data.result ?? data;
 }
 
 /**

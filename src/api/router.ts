@@ -68,7 +68,7 @@ export function registerPawRouter(api: OpenClawPluginApi): void {
         case "knowledge":       await handleKnowledgeRequest(req, res, parts[1], parts); return true;
         case "knowledge-fs":    await handleKnowledgeFsRequest(req, res, parts[1], parts); return true;
         case "memories-fs":     await handleMemoriesFsRequest(req, res, parts[1]); return true;
-        case "reflections":      await handleReflectionsRequest(req, res, parts[1]); return true;
+        case "reflections":      await handleReflectionsRequest(req, res, parts[1], parts); return true;
         default:                error(res, `Unknown resource: ${resource}`, 404); return true;
       }
     } catch (err) {

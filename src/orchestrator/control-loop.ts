@@ -21,7 +21,7 @@ import { processPendingResumes } from "../index.js";
 import { WorkflowExecutor } from "../workflow/engine.js";
 import { popPendingSpawns, requeueSpawn, type SpawnRequest } from "../workflow/nodes.js";
 import { getDb } from "../db/connection.js";
-import { workflowRuns } from "../db/schema.js";
+import { workflowRuns, tasks as tasksTable } from "../db/schema.js";
 import { findReadyTasks } from "./scanner.js";
 import {
   hasCapacity,
@@ -183,17 +183,24 @@ function runTick(): void {
     for (const req of spawns) {
       const spawnProjectId = (((req.context?.task ?? {}) as Record<string, unknown>)["project_id"] ?? ((req.context?.task ?? {}) as Record<string, unknown>)["projectId"] ?? ((req.context?.project ?? {}) as Record<string, unknown>)["id"]) as string | undefined;
 
-      // Project lock: only one worker per project at a time
-      if (spawnProjectId && (projectHasActiveWorker(spawnProjectId) || projectHasPendingSpawn(spawnProjectId))) {
-        log().info(`orchestrator: project ${spawnProjectId.slice(0, 8)} locked — re-queuing spawn for run ${req.runId.slice(0, 8)}`);
+      // Capacity gate: re-queue if at max workers
+      if (!hasCapacity()) {
+        log().info(`orchestrator: at capacity — re-queuing spawn for run ${req.runId.slice(0, 8)}`);
         requeueSpawn(req);
         continue;
       }
 
-      incrementPendingSpawns(spawnProjectId);
+      // Project lock: one worker per project per agent type
+      if (spawnProjectId && (projectHasActiveWorker(spawnProjectId, req.agentType) || projectHasPendingSpawn(spawnProjectId, req.agentType))) {
+        log().info(`orchestrator: project ${spawnProjectId.slice(0, 8)}:${req.agentType} locked — re-queuing spawn for run ${req.runId.slice(0, 8)}`);
+        requeueSpawn(req);
+        continue;
+      }
+
+      incrementPendingSpawns(spawnProjectId, req.agentType);
       processSpawnRequest(req).catch((err) => {
         log().error(`orchestrator: spawn failed for run ${req.runId.slice(0, 8)}: ${err}`);
-        decrementPendingSpawns(spawnProjectId);
+        decrementPendingSpawns(spawnProjectId, req.agentType);
         writeSpawnResult(req.runId, req.nodeId, {
           status: "failed",
           error: String(err),
@@ -231,8 +238,10 @@ function runTick(): void {
       for (const task of readyTasks) {
         if (!hasCapacity()) break;
 
-        if (task.projectId && (projectHasActiveWorker(task.projectId) || projectHasPendingSpawn(task.projectId))) {
-          log().debug?.(`orchestrator: project ${task.projectId.slice(0, 8)} already has active/pending worker — skipping task ${task.id.slice(0, 8)}`);
+
+
+        if (task.projectId && task.agent && (projectHasActiveWorker(task.projectId, task.agent) || projectHasPendingSpawn(task.projectId, task.agent))) {
+          log().debug?.(`orchestrator: project ${task.projectId.slice(0, 8)}:${task.agent} locked — skipping task ${task.id.slice(0, 8)}`);
           continue;
         }
 
@@ -278,33 +287,46 @@ function runTick(): void {
   }
 
   // ── 5b. Stale workflow run cleanup (progress-based) ────────────────────────
-  // Cancel workflow runs stuck >10min. For spawn nodes with a session key,
-  // check if the session is still alive (allows slow local models to run).
+  // Cancel workflow runs stuck too long. Two thresholds:
+  //   - spawn nodes with NO session: 2 min (spawn should complete in seconds;
+  //     if stuck this long the spawn request was silently dropped)
+  //   - spawn nodes WITH a live session: skip (slow models may take a while)
+  //   - all other nodes: 10 min
   try {
     const staleDb = getDb();
-    const staleThreshold = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const staleThreshold10 = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const staleThreshold2  = new Date(Date.now() -  2 * 60 * 1000).toISOString();
     const staleRuns = staleDb.select().from(workflowRuns)
       .where(and(eq(workflowRuns.status, "running")))
       .all()
-      .filter((r: any) => r.updatedAt && r.updatedAt < staleThreshold);
+      .filter((r: any) => r.updatedAt && r.updatedAt < staleThreshold2);
 
     for (const run of staleRuns) {
       const nodeStates = (run.nodeStates ?? {}) as Record<string, any>;
       const currentNs = nodeStates[run.currentNode ?? ""] ?? {};
       const childKey = currentNs["childSessionKey"] as string | undefined;
+      const isSpawnNode = !!run.currentNode?.startsWith("spawn_");
 
-      if (childKey && run.currentNode?.startsWith("spawn_")) {
-        // Spawn node with session — check liveness async
-        checkSessionAlive(childKey).then((alive: boolean) => {
-          if (alive) {
-            staleDb.update(workflowRuns).set({ updatedAt: new Date().toISOString() }).where(eq(workflowRuns.id, run.id)).run();
-          } else {
-            staleDb.update(workflowRuns).set({ status: "failed", updatedAt: new Date().toISOString() }).where(eq(workflowRuns.id, run.id)).run();
-            log().warn("orchestrator: failed stale run " + run.id.slice(0, 8) + " — worker session gone");
-          }
-        }).catch(() => {});
-      } else {
-        // Not a spawn node or no session — fail it
+      if (isSpawnNode && childKey) {
+        // Spawn node with session — only fail if session is dead AND run is >10 min stale
+        if (run.updatedAt < staleThreshold10) {
+          checkSessionAlive(childKey).then((alive: boolean) => {
+            if (alive) {
+              // Touch updatedAt to reset the staleness clock
+              staleDb.update(workflowRuns).set({ updatedAt: new Date().toISOString() }).where(eq(workflowRuns.id, run.id)).run();
+            } else {
+              staleDb.update(workflowRuns).set({ status: "failed", updatedAt: new Date().toISOString() }).where(eq(workflowRuns.id, run.id)).run();
+              log().warn("orchestrator: failed stale run " + run.id.slice(0, 8) + " — worker session gone");
+            }
+          }).catch(() => {});
+        }
+      } else if (isSpawnNode && !childKey) {
+        // Spawn node with NO session after 2 min — spawn was silently dropped (e.g. gateway drain)
+        staleDb.update(workflowRuns).set({ status: "failed", updatedAt: new Date().toISOString() }).where(eq(workflowRuns.id, run.id)).run();
+        const mins = Math.round((Date.now() - new Date(run.updatedAt).getTime()) / 60000);
+        log().warn("orchestrator: failed stale spawn run " + run.id.slice(0, 8) + " (node=" + run.currentNode + ", no session, stuck " + mins + "min) — spawn was dropped");
+      } else if (!isSpawnNode && run.updatedAt < staleThreshold10) {
+        // Non-spawn node stuck >10 min — fail it
         staleDb.update(workflowRuns).set({ status: "failed", updatedAt: new Date().toISOString() }).where(eq(workflowRuns.id, run.id)).run();
         const mins = Math.round((Date.now() - new Date(run.updatedAt).getTime()) / 60000);
         log().warn("orchestrator: failed stale run " + run.id.slice(0, 8) + " (node=" + run.currentNode + ", stuck >" + mins + "min)");
@@ -328,6 +350,73 @@ function runTick(): void {
 
 // ── Spawn processing ─────────────────────────────────────────────────────────
 
+const SPAWN_COUNT_LIMIT = 3;
+
+/**
+ * Per-task-type spawn count limits. Override the default (SPAWN_COUNT_LIMIT=3) for specific task types.
+ * Task types not listed here fall back to SPAWN_COUNT_LIMIT.
+ *
+ * Rationale:
+ *   "bug":     4  — bugs may need an extra retry after initial reproduction
+ *   "feature": 5  — features can legitimately need multiple coding passes
+ *   "spike":   2  — investigative tasks should resolve quickly
+ *   "chore":   3  — default; maintenance tasks rarely need many retries
+ *   "other":   3  — default fallback
+ */
+const SPAWN_COUNT_LIMIT_BY_TYPE: Record<string, number> = {
+  bug: 4,
+  feature: 5,
+  spike: 2,
+  chore: 3,
+  other: 3,
+};
+
+function spawnCountLimitForType(taskType: string | null | undefined): number {
+  if (taskType && taskType in SPAWN_COUNT_LIMIT_BY_TYPE) {
+    return SPAWN_COUNT_LIMIT_BY_TYPE[taskType];
+  }
+  return SPAWN_COUNT_LIMIT;
+}
+
+/**
+ * Increment spawn_count for a task and check if it has exceeded the per-type limit.
+ * Returns true if task was auto-blocked (spawn_count >= limit after increment).
+ * The limit is determined by the task's task_type (falls back to SPAWN_COUNT_LIMIT=3).
+ */
+function incrementAndCheckSpawnCount(taskId: string): boolean {
+  const db = getDb();
+  try {
+    const task = db.select().from(tasksTable).where(eq(tasksTable.id, taskId)).get();
+    if (!task) return false;
+
+    const limit = spawnCountLimitForType(task.shape);
+    const newCount = (task.spawnCount ?? 0) + 1;
+    db.update(tasksTable).set({
+      spawnCount: newCount,
+      updatedAt: new Date().toISOString(),
+    }).where(eq(tasksTable.id, taskId)).run();
+
+    if (newCount >= limit) {
+      // Auto-block the task to stop runaway spawning
+      db.update(tasksTable).set({
+        workState: "blocked",
+        failureReason: `Auto-blocked: spawn_count reached ${newCount} (limit=${limit}, type=${task.shape ?? "other"}). Needs human review.`,
+        updatedAt: new Date().toISOString(),
+      }).where(eq(tasksTable.id, taskId)).run();
+
+      log().warn(
+        `[SPAWN_GUARD] Task ${taskId.slice(0, 8)} auto-blocked — spawn_count=${newCount} >= limit=${limit} (type=${task.shape ?? "other"})`
+      );
+      return true;
+    }
+    log().debug?.(`[SPAWN_GUARD] Task ${taskId.slice(0, 8)} spawn_count now ${newCount}/${limit} (type=${task.shape ?? "other"})`);
+    return false;
+  } catch (e) {
+    log().error(`[SPAWN_GUARD] incrementAndCheckSpawnCount error: ${e}`);
+    return false;
+  }
+}
+
 async function processSpawnRequest(req: SpawnRequest): Promise<void> {
   if (!gatewayToken) {
     throw new Error("No gateway auth token configured — cannot spawn agents");
@@ -339,11 +428,31 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
   const taskNotes = (taskCtx["notes"] as string) ?? "";
   const taskPrompt = req.promptTemplate ?? `${taskTitle}\n\n${taskNotes}`.trim();
   const repoPath = (projectCtx["repo_path"] as string) || undefined;
+  const gitReminder = (req.agentType === "programmer" || req.agentType === "architect") && repoPath
+    ? `\n\n⚠️ IMPORTANT: When you are done, you MUST run: git add -A && git commit -m "agent(${req.agentType}): <brief summary>"\nDo NOT finish without committing your changes.`
+    : "";
+  const finalPrompt = taskPrompt + gitReminder;
 
   const modelChoice = req.modelTier
     ? chooseModel(req.modelTier, req.agentType)
     : chooseModel("standard", req.agentType);
   const model = modelChoice.model;
+
+  // ── Spawn count guard ────────────────────────────────────────────────────
+  if (req.taskId) {
+    const autoBlocked = incrementAndCheckSpawnCount(req.taskId);
+    if (autoBlocked) {
+      decrementPendingSpawns(
+        (taskCtx["projectId"] as string) ?? (taskCtx["project_id"] as string) ?? undefined,
+        req.agentType
+      );
+      writeSpawnResult(req.runId, req.nodeId, {
+        status: "failed",
+        error: `Task auto-blocked: spawn_count exceeded per-type limit (see task failure_reason for details)`,
+      });
+      return;
+    }
+  }
 
   log().info(
     `[SPAWN] Spawning ${req.agentType} for run ${req.runId.slice(0, 8)} ` +
@@ -361,7 +470,7 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
       tool: "sessions_spawn",
       sessionKey: SINK_SESSION_KEY,
       args: {
-        task: taskPrompt,
+        task: finalPrompt,
         agentId: req.agentType,
         model,
         mode: "run",
@@ -376,7 +485,7 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
 
   if (!data.ok) {
     const err = (data.error as Record<string, unknown>)?.message ?? JSON.stringify(data.error);
-    decrementPendingSpawns();
+    decrementPendingSpawns(undefined, req.agentType);
     throw new Error(`Gateway spawn failed: ${err}`);
   }
 
@@ -396,12 +505,12 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
       model,
     });
 
-    decrementPendingSpawns(workerProjectId);
+    decrementPendingSpawns(workerProjectId, req.agentType);
     writeSpawnResult(req.runId, req.nodeId, {
       childSessionKey,
     });
   } else {
-    decrementPendingSpawns((taskCtx["projectId"] as string) ?? (taskCtx["project_id"] as string) ?? undefined);
+    decrementPendingSpawns((taskCtx["projectId"] as string) ?? (taskCtx["project_id"] as string) ?? undefined, req.agentType);
     throw new Error(`Spawn returned status=${status}: ${JSON.stringify(details)}`);
   }
 }

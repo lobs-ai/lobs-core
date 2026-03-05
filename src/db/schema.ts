@@ -66,6 +66,7 @@ export const tasks = sqliteTable("tasks", {
   failureReason: text("failure_reason"),
   lastRetryReason: text("last_retry_reason"),
   evalMetrics: text("eval_metrics", { mode: "json" }),
+  spawnCount: integer("spawn_count").default(0),
   ...timestamps,
 });
 

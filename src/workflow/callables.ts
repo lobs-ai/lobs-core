@@ -32,7 +32,7 @@ export interface CallableContext {
   [key: string]: unknown;
 }
 
-export type CallableFn = (args: Record<string, unknown>, ctx: CallableContext) => Record<string, unknown>;
+export type CallableFn = (args: Record<string, unknown>, ctx: CallableContext) => Record<string, unknown> | Promise<Record<string, unknown>>;
 
 // ─── Assignment ───────────────────────────────────────────────────────────────
 
@@ -80,11 +80,11 @@ function assignmentScanUnassigned(_args: Record<string, unknown>, _ctx: Callable
 
 // ─── Calendar ─────────────────────────────────────────────────────────────────
 
-function calendarSyncGoogle(args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
+async function calendarSyncGoogle(args: Record<string, unknown>, _ctx: CallableContext): Promise<Record<string, unknown>> {
   const svc = new GoogleCalendarService();
   if (!svc.isConfigured()) return { ok: false, skipped: true, reason: "not_configured" };
   const days = (args.days_ahead as number) ?? 14;
-  const result = svc.syncToDb(days);
+  const result = await svc.syncToDb(days);
   return { ok: true, ...result };
 }
 

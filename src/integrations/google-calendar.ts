@@ -1,15 +1,13 @@
 /**
- * Google Calendar Integration
- * Port of lobs-server/app/services/google_calendar.py
- * Syncs events to scheduled_events table.
- * Uses child_process to call python helper or googleapis if available.
+ * Google Calendar Integration — native googleapis implementation
+ * Replaces the Python bridge with direct API calls.
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { execSync, spawnSync } from "node:child_process";
+import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
+import { google } from "googleapis";
 import { getDb } from "../db/connection.js";
 import { scheduledEvents } from "../db/schema.js";
 import { log } from "../util/logger.js";
@@ -19,7 +17,9 @@ const CREDENTIALS_FILE = process.env.GOOGLE_CALENDAR_CREDENTIALS_FILE
   ?? join(LOBS_SERVER_DIR, "credentials/google_calendar.json");
 const TOKEN_FILE = process.env.GOOGLE_CALENDAR_TOKEN_FILE
   ?? join(LOBS_SERVER_DIR, "credentials/google_calendar_token.json");
-const RAFE_CALENDAR_ID = process.env.RAFE_CALENDAR_ID ?? "";
+
+const RAFE_CALENDAR_ID = process.env.RAFE_CALENDAR_ID ?? "primary";
+let LOBS_CALENDAR_ID: string | null = process.env.LOBS_CALENDAR_ID ?? null;
 
 export interface CalendarEvent {
   id: string;
@@ -34,49 +34,144 @@ export interface CalendarEvent {
 }
 
 export class GoogleCalendarService {
-  /**
-   * Check if credentials are available.
-   */
   isConfigured(): boolean {
     return existsSync(TOKEN_FILE) || existsSync(CREDENTIALS_FILE);
   }
 
-  /**
-   * Fetch upcoming events from Google Calendar via Python bridge.
-   * Falls back to reading a cached JSON file if Python is unavailable.
-   */
-  fetchUpcoming(days = 7): CalendarEvent[] {
+  private async _getAuth() {
+    if (!existsSync(TOKEN_FILE)) throw new Error("No token file at " + TOKEN_FILE);
+    if (!existsSync(CREDENTIALS_FILE)) throw new Error("No credentials file at " + CREDENTIALS_FILE);
+
+    const creds = JSON.parse(readFileSync(CREDENTIALS_FILE, "utf8"));
+    const installed = creds.installed ?? creds.web;
+    const oAuth2Client = new google.auth.OAuth2(
+      installed.client_id,
+      installed.client_secret,
+      installed.redirect_uris[0],
+    );
+
+    const token = JSON.parse(readFileSync(TOKEN_FILE, "utf8"));
+    oAuth2Client.setCredentials({
+      access_token: token.token ?? token.access_token,
+      refresh_token: token.refresh_token,
+      token_type: token.token_type ?? "Bearer",
+      expiry_date: token.expiry ? new Date(token.expiry).getTime() : undefined,
+    });
+
+    oAuth2Client.on("tokens", (newTokens) => {
+      const existing = JSON.parse(readFileSync(TOKEN_FILE, "utf8"));
+      const merged = {
+        ...existing,
+        token: newTokens.access_token,
+        access_token: newTokens.access_token,
+        expiry: newTokens.expiry_date ? new Date(newTokens.expiry_date).toISOString() : existing.expiry,
+      };
+      writeFileSync(TOKEN_FILE, JSON.stringify(merged, null, 2));
+      log().info("[GCAL] Token refreshed and saved");
+    });
+
+    return oAuth2Client;
+  }
+
+  async _discoverLobsCalendar(auth: any): Promise<string> {
+    if (LOBS_CALENDAR_ID) return LOBS_CALENDAR_ID;
+    const cal = google.calendar({ version: "v3", auth });
+    const res = await cal.calendarList.list();
+    const calendars = res.data.items ?? [];
+    log().info(`[GCAL] Available calendars: ${calendars.map((c: any) => c.summary + " (" + c.id + ")").join(", ")}`);
+
+    const lobs = calendars.find((c: any) =>
+      c.summary?.toLowerCase().includes("lobs") ||
+      c.id?.toLowerCase().includes("lobs")
+    );
+    if (lobs?.id) {
+      LOBS_CALENDAR_ID = lobs.id;
+      log().info(`[GCAL] Using Lobs calendar: ${lobs.summary} (${lobs.id})`);
+      return lobs.id;
+    }
+
+    log().warn("[GCAL] Could not find a Lobs calendar; falling back to primary for writes");
+    LOBS_CALENDAR_ID = "primary";
+    return "primary";
+  }
+
+  async fetchUpcoming(days = 7): Promise<CalendarEvent[]> {
     if (!this.isConfigured()) {
       log().warn("[GCAL] Not configured — missing credentials");
       return [];
     }
-
     try {
-      // Use the Python helper from lobs-server if available
-      const pyScript = join(LOBS_SERVER_DIR, "bin/fetch_calendar_events.py");
-      if (existsSync(pyScript)) {
-        const result = spawnSync("python3", [pyScript, "--days", String(days), "--json"], {
-          encoding: "utf8", timeout: 30_000,
-        });
-        if (result.status === 0 && result.stdout) {
-          const events = JSON.parse(result.stdout) as CalendarEvent[];
-          return events;
-        }
-      }
+      const auth = await this._getAuth();
+      const cal = google.calendar({ version: "v3", auth });
+      const timeMin = new Date().toISOString();
+      const timeMax = new Date(Date.now() + days * 86400_000).toISOString();
 
-      // Try inline google-auth via node if googleapis is installed
-      return this._fetchViaNodeGoogleapis(days);
-    } catch (e) {
-      log().warn(`[GCAL] fetchUpcoming failed: ${String(e)}`);
+      const res = await cal.events.list({
+        calendarId: RAFE_CALENDAR_ID,
+        timeMin,
+        timeMax,
+        singleEvents: true,
+        orderBy: "startTime",
+        maxResults: 250,
+      });
+
+      return (res.data.items ?? []).map((e: any) => this._mapEvent(e));
+    } catch (err) {
+      log().warn(`[GCAL] fetchUpcoming failed: ${String(err)}`);
       return [];
     }
   }
 
-  /**
-   * Sync calendar events to the scheduled_events table.
-   */
-  syncToDb(daysAhead = 14): { created: number; updated: number; errors: number } {
-    const events = this.fetchUpcoming(daysAhead);
+  async createEvent(calendarId: string | null, event: Partial<CalendarEvent> & { title: string; startAt: string }): Promise<string | null> {
+    try {
+      const auth = await this._getAuth();
+      const targetCal = calendarId ?? await this._discoverLobsCalendar(auth);
+      const cal = google.calendar({ version: "v3", auth });
+      const res = await cal.events.insert({
+        calendarId: targetCal,
+        requestBody: {
+          summary: event.title,
+          description: event.description,
+          start: event.allDay
+            ? { date: event.startAt.split("T")[0] }
+            : { dateTime: event.startAt },
+          end: event.endAt
+            ? (event.allDay ? { date: event.endAt.split("T")[0] } : { dateTime: event.endAt })
+            : undefined,
+        },
+      });
+      return res.data.id ?? null;
+    } catch (err) {
+      log().warn(`[GCAL] createEvent failed: ${String(err)}`);
+      return null;
+    }
+  }
+
+  async getFreeBusy(timeMin: string, timeMax: string, calendarIds?: string[]): Promise<Record<string, { busy: { start: string; end: string }[] }>> {
+    try {
+      const auth = await this._getAuth();
+      const cal = google.calendar({ version: "v3", auth });
+      const ids = calendarIds ?? [RAFE_CALENDAR_ID];
+      const res = await cal.freebusy.query({
+        requestBody: {
+          timeMin,
+          timeMax,
+          items: ids.map(id => ({ id })),
+        },
+      });
+      const result: Record<string, { busy: { start: string; end: string }[] }> = {};
+      for (const [id, info] of Object.entries(res.data.calendars ?? {})) {
+        result[id] = { busy: ((info as any).busy ?? []).map((b: any) => ({ start: b.start!, end: b.end! })) };
+      }
+      return result;
+    } catch (err) {
+      log().warn(`[GCAL] getFreeBusy failed: ${String(err)}`);
+      return {};
+    }
+  }
+
+  async syncToDb(daysAhead = 14): Promise<{ created: number; updated: number; errors: number }> {
+    const events = await this.fetchUpcoming(daysAhead);
     const db = getDb();
     let created = 0, updated = 0, errors = 0;
 
@@ -125,9 +220,6 @@ export class GoogleCalendarService {
     return { created, updated, errors };
   }
 
-  /**
-   * Get upcoming events from DB within the next N hours.
-   */
   getUpcomingFromDb(withinHours = 24): typeof scheduledEvents.$inferSelect[] {
     const db = getDb();
     const now = new Date().toISOString();
@@ -139,16 +231,18 @@ export class GoogleCalendarService {
       .sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt));
   }
 
-  private _fetchViaNodeGoogleapis(_days: number): CalendarEvent[] {
-    // If googleapis npm package is available, use it
-    // Otherwise return empty (token refresh requires interactive auth)
-    try {
-      // Check if token file exists and is readable
-      if (!existsSync(TOKEN_FILE)) return [];
-      const token = JSON.parse(readFileSync(TOKEN_FILE, "utf8"));
-      // Token present but googleapis not bundled — log and skip
-      log().info("[GCAL] Token available but googleapis not bundled. Run python3 bridge.");
-    } catch (_) {}
-    return [];
+  private _mapEvent(e: any): CalendarEvent {
+    const allDay = Boolean(e.start?.date && !e.start?.dateTime);
+    return {
+      id: e.id,
+      title: e.summary ?? "(no title)",
+      description: e.description ?? undefined,
+      startAt: e.start?.dateTime ?? e.start?.date ?? "",
+      endAt: e.end?.dateTime ?? e.end?.date ?? undefined,
+      allDay,
+      recurrenceRule: e.recurrence?.[0] ?? undefined,
+      externalId: `gcal:${e.id}`,
+      externalSource: "google_calendar",
+    };
   }
 }

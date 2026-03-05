@@ -13,6 +13,7 @@
 
 import { getDb, closeDb } from "./db.js";
 import { randomUUID } from "node:crypto";
+import { inferProjectId } from "../util/project-inference.js";
 
 const AGENTS = ["programmer", "writer", "researcher", "reviewer", "architect"];
 const TIERS = ["micro", "small", "medium", "standard", "strong"];
@@ -59,7 +60,7 @@ try {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         id, title, status, agent, tier,
         args.flags.notes ?? null,
-        args.flags.project ?? null,
+        args.flags.project ?? inferProjectId(title, args.flags.notes) ?? null,
         now, now
       );
       console.log(JSON.stringify({ ok: true, id, title, agent, tier, status }));

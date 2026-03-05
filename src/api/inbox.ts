@@ -1,3 +1,4 @@
+import { inferProjectId } from "../util/project-inference.js";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, like } from "drizzle-orm";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -112,6 +113,7 @@ export async function handleInboxRequest(
         status: "inbox",
         agent,
         modelTier: "standard",
+        projectId: inferProjectId(`Respond to inbox feedback: ${item.title}`, text as string),
         notes: `Feedback for inbox item ${item.id}\n\n${text}`,
         createdAt: now,
         updatedAt: now,
