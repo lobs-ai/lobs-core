@@ -484,6 +484,33 @@ Reflection ID: ${reflectionId}`;
         return "skipped";
       }
 
+      // Dedup guard: check for similar existing tasks (active or proposed)
+      const normalizeTitle = (t: string) => t.toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ").trim();
+      const normalizedNew = normalizeTitle(title);
+      const existingTasks = db.select({ id: tasksTable.id, title: tasksTable.title })
+        .from(tasksTable)
+        .where(inArray(tasksTable.status, ["active", "proposed"]))
+        .all();
+      for (const existing of existingTasks) {
+        const normalizedExisting = normalizeTitle(existing.title ?? "");
+        // Skip if titles are identical or one contains the other
+        if (normalizedExisting === normalizedNew || normalizedExisting.includes(normalizedNew) || normalizedNew.includes(normalizedExisting)) {
+          log().info(`[REFLECTION] Dedup: skipping "${title.slice(0, 60)}" — matches existing task "${existing.title?.slice(0, 60)}"`);
+          return "skipped";
+        }
+        // Word-overlap check: if 60%+ of significant words overlap, treat as duplicate
+        const newWords = new Set(normalizedNew.split(" ").filter((w: string) => w.length > 3));
+        const existingWords = normalizedExisting.split(" ").filter((w: string) => w.length > 3);
+        if (newWords.size > 0 && existingWords.length > 0) {
+          const overlap = existingWords.filter((w: string) => newWords.has(w)).length;
+          const ratio = overlap / Math.max(newWords.size, existingWords.length);
+          if (ratio >= 0.6) {
+            log().info(`[REFLECTION] Dedup: skipping "${title.slice(0, 60)}" — word overlap ${Math.round(ratio * 100)}% with "${existing.title?.slice(0, 60)}"`);
+            return "skipped";
+          }
+        }
+      }
+
       db.insert(tasksTable).values({
         id: randomUUID(),
         title,
