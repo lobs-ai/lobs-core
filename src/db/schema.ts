@@ -67,6 +67,13 @@ export const tasks = sqliteTable("tasks", {
   lastRetryReason: text("last_retry_reason"),
   evalMetrics: text("eval_metrics", { mode: "json" }),
   spawnCount: integer("spawn_count").default(0),
+  estimatedMinutes: integer("estimated_minutes"),
+  dueDate: text("due_date"),
+  priority: text("priority").default("medium"),
+  scheduledStart: text("scheduled_start"),
+  scheduledEnd: text("scheduled_end"),
+  calendarEventId: text("calendar_event_id"),
+  actualMinutes: integer("actual_minutes"),
   ...timestamps,
 });
 

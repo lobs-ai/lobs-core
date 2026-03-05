@@ -614,4 +614,13 @@ export function runMigrations(db: PawDB): void {
 
   // ── Prompt A/B variant on worker_runs (idempotent) ───────────────────────
   try { db.run(sql`ALTER TABLE worker_runs ADD COLUMN prompt_variant TEXT NOT NULL DEFAULT 'A'`); } catch {}
+
+  // ── Work tracker fields on tasks (idempotent) ────────────────────────────
+  try { db.run(sql`ALTER TABLE tasks ADD COLUMN estimated_minutes INTEGER`); } catch {}
+  try { db.run(sql`ALTER TABLE tasks ADD COLUMN due_date TEXT`); } catch {}
+  try { db.run(sql`ALTER TABLE tasks ADD COLUMN priority TEXT DEFAULT 'medium'`); } catch {}
+  try { db.run(sql`ALTER TABLE tasks ADD COLUMN scheduled_start TEXT`); } catch {}
+  try { db.run(sql`ALTER TABLE tasks ADD COLUMN scheduled_end TEXT`); } catch {}
+  try { db.run(sql`ALTER TABLE tasks ADD COLUMN calendar_event_id TEXT`); } catch {}
+  try { db.run(sql`ALTER TABLE tasks ADD COLUMN actual_minutes INTEGER`); } catch {}
 }
