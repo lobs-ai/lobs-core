@@ -209,8 +209,9 @@ function scheduleResume(sessionKey: string, taskId: string, title: string): void
 async function failStaleSpawnRuns(): Promise<void> {
   try {
     const { getDb } = await import("./db/connection.js");
-    const { workflowRuns, workerRuns } = await import("./db/schema.js");
-    const { eq, isNull } = await import("drizzle-orm");
+    const { workflowRuns } = await import("./db/schema.js");
+    const { eq } = await import("drizzle-orm");
+    const { readFileSync } = await import("node:fs");
     const db = getDb();
 
     // All running workflow runs currently at a spawn node
@@ -222,28 +223,89 @@ async function failStaleSpawnRuns(): Promise<void> {
     if (spawnStuck.length === 0) return;
     log().info(`paw: checking ${spawnStuck.length} run(s) stuck at spawn nodes on restart`);
 
-    // Build set of active worker session keys for quick lookup
-    const activeWorkerKeys = new Set(
-      db.select().from(workerRuns).where(isNull(workerRuns.endedAt)).all()
-        .map((w: any) => w.workerId).filter(Boolean)
-    );
+    // Read gateway config for live session check
+    let port = 18789;
+    let token = "";
+    try {
+      const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
+      const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+      port = cfg?.gateway?.port ?? 18789;
+      token = cfg?.gateway?.auth?.token ?? "";
+    } catch {}
+
+    /**
+     * Check if a session key is truly alive right now via the gateway API.
+     * We cannot trust workerRuns DB rows alone because they persist across crashes
+     * and may reflect sessions that died during a drain without being cleaned up.
+     */
+    async function isSessionAliveNow(sessionKey: string): Promise<boolean> {
+      if (!token) return false; // can't verify without token — treat as dead on restart
+      try {
+        const resp = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+          body: JSON.stringify({
+            tool: "sessions_list",
+            sessionKey: "agent:sink:paw-orchestrator-v2",
+            args: { activeMinutes: 120, limit: 100 },
+          }),
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!resp.ok) return false;
+        const data = (await resp.json()) as any;
+        const content = data?.result?.content;
+        let sessions: any[] = [];
+        if (Array.isArray(content)) {
+          for (const c of content) {
+            if (c.type === "text" && c.text) {
+              try { sessions = JSON.parse(c.text)?.sessions ?? []; } catch {}
+            }
+          }
+        }
+        return sessions.some((s: any) => s.key === sessionKey);
+      } catch {
+        return false;
+      }
+    }
 
     for (const run of spawnStuck) {
       const nodeStates = (run.nodeStates ?? {}) as Record<string, any>;
       const currentNs = nodeStates[run.currentNode ?? ""] ?? {};
       const childKey = currentNs["childSessionKey"] as string | undefined;
 
-      // If there's no active worker for this spawn, the spawn was lost in the drain
-      if (!childKey || !activeWorkerKeys.has(childKey)) {
+      let shouldFail = false;
+      let reason = "";
+
+      if (!childKey) {
+        // No session key recorded — spawn never completed (dropped during drain)
+        shouldFail = true;
+        reason = "no session — spawn was dropped during drain";
+      } else {
+        // Session key exists but verify it's ACTUALLY alive via the gateway.
+        // DB-based workerRuns rows persist across crashes, so we can't trust them alone.
+        const alive = await isSessionAliveNow(childKey);
+        if (!alive) {
+          shouldFail = true;
+          reason = `session ${childKey.slice(0, 30)} no longer alive after restart`;
+          // Clean up the stale workerRuns row so it doesn't block capacity
+          try {
+            const { workerRuns } = await import("./db/schema.js");
+            db.update(workerRuns)
+              .set({ endedAt: new Date().toISOString(), succeeded: false, timeoutReason: "restart_cleanup" })
+              .where(eq(workerRuns.workerId, childKey))
+              .run();
+          } catch {}
+        }
+      }
+
+      if (shouldFail) {
         db.update(workflowRuns)
           .set({ status: "failed", updatedAt: new Date().toISOString() })
           .where(eq(workflowRuns.id, run.id))
           .run();
         log().warn(
           `paw: restart cleanup — failed stale spawn run ${run.id.slice(0, 8)} ` +
-          `(node=${run.currentNode}` +
-          (childKey ? `, session=${childKey.slice(0, 30)}` : ", no session") +
-          ") — no active worker"
+          `(node=${run.currentNode}) — ${reason}`
         );
       }
     }

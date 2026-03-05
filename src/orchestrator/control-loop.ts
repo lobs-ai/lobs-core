@@ -287,14 +287,15 @@ function runTick(): void {
   }
 
   // ── 5b. Stale workflow run cleanup (progress-based) ────────────────────────
-  // Cancel workflow runs stuck too long. Two thresholds:
-  //   - spawn nodes with NO session: 2 min (spawn should complete in seconds;
-  //     if stuck this long the spawn request was silently dropped)
-  //   - spawn nodes WITH a live session: skip (slow models may take a while)
+  // Cancel workflow runs stuck too long. Thresholds:
+  //   - spawn nodes with NO session: 2 min (spawn takes seconds; silence = dropped)
+  //   - spawn nodes WITH session but session is dead: 3 min (fast recovery after drain)
+  //   - spawn nodes WITH session and session is alive: reset clock (worker may be slow but ok)
   //   - all other nodes: 10 min
   try {
     const staleDb = getDb();
     const staleThreshold10 = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const staleThreshold3  = new Date(Date.now() -  3 * 60 * 1000).toISOString();
     const staleThreshold2  = new Date(Date.now() -  2 * 60 * 1000).toISOString();
     const staleRuns = staleDb.select().from(workflowRuns)
       .where(and(eq(workflowRuns.status, "running")))
@@ -308,15 +309,28 @@ function runTick(): void {
       const isSpawnNode = !!run.currentNode?.startsWith("spawn_");
 
       if (isSpawnNode && childKey) {
-        // Spawn node with session — only fail if session is dead AND run is >10 min stale
-        if (run.updatedAt < staleThreshold10) {
+        // Spawn node with a session key recorded.
+        // After 3 min: check if session is actually alive. If dead (e.g. killed during drain),
+        // fail immediately and clean up the dangling workerRuns row to free capacity.
+        // If alive, touch updatedAt so we don't re-check every tick.
+        if (run.updatedAt < staleThreshold3) {
           checkSessionAlive(childKey).then((alive: boolean) => {
             if (alive) {
-              // Touch updatedAt to reset the staleness clock
+              // Session is live — reset staleness clock so we don't spam liveness checks
               staleDb.update(workflowRuns).set({ updatedAt: new Date().toISOString() }).where(eq(workflowRuns.id, run.id)).run();
             } else {
+              // Session is dead — fail the workflow run and free the capacity slot
               staleDb.update(workflowRuns).set({ status: "failed", updatedAt: new Date().toISOString() }).where(eq(workflowRuns.id, run.id)).run();
-              log().warn("orchestrator: failed stale run " + run.id.slice(0, 8) + " — worker session gone");
+              const mins = Math.round((Date.now() - new Date(run.updatedAt).getTime()) / 60000);
+              log().warn("orchestrator: failed stale spawn run " + run.id.slice(0, 8) + " — worker session " + childKey.slice(0, 30) + " gone after " + mins + "min (possible drain)");
+              // Clean up dangling workerRuns row so capacity is freed immediately
+              try {
+                const { workerRuns: wrTable } = require("../db/schema.js");
+                staleDb.update(wrTable)
+                  .set({ endedAt: new Date().toISOString(), succeeded: false, timeoutReason: "session_dead" })
+                  .where(eq(wrTable.workerId, childKey))
+                  .run();
+              } catch {}
             }
           }).catch(() => {});
         }
