@@ -45,6 +45,7 @@ export const tasks = sqliteTable("tasks", {
   reviewState: text("review_state"),
   projectId: text("project_id").references(() => projects.id),
   notes: text("notes"),
+  contextRefs: text("context_refs", { mode: "json" }),
   artifactPath: text("artifact_path"),
   startedAt: text("started_at"),
   finishedAt: text("finished_at"),

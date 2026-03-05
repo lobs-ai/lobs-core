@@ -13,7 +13,7 @@
  * don't pollute the main session.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import type { OpenClawPluginServiceContext } from "openclaw/plugin-sdk";
 import { eq, and } from "drizzle-orm";
 import { log } from "../util/logger.js";
@@ -458,13 +458,33 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
   const projectCtx = (req.context?.project ?? {}) as Record<string, unknown>;
   const taskTitle = (taskCtx["title"] as string) ?? "Workflow task";
   const taskNotes = (taskCtx["notes"] as string) ?? "";
+  // Load context_refs files if specified
+  const contextRefs = (taskCtx["context_refs"] ?? taskCtx["contextRefs"] ?? []) as string[];
+  let contextBlock = "";
+  if (Array.isArray(contextRefs) && contextRefs.length > 0) {
+    const loaded: string[] = [];
+    for (const ref of contextRefs) {
+      const resolved = ref.replace(/^~/, process.env.HOME ?? "");
+      if (existsSync(resolved)) {
+        try {
+          const content = readFileSync(resolved, "utf-8").trim();
+          if (content.length > 0) {
+            loaded.push(`### File: ${ref}\n${content.slice(0, 30000)}`);
+          }
+        } catch {}
+      }
+    }
+    if (loaded.length > 0) {
+      contextBlock = "\n\n---\n## Reference Context\n" + loaded.join("\n\n") + "\n---\n";
+    }
+  }
   const taskPrompt = req.promptTemplate ?? `${taskTitle}\n\n${taskNotes}`.trim();
   const repoPath = (projectCtx["repo_path"] as string) || undefined;
   const gitReminder = (req.agentType === "programmer" || req.agentType === "architect") && repoPath
     ? `\n\n⚠️ IMPORTANT: When you are done, you MUST run: git add -A && git commit -m "agent(${req.agentType}): <brief summary>"\nDo NOT finish without committing your changes.`
     : "";
   const taskContext = buildTaskContext({ projectId: (taskCtx["project_id"] as string) ?? undefined, agentType: req.agentType });
-  const finalPrompt = taskPrompt + gitReminder + taskContext;
+  const finalPrompt = taskPrompt + contextBlock + gitReminder + taskContext;
 
   // ── Circuit-breaker-aware model selection ────────────────────────────────
   const modelChoice = req.modelTier
