@@ -126,8 +126,8 @@ export async function triageWorkerCompletion(
         sessionKey: SINK_SESSION_KEY,
         args: {
           task: triagePrompt,
-          agentId: "main",
-          model: "lmstudio/qwen/qwen3.5-35b-a3b",
+          agentId: "programmer",
+          model: "anthropic/claude-sonnet-4-6",
           mode: "run",
           cleanup: "keep",
           runTimeoutSeconds: 120,
