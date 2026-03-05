@@ -38,7 +38,7 @@ async function spawnAndWait(task: string, timeoutMs = 180000): Promise<string> {
   const spawnResult = await gatewayInvoke("sessions_spawn", {
     task,
     mode: "run",
-    model: "anthropic/claude-sonnet-4-6",
+    model: "openai-codex/gpt-5.3-codex",
     runTimeoutSeconds: Math.floor(timeoutMs / 1000),
     cleanup: "keep",
   });
