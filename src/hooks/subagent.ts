@@ -113,8 +113,47 @@ async function collectWorkerUsage(sessionKey: string): Promise<WorkerUsageSnapsh
   }
 }
 
+function parseKNumber(s: string): number {
+  const trimmed = s.trim().replace(/,/g, "");
+  if (trimmed.endsWith("k") || trimmed.endsWith("K")) {
+    return parseFloat(trimmed.slice(0, -1)) * 1000;
+  }
+  return parseFloat(trimmed) || 0;
+}
+
+function extractFromStatusText(statusText: string): WorkerUsageSnapshot | null {
+  // Parse "Tokens: 10 in / 534 out" or "🧮 Tokens: 5.2k in / 46k out"
+  const tokenMatch = statusText.match(/Tokens?:\s*([\d.,k]+)\s*in\s*\/\s*([\d.,k]+)\s*out/i);
+  if (!tokenMatch) return null;
+  const input = Math.round(parseKNumber(tokenMatch[1]));
+  const output = Math.round(parseKNumber(tokenMatch[2]));
+  if (input === 0 && output === 0) return null;
+
+  // Parse cost: "$0.0123"
+  let cost = 0;
+  const costMatch = statusText.match(/\$\s*([\d.]+)/);
+  if (costMatch) cost = parseFloat(costMatch[1]) || 0;
+
+  // Parse model
+  let model: string | undefined;
+  const modelMatch = statusText.match(/Model:\s*([^\s·•\n]+)/);
+  if (modelMatch) model = modelMatch[1];
+
+  return { inputTokens: input, outputTokens: output, totalTokens: input + output, totalCostUsd: cost, model };
+}
+
 function extractUsageSnapshot(payload: unknown): WorkerUsageSnapshot {
   const candidates: WorkerUsageSnapshot[] = [];
+
+  // Check for statusText from session_status (text format: "Tokens: X in / Y out")
+  if (payload && typeof payload === "object") {
+    const obj = payload as Record<string, unknown>;
+    const statusText = typeof obj.statusText === "string" ? obj.statusText : undefined;
+    if (statusText) {
+      const fromText = extractFromStatusText(statusText);
+      if (fromText) candidates.push(fromText);
+    }
+  }
 
   const walk = (value: unknown) => {
     if (!value || typeof value !== "object") return;
