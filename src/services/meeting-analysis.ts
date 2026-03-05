@@ -19,26 +19,60 @@ function gatewayCfg(): { port: number; token: string } {
   } catch { return { port: 18789, token: "" }; }
 }
 
-async function gatewaySpawn(task: string): Promise<string> {
+async function gatewayInvoke(tool: string, args: Record<string, unknown>): Promise<any> {
   const { port, token } = gatewayCfg();
   const r = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-    body: JSON.stringify({
-      tool: "sessions_spawn",
-      args: {
-        task,
-        mode: "run",
-        model: "anthropic/claude-sonnet-4-6",
-        runTimeoutSeconds: 120,
-        cleanup: "keep",
-      },
-      sessionKey: "agent:sink:paw-orchestrator-v2",
-    }),
+    body: JSON.stringify({ tool, args, sessionKey: "agent:sink:paw-orchestrator-v2" }),
   });
-  if (!r.ok) throw new Error(`Gateway spawn failed (${r.status}): ${await r.text()}`);
+  if (!r.ok) throw new Error(`Gateway ${tool} failed (${r.status}): ${await r.text()}`);
   const data = (await r.json()) as any;
-  return data?.result?.details?.text ?? data?.result?.text ?? JSON.stringify(data);
+  return data?.result?.details ?? data?.result ?? data;
+}
+
+async function spawnAndWait(task: string, timeoutMs = 120000): Promise<string> {
+  // Spawn the session
+  const spawnResult = await gatewayInvoke("sessions_spawn", {
+    task,
+    mode: "run",
+    model: "anthropic/claude-sonnet-4-6",
+    runTimeoutSeconds: Math.floor(timeoutMs / 1000),
+    cleanup: "keep",
+  });
+
+  const sessionKey = spawnResult.childSessionKey;
+  if (!sessionKey) throw new Error("No session key from spawn: " + JSON.stringify(spawnResult));
+
+  // Poll for completion
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 5000));
+
+    try {
+      const history = await gatewayInvoke("sessions_history", {
+        sessionKey,
+        limit: 5,
+        includeTools: false,
+      });
+
+      const messages = history?.messages ?? history ?? [];
+      // Look for the last assistant message
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i];
+        if (msg.role === "assistant") {
+          const text = typeof msg.content === "string" ? msg.content
+            : Array.isArray(msg.content) ? msg.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
+            : "";
+          if (text.trim()) return text;
+        }
+      }
+    } catch (e) {
+      log().debug?.(`[MEETING_ANALYSIS] Poll error: ${e}`);
+    }
+  }
+
+  throw new Error("Analysis session timed out");
 }
 
 const ANALYSIS_PROMPT = `You are analyzing a meeting transcript. Return ONLY valid JSON (no markdown, no code fences) with this exact structure:
@@ -61,14 +95,12 @@ Rules:
 - If unclear who should do it, set assignee to null
 - Be specific in action item descriptions
 - Only include actual commitments/tasks, not discussion points
+- If the meeting is just a test with no real content, return empty arrays for decisions and action_items
 
 TRANSCRIPT:
 `;
 
 export class MeetingAnalysisService {
-  /**
-   * Analyze a meeting transcript and store results.
-   */
   async analyze(meetingId: string): Promise<void> {
     const db = getDb();
     const meeting = db.select().from(meetings).where(eq(meetings.id, meetingId)).get();
@@ -77,7 +109,6 @@ export class MeetingAnalysisService {
       return;
     }
 
-    // Mark as processing
     db.update(meetings)
       .set({ analysisStatus: "processing", updatedAt: new Date().toISOString() })
       .where(eq(meetings.id, meetingId))
@@ -85,14 +116,12 @@ export class MeetingAnalysisService {
 
     try {
       const prompt = ANALYSIS_PROMPT + meeting.transcript;
-      const responseText = await gatewaySpawn(prompt);
+      const responseText = await spawnAndWait(prompt);
 
-      // Parse JSON from response (handle potential markdown wrapping)
-      let jsonStr = responseText;
+      // Parse JSON from response
       const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) jsonStr = jsonMatch[0];
-
-      const analysis = JSON.parse(jsonStr);
+      if (!jsonMatch) throw new Error("No JSON found in response: " + responseText.slice(0, 200));
+      const analysis = JSON.parse(jsonMatch[0]);
 
       // Store summary
       db.update(meetings)
@@ -133,7 +162,7 @@ export class MeetingAnalysisService {
         }).run();
       }
 
-      log().info(`[MEETING_ANALYSIS] Completed analysis for meeting ${meetingId}: ${(analysis.action_items ?? []).length} action items`);
+      log().info(`[MEETING_ANALYSIS] Completed analysis for meeting ${meetingId}: ${(analysis.action_items ?? []).length} action items, summary: ${(analysis.summary ?? "").slice(0, 80)}`);
 
     } catch (e: any) {
       log().error(`[MEETING_ANALYSIS] Failed for meeting ${meetingId}: ${e.message}`);

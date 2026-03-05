@@ -100,6 +100,14 @@ export async function handleMeetingsRequest(
     return json(res, { ok: true });
   }
 
+  // POST /api/meetings/:id/analyze — trigger (re-)analysis
+  if (id && parts[2] === "analyze" && req.method === "POST") {
+    const { MeetingAnalysisService } = await import("../services/meeting-analysis.js");
+    const analysisSvc = new MeetingAnalysisService();
+    analysisSvc.analyze(id).catch(() => {});
+    return json(res, { ok: true, status: "processing" });
+  }
+
   // Action items sub-routes
   if (id === "action-items" || parts[2] === "action-items") {
     return handleMeetingActionItemsRequest(req, res, id, parts);
