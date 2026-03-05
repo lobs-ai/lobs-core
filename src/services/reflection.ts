@@ -514,7 +514,7 @@ Reflection ID: ${reflectionId}`;
         agent: agentType,
         modelTier: "standard",
         projectId: inferProjectId(title, suggestion),
-        notes: `[Proposed from ${agentType} reflection, size=${size}]\n\n${suggestion}`,
+        notes: `## Problem\n${suggestion}\n\n## Acceptance Criteria\n- [ ] (to be defined when activated)\n\n## Context\nProposed by ${agentType} reflection (size=${size})`,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       }).run();
