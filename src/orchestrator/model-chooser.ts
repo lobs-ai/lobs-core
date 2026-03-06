@@ -15,7 +15,6 @@ export type ModelTier = "micro" | "small" | "medium" | "standard" | "strong";
 
 export const TIER_MODELS: Record<ModelTier, string[]> = {
   micro: [
-    "lmstudio/qwen/qwen3.5-35b-a3b",
     "anthropic/claude-haiku-4-5",
   ],
   small: [
@@ -74,8 +73,7 @@ export const AGENT_FALLBACK_CHAINS: Record<string, string[]> = {
     "anthropic/claude-opus-4-6",
   ],
   "inbox-responder": [
-    "lmstudio/qwen/qwen3.5-35b-a3b",     // tier: micro — cheapest
-    "anthropic/claude-haiku-4-5",
+    "anthropic/claude-haiku-4-5",         // tier: micro — cheapest cloud
     "anthropic/claude-sonnet-4-6",
   ],
 };

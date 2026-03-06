@@ -12,8 +12,7 @@ declare module "openclaw/plugin-sdk" {
     config: Record<string, unknown>;
     resolvePath(path: string): string;
     on(event: string, handler: (event: unknown, ctx: unknown) => Promise<Record<string, unknown> | void>): void;
-    registerHttpRoute(opts: { path: string; handler: (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) => Promise<void> }): void;
-    registerHttpHandler(opts: { handler: (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) => Promise<boolean>; pluginId?: string }): void;
+    registerHttpRoute(params: { path: string; handler: (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) => Promise<boolean | void> | boolean | void; auth: "gateway" | "plugin"; match?: "exact" | "prefix"; replaceExisting?: boolean }): void;
     registerService(opts: { id: string; start: () => void; stop: () => void }): void;
     registerCommand?(opts: { name: string; description: string; handler: (ctx?: unknown) => Promise<{ text: string }> }): void;
     registerCli?(fn: (opts: { program: CliProgram }) => void, opts?: { commands: string[] }): void;

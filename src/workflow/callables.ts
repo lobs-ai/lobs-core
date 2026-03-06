@@ -187,9 +187,40 @@ function reflectionRunSweep(args: Record<string, unknown>, _ctx: CallableContext
     .limit(30)
     .all();
 
-  // Build reflection summaries
+  // Build reflection summaries and persist each raw reflection into inbox (notice)
+  let rawInboxCount = 0;
   const reflectionSummaries = reflections.map(r => {
     const result = r.result as Record<string, unknown> | null;
+
+    // Persist full per-agent reflection so human can review all outputs, not just triage results.
+    const existingInbox = db.select().from(inboxItems)
+      .where(eq(inboxItems.sourceReflectionId, r.id))
+      .limit(1)
+      .get();
+
+    if (!existingInbox) {
+      const summaryText = (typeof result?.summary === "string" && result.summary.trim().length > 0)
+        ? result.summary.trim()
+        : `Reflection output from ${r.agentType}`;
+      const payloadText = result
+        ? JSON.stringify(result, null, 2)
+        : "No structured reflection payload captured.";
+
+      db.insert(inboxItems).values({
+        id: randomUUID(),
+        title: `Reflection result — ${r.agentType}`,
+        content: payloadText.slice(0, 24000),
+        summary: summaryText.slice(0, 500),
+        type: "notice",
+        requiresAction: false,
+        actionStatus: "pending",
+        sourceAgent: r.agentType,
+        sourceReflectionId: r.id,
+        modifiedAt: new Date().toISOString(),
+      }).run();
+      rawInboxCount += 1;
+    }
+
     if (!result) return null;
     const parts: string[] = [`### ${r.agentType} (${r.createdAt})`];
     if (result.summary) parts.push(`Summary: ${result.summary}`);
@@ -212,18 +243,24 @@ function reflectionRunSweep(args: Record<string, unknown>, _ctx: CallableContext
 
   const eventText = `[Reflection Sweep] ${reflections.length} agent reflections need triage.
 
-Review these reflections and classify each suggestion by impact:
-- **High impact**: Strategic decisions, architecture changes, risky refactors, anything that needs human judgment → Create an **inbox item** for Rafe to review.
-- **Medium impact**: Useful improvements, bug fixes, tooling enhancements → Create a **task** directly.
-- **Low impact**: Small fixes, doc updates, minor cleanup → Create a **task** directly.
-- **Noise/duplicates**: Skip entirely.
+You have ${reflections.length} agent reflections to process. Each agent spent real compute thinking about our system — extract maximum value from their work.
 
-Rules:
-- Rewrite suggestions into clear, actionable task titles — don't copy verbatim from reflections.
-- Merge duplicates across agents into single items.
+## Your Job
+For EACH reflection that contains substantive ideas:
+1. Create an **inbox item** (suggestion) summarizing that agent's key insight(s) so Rafe can review/approve/reject them.
+2. If a reflection contains **obvious small fixes** (typos, minor config, doc updates) that don't need approval, create tasks directly.
+
+## Classification
+- **Needs Rafe's review** (most things): Strategic decisions, new features, architecture changes, process changes, anything non-trivial → **inbox item** (suggestion, requires_action=true)
+- **Auto-approve** (only obvious small wins): Config fixes, doc typos, minor cleanup that can't break anything → **task** directly
+- **Skip**: Pure noise, vague platitudes with no concrete action, exact duplicates of existing tasks
+
+## Rules
+- Create at least one inbox item per agent that produced useful output — don't over-compress.
+- Rewrite into clear, actionable titles — not verbatim reflection text.
+- Include the agent's reasoning/context in the inbox item content so Rafe has enough info to decide.
+- Merge only when two agents said the exact same thing.
 - Check existing tasks to avoid duplicates.
-- Be selective — 3 good tasks beat 10 mediocre ones.
-- Assign the right agent type and model_tier for each task.
 
 ## Existing Tasks
 ${existingTaskList}
@@ -271,8 +308,8 @@ ${reflectionSummaries}`;
   for (const r of reflections) {
     db.update(agentReflections).set({ status: "swept" }).where(eq(agentReflections.id, r.id)).run();
   }
-  log().info(`[REFLECTION] Sweep: gathered ${reflections.length} reflections, marked swept, sent to main for triage`);
-  return { ok: true, processed: reflections.length, sentToMain: true };
+  log().info(`[REFLECTION] Sweep: gathered ${reflections.length} reflections, wrote ${rawInboxCount} raw inbox notices, marked swept, sent to main for triage`);
+  return { ok: true, processed: reflections.length, rawInboxNotices: rawInboxCount, sentToMain: true };
 }
 
 function reflectionRunCompression(args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {

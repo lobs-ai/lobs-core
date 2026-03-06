@@ -11,7 +11,7 @@
  */
 
 import { log } from "../util/logger.js";
-import { getDb } from "../db/connection.js";
+import { getRawDb } from "../db/connection.js";
 
 export type CircuitState = "closed" | "open" | "half_open";
 
@@ -37,7 +37,7 @@ const DEFAULT_RECOVERY_MINUTES = 30;
 
 function getSettings(): { threshold: number; recoveryMinutes: number; enabled: boolean } {
   try {
-    const db = getDb() as any;
+    const db = getRawDb();
     const row = db.prepare(
       "SELECT value FROM orchestrator_settings WHERE key = 'circuit_breaker'"
     ).get() as { value: string } | undefined;
@@ -54,7 +54,7 @@ function getSettings(): { threshold: number; recoveryMinutes: number; enabled: b
 }
 
 function getOrCreate(model: string, agentType: string): ModelHealthRow {
-  const db = getDb() as any;
+  const db = getRawDb();
   const existing = db.prepare(
     "SELECT * FROM model_health WHERE model = ? AND agent_type = ?"
   ).get(model, agentType) as ModelHealthRow | undefined;
@@ -73,7 +73,7 @@ function getOrCreate(model: string, agentType: string): ModelHealthRow {
 }
 
 function save(row: ModelHealthRow): void {
-  const db = getDb() as any;
+  const db = getRawDb();
   db.prepare(`
     UPDATE model_health SET
       state = ?, consecutive_failures = ?, total_failures = ?, total_runs = ?,
@@ -123,7 +123,7 @@ function openCircuit(row: ModelHealthRow, _recoveryMinutes: number): void {
   log().warn("[MODEL_HEALTH] ⚠️  Circuit OPENED: " + row.model + "/" + row.agentType +
     " (failures=" + row.consecutiveFailures + ", recovery_after=" + row.recoveryAfter + ")");
   try {
-    const db = getDb() as any;
+    const db = getRawDb();
     db.prepare(
       "INSERT INTO control_loop_events (event_type, payload, created_at) VALUES ('circuit_opened', ?, ?)"
     ).run(JSON.stringify({
@@ -156,7 +156,7 @@ export function recordRunOutcome(
         save(row);
         log().info("[MODEL_HEALTH] ✅ Circuit CLOSED: " + model + "/" + agentType + " (probe succeeded)");
         try {
-          const db = getDb() as any;
+          const db = getRawDb();
           db.prepare(
             "INSERT INTO control_loop_events (event_type, payload, created_at) VALUES ('circuit_closed', ?, ?)"
           ).run(JSON.stringify({ model, agent_type: agentType, reason: "probe_success" }), new Date().toISOString());
@@ -220,7 +220,7 @@ export function chooseHealthyModel(
 /** Return all tracked health rows. */
 export function getHealthSnapshot(): ModelHealthRow[] {
   try {
-    const db = getDb() as any;
+    const db = getRawDb();
     return db.prepare("SELECT * FROM model_health ORDER BY updated_at DESC").all() as ModelHealthRow[];
   } catch { return []; }
 }
@@ -228,7 +228,7 @@ export function getHealthSnapshot(): ModelHealthRow[] {
 /** Reset a specific circuit to closed. */
 export function resetCircuit(model: string, agentType: string): void {
   try {
-    const db = getDb() as any;
+    const db = getRawDb();
     db.prepare(`
       UPDATE model_health SET state = 'closed', consecutive_failures = 0,
         opened_at = NULL, recovery_after = NULL, manual_override = NULL, updated_at = ?
@@ -243,7 +243,7 @@ export function resetCircuit(model: string, agentType: string): void {
 /** Force a circuit state. override: 'force_open' | 'force_closed' | null */
 export function setManualOverride(model: string, agentType: string, override: string | null): void {
   try {
-    const db = getDb() as any;
+    const db = getRawDb();
     db.prepare(
       "UPDATE model_health SET manual_override = ?, updated_at = ? WHERE model = ? AND agent_type = ?"
     ).run(override, new Date().toISOString(), model, agentType);
@@ -264,7 +264,7 @@ export function setManualOverride(model: string, agentType: string, override: st
  */
 export function seedModelHealthFromHistory(lookbackHours = 24): void {
   try {
-    const db = getDb() as any;
+    const db = getRawDb();
 
     // Query recent worker_runs grouped by (model, agent_type)
     const rows = db.prepare(`

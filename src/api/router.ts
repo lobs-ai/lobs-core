@@ -32,7 +32,7 @@ import { error } from "./index.js";
 const PREFIXES = ["/paw/api/", "/api/"];
 
 export function registerPawRouter(api: OpenClawPluginApi): void {
-  (api as any).registerHttpHandler(async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
+  const handler = async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const pathname = decodeURIComponent(url.pathname);
 
@@ -79,5 +79,9 @@ export function registerPawRouter(api: OpenClawPluginApi): void {
       if (!res.headersSent) error(res, `Internal error: ${String(err)}`, 500);
       return true;
     }
-  });
+  };
+
+  // Register under both prefixes
+  api.registerHttpRoute({ path: "/paw/api", handler, auth: "plugin", match: "prefix" });
+  api.registerHttpRoute({ path: "/api", handler, auth: "plugin", match: "prefix" });
 }

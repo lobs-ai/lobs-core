@@ -8,6 +8,8 @@
  * 3. Process schedule triggers (cron-triggered workflows)
  * 4. Scan for new ready tasks → match to workflows → start runs
  * 5. Health check active workers (detect stale)
+ * 6. Worker health check (legacy)
+ * 7. Auto-close active tasks whose every worker_run shows succeeded=true
  *
  * Spawns route through the "sink" agent session so completion announcements
  * don't pollute the main session.
@@ -20,7 +22,7 @@ import { log } from "../util/logger.js";
 import { processPendingResumes } from "../index.js";
 import { WorkflowExecutor } from "../workflow/engine.js";
 import { popPendingSpawns, requeueSpawn, type SpawnRequest } from "../workflow/nodes.js";
-import { getDb } from "../db/connection.js";
+import { getDb, getRawDb } from "../db/connection.js";
 import { workflowRuns, tasks as tasksTable } from "../db/schema.js";
 import { maybeFlushTriageQueue } from "./triage.js";
 import { buildTaskContext } from "../util/task-context.js";
@@ -62,49 +64,49 @@ const SINK_SESSION_KEY = "agent:sink:paw-orchestrator-v2";
  */
 async function checkSessionAlive(sessionKey: string): Promise<boolean> {
   try {
-    const cfgPath = process.env.OPENCLAW_CONFIG ?? process.env.HOME + "/.openclaw/openclaw.json";
-    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    const port = cfg?.gateway?.port ?? 18789;
-    const token = cfg?.gateway?.auth?.token ?? "";
+    // Strategy: check the transcript file directly instead of relying on sessions_list,
+    // which can miss ephemeral subagent sessions after store cleanup.
 
-    const resp = await fetch("http://127.0.0.1:" + port + "/tools/invoke", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
-      body: JSON.stringify({
-        tool: "sessions_list",
-        sessionKey: "agent:sink:paw-orchestrator-v2",
-        args: { activeMinutes: 120, limit: 100 },
-      }),
-      signal: AbortSignal.timeout(5000),
-    });
+    // Extract agent id from session key (e.g. "agent:programmer:subagent:UUID" → "programmer")
+    const parts = sessionKey.split(":");
+    const agentId = parts[1] ?? "main";
+    // Extract session UUID — the last UUID-like segment
+    const uuidMatch = sessionKey.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
 
-    if (!resp.ok) return true; // assume alive if we can't check
+    // Try to find the session in the agent's session store
+    const storePath = `${process.env.HOME}/.openclaw/agents/${agentId}/sessions/sessions.json`;
+    try {
+      const store = JSON.parse(readFileSync(storePath, "utf8"));
+      const entry = store[sessionKey];
+      if (entry) {
+        const updatedAt = entry.updatedAt as number;
+        const ageMs = Date.now() - updatedAt;
+        const STALE_THRESHOLD_MS = 15 * 60 * 1000; // 15 min — matches runTimeoutSeconds
+        if (ageMs <= STALE_THRESHOLD_MS) return true;
+        // Entry exists but stale — check transcript file mtime as backup
+      }
+    } catch {}
 
-    const data = (await resp.json()) as any;
-    const respContent = data?.result?.content;
-    let sessions: any[] = [];
-    if (Array.isArray(respContent)) {
-      for (const c of respContent) {
-        if (c.type === "text" && c.text) {
-          try { sessions = JSON.parse(c.text)?.sessions ?? []; } catch {}
-        }
+    // Fallback: check if transcript file exists and was recently modified
+    if (uuidMatch) {
+      const transcriptDir = `${process.env.HOME}/.openclaw/agents/${agentId}/sessions`;
+      const transcriptPath = `${transcriptDir}/${uuidMatch[1]}.jsonl`;
+      try {
+        const { statSync } = require("node:fs");
+        const stat = statSync(transcriptPath);
+        const fileAgeMs = Date.now() - stat.mtimeMs;
+        const FILE_STALE_MS = 15 * 60 * 1000; // 15 min — matches runTimeoutSeconds
+        if (fileAgeMs <= FILE_STALE_MS) return true;
+        log().debug?.("checkSessionAlive: transcript " + transcriptPath.slice(-50) + " stale (" + Math.round(fileAgeMs / 60000) + "min)");
+        return false;
+      } catch {
+        // No transcript file — session truly doesn't exist
+        return false;
       }
     }
 
-    const session = sessions.find((s: any) => s.key === sessionKey);
-    if (!session) return false; // session doesn't exist at all
-
-    // Check if session has been updated recently (within 5 min)
-    const updatedAt = session.updatedAt as number;
-    const ageMs = Date.now() - updatedAt;
-    const STALE_THRESHOLD_MS = 5 * 60 * 1000;
-
-    if (ageMs > STALE_THRESHOLD_MS) {
-      log().debug?.("checkSessionAlive: session " + sessionKey.slice(0, 30) + " exists but stale (" + Math.round(ageMs / 60000) + "min since update)");
-      return false;
-    }
-
-    return true; // session exists and recently active
+    // Can't determine — assume alive
+    return true;
   } catch {
     return true; // assume alive on error
   }
@@ -204,7 +206,7 @@ function runTick(): void {
 
       // Project lock: one worker per project per agent type
       if (spawnProjectId && (projectHasActiveWorker(spawnProjectId, req.agentType) || projectHasPendingSpawn(spawnProjectId, req.agentType))) {
-        log().info(`orchestrator: project ${spawnProjectId.slice(0, 8)}:${req.agentType} locked — re-queuing spawn for run ${req.runId.slice(0, 8)}`);
+        log().debug?.(`orchestrator: project ${spawnProjectId.slice(0, 8)}:${req.agentType} locked — re-queuing spawn for run ${req.runId.slice(0, 8)}`);
         requeueSpawn(req);
         continue;
       }
@@ -285,7 +287,7 @@ function runTick(): void {
       const sessionKey = w.workerId;
       if (!sessionKey) continue;
       const runningMin = (Date.now() - new Date(w.startedAt).getTime()) / 60000;
-      if (runningMin < 5) continue; // give new workers time
+      if (runningMin < 12) continue; // give workers time — long model calls can take 5-10min
 
       checkSessionAlive(sessionKey).then((alive: boolean) => {
         if (!alive) {
@@ -377,6 +379,93 @@ function runTick(): void {
     }
   } catch (e) {
     log().error(`orchestrator: health check error: ${e}`);
+  }
+
+  // ── 7. Auto-close tasks where all worker_runs succeeded ────────────────────
+  // Detects active tasks where every worker_run has succeeded=1 (at least one
+  // run exists, no failed or in-flight runs). Marks them completed and logs an
+  // audit event so the orchestrator stops re-queuing them.
+  try {
+    autoCloseSucceededTasks();
+  } catch (e) {
+    log().error(`orchestrator: auto-close succeeded tasks error: ${e}`);
+  }
+}
+
+// ── Auto-close helper ─────────────────────────────────────────────────────────
+
+/**
+ * Close any active task whose worker_runs are ALL succeeded=1.
+ *
+ * Safe to call on every tick (query is cheap; idempotent).
+ * Writes a control_loop_events row per closed task for audit trail.
+ */
+function autoCloseSucceededTasks(): void {
+  const db = getRawDb();
+
+  const stale = db.prepare(`
+    SELECT
+        t.id,
+        t.title,
+        t.agent,
+        COUNT(wr.id)                                          AS run_count,
+        SUM(CASE WHEN wr.succeeded = 1 THEN 1 ELSE 0 END)    AS succeeded_count,
+        SUM(CASE WHEN wr.succeeded = 0 THEN 1 ELSE 0 END)    AS failed_count,
+        SUM(CASE WHEN wr.succeeded IS NULL THEN 1 ELSE 0 END) AS pending_count,
+        MAX(wr.ended_at)                                      AS last_run_at
+    FROM tasks t
+    JOIN worker_runs wr ON wr.task_id = t.id
+    WHERE t.status = 'active'
+    GROUP BY t.id
+    HAVING
+        run_count > 0
+        AND succeeded_count = run_count
+        AND failed_count = 0
+        AND pending_count = 0
+    ORDER BY last_run_at ASC
+  `).all() as Array<{
+    id: string;
+    title: string;
+    agent: string;
+    run_count: number;
+    last_run_at: string;
+  }>;
+
+  if (stale.length === 0) return;
+
+  const now = new Date().toISOString();
+
+  const closeStmt = db.prepare(`
+    UPDATE tasks
+    SET status = 'completed',
+        finished_at = ?,
+        updated_at = ?
+    WHERE id = ?
+  `);
+
+  const eventStmt = db.prepare(`
+    INSERT INTO control_loop_events (id, event_type, status, payload, created_at)
+    VALUES (lower(hex(randomblob(16))), 'auto_close_succeeded', 'processed', json(?), ?)
+  `);
+
+  for (const task of stale) {
+    closeStmt.run(now, now, task.id);
+    eventStmt.run(
+      JSON.stringify({
+        task_id: task.id,
+        title: task.title,
+        agent: task.agent,
+        run_count: task.run_count,
+        last_run_at: task.last_run_at,
+        reason: "all_worker_runs_succeeded",
+        closed_at: now,
+      }),
+      now,
+    );
+    log().info(
+      `[AUTO-CLOSE] Completed task ${task.id.slice(0, 8)} (${task.agent}): ` +
+      `"${task.title.slice(0, 60)}" — ${task.run_count} run(s) all succeeded`,
+    );
   }
 }
 
@@ -564,7 +653,8 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
 
   if (!data.ok) {
     const err = (data.error as Record<string, unknown>)?.message ?? JSON.stringify(data.error);
-    decrementPendingSpawns(undefined, req.agentType);
+    const workerProjectId = (taskCtx["projectId"] as string) ?? (taskCtx["project_id"] as string) ?? undefined;
+    decrementPendingSpawns(workerProjectId, req.agentType);
     throw new Error(`Gateway spawn failed: ${err}`);
   }
 
