@@ -81,7 +81,7 @@ async function checkSessionAlive(sessionKey: string): Promise<boolean> {
       if (entry) {
         const updatedAt = entry.updatedAt as number;
         const ageMs = Date.now() - updatedAt;
-        const STALE_THRESHOLD_MS = 15 * 60 * 1000; // 15 min — matches runTimeoutSeconds
+        const STALE_THRESHOLD_MS = 30 * 60 * 1000; // 30 min — matches runTimeoutSeconds
         if (ageMs <= STALE_THRESHOLD_MS) return true;
         // Entry exists but stale — check transcript file mtime as backup
       }
@@ -95,7 +95,7 @@ async function checkSessionAlive(sessionKey: string): Promise<boolean> {
         const { statSync } = require("node:fs");
         const stat = statSync(transcriptPath);
         const fileAgeMs = Date.now() - stat.mtimeMs;
-        const FILE_STALE_MS = 15 * 60 * 1000; // 15 min — matches runTimeoutSeconds
+        const FILE_STALE_MS = 30 * 60 * 1000; // 30 min — matches runTimeoutSeconds
         if (fileAgeMs <= FILE_STALE_MS) return true;
         log().debug?.("checkSessionAlive: transcript " + transcriptPath.slice(-50) + " stale (" + Math.round(fileAgeMs / 60000) + "min)");
         return false;
@@ -411,6 +411,40 @@ function runTick(): void {
   } catch (e) {
     log().error(`orchestrator: watchdog error: ${e}`);
   }
+
+  // ── 9. Meeting analysis recovery ────────────────────────────────────────────
+  // Pick up meetings stuck in 'pending' (e.g. after restart reset from processing).
+  // Only processes one per tick to avoid blocking the loop.
+  try {
+    processPendingMeetings();
+  } catch (e) {
+    log().error(`orchestrator: meeting analysis recovery error: ${e}`);
+  }
+}
+
+// ── Meeting analysis recovery ─────────────────────────────────────────────────
+
+/**
+ * Pick up one pending meeting per tick and re-trigger analysis.
+ * Handles meetings that were reset from 'processing' → 'pending' on restart.
+ */
+function processPendingMeetings(): void {
+  const raw = getRawDb();
+  const pending = raw.prepare(
+    `SELECT id FROM meetings WHERE analysis_status = 'pending' AND transcript IS NOT NULL ORDER BY created_at ASC LIMIT 1`
+  ).get() as { id: string } | undefined;
+
+  if (!pending) return;
+
+  log().info(`orchestrator: re-triggering analysis for pending meeting ${pending.id.slice(0, 8)}`);
+
+  // Fire-and-forget — MeetingAnalysisService handles its own status transitions
+  import("../services/meeting-analysis.js").then(({ MeetingAnalysisService }) => {
+    const svc = new MeetingAnalysisService();
+    svc.analyze(pending.id).catch(e =>
+      log().error(`orchestrator: meeting analysis failed for ${pending.id.slice(0, 8)}: ${e.message}`)
+    );
+  });
 }
 
 // ── Stall watchdog ────────────────────────────────────────────────────────────
@@ -489,7 +523,7 @@ function runStallWatchdog(): void {
 
   for (const wr of openRuns) {
     const agentType = wr.agent_type ?? "default";
-    const stallThresholdSec = config.timeouts[agentType] ?? config.timeouts["default"] ?? 600;
+    const stallThresholdSec = config.timeouts[agentType] ?? config.timeouts["default"] ?? 1800;
 
     // Determine the reference time for stall calculation:
     // - If last_tool_call_at is set, use it
@@ -922,7 +956,7 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
         model,
         mode: "run",
         cleanup: "keep",
-        runTimeoutSeconds: 900,
+        runTimeoutSeconds: 1800,
         ...(repoPath ? { cwd: repoPath } : {}),
       },
     }),

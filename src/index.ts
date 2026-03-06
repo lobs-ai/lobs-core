@@ -74,6 +74,16 @@ const pawPlugin = {
 
       // Cancel stale workflow runs — only cancel runs older than 5 minutes to avoid killing active ones during hot-reload
       raw.exec(`UPDATE workflow_runs SET status = 'cancelled' WHERE status IN ('running', 'pending') AND updated_at < datetime('now', '-5 minutes')`);
+
+      // ── Meeting analysis recovery ────────────────────────────────────
+      // Reset meetings stuck in 'processing' back to 'pending' so they get re-analyzed
+      const stuckMeetings = raw.prepare(
+        `UPDATE meetings SET analysis_status = 'pending', updated_at = datetime('now')
+         WHERE analysis_status = 'processing'`
+      ).run();
+      if (stuckMeetings.changes > 0) {
+        log().info(`paw: startup recovery — reset ${stuckMeetings.changes} stuck meeting(s) from processing → pending`);
+      }
     } catch (e) {
       log().warn(`paw: startup recovery error: ${e}`);
     }

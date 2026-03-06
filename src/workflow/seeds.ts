@@ -172,8 +172,8 @@ const DEFAULT_WORKFLOWS = [
         type: "branch",
         config: {
           conditions: [
-            { match: "run_tests_1.returncode == 0", goto: "spawn_reviewer_post" },
-            { match: 'contains(run_tests_1.stdout, "no buildable project")', goto: "spawn_reviewer_post" },
+            { match: "run_tests_1.returncode == 0", goto: "review_gate" },
+            { match: 'contains(run_tests_1.stdout, "no buildable project")', goto: "review_gate" },
           ],
           default: "spawn_programmer_fix_1",
         },
@@ -209,7 +209,7 @@ const DEFAULT_WORKFLOWS = [
         id: "tests_gate_2",
         type: "branch",
         config: {
-          conditions: [{ match: "run_tests_2.returncode == 0", goto: "spawn_reviewer_post" }],
+          conditions: [{ match: "run_tests_2.returncode == 0", goto: "review_gate" }],
           default: "spawn_programmer_fix_2",
         },
       },
@@ -244,7 +244,7 @@ const DEFAULT_WORKFLOWS = [
         id: "tests_gate_3",
         type: "branch",
         config: {
-          conditions: [{ match: "run_tests_3.returncode == 0", goto: "spawn_reviewer_post" }],
+          conditions: [{ match: "run_tests_3.returncode == 0", goto: "review_gate" }],
           default: "tests_failed_terminal",
         },
       },
@@ -253,6 +253,14 @@ const DEFAULT_WORKFLOWS = [
         type: "gate",
         config: { prompt: "CI still failing after 2 fix attempts. Manual intervention required.", timeout_hours: 24 },
         on_success: "done",
+      },
+      {
+        id: "review_gate",
+        type: "review_gate",
+        config: {
+          on_review: "spawn_reviewer_post",
+          on_skip: "done",
+        },
       },
       {
         id: "spawn_reviewer_post",

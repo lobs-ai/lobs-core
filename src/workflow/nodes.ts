@@ -10,10 +10,11 @@ import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
-import { tasks, inboxItems, workflowEvents, workflowRuns, workerRuns } from "../db/schema.js";
+import { tasks, projects, inboxItems, workflowEvents, workflowRuns, workerRuns } from "../db/schema.js";
 import { evaluateCondition, evaluateExpression, interpolate } from "./functions.js";
 import { log } from "../util/logger.js";
 import { executeCallable } from "./callables.js";
+import { shouldTriggerReview } from "../orchestrator/review-triggers.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -96,6 +97,7 @@ export class NodeHandlers {
         case "send_to_session": return this._executeSendToSession(nodeDef, run);
         case "ts_call":         return this._executeTsCall(nodeDef, run);
         case "python_call":     return this._executeTsCall(nodeDef, run);
+        case "review_gate":     return this._executeReviewGate(nodeDef, run);
         default:
           log().warn(`[WORKFLOW] Unknown node type: ${type}`);
           return { status: "completed", output: { skipped: true, reason: `unknown type: ${type}` } };
@@ -458,6 +460,81 @@ export class NodeHandlers {
 
     log().info(`[WORKFLOW] Queued send_to_session → ${sessionKey.slice(0, 12)}`);
     return { status: "completed", output: { sent: true, session_key: sessionKey } };
+  }
+
+  // ── review_gate ──────────────────────────────────────────────────────────
+  //
+  // Checks selective review trigger criteria before spawning a reviewer.
+  // Resolves the repo path from the linked task or its project, runs
+  // shouldTriggerReview(), and sets output.goto to either the configured
+  // "on_review" target (default: "spawn_reviewer_post") or the configured
+  // "on_skip" target (default: "done").
+  //
+  // Logs the full trigger reason so it's visible in the orchestrator log.
+
+  private _executeReviewGate(nodeDef: NodeDef, run: WorkflowRun): NodeResult {
+    const config = nodeDef.config as {
+      on_review?: string;
+      on_skip?: string;
+    };
+
+    const onReview = config.on_review ?? "spawn_reviewer_post";
+    const onSkip   = config.on_skip   ?? "done";
+
+    // --- Resolve repo path from task / project ---
+    let repoPath: string | null = null;
+    let taskTitle = "(unknown)";
+    let taskId    = run.taskId ?? "(unknown)";
+
+    if (run.taskId) {
+      const db = getDb();
+      const task = db.select().from(tasks).where(eq(tasks.id, run.taskId)).get();
+      if (task) {
+        taskId    = task.id;
+        taskTitle = task.title;
+        repoPath  = task.artifactPath ?? null;
+
+        if (!repoPath && task.projectId) {
+          const project = db.select().from(projects).where(eq(projects.id, task.projectId)).get();
+          repoPath = project?.repoPath ?? null;
+        }
+      }
+    }
+
+    // --- Run trigger detection ---
+    const result = shouldTriggerReview({ repoPath, taskId, taskTitle });
+
+    if (result.shouldReview) {
+      log().info(
+        `[REVIEW-GATE] ✅ Triggering reviewer — task ${taskId.slice(0, 8)} "${taskTitle.slice(0, 60)}"\n` +
+        result.reason
+      );
+      return {
+        status: "completed",
+        output: {
+          goto: onReview,
+          should_review: true,
+          triggers: result.triggers,
+          reason: result.reason,
+          stats: result.stats,
+        },
+      };
+    }
+
+    log().info(
+      `[REVIEW-GATE] ⏭  Skipping reviewer — task ${taskId.slice(0, 8)} "${taskTitle.slice(0, 60)}"\n` +
+      result.reason
+    );
+    return {
+      status: "completed",
+      output: {
+        goto: onSkip,
+        should_review: false,
+        triggers: [],
+        reason: result.reason,
+        stats: result.stats,
+      },
+    };
   }
 
   // ── ts_call ───────────────────────────────────────────────────────────────
