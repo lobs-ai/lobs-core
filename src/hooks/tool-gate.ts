@@ -1,8 +1,13 @@
 /**
- * before_tool_call hook — approval tier enforcement.
+ * before_tool_call hook — approval tier enforcement + hard blocks.
  *
- * Checks task approval tier before allowing tool execution:
- * - Tier A (auto): Bug fixes, docs, research, tests → allow all tools
+ * Hard blocks (ALL tiers, always blocked):
+ * - Workers mutating the PAW DB (UPDATE/INSERT/DELETE on tasks, worker_runs, agent_status)
+ * - Workers editing openclaw.json or openclaw.yaml
+ * - Workers running gateway restart/config commands
+ *
+ * Tier-based (soft) enforcement:
+ * - Tier A (auto): Bug fixes, docs, research, tests → allow remaining tools
  * - Tier B (lobs): Refactors, new utilities → allow, log for audit
  * - Tier C (rafe): UI, features, architecture → block destructive tools, create inbox item
  *
@@ -24,6 +29,35 @@ const DANGEROUS_PATTERNS = [
   /\bkubectl\s+(apply|delete)\b/,
 ];
 
+/**
+ * Hard-blocked patterns for ALL workers regardless of tier.
+ * These protect orchestrator state from being mutated by workers.
+ */
+const HARD_BLOCK_EXEC_PATTERNS = [
+  // Block sqlite3 mutations against the PAW DB
+  /sqlite3\s+.*paw\.db\s+.*\b(UPDATE|INSERT|DELETE|ALTER|DROP)\b/i,
+  /sqlite3\s+.*paw\.db\s+["'].*\b(UPDATE|INSERT|DELETE|ALTER|DROP)\b/i,
+  // Block editing openclaw config files
+  /\bopenclaw\.json\b/,
+  /\bopenclaw\.yaml\b/,
+  // Block gateway commands
+  /\bopenclaw\s+gateway\b/i,
+];
+
+/**
+ * Hard-blocked tool names that workers must never call.
+ */
+const HARD_BLOCK_TOOLS = new Set(["gateway"]);
+
+/**
+ * Hard-blocked file path patterns for write/edit tools.
+ */
+const HARD_BLOCK_FILE_PATTERNS = [
+  /openclaw\.json$/,
+  /openclaw\.yaml$/,
+  /paw\.db$/,
+];
+
 export function registerToolGateHook(api: OpenClawPluginApi): void {
   api.on("before_tool_call", async (event, ctx) => {
     const sessionKey = (ctx as Record<string, unknown>).sessionKey as string | undefined;
@@ -43,32 +77,64 @@ export function registerToolGateHook(api: OpenClawPluginApi): void {
     const task = db.select().from(tasks).where(eq(tasks.id, run.taskId)).get();
     if (!task) return;
 
-    // Determine approval tier based on task/agent
+    const toolName = (event as Record<string, unknown>).toolName as string;
+    const toolInput = (event as Record<string, unknown>).toolInput as Record<string, unknown> ?? {};
+    const toolInputStr = JSON.stringify(toolInput);
+
+    // ── Hard blocks (all tiers) ──────────────────────────────────────
+
+    // Block specific tool names entirely
+    if (HARD_BLOCK_TOOLS.has(toolName)) {
+      log().warn(`[PAW] HARD BLOCK: tool "${toolName}" denied for worker on task ${task.id.slice(0, 8)}`);
+      return { block: true, blockReason: `Workers cannot use the "${toolName}" tool. Only the orchestrator or Lobs can do this.` };
+    }
+
+    // Block exec commands that mutate orchestrator state
+    if (toolName === "exec" || toolName === "Bash") {
+      const command = (toolInput.command as string) ?? toolInputStr;
+      for (const pattern of HARD_BLOCK_EXEC_PATTERNS) {
+        if (pattern.test(command)) {
+          log().warn(`[PAW] HARD BLOCK: exec pattern "${pattern}" matched for worker on task ${task.id.slice(0, 8)}: ${command.slice(0, 200)}`);
+          return { block: true, blockReason: "Workers cannot modify openclaw.json, paw.db, or gateway config. Only the orchestrator or Lobs can do this." };
+        }
+      }
+    }
+
+    // Block write/edit to protected files
+    if (toolName === "Write" || toolName === "Edit" || toolName === "write" || toolName === "edit") {
+      const filePath = (toolInput.file_path as string) ?? (toolInput.path as string) ?? "";
+      for (const pattern of HARD_BLOCK_FILE_PATTERNS) {
+        if (pattern.test(filePath)) {
+          log().warn(`[PAW] HARD BLOCK: file write to "${filePath}" denied for worker on task ${task.id.slice(0, 8)}`);
+          return { block: true, blockReason: `Workers cannot modify "${filePath}". Only the orchestrator or Lobs can do this.` };
+        }
+      }
+    }
+
+    // ── Tier-based enforcement ───────────────────────────────────────
+
     const tier = classifyApprovalTier(task.agent ?? "", task.notes ?? "");
 
-    const toolName = (event as Record<string, unknown>).toolName as string;
-    const toolInput = JSON.stringify((event as Record<string, unknown>).toolInput ?? {});
-
-    // Tier A: auto-approve everything
+    // Tier A: auto-approve everything (hard blocks already handled above)
     if (tier === "A") return;
 
     // Tier B: allow but log
     if (tier === "B") {
-      if (isDangerous(toolName, toolInput)) {
+      if (isDangerous(toolName, toolInputStr)) {
         log().warn(`[PAW] Tier B tool gate: ${toolName} on task ${task.id.slice(0, 8)} — allowed with audit`);
       }
       return;
     }
 
     // Tier C: block dangerous tools
-    if (tier === "C" && isDangerous(toolName, toolInput)) {
+    if (tier === "C" && isDangerous(toolName, toolInputStr)) {
       log().warn(`[PAW] Tier C tool BLOCKED: ${toolName} on task ${task.id.slice(0, 8)}`);
 
       // Create inbox item for Rafe
       db.insert(inboxItems).values({
         id: randomUUID(),
         title: `Approval needed: ${toolName} on "${task.title}"`,
-        content: `Task: ${task.title}\nTool: ${toolName}\nInput: ${toolInput.slice(0, 500)}`,
+        content: `Task: ${task.title}\nTool: ${toolName}\nInput: ${toolInputStr.slice(0, 500)}`,
         isRead: false,
       }).run();
 
