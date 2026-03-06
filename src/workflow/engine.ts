@@ -19,6 +19,7 @@ import {
 import { NodeHandlers, type WorkflowRun } from "./nodes.js";
 import { evaluateCondition } from "./functions.js";
 import { queueReviewerFollowup } from "../hooks/subagent.js";
+import { shouldTriggerReview } from "../orchestrator/review-triggers.js";
 import { log } from "../util/logger.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -632,10 +633,36 @@ export class WorkflowExecutor {
           updatedAt: now,
         }).where(eq(tasks.id, run.taskId)).run();
 
-        // Queue reviewer followup for programmer tasks
+        // Selective reviewer followup for programmer tasks.
+        // Checks trigger criteria (>500 lines, new API routes, DB schema changes, etc.)
+        // before queuing — avoids spawning a reviewer on every minor change.
         const task = db.select().from(tasks).where(eq(tasks.id, run.taskId!)).get();
         if (task?.agent === "programmer") {
-          queueReviewerFollowup(run.taskId!);
+          const project = task.projectId
+            ? db.select().from(projects).where(eq(projects.id, task.projectId)).get()
+            : undefined;
+          const repoPath = task.artifactPath ?? project?.repoPath ?? null;
+
+          const triggerResult = shouldTriggerReview({
+            repoPath,
+            taskId: task.id,
+            taskTitle: task.title,
+          });
+
+          if (triggerResult.shouldReview) {
+            log().info(
+              `[REVIEW-GATE] ✅ Triggering reviewer for task ${task.id.slice(0, 8)}` +
+              ` (${task.title.slice(0, 60)})\n` +
+              triggerResult.reason
+            );
+            queueReviewerFollowup(run.taskId!);
+          } else {
+            log().info(
+              `[REVIEW-GATE] ⏭  Skipping reviewer for task ${task.id.slice(0, 8)}` +
+              ` (${task.title.slice(0, 60)})\n` +
+              triggerResult.reason
+            );
+          }
         }
       } else if (status === "failed") {
         db.update(tasks).set({
