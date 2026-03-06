@@ -18,13 +18,29 @@ import { readFileSync as _readFileSync } from "node:fs";
  * for `complianceRequired` (used by the Nexus UI).
  * Also resolves effective compliance: if the task's project has compliance_required=1,
  * the task is treated as compliant regardless of the task-level flag.
+ *
+ * Performs a project lookup when the task has a projectId so the single-task
+ * GET endpoint correctly reflects inherited project compliance.
  */
 function normalizeTask(row: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
   if (!row) return null;
   const taskCompliant = Boolean(row["complianceRequired"] ?? row["compliance_required"]);
+  const projectId = row["projectId"] as string | undefined;
+  let projectCompliant = false;
+  if (!taskCompliant && projectId) {
+    try {
+      const db = getDb();
+      const proj = db.select({ complianceRequired: projects.complianceRequired })
+        .from(projects)
+        .where(eq(projects.id, projectId))
+        .get();
+      projectCompliant = Boolean(proj?.complianceRequired);
+    } catch {}
+  }
   return {
     ...row,
-    compliant: taskCompliant,
+    compliant: taskCompliant || projectCompliant,
+    complianceInherited: !taskCompliant && projectCompliant,
   };
 }
 

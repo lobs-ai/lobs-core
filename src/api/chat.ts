@@ -80,8 +80,33 @@ export async function handleChatRequest(
 
     // POST /api/chat/sessions — create a new chat session
     if (!sessionKey && method === "POST") {
-      const body = (await parseBody(req)) as { title?: string };
+      const body = (await parseBody(req)) as { title?: string; compliance_required?: boolean };
       const title = body?.title || "New Chat";
+      const complianceRequired = Boolean(body?.compliance_required ?? false);
+
+      // Resolve the model to use for this session.
+      // Compliant sessions use the configured local compliance model so that no
+      // user data is sent to cloud providers even before the first message.
+      // Falls back to the default cloud model when compliance_model is not configured.
+      let sessionModel = "anthropic/claude-sonnet-4-6";
+      if (complianceRequired) {
+        try {
+          const { getRawDb } = await import("../db/connection.js");
+          const rawDb = getRawDb();
+          const cmRow = rawDb.prepare(
+            `SELECT value FROM orchestrator_settings WHERE key = 'compliance_model'`
+          ).get() as { value: string } | undefined;
+          if (cmRow) {
+            const parsed = JSON.parse(cmRow.value) as unknown;
+            if (typeof parsed === "string" && parsed.length > 0) {
+              sessionModel = parsed;
+              log().info(`[COMPLIANCE] Creating compliant chat session with local model: ${sessionModel}`);
+            }
+          }
+        } catch (e) {
+          log().warn(`[COMPLIANCE] Could not resolve compliance_model setting: ${e}`);
+        }
+      }
 
       try {
         // Spawn through the sink session so it's not a child of main
@@ -89,7 +114,7 @@ export async function handleChatRequest(
         const spawnResult = await gatewayInvoke("sessions_spawn", {
           task: `You are a helpful AI assistant in a web chat interface called Nexus. Be conversational, concise, and helpful. You do NOT have access to the user's files, calendar, or personal data. Just be a good chat assistant.`,
           mode: "session",
-          model: "anthropic/claude-sonnet-4-6",
+          model: sessionModel,
           thread: true,
         }, SINK_SESSION_KEY);
 
@@ -105,12 +130,13 @@ export async function handleChatRequest(
           id,
           sessionKey: ocSessionKey,
           label: title,
+          complianceRequired,
           createdAt: now,
           isActive: true,
           lastMessageAt: now,
         }).run();
 
-        return json(res, { id, key: ocSessionKey, title, createdAt: now }, 201);
+        return json(res, { id, key: ocSessionKey, title, createdAt: now, compliance_required: complianceRequired }, 201);
       } catch (err) {
         log().error(`chat: failed to create session: ${err}`);
         return error(res, `Failed to create chat session: ${String(err)}`, 500);
