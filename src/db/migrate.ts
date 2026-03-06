@@ -717,12 +717,12 @@ export function runMigrations(db: PawDB): void {
   // ── Seed fallback tier chains per agent type (circuit-breaker dispatch order) ──
   // INSERT OR IGNORE so manual overrides via SQL are preserved.
   const fallbackChains = {
-    programmer: ["lmstudio/qwen/qwen3.5-35b-a3b", "openai-codex/gpt-5.3-codex", "anthropic/claude-sonnet-4-6"],
-    architect:  ["anthropic/claude-opus-4-6", "openai-codex/gpt-5.3-codex", "anthropic/claude-sonnet-4-6"],
-    reviewer:   ["openai-codex/gpt-5.3-codex", "anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6"],
-    researcher: ["openai-codex/gpt-5.3-codex", "anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6"],
-    writer:     ["anthropic/claude-sonnet-4-6", "openai-codex/gpt-5.3-codex", "anthropic/claude-opus-4-6"],
-    "inbox-responder": ["lmstudio/qwen/qwen3.5-35b-a3b", "anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-4-6"],
+    programmer: ["anthropic/claude-sonnet-4-6", "anthropic/claude-haiku-4-5"],
+    architect:  ["anthropic/claude-opus-4-6", "anthropic/claude-sonnet-4-6"],
+    reviewer:   ["anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6"],
+    researcher: ["anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6"],
+    writer:     ["anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6"],
+    "inbox-responder": ["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-4-6"],
   };
   try {
     for (const [agentType, chain] of Object.entries(fallbackChains)) {

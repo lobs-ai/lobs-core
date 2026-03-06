@@ -194,7 +194,7 @@ export function chooseHealthyModel(
 ): { model: string; degraded: boolean } {
   const { enabled } = getSettings();
   if (!enabled || fallbackChain.length === 0) {
-    return { model: fallbackChain[0] ?? "openai-codex/gpt-5.3-codex", degraded: false };
+    return { model: fallbackChain[0] ?? "anthropic/claude-sonnet-4-6", degraded: false };
   }
   try {
     for (const model of fallbackChain) {

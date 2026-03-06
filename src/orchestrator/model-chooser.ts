@@ -19,19 +19,16 @@ export const TIER_MODELS: Record<ModelTier, string[]> = {
   ],
   small: [
     "anthropic/claude-sonnet-4-6",
-    "openai-codex/gpt-5.3-codex",
   ],
   medium: [
     "anthropic/claude-sonnet-4-6",
-    "openai-codex/gpt-5.3-codex",
   ],
   standard: [
-    "openai-codex/gpt-5.3-codex",
     "anthropic/claude-sonnet-4-6",
   ],
   strong: [
     "anthropic/claude-opus-4-6",
-    "openai-codex/gpt-5.3-codex",
+    "anthropic/claude-sonnet-4-6",
   ],
 };
 
@@ -40,8 +37,6 @@ export const TIER_MODELS: Record<ModelTier, string[]> = {
  *
  * Ordered from cheapest/preferred → more capable/expensive.
  * When the preferred model is OPEN (circuit breaker), the next entry is tried.
- * These chains intentionally cross tier boundaries — e.g., a programmer task
- * prefers local qwen (cheap/micro) but escalates to codex or claude when OPEN.
  *
  * Used by chooseHealthyModel() in model-health.ts as the authoritative
  * fallback order. The within-tier TIER_MODELS fallbacks are only used when no
@@ -49,27 +44,23 @@ export const TIER_MODELS: Record<ModelTier, string[]> = {
  */
 export const AGENT_FALLBACK_CHAINS: Record<string, string[]> = {
   programmer: [
-    "openai-codex/gpt-5.3-codex",         // tier: standard — cloud fallback
-    "anthropic/claude-sonnet-4-6",         // tier: standard — final fallback
+    "anthropic/claude-sonnet-4-6",         // tier: standard — preferred
+    "anthropic/claude-haiku-4-5",           // tier: micro — fast fallback
   ],
   architect: [
     "anthropic/claude-opus-4-6",           // tier: strong — best for design
-    "openai-codex/gpt-5.3-codex",          // tier: standard — fallback
     "anthropic/claude-sonnet-4-6",         // tier: standard — final fallback
   ],
   reviewer: [
-    "openai-codex/gpt-5.3-codex",         // tier: standard — preferred
-    "anthropic/claude-sonnet-4-6",         // tier: standard — fallback
+    "anthropic/claude-sonnet-4-6",         // tier: standard — preferred
     "anthropic/claude-opus-4-6",           // tier: strong — final fallback
   ],
   researcher: [
-    "openai-codex/gpt-5.3-codex",
     "anthropic/claude-sonnet-4-6",
     "anthropic/claude-opus-4-6",
   ],
   writer: [
     "anthropic/claude-sonnet-4-6",        // tier: small — preferred
-    "openai-codex/gpt-5.3-codex",
     "anthropic/claude-opus-4-6",
   ],
   "inbox-responder": [

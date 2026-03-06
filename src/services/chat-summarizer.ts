@@ -2,7 +2,7 @@
  * Chat Summarizer — generates and updates chat session summaries using a micro-tier model.
  *
  * Triggers after new messages, debounced so we don't summarize on every single message.
- * Uses the micro tier (local qwen) to keep costs at zero.
+ * Uses the micro tier (claude-haiku) for low cost summarization.
  */
 
 import { eq } from "drizzle-orm";
@@ -20,10 +20,7 @@ const MIN_NEW_MESSAGES = 3;
 const MIN_INTERVAL_SECONDS = 60;
 
 /** Model to use for summarization (micro tier) */
-const SUMMARY_MODEL = "lmstudio/qwen/qwen3.5-35b-a3b";
-
-/** Fallback model if local isn't available */
-const FALLBACK_MODEL = "anthropic/claude-haiku-4-5";
+const SUMMARY_MODEL = "anthropic/claude-haiku-4-5";
 
 // ── Gateway helpers ─────────────────────────────────────────────────────
 
