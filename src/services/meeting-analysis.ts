@@ -102,8 +102,10 @@ Rules for action items:
 - For decisions made: create action items for any follow-up work the decision requires
 - Be specific: "Fix the drag-to-reorder bug in assessments" not "Fix bugs"
 - Use lowercase first names for assignee: "rafe", "lobs", etc.
-- If it's work for the AI agent system, assignee is "lobs"
-- If unclear who should do it, set assignee to null
+- Default assignee is "lobs" — most action items from meetings are work for the AI agent system
+- Only assign to "rafe" if the item EXPLICITLY requires a human decision or human-only action (e.g., "Rafe will email the professor", "Rafe needs to decide on pricing")
+- Implementation tasks, design tasks, research tasks, feature specs, bug fixes, documentation — ALL go to "lobs" even if Rafe discussed them
+- If unclear who should do it, assign to "lobs" (not null)
 - Prioritize: blocking bugs = high, features discussed enthusiastically = medium, nice-to-haves = low
 - If the meeting is just a test with no real content, return empty arrays
 - Do NOT duplicate items — if the same issue is mentioned multiple times, consolidate into one item
