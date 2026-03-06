@@ -236,6 +236,7 @@ ${body.text}`;
       notes: body.notes as string,
       agent: body.agent as string,
       modelTier: (body.model_tier as string) ?? "standard",
+      blockedBy: Array.isArray(body.blocked_by) ? body.blocked_by as string[] : null,
       createdAt: now,
       updatedAt: now,
     }).run();
