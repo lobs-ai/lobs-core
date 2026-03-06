@@ -209,7 +209,7 @@ Reply with ONLY the summary, nothing else.`;
       log().info(`[CHAT-SUMMARY] Micro model returned empty, trying fallback`);
       const fallbackResult = await gatewayInvoke("sessions_spawn", {
         task: prompt,
-        model: FALLBACK_MODEL,
+        model: "anthropic/claude-sonnet-4-6",
         mode: "run",
         cleanup: "kill",
         runTimeoutSeconds: 60,
