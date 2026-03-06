@@ -22,6 +22,7 @@ import { registerCircuitBreakerHooks } from "./hooks/circuit-breaker.js";
 import { startControlLoop, stopControlLoop } from "./orchestrator/control-loop.js";
 import { YouTubeService } from "./services/youtube.js";
 import { ensureCompliantMemoryDirs } from "./api/memories-fs.js";
+import { startMemoryScanner, stopMemoryScanner } from "./services/memory-scanner.js";
 import { setLogger, log } from "./util/logger.js";
 import type { PawConfig } from "./util/types.js";
 
@@ -95,6 +96,11 @@ const pawPlugin = {
       log().warn(`paw: ensureCompliantMemoryDirs error: ${e}`)
     );
 
+    // ── Memory Compliance Scanner ─────────────────────────────────────
+    // Background service: scans memory/ and memory-compliant/ dirs every 5 min,
+    // maintains memory_compliance_index, and flags misplaced files as anomalies.
+    startMemoryScanner();
+
     // ── Seed Workflows ────────────────────────────────────────────────
     const seeded = seedDefaultWorkflows();
     if (seeded > 0) {
@@ -152,6 +158,7 @@ const pawPlugin = {
       },
       stop: () => {
         stopControlLoop();
+        stopMemoryScanner();
         try { (globalThis as any).__ytSvc?.stopRecoveryLoop(); } catch {}
         closeDb();
       },

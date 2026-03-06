@@ -78,7 +78,13 @@ export function isCloudModel(model: string): boolean {
  */
 export function isComplianceModel(model: string, configuredCompliance?: string | null): boolean {
   if (isLocalModel(model)) return true;
-  if (configuredCompliance && model === configuredCompliance) return true;
+  // Allow a configured compliance model only if it is NOT a known cloud provider.
+  // This prevents accidentally designating an Anthropic/OpenAI/etc. model as
+  // "compliance-safe" even when it is explicitly set in the config.
+  if (configuredCompliance && model === configuredCompliance) {
+    const provider = extractProvider(model);
+    if (!isCloudProvider(provider)) return true;
+  }
   return false;
 }
 
