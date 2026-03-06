@@ -39,7 +39,12 @@ export class MeetingsService {
     log().info(`[MEETINGS] Transcribing ${audioPath}`);
 
     const result = await new Promise<TranscriptResult>((resolve, reject) => {
-      execFile(PYTHON, [TRANSCRIBER_PATH, audioPath], { maxBuffer: 50 * 1024 * 1024 }, (err, stdout, stderr) => {
+      const args = [TRANSCRIBER_PATH, audioPath];
+      // Pass HF_TOKEN for speaker diarization if available
+      if (process.env.HF_TOKEN) {
+        args.push("--hf-token", process.env.HF_TOKEN);
+      }
+      execFile(PYTHON, args, { maxBuffer: 50 * 1024 * 1024 }, (err, stdout, stderr) => {
         if (err) {
           log().error(`[MEETINGS] Transcription failed: ${err.message}\n${stderr}`);
           return reject(err);
