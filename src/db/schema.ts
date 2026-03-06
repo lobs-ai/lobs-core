@@ -31,6 +31,9 @@ export const projects = sqliteTable("projects", {
   githubRepo: text("github_repo"),
   githubLabelFilter: text("github_label_filter", { mode: "json" }),
   repoPath: text("repo_path"),
+  // Compliance flag: when true, all tasks in this project must use local models only.
+  // Cascades down to every task dispatch in processSpawnRequest.
+  complianceRequired: integer("compliance_required", { mode: "boolean" }).notNull().default(false),
   ...timestamps,
 });
 

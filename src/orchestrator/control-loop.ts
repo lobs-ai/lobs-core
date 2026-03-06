@@ -888,35 +888,92 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
   const taskContext = buildTaskContext({ projectId: (taskCtx["project_id"] as string) ?? undefined, agentType: req.agentType });
   const finalPrompt = taskPrompt + contextBlock + gitReminder + taskContext;
 
+  // ── Compliance gate: if the project is marked compliance_required, force local model ──
+  const spawnProjectId = (taskCtx["project_id"] as string) ?? (taskCtx["projectId"] as string) ?? (projectCtx["id"] as string) ?? undefined;
+  let complianceOverrideModel: string | null = null;
+  if (spawnProjectId) {
+    try {
+      const rawDb = getRawDb();
+      const proj = rawDb.prepare(
+        `SELECT compliance_required FROM projects WHERE id = ?`
+      ).get(spawnProjectId) as { compliance_required: number | null } | undefined;
+
+      if (proj?.compliance_required) {
+        // Project is compliance-required — look up the configured local model
+        const cmRow = rawDb.prepare(
+          `SELECT value FROM orchestrator_settings WHERE key = 'compliance_model'`
+        ).get() as { value: string } | undefined;
+
+        if (cmRow) {
+          const parsed = JSON.parse(cmRow.value) as string;
+          if (parsed && typeof parsed === "string") {
+            complianceOverrideModel = parsed;
+            log().info(
+              `[COMPLIANCE] Project ${spawnProjectId.slice(0, 8)} is compliance-required — ` +
+              `forcing local model: ${complianceOverrideModel} for ${req.agentType} task ${req.taskId?.slice(0, 8) ?? "?"}`
+            );
+          }
+        }
+
+        if (!complianceOverrideModel) {
+          // compliance_model not configured — block the dispatch to prevent accidental cloud use
+          log().error(
+            `[COMPLIANCE] Project ${spawnProjectId.slice(0, 8)} is compliance-required but ` +
+            `'compliance_model' orchestrator setting is not configured. Blocking dispatch.`
+          );
+          decrementPendingSpawns(spawnProjectId, req.agentType);
+          writeSpawnResult(req.runId, req.nodeId, {
+            status: "failed",
+            error: `compliance_model_not_configured: project requires local model but 'compliance_model' setting is missing. Set it via: UPDATE orchestrator_settings SET value = '"your/local-model"' WHERE key = 'compliance_model'`,
+          });
+          return;
+        }
+      }
+    } catch (e) {
+      log().error(`[COMPLIANCE] Failed to check project compliance flag: ${e}`);
+    }
+  }
+
   // ── Circuit-breaker-aware model selection ────────────────────────────────
-  const modelChoice = req.modelTier
-    ? chooseModel(req.modelTier, req.agentType)
-    : chooseModel("standard", req.agentType);
+  let model: string;
+  let circuitDegraded = false;
 
-  // Build fallback chain: uses AGENT_FALLBACK_CHAINS if available, else tier-level alternatives
-  const primaryModel = modelChoice.model;
-  const fallbackChain = buildFallbackChain(primaryModel, modelChoice.tier, req.agentType);
+  if (complianceOverrideModel) {
+    // Compliance mode: use only the local model, no fallback to cloud
+    model = complianceOverrideModel;
+    log().info(`[COMPLIANCE] Using local-only model: ${model} (no cloud fallback)`);
+  } else {
+    const modelChoice = req.modelTier
+      ? chooseModel(req.modelTier, req.agentType)
+      : chooseModel("standard", req.agentType);
 
-  const { model, degraded: circuitDegraded } = req.agentType
-    ? chooseHealthyModel(fallbackChain, req.agentType)
-    : { model: primaryModel, degraded: false };
+    // Build fallback chain: uses AGENT_FALLBACK_CHAINS if available, else tier-level alternatives
+    const primaryModel = modelChoice.model;
+    const fallbackChain = buildFallbackChain(primaryModel, modelChoice.tier, req.agentType);
 
-  if (circuitDegraded) {
-    // Design doc: do NOT dispatch when all models are open — leave task queued so it retries
-    // after the cooldown expires.
-    log().error(
-      `[SPAWN] ⚠️  All models circuit-open for ${req.agentType} ` +
-      `(chain=${fallbackChain.join(", ")}). Blocking dispatch — task will requeue after cooldown.`
-    );
-    decrementPendingSpawns(
-      (taskCtx["projectId"] as string) ?? (taskCtx["project_id"] as string) ?? undefined,
-      req.agentType
-    );
-    writeSpawnResult(req.runId, req.nodeId, {
-      status: "failed",
-      error: `all_models_unhealthy: all circuit breakers open for ${req.agentType}. Task requeued — will retry after cooldown expires.`,
-    });
-    return;
+    const healthResult = req.agentType
+      ? chooseHealthyModel(fallbackChain, req.agentType)
+      : { model: primaryModel, degraded: false };
+    model = healthResult.model;
+    circuitDegraded = healthResult.degraded;
+
+    if (circuitDegraded) {
+      // Design doc: do NOT dispatch when all models are open — leave task queued so it retries
+      // after the cooldown expires.
+      log().error(
+        `[SPAWN] ⚠️  All models circuit-open for ${req.agentType} ` +
+        `(chain=${fallbackChain.join(", ")}). Blocking dispatch — task will requeue after cooldown.`
+      );
+      decrementPendingSpawns(
+        (taskCtx["projectId"] as string) ?? (taskCtx["project_id"] as string) ?? undefined,
+        req.agentType
+      );
+      writeSpawnResult(req.runId, req.nodeId, {
+        status: "failed",
+        error: `all_models_unhealthy: all circuit breakers open for ${req.agentType}. Task requeued — will retry after cooldown expires.`,
+      });
+      return;
+    }
   }
 
   // ── Spawn count guard ────────────────────────────────────────────────────

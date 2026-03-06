@@ -628,6 +628,11 @@ export function runMigrations(db: PawDB): void {
   try { db.run(sql`ALTER TABLE tasks ADD COLUMN calendar_event_id TEXT`); } catch {}
   try { db.run(sql`ALTER TABLE tasks ADD COLUMN actual_minutes INTEGER`); } catch {}
 
+  // ── Project compliance flag (idempotent) ──────────────────────────────────
+  // When compliance_required=1, all tasks in this project are forced to use
+  // local models only (compliance_model orchestrator setting).
+  try { db.run(sql`ALTER TABLE projects ADD COLUMN compliance_required INTEGER NOT NULL DEFAULT 0`); } catch {}
+
   // ── model_health: circuit breaker per (model, agent_type) ──────────────────
   db.run(sql`CREATE TABLE IF NOT EXISTS model_health (
     model                TEXT NOT NULL,
@@ -736,6 +741,14 @@ export function runMigrations(db: PawDB): void {
       VALUES ('stall_timeout:writer', '600', datetime('now'))`);
     db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)
       VALUES ('stall_timeout:default', '600', datetime('now'))`);
+  } catch {}
+
+  // ── Seed compliance model (INSERT OR IGNORE — configurable via SQL) ──────────
+  // compliance_model: the local model to use when a project has compliance_required=1.
+  // Change this setting to match the local LM Studio / Ollama model installed.
+  try {
+    db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)
+      VALUES ('compliance_model', '"lmstudio/local-compliance-model"', datetime('now'))`);
   } catch {}
 
   // ── Seed fallback tier chains per agent type (circuit-breaker dispatch order) ──

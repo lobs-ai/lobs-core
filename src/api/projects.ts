@@ -56,6 +56,7 @@ export async function handleProjectRequest(
       const map: Record<string, string> = {
         title: "title", notes: "notes", type: "type", archived: "archived",
         sort_order: "sortOrder", repo_path: "repoPath", github_repo: "githubRepo",
+        compliance_required: "complianceRequired",
       };
       for (const [k, v] of Object.entries(map)) { if (k in body) update[v] = body[k]; }
       db.update(projects).set(update).where(eq(projects.id, id)).run();
