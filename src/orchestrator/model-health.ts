@@ -53,12 +53,32 @@ function getSettings(): { threshold: number; recoveryMinutes: number; enabled: b
   return { threshold: DEFAULT_FAILURE_THRESHOLD, recoveryMinutes: DEFAULT_RECOVERY_MINUTES, enabled: true };
 }
 
+/** Map raw SQLite snake_case columns to the camelCase ModelHealthRow interface. */
+function mapRow(raw: Record<string, unknown>): ModelHealthRow {
+  return {
+    model: raw.model as string,
+    agentType: (raw.agent_type ?? raw.agentType) as string,
+    state: (raw.state ?? "closed") as CircuitState,
+    consecutiveFailures: (raw.consecutive_failures ?? raw.consecutiveFailures ?? 0) as number,
+    totalFailures: (raw.total_failures ?? raw.totalFailures ?? 0) as number,
+    totalRuns: (raw.total_runs ?? raw.totalRuns ?? 0) as number,
+    lastFailureAt: (raw.last_failure_at ?? raw.lastFailureAt ?? null) as string | null,
+    lastSuccessAt: (raw.last_success_at ?? raw.lastSuccessAt ?? null) as string | null,
+    openedAt: (raw.opened_at ?? raw.openedAt ?? null) as string | null,
+    recoveryAfter: (raw.recovery_after ?? raw.recoveryAfter ?? null) as string | null,
+    lastErrorSummary: (raw.last_error_summary ?? raw.lastErrorSummary ?? null) as string | null,
+    manualOverride: (raw.manual_override ?? raw.manualOverride ?? null) as string | null,
+    createdAt: (raw.created_at ?? raw.createdAt ?? "") as string,
+    updatedAt: (raw.updated_at ?? raw.updatedAt ?? "") as string,
+  };
+}
+
 function getOrCreate(model: string, agentType: string): ModelHealthRow {
   const db = getRawDb();
   const existing = db.prepare(
     "SELECT * FROM model_health WHERE model = ? AND agent_type = ?"
-  ).get(model, agentType) as ModelHealthRow | undefined;
-  if (existing) return existing;
+  ).get(model, agentType) as Record<string, unknown> | undefined;
+  if (existing) return mapRow(existing);
   const now = new Date().toISOString();
   db.prepare(`
     INSERT INTO model_health
@@ -67,9 +87,9 @@ function getOrCreate(model: string, agentType: string): ModelHealthRow {
        last_error_summary, manual_override, created_at, updated_at)
     VALUES (?, ?, 'closed', 0, 0, 0, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)
   `).run(model, agentType, now, now);
-  return db.prepare(
+  return mapRow(db.prepare(
     "SELECT * FROM model_health WHERE model = ? AND agent_type = ?"
-  ).get(model, agentType) as ModelHealthRow;
+  ).get(model, agentType) as Record<string, unknown>);
 }
 
 function save(row: ModelHealthRow): void {
@@ -221,7 +241,8 @@ export function chooseHealthyModel(
 export function getHealthSnapshot(): ModelHealthRow[] {
   try {
     const db = getRawDb();
-    return db.prepare("SELECT * FROM model_health ORDER BY updated_at DESC").all() as ModelHealthRow[];
+    const rows = db.prepare("SELECT * FROM model_health ORDER BY updated_at DESC").all() as Array<Record<string, unknown>>;
+    return rows.map(mapRow);
   } catch { return []; }
 }
 

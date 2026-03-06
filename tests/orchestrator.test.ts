@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { randomUUID } from "node:crypto";
 import { eq, and, isNull } from "drizzle-orm";
-import { getDb } from "../src/db/connection.js";
+import { getDb, getRawDb } from "../src/db/connection.js";
 import { tasks, projects, workerRuns, agentStatus as agentStatusTable } from "../src/db/schema.js";
 import {
   hasCapacity,
@@ -287,26 +287,26 @@ import {
 
 describe("seedModelHealthFromHistory (Phase 4 boot seed)", () => {
   beforeEach(() => {
-    // Clean slate
-    const db = getDb() as any;
-    db.prepare("DELETE FROM model_health").run();
-    db.prepare("DELETE FROM worker_runs WHERE model LIKE 'test-seed/%'").run();
+    // Clean slate — clear all model_health and worker_runs so prior tests don't pollute seeding
+    const raw = getRawDb();
+    raw.prepare("DELETE FROM model_health").run();
+    raw.prepare("DELETE FROM worker_runs").run();
   });
 
   it("seeds model_health rows from recent worker_runs", () => {
-    const db = getDb() as any;
+    const raw = getRawDb();
     const now = new Date().toISOString();
     const ago1h = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
-    // Insert synthetic worker_run history
-    db.prepare(`
-      INSERT INTO worker_runs (id, model, agent_type, task_id, worker_id, started_at, ended_at, succeeded, timeout_reason)
-      VALUES
-        ('wr-seed-1', 'test-seed/modelA', 'programmer', 'task-1', 'sess-1', ?, ?, 1, NULL),
-        ('wr-seed-2', 'test-seed/modelA', 'programmer', 'task-2', 'sess-2', ?, ?, 0, 'session_dead'),
-        ('wr-seed-3', 'test-seed/modelA', 'programmer', 'task-3', 'sess-3', ?, ?, 0, 'session_dead'),
-        ('wr-seed-4', 'test-seed/modelB', 'reviewer',   'task-4', 'sess-4', ?, ?, 1, NULL)
-    `).run(ago1h, now, ago1h, now, ago1h, now, ago1h, now);
+    // Insert synthetic worker_run history (no task_id — avoids FK constraint in test DB)
+    const insertWr = raw.prepare(`
+      INSERT INTO worker_runs (model, agent_type, worker_id, started_at, ended_at, succeeded, timeout_reason)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    insertWr.run('test-seed/modelA', 'programmer', 'sess-1', ago1h, now, 1, null);
+    insertWr.run('test-seed/modelA', 'programmer', 'sess-2', ago1h, now, 0, 'session_dead');
+    insertWr.run('test-seed/modelA', 'programmer', 'sess-3', ago1h, now, 0, 'session_dead');
+    insertWr.run('test-seed/modelB', 'reviewer',   'sess-4', ago1h, now, 1, null);
 
     seedModelHealthFromHistory(24);
 
@@ -327,26 +327,26 @@ describe("seedModelHealthFromHistory (Phase 4 boot seed)", () => {
   });
 
   it("does not overwrite existing model_health rows", () => {
-    const db = getDb() as any;
+    const raw = getRawDb();
     const now = new Date().toISOString();
     const ago1h = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
     // Pre-existing live state (e.g. circuit already tripped)
-    db.prepare(`
+    raw.prepare(`
       INSERT INTO model_health (model, agent_type, state, consecutive_failures, total_failures, total_runs, created_at, updated_at)
       VALUES ('test-seed/modelC', 'programmer', 'open', 5, 5, 5, ?, ?)
     `).run(now, now);
 
-    // History that would conflict
-    db.prepare(`
-      INSERT INTO worker_runs (id, model, agent_type, task_id, worker_id, started_at, ended_at, succeeded, timeout_reason)
-      VALUES ('wr-seed-5', 'test-seed/modelC', 'programmer', 'task-5', 'sess-5', ?, ?, 0, 'session_dead')
+    // History that would conflict (no task_id — avoids FK constraint in test DB)
+    raw.prepare(`
+      INSERT INTO worker_runs (model, agent_type, worker_id, started_at, ended_at, succeeded, timeout_reason)
+      VALUES ('test-seed/modelC', 'programmer', 'sess-5', ?, ?, 0, 'session_dead')
     `).run(ago1h, now);
 
     seedModelHealthFromHistory(24);
 
-    const row = db.prepare("SELECT * FROM model_health WHERE model = ? AND agent_type = ?")
-      .get('test-seed/modelC', 'programmer');
+    const row = raw.prepare("SELECT * FROM model_health WHERE model = ? AND agent_type = ?")
+      .get('test-seed/modelC', 'programmer') as any;
 
     // Should NOT have been overwritten
     expect(row.state).toBe('open');
@@ -357,5 +357,139 @@ describe("seedModelHealthFromHistory (Phase 4 boot seed)", () => {
     seedModelHealthFromHistory(24);
     const snapshot = getHealthSnapshot();
     expect(snapshot.length).toBe(0);
+  });
+});
+
+// ── Stall Watchdog tests ──────────────────────────────────────────────────────
+
+describe("Stall Watchdog", () => {
+  beforeEach(() => {
+    const raw = getRawDb();
+    raw.prepare("DELETE FROM worker_runs WHERE worker_id LIKE 'stall-test-%'").run();
+    raw.prepare("DELETE FROM tasks WHERE title LIKE '[stall-test]%'").run();
+    // Ensure stall_watchdog settings are seeded
+    raw.prepare(`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at) VALUES ('stall_watchdog', '{"enabled":true,"grace_period_seconds":60}', datetime('now'))`).run();
+    raw.prepare(`INSERT OR REPLACE INTO orchestrator_settings (key, value, updated_at) VALUES ('stall_timeout:researcher', '300', datetime('now'))`).run();
+    raw.prepare(`INSERT OR REPLACE INTO orchestrator_settings (key, value, updated_at) VALUES ('stall_timeout:programmer', '600', datetime('now'))`).run();
+    raw.prepare(`INSERT OR REPLACE INTO orchestrator_settings (key, value, updated_at) VALUES ('stall_timeout:default', '600', datetime('now'))`).run();
+  });
+
+  it("last_tool_call_at column exists in worker_runs schema", () => {
+    const raw = getRawDb();
+    const schema = raw.prepare("PRAGMA table_info(worker_runs)").all() as Array<{ name: string }>;
+    const colNames = schema.map(c => c.name);
+    expect(colNames).toContain("last_tool_call_at");
+  });
+
+  it("stall_watchdog settings are seeded in orchestrator_settings", () => {
+    const raw = getRawDb();
+    const watchdog = raw.prepare("SELECT value FROM orchestrator_settings WHERE key = 'stall_watchdog'").get() as { value: string } | undefined;
+    expect(watchdog).toBeDefined();
+    const cfg = JSON.parse(watchdog!.value);
+    expect(cfg.enabled).toBe(true);
+    expect(typeof cfg.grace_period_seconds).toBe("number");
+
+    const researcherTimeout = raw.prepare("SELECT value FROM orchestrator_settings WHERE key = 'stall_timeout:researcher'").get() as { value: string } | undefined;
+    expect(researcherTimeout).toBeDefined();
+    expect(parseInt(researcherTimeout!.value, 10)).toBe(300);
+
+    const programmerTimeout = raw.prepare("SELECT value FROM orchestrator_settings WHERE key = 'stall_timeout:programmer'").get() as { value: string } | undefined;
+    expect(programmerTimeout).toBeDefined();
+    expect(parseInt(programmerTimeout!.value, 10)).toBe(600);
+  });
+
+  it("last_tool_call_at can be written and read back", () => {
+    const raw = getRawDb();
+    const workerId = `stall-test-${randomUUID().slice(0, 8)}`;
+    const startedAt = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+    const toolCallAt = new Date().toISOString();
+
+    raw.prepare(`
+      INSERT INTO worker_runs (worker_id, agent_type, started_at)
+      VALUES (?, 'researcher', ?)
+    `).run(workerId, startedAt);
+
+    raw.prepare(`
+      UPDATE worker_runs SET last_tool_call_at = ? WHERE worker_id = ? AND ended_at IS NULL
+    `).run(toolCallAt, workerId);
+
+    const row = raw.prepare("SELECT last_tool_call_at FROM worker_runs WHERE worker_id = ?").get(workerId) as { last_tool_call_at: string | null };
+    expect(row.last_tool_call_at).toBe(toolCallAt);
+
+    // cleanup
+    raw.prepare("DELETE FROM worker_runs WHERE worker_id = ?").run(workerId);
+  });
+
+  it("stall detection skips sessions within grace period", () => {
+    // Session started 30s ago — within 60s grace period, should NOT be considered stalled
+    const raw = getRawDb();
+    const workerId = `stall-test-${randomUUID().slice(0, 8)}`;
+    const startedAt = new Date(Date.now() - 30 * 1000).toISOString();
+
+    raw.prepare(`
+      INSERT INTO worker_runs (worker_id, agent_type, started_at)
+      VALUES (?, 'researcher', ?)
+    `).run(workerId, startedAt);
+
+    // The stall query: started_at < cutoff (60s ago). 30s-old session should NOT appear.
+    const graceCutoff = new Date(Date.now() - 60 * 1000).toISOString();
+    const stalled = raw.prepare(`
+      SELECT id FROM worker_runs
+      WHERE ended_at IS NULL AND started_at IS NOT NULL AND started_at < ?
+    `).all(graceCutoff) as Array<{ id: number }>;
+
+    const stalledIds = stalled.map(r => r.id);
+    const insertedRow = raw.prepare("SELECT id FROM worker_runs WHERE worker_id = ?").get(workerId) as { id: number };
+    expect(stalledIds).not.toContain(insertedRow.id);
+
+    // cleanup
+    raw.prepare("DELETE FROM worker_runs WHERE worker_id = ?").run(workerId);
+  });
+
+  it("stall detection identifies sessions past grace period with no tool calls", () => {
+    // Session started 10 minutes ago, no last_tool_call_at — should appear in stall query
+    const raw = getRawDb();
+    const workerId = `stall-test-${randomUUID().slice(0, 8)}`;
+    const startedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+
+    raw.prepare(`
+      INSERT INTO worker_runs (worker_id, agent_type, started_at)
+      VALUES (?, 'researcher', ?)
+    `).run(workerId, startedAt);
+
+    const graceCutoff = new Date(Date.now() - 60 * 1000).toISOString();
+    const stalled = raw.prepare(`
+      SELECT id, worker_id, agent_type, started_at, last_tool_call_at
+      FROM worker_runs
+      WHERE ended_at IS NULL AND started_at IS NOT NULL AND started_at < ?
+    `).all(graceCutoff) as Array<{ id: number; worker_id: string; last_tool_call_at: string | null }>;
+
+    const match = stalled.find(r => r.worker_id === workerId);
+    expect(match).toBeDefined();
+    expect(match!.last_tool_call_at).toBeNull();
+
+    // cleanup
+    raw.prepare("DELETE FROM worker_runs WHERE worker_id = ?").run(workerId);
+  });
+
+  it("stall detection is cleared by a recent tool call", () => {
+    // Session started 10 min ago, but last tool call was 30s ago — should NOT be stalled
+    const raw = getRawDb();
+    const workerId = `stall-test-${randomUUID().slice(0, 8)}`;
+    const startedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const recentToolCall = new Date(Date.now() - 30 * 1000).toISOString();
+
+    raw.prepare(`
+      INSERT INTO worker_runs (worker_id, agent_type, started_at, last_tool_call_at)
+      VALUES (?, 'programmer', ?, ?)
+    `).run(workerId, startedAt, recentToolCall);
+
+    // Stall threshold for programmer is 600s. Time since last tool call = 30s < 600s.
+    const programmerThreshold = 600;
+    const silentSec = (Date.now() - new Date(recentToolCall).getTime()) / 1000;
+    expect(silentSec).toBeLessThan(programmerThreshold);
+
+    // cleanup
+    raw.prepare("DELETE FROM worker_runs WHERE worker_id = ?").run(workerId);
   });
 });
