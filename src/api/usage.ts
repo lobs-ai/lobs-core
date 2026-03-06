@@ -12,6 +12,29 @@ function windowToMs(window: string): number {
   }
 }
 
+/**
+ * SAIL Compliance Classification
+ *
+ * "Compliant" calls are routed to local (on-premises) models — no data leaves
+ * the user's machine. "Non-compliant" calls are routed to cloud AI providers
+ * (Anthropic, OpenAI, Google, etc.) which may process sensitive data off-site.
+ *
+ * Classification priority:
+ *   1. routeType === "local"  → compliant (explicit local route)
+ *   2. Known cloud providers  → non-compliant
+ *   3. Everything else        → compliant (local/unknown is safer default)
+ */
+const CLOUD_PROVIDERS = new Set([
+  "anthropic", "openai", "google", "mistral", "cohere", "ai21",
+  "huggingface", "together", "replicate", "perplexity", "groq",
+  "anyscale", "fireworks", "deepinfra", "lepton", "azure",
+]);
+
+export function isCompliantCall(provider: string, routeType: string): boolean {
+  if (routeType === "local") return true;
+  return !CLOUD_PROVIDERS.has(provider.toLowerCase());
+}
+
 export async function handleUsageRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -250,6 +273,81 @@ export async function handleUsageRequest(
       month_to_date_cost_usd: mtdCost,
       current_daily_burn_usd: dailyBurn,
       projected_month_end_cost_usd: projected,
+    });
+  }
+
+  if (sub === "compliance") {
+    // SAIL compliance report: compliant (local) vs non-compliant (cloud) AI calls
+    let compliantCount = 0;
+    let nonCompliantCount = 0;
+    let compliantTokens = 0;
+    let nonCompliantTokens = 0;
+    let compliantCost = 0;
+    let nonCompliantCost = 0;
+
+    // Daily breakdown keyed by date
+    const dailyCompliant: Record<string, number> = {};
+    const dailyNonCompliant: Record<string, number> = {};
+
+    for (const e of events) {
+      const prov = e.provider ?? "unknown";
+      const rt = e.routeType ?? "api";
+      const compliant = isCompliantCall(prov, rt);
+      const reqs = e.requests ?? 1;
+      const tokens = (e.inputTokens ?? 0) + (e.outputTokens ?? 0);
+      const cost = e.estimatedCostUsd ?? 0;
+      const day = (e.timestamp ?? "").slice(0, 10);
+
+      if (compliant) {
+        compliantCount += reqs;
+        compliantTokens += tokens;
+        compliantCost += cost;
+        dailyCompliant[day] = (dailyCompliant[day] ?? 0) + reqs;
+      } else {
+        nonCompliantCount += reqs;
+        nonCompliantTokens += tokens;
+        nonCompliantCost += cost;
+        dailyNonCompliant[day] = (dailyNonCompliant[day] ?? 0) + reqs;
+      }
+    }
+
+    const totalCount = compliantCount + nonCompliantCount;
+    const compliantPct = totalCount > 0 ? Math.round((compliantCount / totalCount) * 10000) / 100 : 0;
+    const nonCompliantPct = totalCount > 0 ? Math.round((nonCompliantCount / totalCount) * 10000) / 100 : 0;
+
+    // Build daily series across all dates observed
+    const allDays = Array.from(new Set([...Object.keys(dailyCompliant), ...Object.keys(dailyNonCompliant)])).sort();
+    const dailySeries = allDays.map(date => {
+      const c = dailyCompliant[date] ?? 0;
+      const nc = dailyNonCompliant[date] ?? 0;
+      const t = c + nc;
+      return {
+        date,
+        compliant_count: c,
+        non_compliant_count: nc,
+        total_count: t,
+        compliant_pct: t > 0 ? Math.round((c / t) * 10000) / 100 : 0,
+        non_compliant_pct: t > 0 ? Math.round((nc / t) * 10000) / 100 : 0,
+      };
+    });
+
+    return json(res, {
+      window,
+      period_start: periodStart.toISOString(),
+      period_end: periodEnd.toISOString(),
+      summary: {
+        total_count: totalCount,
+        compliant_count: compliantCount,
+        non_compliant_count: nonCompliantCount,
+        compliant_pct: compliantPct,
+        non_compliant_pct: nonCompliantPct,
+        compliant_tokens: compliantTokens,
+        non_compliant_tokens: nonCompliantTokens,
+        compliant_cost_usd: compliantCost,
+        non_compliant_cost_usd: nonCompliantCost,
+      },
+      daily_series: dailySeries,
+      note: "Compliant calls use local (on-premises) models. Non-compliant calls are routed to cloud AI providers.",
     });
   }
 
