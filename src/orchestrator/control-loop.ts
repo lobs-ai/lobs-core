@@ -570,6 +570,12 @@ function runStallWatchdog(): void {
  */
 function runWatchdog(): void {
   const db = getRawDb();
+  // IMPORTANT: use toISOString() — not SQLite's datetime("now","-5 minutes").
+  // stored started_at values are in ISO 8601 T/Z format (e.g. "2026-03-06T17:00:05.000Z").
+  // SQLite datetime() returns space-separated format ("2026-03-06 17:00:05") which
+  // sorts LESS than the stored T-format strings (space 0x20 < T 0x54), so a
+  // datetime() cutoff would cause started_at < ? to always be FALSE — watchdog silent.
+  // Both sides must use the same format for string comparison to work correctly.
   const cutoff = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 
   const ghostCandidates = db.prepare(`

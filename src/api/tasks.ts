@@ -164,6 +164,23 @@ ${body.text}`;
       }).where(eq(tasks.id, id)).run();
       return json(res, db.select().from(tasks).where(eq(tasks.id, id)).get());
     }
+    if (sub === "blockers" && req.method === "GET") {
+      // GET /api/tasks/:id/blockers — returns full task objects for each blocker
+      const row = db.select({ id: tasks.id, blockedBy: tasks.blockedBy }).from(tasks).where(eq(tasks.id, id)).get();
+      if (!row) return error(res, "Not found", 404);
+      const blockerIds: string[] = Array.isArray(row.blockedBy) ? row.blockedBy as string[] : [];
+      if (blockerIds.length === 0) return json(res, { blockers: [], resolved: true });
+      const blockerRows = blockerIds.length > 0
+        ? db.select().from(tasks).where(inArray(tasks.id, blockerIds)).all()
+        : [];
+      const unresolvedStatuses = ["active", "pending", "queued", "in_progress", "blocked"];
+      const unresolved = blockerRows.filter(t => unresolvedStatuses.includes(t.status ?? ""));
+      return json(res, {
+        blockers: blockerRows,
+        resolved: unresolved.length === 0,
+        unresolved_count: unresolved.length,
+      });
+    }
     if (sub === "review-state" && req.method === "PATCH") {
       const body = await parseBody(req) as Record<string, unknown>;
       if (!body.review_state) return error(res, "review_state required");
