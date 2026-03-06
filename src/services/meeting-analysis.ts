@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { eq } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
-import { meetings, meetingActionItems, tasks } from "../db/schema.js";
+import { meetings, meetingActionItems, tasks, inboxItems } from "../db/schema.js";
 import { log } from "../util/logger.js";
 
 function gatewayCfg(): { port: number; token: string } {
@@ -165,15 +165,35 @@ export class MeetingAnalysisService {
           const agent = /redesign|architect|evaluat/i.test(item.description) ? "architect"
             : /research|scrape|documentation|investigate/i.test(item.description) ? "researcher"
             : "programmer";
+
+          // Classify approval tier — C-tier tasks need Rafe's review
+          const isCTier = /feature|ui|architecture|design|new\s+endpoint/i.test(agent + " " + item.description);
+
           db.insert(tasks).values({
             id: taskId,
             title: item.description,
-            status: "active",
+            status: isCTier ? "proposed" : "active",
             owner: item.assignee ?? "lobs",
             agent,
             notes: `## Problem\n${item.description}\n\n## Acceptance Criteria\n- [ ] Change implemented and working\n- [ ] Build passes\n\n## Context\nFrom meeting: ${meeting.title ?? meeting.filename}\nMeeting ID: ${meetingId}\nPriority: ${item.priority ?? "medium"}\nSource: ${item.source ?? "explicit"}`,
           }).run();
-          log().info(`[MEETING_ANALYSIS] Created task ${taskId}: ${item.description.slice(0, 60)}`);
+
+          // C-tier tasks → create inbox item for Rafe to review in Nexus
+          if (isCTier) {
+            db.insert(inboxItems).values({
+              id: randomUUID(),
+              title: `Review: ${item.description.slice(0, 80)}`,
+              content: `Meeting-generated task needs approval.\n\nTask: ${item.description}\nAgent: ${agent}\nMeeting: ${meeting.title ?? meeting.filename}\nPriority: ${item.priority ?? "medium"}\n\nApprove this task to start work.`,
+              type: "action",
+              requiresAction: true,
+              actionStatus: "pending",
+              sourceAgent: "meeting-analysis",
+              isRead: false,
+            }).run();
+            log().info(`[MEETING_ANALYSIS] Created C-tier task ${taskId} (proposed) + inbox item: ${item.description.slice(0, 60)}`);
+          } else {
+            log().info(`[MEETING_ANALYSIS] Created task ${taskId} (active): ${item.description.slice(0, 60)}`);
+          }
         } else {
           log().info(`[MEETING_ANALYSIS] Skipping task creation for non-lobs assignee (${item.assignee}): ${item.description.slice(0, 60)}`);
         }

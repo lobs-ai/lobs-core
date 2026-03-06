@@ -212,6 +212,7 @@ ${body.text}`;
         project_id: "projectId", notes: "notes", agent: "agent",
         model_tier: "modelTier", failure_reason: "failureReason",
         escalation_tier: "escalationTier", retry_count: "retryCount", blocked_by: "blockedBy",
+        compliance_required: "complianceRequired",
       };
       for (const [apiKey, schemaKey] of Object.entries(fieldMap)) {
         if (apiKey in body) update[schemaKey] = body[apiKey];
@@ -254,6 +255,7 @@ ${body.text}`;
       agent: body.agent as string,
       modelTier: (body.model_tier as string) ?? "standard",
       blockedBy: Array.isArray(body.blocked_by) ? body.blocked_by as string[] : null,
+      complianceRequired: Boolean(body.compliance_required),
       createdAt: now,
       updatedAt: now,
     }).run();

@@ -633,6 +633,16 @@ export function runMigrations(db: PawDB): void {
   // local models only (compliance_model orchestrator setting).
   try { db.run(sql`ALTER TABLE projects ADD COLUMN compliance_required INTEGER NOT NULL DEFAULT 0`); } catch {}
 
+  // ── Task-level compliance flag (idempotent) ───────────────────────────────
+  // When compliance_required=1, this specific task is forced to use local models.
+  // Also inherited automatically when the parent project has compliance_required=1.
+  try { db.run(sql`ALTER TABLE tasks ADD COLUMN compliance_required INTEGER NOT NULL DEFAULT 0`); } catch {}
+
+  // ── Chat-session compliance flag (idempotent) ────────────────────────────
+  // When compliance_required=1, all LLM calls in this chat session use local models.
+  // Can be set manually by the user or auto-applied by the classification engine.
+  try { db.run(sql`ALTER TABLE chat_sessions ADD COLUMN compliance_required INTEGER NOT NULL DEFAULT 0`); } catch {}
+
   // ── model_health: circuit breaker per (model, agent_type) ──────────────────
   db.run(sql`CREATE TABLE IF NOT EXISTS model_health (
     model                TEXT NOT NULL,

@@ -196,6 +196,7 @@ export async function handleChatRequest(
           createdAt: s.createdAt,
           updatedAt: s.lastMessageAt ?? s.createdAt,
           isActive: s.isActive,
+          compliance_required: s.complianceRequired ?? false,
         })),
       });
     }
@@ -209,6 +210,34 @@ export async function handleChatRequest(
         log().error(`chat: failed to summarize: ${err}`);
         return error(res, `Failed to summarize: ${String(err)}`, 500);
       }
+    }
+
+    // PATCH /api/chat/sessions/:key/compliance — toggle compliance mode for a session
+    // Body: { compliance_required: boolean }
+    // When compliance_required=true, the session is flagged so that the UI and any
+    // future classification/routing can enforce local-model-only processing.
+    if (sessionKey && action === "compliance" && method === "PATCH") {
+      const body = (await parseBody(req)) as { compliance_required?: boolean };
+      if (typeof body.compliance_required !== "boolean") {
+        return error(res, "compliance_required (boolean) is required", 400);
+      }
+      const session = db.select().from(chatSessions)
+        .where(eq(chatSessions.sessionKey, sessionKey))
+        .get();
+      if (!session) return error(res, "Session not found", 404);
+
+      db.update(chatSessions)
+        .set({ complianceRequired: body.compliance_required })
+        .where(eq(chatSessions.sessionKey, sessionKey))
+        .run();
+
+      log().info(
+        `[COMPLIANCE] Chat session ${sessionKey.slice(0, 30)} compliance_required set to ${body.compliance_required}`
+      );
+      return json(res, {
+        key: sessionKey,
+        compliance_required: body.compliance_required,
+      });
     }
 
     // DELETE /api/chat/sessions/:key — delete a session

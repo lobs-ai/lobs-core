@@ -78,6 +78,11 @@ export const tasks = sqliteTable("tasks", {
   scheduledEnd: text("scheduled_end"),
   calendarEventId: text("calendar_event_id"),
   actualMinutes: integer("actual_minutes"),
+  // Task-level compliance flag: when true, this task must run on a local model only.
+  // If the parent project has complianceRequired=true, all its tasks are treated as
+  // compliant regardless of this flag. Setting this flag on a task forces compliance
+  // even when the project itself is not marked compliant.
+  complianceRequired: integer("compliance_required", { mode: "boolean" }).notNull().default(false),
   ...timestamps,
 });
 
@@ -502,6 +507,10 @@ export const chatSessions = sqliteTable("chat_sessions", {
   createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
   isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
   lastMessageAt: text("last_message_at"),
+  // Chat-level compliance flag: when true, all AI calls in this session must use
+  // local models only. Users can toggle this manually or it may be applied
+  // automatically when sensitive data is detected.
+  complianceRequired: integer("compliance_required", { mode: "boolean" }).notNull().default(false),
 });
 
 export const chatMessages = sqliteTable("chat_messages", {

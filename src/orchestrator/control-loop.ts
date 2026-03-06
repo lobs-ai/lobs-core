@@ -888,50 +888,72 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
   const taskContext = buildTaskContext({ projectId: (taskCtx["project_id"] as string) ?? undefined, agentType: req.agentType });
   const finalPrompt = taskPrompt + contextBlock + gitReminder + taskContext;
 
-  // ── Compliance gate: if the project is marked compliance_required, force local model ──
+  // ── Compliance gate: enforce local-model-only for compliant projects and tasks ──
+  // Hierarchy: project.compliance_required=1 cascades to ALL tasks in the project.
+  // task.compliance_required=1 also forces compliance for that specific task,
+  // even when the parent project is not marked compliant.
   const spawnProjectId = (taskCtx["project_id"] as string) ?? (taskCtx["projectId"] as string) ?? (projectCtx["id"] as string) ?? undefined;
+  const spawnTaskId = req.taskId ?? undefined;
   let complianceOverrideModel: string | null = null;
-  if (spawnProjectId) {
-    try {
-      const rawDb = getRawDb();
+  let complianceReason = "";
+  try {
+    const rawDb = getRawDb();
+
+    // Check project-level compliance
+    let projectCompliant = false;
+    if (spawnProjectId) {
       const proj = rawDb.prepare(
         `SELECT compliance_required FROM projects WHERE id = ?`
       ).get(spawnProjectId) as { compliance_required: number | null } | undefined;
+      projectCompliant = Boolean(proj?.compliance_required);
+    }
 
-      if (proj?.compliance_required) {
-        // Project is compliance-required — look up the configured local model
-        const cmRow = rawDb.prepare(
-          `SELECT value FROM orchestrator_settings WHERE key = 'compliance_model'`
-        ).get() as { value: string } | undefined;
+    // Check task-level compliance (either explicit flag OR project cascade)
+    let taskCompliant = projectCompliant; // inherit from project by default
+    if (!taskCompliant && spawnTaskId) {
+      const taskRow = rawDb.prepare(
+        `SELECT compliance_required FROM tasks WHERE id = ?`
+      ).get(spawnTaskId) as { compliance_required: number | null } | undefined;
+      taskCompliant = Boolean(taskRow?.compliance_required);
+    }
 
-        if (cmRow) {
-          const parsed = JSON.parse(cmRow.value) as string;
-          if (parsed && typeof parsed === "string") {
-            complianceOverrideModel = parsed;
-            log().info(
-              `[COMPLIANCE] Project ${spawnProjectId.slice(0, 8)} is compliance-required — ` +
-              `forcing local model: ${complianceOverrideModel} for ${req.agentType} task ${req.taskId?.slice(0, 8) ?? "?"}`
-            );
-          }
-        }
+    if (taskCompliant) {
+      complianceReason = projectCompliant
+        ? `project ${spawnProjectId?.slice(0, 8) ?? "?"} compliance_required=1 (cascaded to task)`
+        : `task ${spawnTaskId?.slice(0, 8) ?? "?"} compliance_required=1`;
 
-        if (!complianceOverrideModel) {
-          // compliance_model not configured — block the dispatch to prevent accidental cloud use
-          log().error(
-            `[COMPLIANCE] Project ${spawnProjectId.slice(0, 8)} is compliance-required but ` +
-            `'compliance_model' orchestrator setting is not configured. Blocking dispatch.`
+      // Look up the configured local compliance model
+      const cmRow = rawDb.prepare(
+        `SELECT value FROM orchestrator_settings WHERE key = 'compliance_model'`
+      ).get() as { value: string } | undefined;
+
+      if (cmRow) {
+        const parsed = JSON.parse(cmRow.value) as string;
+        if (parsed && typeof parsed === "string") {
+          complianceOverrideModel = parsed;
+          log().info(
+            `[COMPLIANCE] Forcing local model: ${complianceOverrideModel} for ` +
+            `${req.agentType} task ${spawnTaskId?.slice(0, 8) ?? "?"} — reason: ${complianceReason}`
           );
-          decrementPendingSpawns(spawnProjectId, req.agentType);
-          writeSpawnResult(req.runId, req.nodeId, {
-            status: "failed",
-            error: `compliance_model_not_configured: project requires local model but 'compliance_model' setting is missing. Set it via: UPDATE orchestrator_settings SET value = '"your/local-model"' WHERE key = 'compliance_model'`,
-          });
-          return;
         }
       }
-    } catch (e) {
-      log().error(`[COMPLIANCE] Failed to check project compliance flag: ${e}`);
+
+      if (!complianceOverrideModel) {
+        // compliance_model not configured — block dispatch to prevent accidental cloud use
+        log().error(
+          `[COMPLIANCE] Dispatch blocked — compliance required (${complianceReason}) but ` +
+          `'compliance_model' orchestrator setting is not configured.`
+        );
+        decrementPendingSpawns(spawnProjectId, req.agentType);
+        writeSpawnResult(req.runId, req.nodeId, {
+          status: "failed",
+          error: `compliance_model_not_configured: compliance required (${complianceReason}) but 'compliance_model' setting is missing. Set it via: UPDATE orchestrator_settings SET value = '"your/local-model"' WHERE key = 'compliance_model'`,
+        });
+        return;
+      }
     }
+  } catch (e) {
+    log().error(`[COMPLIANCE] Failed to check compliance flags: ${e}`);
   }
 
   // ── Circuit-breaker-aware model selection ────────────────────────────────
