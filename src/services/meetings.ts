@@ -12,7 +12,7 @@ import { log } from "../util/logger.js";
 import { MeetingAnalysisService } from "./meeting-analysis.js";
 
 const TRANSCRIBER_PATH = `${process.env.HOME}/lobs-meeting-transcriber/transcribe.py`;
-const PYTHON = `${process.env.HOME}/lobs-meeting-transcriber/.venv/bin/python3`;
+const PYTHON = `${process.env.HOME}/lobs-meeting-transcriber/.venv/bin/python3.12`;
 
 interface TranscribeOptions {
   title?: string;
