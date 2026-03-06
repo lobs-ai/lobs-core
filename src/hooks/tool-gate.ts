@@ -20,6 +20,7 @@ import { getDb, getRawDb } from "../db/connection.js";
 import { workerRuns, tasks, inboxItems } from "../db/schema.js";
 import { randomUUID } from "node:crypto";
 import { log } from "../util/logger.js";
+import { classifyApprovalTier } from "../util/approval-tier.js";
 
 const DANGEROUS_PATTERNS = [
   /\brm\s+-rf?\b/,
@@ -151,19 +152,6 @@ export function registerToolGateHook(api: OpenClawPluginApi): void {
 
     return;
   });
-}
-
-function classifyApprovalTier(agent: string, notes: string): "A" | "B" | "C" {
-  const lower = (agent + " " + notes).toLowerCase();
-
-  // Tier A: bug fixes, docs, research, tests
-  if (/bug.?fix|test|doc|research|investigation/i.test(lower)) return "A";
-
-  // Tier C: UI, features, architecture
-  if (/feature|ui|architecture|design|new\s+endpoint/i.test(lower)) return "C";
-
-  // Tier B: everything else (refactors, utilities)
-  return "B";
 }
 
 function isDangerous(toolName: string, toolInput: string): boolean {

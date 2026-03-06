@@ -10,6 +10,7 @@ import { eq } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { meetings, meetingActionItems, tasks, inboxItems } from "../db/schema.js";
 import { log } from "../util/logger.js";
+import { classifyApprovalTier } from "../util/approval-tier.js";
 
 function gatewayCfg(): { port: number; token: string } {
   const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
@@ -166,20 +167,23 @@ export class MeetingAnalysisService {
             : /research|scrape|documentation|investigate/i.test(item.description) ? "researcher"
             : "programmer";
 
-          // Classify approval tier — C-tier tasks need Rafe's review
-          const isCTier = /feature|ui|architecture|design|new\s+endpoint/i.test(agent + " " + item.description);
+          const notes = `## Problem\n${item.description}\n\n## Acceptance Criteria\n- [ ] Change implemented and working\n- [ ] Build passes\n\n## Context\nFrom meeting: ${meeting.title ?? meeting.filename}\nMeeting ID: ${meetingId}\nPriority: ${item.priority ?? "medium"}\nSource: ${item.source ?? "explicit"}`;
+
+          // Use standard approval tier classification
+          const tier = classifyApprovalTier(agent, notes);
+          const status = tier === "C" ? "proposed" : "active";
 
           db.insert(tasks).values({
             id: taskId,
             title: item.description,
-            status: isCTier ? "proposed" : "active",
+            status,
             owner: item.assignee ?? "lobs",
             agent,
-            notes: `## Problem\n${item.description}\n\n## Acceptance Criteria\n- [ ] Change implemented and working\n- [ ] Build passes\n\n## Context\nFrom meeting: ${meeting.title ?? meeting.filename}\nMeeting ID: ${meetingId}\nPriority: ${item.priority ?? "medium"}\nSource: ${item.source ?? "explicit"}`,
+            notes,
           }).run();
 
-          // C-tier tasks → create inbox item for Rafe to review in Nexus
-          if (isCTier) {
+          // Tier C → inbox item for Rafe to review in Nexus
+          if (tier === "C") {
             db.insert(inboxItems).values({
               id: randomUUID(),
               title: `Review: ${item.description.slice(0, 80)}`,
@@ -190,10 +194,9 @@ export class MeetingAnalysisService {
               sourceAgent: "meeting-analysis",
               isRead: false,
             }).run();
-            log().info(`[MEETING_ANALYSIS] Created C-tier task ${taskId} (proposed) + inbox item: ${item.description.slice(0, 60)}`);
-          } else {
-            log().info(`[MEETING_ANALYSIS] Created task ${taskId} (active): ${item.description.slice(0, 60)}`);
           }
+
+          log().info(`[MEETING_ANALYSIS] Created ${tier}-tier task ${taskId} (${status}): ${item.description.slice(0, 60)}`);
         } else {
           log().info(`[MEETING_ANALYSIS] Skipping task creation for non-lobs assignee (${item.assignee}): ${item.description.slice(0, 60)}`);
         }
