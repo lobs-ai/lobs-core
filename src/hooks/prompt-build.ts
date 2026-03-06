@@ -14,10 +14,34 @@
  */
 
 import { eq, and, isNull } from "drizzle-orm";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { getDb } from "../db/connection.js";
 import { workerRuns, tasks, projects } from "../db/schema.js";
 import { log } from "../util/logger.js";
+
+const WORKSPACE_BASE = join(process.env.HOME || "/Users/lobs", ".openclaw");
+
+/**
+ * Read compliant memory files for a given agent type from memory-compliant/.
+ * Only called when the session is compliance-mode (task/project has complianceRequired=true).
+ */
+async function readCompliantMemories(agentType: string): Promise<string[]> {
+  const compliantDir = join(WORKSPACE_BASE, `workspace-${agentType}`, "memory-compliant");
+  const contents: string[] = [];
+  try {
+    const files = await readdir(compliantDir);
+    for (const f of files) {
+      if (!f.endsWith(".md") && !f.endsWith(".txt")) continue;
+      try {
+        const content = await readFile(join(compliantDir, f), "utf-8");
+        contents.push(`### ${f}\n${content.trim()}`);
+      } catch {}
+    }
+  } catch {}
+  return contents;
+}
 
 /**
  * Deterministic A/B assignment based on task_id.
@@ -88,9 +112,27 @@ export function registerPromptBuildHook(api: OpenClawPluginApi): void {
     }
 
     const lines = [`<paw-task-context>`, ...innerLines, `</paw-task-context>`];
+    let prependContext = lines.join("\n");
 
-    return {
-      prependContext: lines.join("\n"),
-    };
+    // ── Compliance memory injection ───────────────────────────────────────
+    // When the task or project has compliance_required=true, append the agent's
+    // compliant memory files to the prompt. These files live in memory-compliant/
+    // and are NEVER included in cloud model sessions (structural enforcement).
+    const isCompliant =
+      Boolean((task as Record<string, unknown>).complianceRequired) ||
+      Boolean((project as Record<string, unknown> | null)?.complianceRequired);
+
+    if (isCompliant && task.agent) {
+      const compliantMemories = await readCompliantMemories(task.agent);
+      if (compliantMemories.length > 0) {
+        prependContext +=
+          "\n\n<compliance-memories>\n" +
+          compliantMemories.join("\n\n---\n\n") +
+          "\n</compliance-memories>";
+        log().debug?.(`[PAW] Injected ${compliantMemories.length} compliant memory file(s) for agent ${task.agent}`);
+      }
+    }
+
+    return { prependContext };
   });
 }

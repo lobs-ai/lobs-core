@@ -753,6 +753,37 @@ export function runMigrations(db: PawDB): void {
       VALUES ('stall_timeout:default', '600', datetime('now'))`);
   } catch {}
 
+  // ── Memory Compliance Index (idempotent) ──────────────────────────────────
+  // Added: 2026-03-06 — tracks compliance metadata for all agent workspace memory files.
+  // Part of the bifurcated memory system (ADR-bifurcated-memory-compliance.md).
+  //   - Files in memory/           → compliance_required=0 (cloud-safe)
+  //   - Files in memory-compliant/ → compliance_required=1 (local-only)
+  //   - anomaly=1                  → file is in memory/ but frontmatter says compliant
+  db.run(sql`CREATE TABLE IF NOT EXISTS memory_compliance_index (
+    id                    TEXT PRIMARY KEY,
+    agent_type            TEXT NOT NULL,
+    file_path             TEXT NOT NULL,
+    filename              TEXT NOT NULL,
+    directory             TEXT NOT NULL DEFAULT 'memory',
+    compliance_required   INTEGER NOT NULL DEFAULT 0,
+    frontmatter_compliance INTEGER,
+    content_hash          TEXT,
+    size_bytes            INTEGER,
+    last_scanned_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    anomaly               INTEGER NOT NULL DEFAULT 0,
+    anomaly_reason        TEXT,
+    created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  try {
+    db.run(sql`CREATE UNIQUE INDEX IF NOT EXISTS memory_compliance_idx_agent_path
+      ON memory_compliance_index(agent_type, file_path)`);
+    db.run(sql`CREATE INDEX IF NOT EXISTS memory_compliance_idx_compliance
+      ON memory_compliance_index(compliance_required)`);
+    db.run(sql`CREATE INDEX IF NOT EXISTS memory_compliance_idx_anomaly
+      ON memory_compliance_index(anomaly)`);
+  } catch {}
+
   // ── Seed compliance model (INSERT OR IGNORE — configurable via SQL) ──────────
   // compliance_model: the local model to use when a project has compliance_required=1.
   // Change this setting to match the local LM Studio / Ollama model installed.
@@ -785,4 +816,5 @@ export function runMigrations(db: PawDB): void {
 
 // ── Model Health circuit breaker table ──────────────────────────────────────
 // Added: 2026-03-04 — tracks (model, agent_type) circuit state for dispatch routing
+
 

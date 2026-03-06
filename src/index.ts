@@ -21,6 +21,7 @@ import { registerRestartContinuationHook } from "./hooks/restart-continuation.js
 import { registerCircuitBreakerHooks } from "./hooks/circuit-breaker.js";
 import { startControlLoop, stopControlLoop } from "./orchestrator/control-loop.js";
 import { YouTubeService } from "./services/youtube.js";
+import { ensureCompliantMemoryDirs } from "./api/memories-fs.js";
 import { setLogger, log } from "./util/logger.js";
 import type { PawConfig } from "./util/types.js";
 
@@ -87,6 +88,12 @@ const pawPlugin = {
     } catch (e) {
       log().warn(`paw: startup recovery error: ${e}`);
     }
+
+    // ── Ensure memory-compliant/ dirs exist ──────────────────────────
+    // Idempotent — creates directories for all known agents if missing.
+    ensureCompliantMemoryDirs().catch(e =>
+      log().warn(`paw: ensureCompliantMemoryDirs error: ${e}`)
+    );
 
     // ── Seed Workflows ────────────────────────────────────────────────
     const seeded = seedDefaultWorkflows();

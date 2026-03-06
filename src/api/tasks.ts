@@ -7,9 +7,61 @@ import { inferProjectId } from "../util/project-inference.js";
 import { eq, and, inArray, desc, lte } from "drizzle-orm";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getDb } from "../db/connection.js";
-import { tasks } from "../db/schema.js";
+import { tasks, projects } from "../db/schema.js";
 import { json, error, parseBody, parseQuery } from "./index.js";
 import { readFileSync as _readFileSync } from "node:fs";
+
+// ── Normalization ─────────────────────────────────────────────────────────────
+
+/**
+ * Normalize a raw task row from Drizzle by adding a `compliant` boolean alias
+ * for `complianceRequired` (used by the Nexus UI).
+ * Also resolves effective compliance: if the task's project has compliance_required=1,
+ * the task is treated as compliant regardless of the task-level flag.
+ */
+function normalizeTask(row: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
+  if (!row) return null;
+  const taskCompliant = Boolean(row["complianceRequired"] ?? row["compliance_required"]);
+  return {
+    ...row,
+    compliant: taskCompliant,
+  };
+}
+
+/**
+ * Batch-normalize tasks, resolving effective compliance via a project lookup.
+ * For tasks that are not individually flagged, check if their parent project is compliant.
+ */
+function normalizeTaskBatch(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  if (rows.length === 0) return [];
+  const db = getDb();
+  // Collect unique project IDs that appear in the task list
+  const projectIds = [...new Set(rows.map(r => r["projectId"] as string | null | undefined).filter(Boolean))] as string[];
+  // Load compliance flags for those projects in one query
+  const projectCompliance: Record<string, boolean> = {};
+  if (projectIds.length > 0) {
+    try {
+      const projRows = db.select({ id: projects.id, complianceRequired: projects.complianceRequired })
+        .from(projects)
+        .where(inArray(projects.id, projectIds))
+        .all();
+      for (const p of projRows) {
+        projectCompliance[p.id] = Boolean(p.complianceRequired);
+      }
+    } catch {}
+  }
+  return rows.map(row => {
+    const taskCompliant = Boolean(row["complianceRequired"] ?? row["compliance_required"]);
+    const projectId = row["projectId"] as string | undefined;
+    const projectCompliant = projectId ? Boolean(projectCompliance[projectId]) : false;
+    return {
+      ...row,
+      compliant: taskCompliant || projectCompliant,
+      // If project is compliant and task is not flagged, indicate it's inherited
+      complianceInherited: !taskCompliant && projectCompliant,
+    };
+  });
+}
 
 // ── Brain Dump Gateway helpers ──────────────────────────────────────────
 
@@ -49,7 +101,7 @@ export async function handleTaskRequest(
       .where(inArray(tasks.status, ["inbox", "active", "waiting_on"]))
       .orderBy(desc(tasks.updatedAt))
       .all();
-    return json(res, rows);
+    return json(res, normalizeTaskBatch(rows as Record<string, unknown>[]));
   }
 
   // /api/tasks/auto-archive — POST
@@ -185,7 +237,18 @@ ${body.text}`;
       const body = await parseBody(req) as Record<string, unknown>;
       if (!body.review_state) return error(res, "review_state required");
       db.update(tasks).set({ reviewState: body.review_state as string, updatedAt: new Date().toISOString() }).where(eq(tasks.id, id)).run();
-      return json(res, db.select().from(tasks).where(eq(tasks.id, id)).get());
+      return json(res, normalizeTask(db.select().from(tasks).where(eq(tasks.id, id)).get() as Record<string, unknown>));
+    }
+    // PATCH /api/tasks/:id/compliance — toggle compliance mode for a specific task
+    // Accepts { compliant: boolean } (Nexus UI convention) or { compliance_required: boolean }
+    if (sub === "compliance" && req.method === "PATCH") {
+      const body = await parseBody(req) as Record<string, unknown>;
+      const rawVal = "compliant" in body ? body["compliant"] : body["compliance_required"];
+      if (typeof rawVal !== "boolean") return error(res, "compliant (boolean) is required", 400);
+      const rowCheck = db.select({ id: tasks.id }).from(tasks).where(eq(tasks.id, id)).get();
+      if (!rowCheck) return error(res, "Not found", 404);
+      db.update(tasks).set({ complianceRequired: rawVal, updatedAt: new Date().toISOString() }).where(eq(tasks.id, id)).run();
+      return json(res, normalizeTask(db.select().from(tasks).where(eq(tasks.id, id)).get() as Record<string, unknown>));
     }
     if (sub === "archive" && req.method === "POST") {
       db.update(tasks).set({ status: "archived", updatedAt: new Date().toISOString() }).where(eq(tasks.id, id)).run();
@@ -200,7 +263,7 @@ ${body.text}`;
     if (req.method === "GET") {
       const row = db.select().from(tasks).where(eq(tasks.id, id)).get();
       if (!row) return error(res, "Not found", 404);
-      return json(res, row);
+      return json(res, normalizeTask(row as Record<string, unknown>));
     }
     if (req.method === "PATCH") {
       const body = await parseBody(req) as Record<string, unknown>;
@@ -213,13 +276,15 @@ ${body.text}`;
         model_tier: "modelTier", failure_reason: "failureReason",
         escalation_tier: "escalationTier", retry_count: "retryCount", blocked_by: "blockedBy",
         compliance_required: "complianceRequired",
+        // Also accept the Nexus UI convention
+        compliant: "complianceRequired",
       };
       for (const [apiKey, schemaKey] of Object.entries(fieldMap)) {
         if (apiKey in body) update[schemaKey] = body[apiKey];
       }
       db.update(tasks).set(update).where(eq(tasks.id, id)).run();
       const updated = db.select().from(tasks).where(eq(tasks.id, id)).get();
-      return json(res, updated);
+      return json(res, normalizeTask(updated as Record<string, unknown>));
     }
     if (req.method === "DELETE") {
       db.delete(tasks).where(eq(tasks.id, id)).run();
@@ -238,7 +303,7 @@ ${body.text}`;
     const rows = conditions.length > 0
       ? db.select().from(tasks).where(and(...conditions)).orderBy(desc(tasks.updatedAt)).all()
       : db.select().from(tasks).orderBy(desc(tasks.updatedAt)).all();
-    return json(res, rows);
+    return json(res, normalizeTaskBatch(rows as Record<string, unknown>[]));
   }
   if (req.method === "POST") {
     const body = await parseBody(req) as Record<string, unknown>;

@@ -720,3 +720,47 @@ export const youtubeVideos = sqliteTable("youtube_videos", {
   projectId: text("project_id").references(() => projects.id),
   ...timestamps,
 });
+
+// ─── Memory Compliance Index ────────────────────────────────────────────────
+// Tracks compliance metadata for all memory files across agent workspaces.
+// Populated by the memory scanner service; enables compliance reports and
+// anomaly detection without scanning the filesystem on every request.
+//
+// Key invariants:
+//   - Files in memory/           → complianceRequired=0 (cloud-safe)
+//   - Files in memory-compliant/ → complianceRequired=1 (local-only)
+//   - anomaly=1                  → file is in memory/ but frontmatter says compliant
+//
+// @see docs/decisions/ADR-bifurcated-memory-compliance.md
+
+export const memoryComplianceIndex = sqliteTable("memory_compliance_index", {
+  id: text("id").primaryKey(), // {agent_type}:{relative_path}
+  agentType: text("agent_type").notNull(),
+  /** Absolute filesystem path to the memory file. */
+  filePath: text("file_path").notNull(),
+  filename: text("filename").notNull(),
+  /** "memory" | "memory-compliant" */
+  directory: text("directory").notNull().default("memory"),
+  /**
+   * Derived compliance flag:
+   *   1 if file is in memory-compliant/ OR frontmatter has compliance_required=true
+   *   0 otherwise (cloud-safe)
+   */
+  complianceRequired: integer("compliance_required", { mode: "boolean" }).notNull().default(false),
+  /** Frontmatter compliance_required value (null if no frontmatter). */
+  frontmatterCompliance: integer("frontmatter_compliance", { mode: "boolean" }),
+  /** SHA1 of file content — used for change detection during re-scans. */
+  contentHash: text("content_hash"),
+  sizeBytes: integer("size_bytes"),
+  lastScannedAt: text("last_scanned_at").notNull().default(sql`(datetime('now'))`),
+  /**
+   * Anomaly flag: 1 if the file is in memory/ but its frontmatter declares
+   * compliance_required=true (i.e., it should be in memory-compliant/).
+   */
+  anomaly: integer("anomaly", { mode: "boolean" }).notNull().default(false),
+  anomalyReason: text("anomaly_reason"),
+  createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+  updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
+}, (t) => ({
+  uniqAgentPath: uniqueIndex("memory_compliance_idx_agent_path").on(t.agentType, t.filePath),
+}));
