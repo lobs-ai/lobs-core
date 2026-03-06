@@ -155,20 +155,26 @@ export class MeetingAnalysisService {
         const itemId = randomUUID();
         let taskId: string | null = null;
 
-        // Auto-create PAW task for every action item
-        taskId = randomUUID();
-        const agent = /redesign|architect|evaluat/i.test(item.description) ? "architect"
-          : /research|scrape|documentation|investigate/i.test(item.description) ? "researcher"
-          : "programmer";
-        db.insert(tasks).values({
-          id: taskId,
-          title: item.description,
-          status: "active",
-          owner: item.assignee ?? "lobs",
-          agent,
-          notes: `## Problem\n${item.description}\n\n## Acceptance Criteria\n- [ ] Change implemented and working\n- [ ] Build passes\n\n## Context\nFrom meeting: ${meeting.title ?? meeting.filename}\nMeeting ID: ${meetingId}\nPriority: ${item.priority ?? "medium"}\nSource: ${item.source ?? "explicit"}`,
-        }).run();
-        log().info(`[MEETING_ANALYSIS] Created task ${taskId}: ${item.description.slice(0, 60)}`);
+        // Only create PAW tasks for lobs (or unassigned) action items.
+        // Other people (rafe, etc.) don't use Nexus so they use meeting notes directly.
+        const isLobsItem = !item.assignee || item.assignee === "lobs";
+        if (isLobsItem) {
+          taskId = randomUUID();
+          const agent = /redesign|architect|evaluat/i.test(item.description) ? "architect"
+            : /research|scrape|documentation|investigate/i.test(item.description) ? "researcher"
+            : "programmer";
+          db.insert(tasks).values({
+            id: taskId,
+            title: item.description,
+            status: "active",
+            owner: item.assignee ?? "lobs",
+            agent,
+            notes: `## Problem\n${item.description}\n\n## Acceptance Criteria\n- [ ] Change implemented and working\n- [ ] Build passes\n\n## Context\nFrom meeting: ${meeting.title ?? meeting.filename}\nMeeting ID: ${meetingId}\nPriority: ${item.priority ?? "medium"}\nSource: ${item.source ?? "explicit"}`,
+          }).run();
+          log().info(`[MEETING_ANALYSIS] Created task ${taskId}: ${item.description.slice(0, 60)}`);
+        } else {
+          log().info(`[MEETING_ANALYSIS] Skipping task creation for non-lobs assignee (${item.assignee}): ${item.description.slice(0, 60)}`);
+        }
 
         db.insert(meetingActionItems).values({
           id: itemId,

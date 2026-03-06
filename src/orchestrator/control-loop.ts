@@ -390,6 +390,124 @@ function runTick(): void {
   } catch (e) {
     log().error(`orchestrator: auto-close succeeded tasks error: ${e}`);
   }
+
+  // ── 8. Watchdog: close ghost worker_runs ────────────────────────────────────
+  // Closes worker_runs where ended_at IS NULL and started_at < now - 5 min.
+  // These are "ghost" runs left by sessions that died before writing ended_at.
+  // The 5-min buffer is safe: real runs complete in <3min; anything older with
+  // a dead session is a ghost inflating the capacity counter.
+  try {
+    runWatchdog();
+  } catch (e) {
+    log().error(`orchestrator: watchdog error: ${e}`);
+  }
+}
+
+// ── Watchdog: ghost worker_run cleanup ────────────────────────────────────────
+
+/**
+ * Scan for worker_runs with ended_at IS NULL and started_at older than 5 minutes.
+ * For each, check if the session is still alive. If not (or if no session key),
+ * close the run as a ghost, reset the task to not_started, and fail any workflow_run
+ * stuck at a spawn node for that task.
+ *
+ * Safe on every tick (query is cheap and idempotent).
+ */
+function runWatchdog(): void {
+  const db = getRawDb();
+  const cutoff = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+
+  const ghostCandidates = db.prepare(`
+    SELECT id, worker_id, task_id, agent_type, started_at
+    FROM worker_runs
+    WHERE ended_at IS NULL
+      AND started_at IS NOT NULL
+      AND started_at < ?
+  `).all(cutoff) as Array<{
+    id: number;
+    worker_id: string | null;
+    task_id: string | null;
+    agent_type: string | null;
+    started_at: string;
+  }>;
+
+  if (ghostCandidates.length === 0) return;
+
+  const now = new Date().toISOString();
+  log().debug?.(`[WATCHDOG] ${ghostCandidates.length} worker_run(s) >5min with null ended_at — checking liveness`);
+
+  for (const wr of ghostCandidates) {
+    const sessionKey = wr.worker_id;
+    if (sessionKey) {
+      checkSessionAlive(sessionKey).then((alive: boolean) => {
+        if (alive) {
+          log().debug?.(`[WATCHDOG] worker_run ${wr.id} session ${sessionKey.slice(0, 30)} still alive — skipping`);
+          return;
+        }
+        closeGhostRun(wr, now);
+      }).catch(() => {
+        // On error checking session, close conservatively
+        closeGhostRun(wr, now);
+      });
+    } else {
+      // No session key recorded — definitely orphaned
+      closeGhostRun(wr, now);
+    }
+  }
+}
+
+type GhostRunRow = {
+  id: number;
+  worker_id: string | null;
+  task_id: string | null;
+  agent_type: string | null;
+  started_at: string;
+};
+
+function closeGhostRun(wr: GhostRunRow, now: string): void {
+  const db = getRawDb();
+  const staleMin = Math.round((Date.now() - new Date(wr.started_at).getTime()) / 60000);
+
+  // 1. Close the worker_run
+  const changed = db.prepare(`
+    UPDATE worker_runs
+    SET ended_at = ?, succeeded = 0, summary = 'ghost: watchdog closed stale run'
+    WHERE id = ? AND ended_at IS NULL
+  `).run(now, wr.id);
+
+  if ((changed as { changes: number }).changes === 0) return; // already closed by another path
+
+  log().warn(`[WATCHDOG] Closed ghost worker_run ${wr.id} (${wr.agent_type ?? "?"}) — stale ${staleMin}min, session=${wr.worker_id?.slice(0, 30) ?? "none"}`);
+
+  // 2. Reset task to not_started if still in_progress
+  if (wr.task_id) {
+    db.prepare(`
+      UPDATE tasks
+      SET work_state = 'not_started', spawn_count = 0, updated_at = ?
+      WHERE id = ? AND work_state = 'in_progress'
+    `).run(now, wr.task_id);
+  }
+
+  // 3. Fail workflow_runs stuck at a spawn node for this task
+  if (wr.task_id) {
+    try {
+      const liveDb = getDb();
+      const stuckRuns = liveDb.select().from(workflowRuns)
+        .where(and(eq(workflowRuns.status, "running"), eq(workflowRuns.taskId, wr.task_id)))
+        .all()
+        .filter((r: any) => r.currentNode?.startsWith("spawn_"));
+
+      for (const run of stuckRuns) {
+        liveDb.update(workflowRuns)
+          .set({ status: "failed", updatedAt: now })
+          .where(eq(workflowRuns.id, run.id))
+          .run();
+        log().warn(`[WATCHDOG] Failed workflow_run ${run.id.slice(0, 8)} stuck at ${run.currentNode} (ghost task ${wr.task_id.slice(0, 8)})`);
+      }
+    } catch (e) {
+      log().error(`[WATCHDOG] workflow_run cleanup error for task ${wr.task_id}: ${e}`);
+    }
+  }
 }
 
 // ── Auto-close helper ─────────────────────────────────────────────────────────
