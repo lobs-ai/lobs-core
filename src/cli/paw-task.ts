@@ -53,6 +53,25 @@ try {
       if (!TIERS.includes(tier)) die(`Invalid tier: ${tier}. Must be one of: ${TIERS.join(", ")}`);
       const status = args.flags.status ?? "active";
       if (!STATUSES.includes(status)) die(`Invalid status: ${status}`);
+
+      // Dedup: reject if a task with the same title already exists in an active/pending state.
+      // Applies to ALL agent types (programmer, architect, researcher, writer, reviewer, etc.)
+      // to prevent duplicates from slipping through when triage agents spawn tasks.
+      const DEDUP_STATUSES = ["active", "proposed", "queued", "waiting_on"];
+      const existing = db.prepare(
+        `SELECT id, agent, status FROM tasks WHERE title = ? AND status IN (${DEDUP_STATUSES.map(() => "?").join(",")}) LIMIT 1`
+      ).get(title, ...DEDUP_STATUSES) as { id: string; agent: string; status: string } | undefined;
+      if (existing) {
+        console.log(JSON.stringify({
+          ok: false,
+          skipped: true,
+          reason: "duplicate",
+          message: `Task already exists with same title (id=${existing.id}, agent=${existing.agent}, status=${existing.status}) — skipping to prevent duplicate`,
+          existing_id: existing.id,
+        }));
+        process.exit(0);
+      }
+
       const id = randomUUID();
       const now = new Date().toISOString();
 
