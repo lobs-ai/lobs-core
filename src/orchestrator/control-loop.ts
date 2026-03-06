@@ -370,6 +370,16 @@ function runTick(): void {
   // ── 5c. Triage queue flush ────────────────────────────────────────────────
   maybeFlushTriageQueue().catch(e => log().error(`orchestrator: triage flush error: ${e}`));
 
+  // ── 5d. Stall watchdog ────────────────────────────────────────────────────
+  // Kill sessions that have emitted no tool calls for longer than their per-agent-type
+  // stall threshold. Distinct from the hard 900s timeout — this catches sessions that
+  // are silently hanging (e.g. waiting for a model response that never arrives).
+  try {
+    runStallWatchdog();
+  } catch (e) {
+    log().error(`orchestrator: stall watchdog error: ${e}`);
+  }
+
   // ── 6. Worker health check (legacy) ───────────────────────────────────────
   try {
     const staleWorkers = detectStaleWorkers(120);
@@ -400,6 +410,151 @@ function runTick(): void {
     runWatchdog();
   } catch (e) {
     log().error(`orchestrator: watchdog error: ${e}`);
+  }
+}
+
+// ── Stall watchdog ────────────────────────────────────────────────────────────
+
+/**
+ * Load stall watchdog config from orchestrator_settings.
+ * Returns { enabled, gracePeriodSeconds, timeouts: Record<agentType, seconds> }
+ */
+function loadStallConfig(): { enabled: boolean; gracePeriodSeconds: number; timeouts: Record<string, number> } {
+  const db = getRawDb();
+  const defaultConfig = { enabled: true, gracePeriodSeconds: 60, timeouts: {} as Record<string, number> };
+
+  try {
+    const watchdogRow = db.prepare(
+      `SELECT value FROM orchestrator_settings WHERE key = 'stall_watchdog'`
+    ).get() as { value: string } | undefined;
+
+    if (watchdogRow) {
+      const parsed = JSON.parse(watchdogRow.value) as Record<string, unknown>;
+      defaultConfig.enabled = parsed.enabled !== false;
+      defaultConfig.gracePeriodSeconds = typeof parsed.grace_period_seconds === "number"
+        ? parsed.grace_period_seconds
+        : 60;
+    }
+
+    // Load per-agent-type timeouts
+    const timeoutRows = db.prepare(
+      `SELECT key, value FROM orchestrator_settings WHERE key LIKE 'stall_timeout:%'`
+    ).all() as Array<{ key: string; value: string }>;
+
+    for (const row of timeoutRows) {
+      const agentType = row.key.replace("stall_timeout:", "");
+      const seconds = parseInt(row.value, 10);
+      if (!isNaN(seconds)) {
+        defaultConfig.timeouts[agentType] = seconds;
+      }
+    }
+  } catch {}
+
+  return defaultConfig;
+}
+
+/**
+ * Scan for worker sessions that have gone silent (no tool calls) longer than
+ * their per-agent-type stall threshold. Kill stalled sessions and mark them failed.
+ *
+ * Grace period: sessions started < grace_period_seconds ago are excluded.
+ * Null last_tool_call_at: excluded if within grace period; checked against
+ * started_at if outside grace period (may indicate the session never started a tool).
+ */
+function runStallWatchdog(): void {
+  const config = loadStallConfig();
+  if (!config.enabled) return;
+
+  const db = getRawDb();
+  const now = Date.now();
+  const graceCutoff = new Date(now - config.gracePeriodSeconds * 1000).toISOString();
+
+  // Find all open worker_runs that have passed the grace period
+  const openRuns = db.prepare(`
+    SELECT id, worker_id, task_id, agent_type, started_at, last_tool_call_at
+    FROM worker_runs
+    WHERE ended_at IS NULL
+      AND started_at IS NOT NULL
+      AND started_at < ?
+  `).all(graceCutoff) as Array<{
+    id: number;
+    worker_id: string | null;
+    task_id: string | null;
+    agent_type: string | null;
+    started_at: string;
+    last_tool_call_at: string | null;
+  }>;
+
+  if (openRuns.length === 0) return;
+
+  for (const wr of openRuns) {
+    const agentType = wr.agent_type ?? "default";
+    const stallThresholdSec = config.timeouts[agentType] ?? config.timeouts["default"] ?? 600;
+
+    // Determine the reference time for stall calculation:
+    // - If last_tool_call_at is set, use it
+    // - If null (no tools called yet), use started_at as the reference
+    const referenceTime = wr.last_tool_call_at ?? wr.started_at;
+    const silentSec = (now - new Date(referenceTime).getTime()) / 1000;
+
+    if (silentSec < stallThresholdSec) continue;
+
+    const silentMin = Math.round(silentSec / 60);
+    const stallSource = wr.last_tool_call_at ? "last_tool_call" : "session_start";
+    log().warn(
+      `[STALL_WATCHDOG] Session ${wr.worker_id?.slice(0, 30) ?? "?"} (${agentType}) ` +
+      `silent ${silentMin}min since ${stallSource} — threshold=${stallThresholdSec}s — marking stalled`
+    );
+
+    // Close the worker_run as stalled
+    const changed = db.prepare(`
+      UPDATE worker_runs
+      SET ended_at = ?,
+          succeeded = 0,
+          timeout_reason = 'stall_watchdog',
+          summary = ?
+      WHERE id = ? AND ended_at IS NULL
+    `).run(
+      new Date(now).toISOString(),
+      `stall_watchdog: no tool calls for ${silentMin}min (threshold=${stallThresholdSec}s, ref=${stallSource})`,
+      wr.id,
+    ) as { changes: number };
+
+    if (changed.changes === 0) continue; // already closed
+
+    // Reset task to not_started so it can be retried
+    if (wr.task_id) {
+      db.prepare(`
+        UPDATE tasks
+        SET work_state = 'not_started', spawn_count = 0, updated_at = ?
+        WHERE id = ? AND work_state = 'in_progress'
+      `).run(new Date(now).toISOString(), wr.task_id);
+      log().warn(
+        `[STALL_WATCHDOG] Reset task ${wr.task_id.slice(0, 8)} to not_started after stall (${agentType}, ${silentMin}min silent)`
+      );
+    }
+
+    // Fail any workflow_run stuck at a spawn node for this task
+    if (wr.task_id) {
+      try {
+        const liveDb = getDb();
+        const { workflowRuns: wrTable } = require("../db/schema.js");
+        const stuckRuns = liveDb.select().from(wrTable)
+          .where(and(eq(wrTable.status, "running"), eq(wrTable.taskId, wr.task_id)))
+          .all()
+          .filter((r: any) => r.currentNode?.startsWith("spawn_"));
+
+        for (const run of stuckRuns) {
+          liveDb.update(wrTable)
+            .set({ status: "failed", updatedAt: new Date(now).toISOString() })
+            .where(eq(wrTable.id, run.id))
+            .run();
+          log().warn(`[STALL_WATCHDOG] Failed workflow_run ${run.id.slice(0, 8)} (stalled task ${wr.task_id.slice(0, 8)})`);
+        }
+      } catch (e) {
+        log().error(`[STALL_WATCHDOG] workflow_run cleanup error: ${e}`);
+      }
+    }
   }
 }
 

@@ -615,6 +615,9 @@ export function runMigrations(db: PawDB): void {
   // ── Prompt A/B variant on worker_runs (idempotent) ───────────────────────
   try { db.run(sql`ALTER TABLE worker_runs ADD COLUMN prompt_variant TEXT NOT NULL DEFAULT 'A'`); } catch {}
 
+  // ── Stall watchdog: track last tool call time per worker session ──────────
+  try { db.run(sql`ALTER TABLE worker_runs ADD COLUMN last_tool_call_at TEXT`); } catch {}
+
   // ── Work tracker fields on tasks (idempotent) ────────────────────────────
   try { db.run(sql`ALTER TABLE tasks ADD COLUMN estimated_minutes INTEGER`); } catch {}
   try { db.run(sql`ALTER TABLE tasks ADD COLUMN due_date TEXT`); } catch {}
@@ -712,6 +715,26 @@ export function runMigrations(db: PawDB): void {
   try {
     db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)
       VALUES ('circuit_breaker', '{"enabled":true,"failure_threshold":3,"recovery_minutes":30}', datetime('now'))`);
+  } catch {}
+
+  // ── Seed stall watchdog settings (INSERT OR IGNORE) ──────────────────────
+  // grace_period_seconds: how long after session start before stall detection kicks in
+  // stall_timeout:<agent_type>: seconds since last tool call before declaring a stall
+  try {
+    db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)
+      VALUES ('stall_watchdog', '{"enabled":true,"grace_period_seconds":60}', datetime('now'))`);
+    db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)
+      VALUES ('stall_timeout:researcher', '300', datetime('now'))`);
+    db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)
+      VALUES ('stall_timeout:programmer', '600', datetime('now'))`);
+    db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)
+      VALUES ('stall_timeout:architect', '600', datetime('now'))`);
+    db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)
+      VALUES ('stall_timeout:reviewer', '480', datetime('now'))`);
+    db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)
+      VALUES ('stall_timeout:writer', '600', datetime('now'))`);
+    db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)
+      VALUES ('stall_timeout:default', '600', datetime('now'))`);
   } catch {}
 
   // ── Seed fallback tier chains per agent type (circuit-breaker dispatch order) ──

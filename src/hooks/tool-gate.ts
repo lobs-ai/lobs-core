@@ -16,7 +16,7 @@
 
 import { eq, and, isNull } from "drizzle-orm";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { getDb } from "../db/connection.js";
+import { getDb, getRawDb } from "../db/connection.js";
 import { workerRuns, tasks, inboxItems } from "../db/schema.js";
 import { randomUUID } from "node:crypto";
 import { log } from "../util/logger.js";
@@ -76,6 +76,14 @@ export function registerToolGateHook(api: OpenClawPluginApi): void {
 
     const task = db.select().from(tasks).where(eq(tasks.id, run.taskId)).get();
     if (!task) return;
+
+    // ── Stall watchdog: update last_tool_call_at ─────────────────────
+    // Track the most recent tool call so the control loop can detect stalls.
+    try {
+      getRawDb().prepare(
+        `UPDATE worker_runs SET last_tool_call_at = ? WHERE id = ? AND ended_at IS NULL`
+      ).run(new Date().toISOString(), run.id);
+    } catch {}
 
     const toolName = (event as Record<string, unknown>).toolName as string;
     const toolInput = (event as Record<string, unknown>).toolInput as Record<string, unknown> ?? {};
