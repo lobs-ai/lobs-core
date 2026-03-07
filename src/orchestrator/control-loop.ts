@@ -1085,6 +1085,12 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
   const gitReminder = (req.agentType === "programmer" || req.agentType === "architect") && repoPath
     ? `\n\n⚠️ IMPORTANT: When you are done, you MUST run: git add -A && git commit -m "agent(${req.agentType}): <brief summary>"\nDo NOT finish without committing your changes.`
     : "";
+  const architectReminder = req.agentType === "architect"
+    ? `\n\n⚠️ SCOPE REMINDER: You are an architect agent. Your job is design-only. Produce a design doc or ADR. Do NOT write implementation code, do NOT create or modify source files beyond documentation. Stop as soon as you have a clear design artifact.`
+    : "";
+  if (req.agentType === "architect" && /design.{0,10}implement/i.test(taskTitle)) {
+    log().warn(`[ORCHESTRATOR] Architect task title suggests implementation: "${taskTitle}". This is design-only scope — agent will be reminded. Consider splitting the task if implementation is also needed.`);
+  }
   const taskContext = buildTaskContext({ projectId: (taskCtx["project_id"] as string) ?? undefined, agentType: req.agentType });
 
   // ── Learning injection ─────────────────────────────────────────────────────
@@ -1101,7 +1107,7 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
     log().warn(`[LEARNING] Prompt injection failed: ${e}`);
   }
 
-  const finalPrompt = taskPrompt + contextBlock + learningInjection + gitReminder + taskContext;
+  const finalPrompt = taskPrompt + contextBlock + learningInjection + architectReminder + gitReminder + taskContext;
 
   // ── Artifact pre-flight check ──────────────────────────────────────────────
   // If the task declares expected_artifacts, check whether output files already
