@@ -11,7 +11,7 @@ import { triageWorkerCompletion } from "../orchestrator/triage.js";
 import { onSuccess, onFailure, classifyOutcome } from "../services/circuit-breaker.js";
 import { log } from "../util/logger.js";
 import { ReflectionService } from "../services/reflection.js";
-import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
 export function registerSubagentHooks(api: OpenClawPluginApi): void {
@@ -540,6 +540,15 @@ export function queueReviewerFollowup(taskId: string): void {
     ? db.select().from(projects).where(eq(projects.id, sourceTask.projectId)).get()
     : undefined;
   const scopePath = sourceTask.artifactPath ?? project?.repoPath ?? undefined;
+
+  // Guard: skip auto-review if the target repo/artifact path doesn't exist on disk.
+  // This prevents wasted reviewer spawns (and ~5–10min per failed run) when a task
+  // references a repo that was never cloned locally or was removed.
+  // TODO: extend this guard to writer tasks if/when auto-review is added for them.
+  if (scopePath && !existsSync(scopePath)) {
+    log().warn(`[PAW] Auto-review skipped for task ${taskId.slice(0, 8)}: scopePath does not exist on disk (${scopePath})`);
+    return;
+  }
 
   const reviewNotes = [
     `Auto-review for completed programmer task ${taskId.slice(0, 8)}.`,
