@@ -41,6 +41,7 @@ import {
 import { chooseModel, resolveTaskTier, TIER_MODELS, buildFallbackChain } from "./model-chooser.js";
 import { chooseHealthyModel, seedModelHealthFromHistory } from "./model-health.js";
 import { checkArtifacts } from "./artifact-check.js";
+import { validatePostSuccessArtifacts } from "./post-success-validator.js";
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let executor: WorkflowExecutor | null = null;
@@ -345,7 +346,12 @@ function runTick(): void {
               staleDb.update(workflowRuns).set({ status: "failed", updatedAt: new Date().toISOString() }).where(eq(workflowRuns.id, run.id)).run();
               const mins = Math.round((Date.now() - new Date(run.updatedAt).getTime()) / 60000);
               log().warn("orchestrator: failed stale spawn run " + run.id.slice(0, 8) + " — worker session " + childKey.slice(0, 30) + " gone after " + mins + "min (possible drain)");
-              // Clean up dangling workerRuns row so capacity is freed and circuit breaker fires
+              // Clean up dangling workerRuns row so capacity is freed.
+              // This is an INFRA failure (gateway drain/restart killed the session),
+              // NOT an agent quality failure. Increment crash_count so the spawn guard
+              // uses effective_fail = spawn_count - crash_count correctly.
+              // Do NOT reset task to not_started here — let the ghost watchdog (step 8)
+              // handle task cleanup via closeGhostRun which also increments crash_count.
               try {
                 const { workerRuns: wrTable } = require("../db/schema.js");
                 const wrRow = staleDb.select().from(wrTable).where(eq(wrTable.workerId, childKey)).get() as any;
@@ -353,8 +359,16 @@ function runTick(): void {
                   workerId: childKey,
                   agentType: wrRow?.agentType ?? "unknown",
                   succeeded: false,
-                  summary: `session_dead: stale after ${mins}min`,
+                  summary: `stale_run_watchdog: session_dead after ${mins}min`,
                 });
+                // Increment crash_count on the task — this is infra-failure, not agent failure
+                if (wrRow?.task_id) {
+                  const nowIso = new Date().toISOString();
+                  getRawDb().prepare(
+                    `UPDATE tasks SET crash_count = COALESCE(crash_count, 0) + 1, updated_at = ? WHERE id = ?`
+                  ).run(nowIso, wrRow.task_id);
+                  log().info(`[STALE_RUN_WATCHDOG] Incremented crash_count for task ${String(wrRow.task_id).slice(0, 8)} (infra failure: session_dead after ${mins}min)`);
+                }
               } catch {}
             }
           }).catch(() => {});
@@ -565,18 +579,21 @@ function runStallWatchdog(): void {
     if (changed.changes === 0) continue; // already closed
 
     // Reset task to not_started so it can be retried.
-    // NOTE: Do NOT reset spawn_count here. Stall-watchdog kills are not crash-orphans —
-    // a stalled agent may be a genuine agent failure. The spawn guard uses
-    // effective_fail_count = spawn_count - crash_count, so spawn_count correctly
-    // accumulates. crash_count is only incremented by gateway crash-orphan paths.
+    // Stall-watchdog is treated as an INFRA failure (a session hung, not a deliberate
+    // agent decision), so increment crash_count. This keeps it out of the agent-quality
+    // effective_fail_count = spawn_count - crash_count calculation, preventing the
+    // spawn guard from auto-blocking tasks whose workers were silently killed by
+    // resource exhaustion, model hangs, or infrastructure issues.
     if (wr.task_id) {
       db.prepare(`
         UPDATE tasks
-        SET work_state = 'not_started', updated_at = ?
+        SET work_state = 'not_started',
+            crash_count = COALESCE(crash_count, 0) + 1,
+            updated_at = ?
         WHERE id = ? AND work_state = 'in_progress'
       `).run(new Date(now).toISOString(), wr.task_id);
       log().warn(
-        `[STALL_WATCHDOG] Reset task ${wr.task_id.slice(0, 8)} to not_started after stall (${agentType}, ${silentMin}min silent)`
+        `[STALL_WATCHDOG] Reset task ${wr.task_id.slice(0, 8)} to not_started after stall (${agentType}, ${silentMin}min silent) — crash_count++`
       );
     }
 
@@ -727,21 +744,37 @@ function closeGhostRun(wr: GhostRunRow, now: string): void {
 /**
  * Close any active task whose worker_runs are ALL succeeded=1.
  *
+ * Before closing, runs post-success artifact validation to detect phantom
+ * completions (tasks that reported succeeded=true but produced no output).
+ *
+ * Outcomes:
+ *   - valid:        task closed as completed (normal path)
+ *   - suspicious:   task closed as completed + inbox warning (fast but has artifacts)
+ *   - no_artifacts: task NOT closed — review_state='needs_review' + inbox warning
+ *
  * Safe to call on every tick (query is cheap; idempotent).
  * Writes a control_loop_events row per closed task for audit trail.
  */
 function autoCloseSucceededTasks(): void {
   const db = getRawDb();
 
-  const stale = db.prepare(`
+  const candidates = db.prepare(`
     SELECT
         t.id,
         t.title,
         t.agent,
+        t.project_id,
+        p.repo_path,
         COUNT(wr.id)                                              AS run_count,
-        MAX(wr.ended_at)                                          AS last_run_at
+        MAX(wr.ended_at)                                          AS last_run_at,
+        (
+            SELECT wr2.started_at FROM worker_runs wr2
+            WHERE wr2.task_id = t.id AND wr2.ended_at IS NOT NULL
+            ORDER BY wr2.ended_at DESC LIMIT 1
+        )                                                         AS last_started_at
     FROM tasks t
     JOIN worker_runs wr ON wr.task_id = t.id
+    LEFT JOIN projects p ON p.id = t.project_id
     WHERE t.status = 'active'
     GROUP BY t.id
     HAVING
@@ -757,11 +790,14 @@ function autoCloseSucceededTasks(): void {
     id: string;
     title: string;
     agent: string;
+    project_id: string | null;
+    repo_path: string | null;
     run_count: number;
     last_run_at: string;
+    last_started_at: string | null;
   }>;
 
-  if (stale.length === 0) return;
+  if (candidates.length === 0) return;
 
   const now = new Date().toISOString();
 
@@ -773,12 +809,73 @@ function autoCloseSucceededTasks(): void {
     WHERE id = ?
   `);
 
+  const needsReviewStmt = db.prepare(`
+    UPDATE tasks
+    SET review_state = 'needs_review',
+        updated_at = ?
+    WHERE id = ?
+  `);
+
   const eventStmt = db.prepare(`
     INSERT INTO control_loop_events (id, event_type, status, payload, created_at)
     VALUES (lower(hex(randomblob(16))), 'auto_close_succeeded', 'processed', json(?), ?)
   `);
 
-  for (const task of stale) {
+  const inboxStmt = db.prepare(`
+    INSERT INTO inbox_items (id, title, content, type, requires_action, action_status, source_agent)
+    VALUES (lower(hex(randomblob(16))), ?, ?, 'notice', 1, 'pending', ?)
+  `);
+
+  for (const task of candidates) {
+    // Calculate duration of the last run
+    const durationMs = (task.last_started_at && task.last_run_at)
+      ? new Date(task.last_run_at).getTime() - new Date(task.last_started_at).getTime()
+      : null;
+
+    // ── Post-success artifact validation ──────────────────────────────────
+    let validation: ReturnType<typeof validatePostSuccessArtifacts>;
+    try {
+      validation = validatePostSuccessArtifacts(task.agent, task.repo_path, durationMs);
+    } catch (e) {
+      // Fail open: on error, close normally rather than blocking completions
+      log().error(`[AUTO-CLOSE] Artifact validation error for task ${task.id.slice(0, 8)}: ${e}`);
+      validation = { status: "valid" };
+    }
+
+    if (validation.status === "no_artifacts") {
+      // Phantom completion detected — do NOT close; flag for human review
+      needsReviewStmt.run(now, task.id);
+      const warningTitle = `⚠️ Phantom completion: ${task.title.slice(0, 60)}`;
+      const warningContent =
+        `Task ${task.id.slice(0, 8)} (${task.agent}) reported succeeded=true but produced no output.\n\n` +
+        `Reason: ${validation.reason}\n\n` +
+        `Duration: ${durationMs != null ? Math.round(durationMs / 1000) + "s" : "unknown"}\n` +
+        `Run count: ${task.run_count}\n` +
+        `Last run at: ${task.last_run_at}\n\n` +
+        `Task has been marked needs_review. Review and re-queue or close manually.`;
+      inboxStmt.run(warningTitle, warningContent, task.agent ?? "orchestrator");
+      eventStmt.run(
+        JSON.stringify({
+          task_id: task.id,
+          title: task.title,
+          agent: task.agent,
+          run_count: task.run_count,
+          last_run_at: task.last_run_at,
+          duration_ms: durationMs,
+          reason: "phantom_completion_no_artifacts",
+          validation_detail: validation.reason,
+          closed_at: null,
+        }),
+        now,
+      );
+      log().warn(
+        `[AUTO-CLOSE] ⚠️  Phantom completion: task ${task.id.slice(0, 8)} (${task.agent}) — ` +
+        `"${task.title.slice(0, 60)}" — set needs_review. ${validation.reason}`,
+      );
+      continue;
+    }
+
+    // Close the task
     closeStmt.run(now, now, task.id);
     eventStmt.run(
       JSON.stringify({
@@ -787,15 +884,33 @@ function autoCloseSucceededTasks(): void {
         agent: task.agent,
         run_count: task.run_count,
         last_run_at: task.last_run_at,
+        duration_ms: durationMs,
         reason: "latest_worker_run_succeeded",
+        validation_status: validation.status,
         closed_at: now,
       }),
       now,
     );
-    log().info(
-      `[AUTO-CLOSE] Completed task ${task.id.slice(0, 8)} (${task.agent}): ` +
-      `"${task.title.slice(0, 60)}" — ${task.run_count} run(s) all succeeded`,
-    );
+
+    if (validation.status === "suspicious") {
+      // Artifacts present but suspiciously fast — close AND warn
+      const warningTitle = `⚡ Suspicious fast completion: ${task.title.slice(0, 60)}`;
+      const warningContent =
+        `Task ${task.id.slice(0, 8)} (${task.agent}) completed very quickly.\n\n` +
+        `Reason: ${validation.reason}\n\n` +
+        `Task was closed as completed but may need spot-check. Review artifacts manually.`;
+      inboxStmt.run(warningTitle, warningContent, task.agent ?? "orchestrator");
+      log().warn(
+        `[AUTO-CLOSE] ⚡ Suspicious completion: task ${task.id.slice(0, 8)} (${task.agent}): ` +
+        `"${task.title.slice(0, 60)}" — ${validation.reason}`,
+      );
+    } else {
+      log().info(
+        `[AUTO-CLOSE] Completed task ${task.id.slice(0, 8)} (${task.agent}): ` +
+        `"${task.title.slice(0, 60)}" — ${task.run_count} run(s), ` +
+        `duration=${durationMs != null ? Math.round(durationMs / 1000) + "s" : "?"}`,
+      );
+    }
   }
 }
 
