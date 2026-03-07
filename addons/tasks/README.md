@@ -7,7 +7,7 @@ PAW tasks via natural language commands.
 
 ## What It Installs
 
-- `~/.openclaw/skills/tasks-skill/SKILL.md` — skill teaching agents how to manage tasks
+- `~/.openclaw/skills/tasks/SKILL.md` — skill teaching agents how to manage tasks
 - Appends task-management behaviors to `~/apps/AGENTS.md`
 
 ## What You Can Do After Installing
@@ -31,6 +31,6 @@ python3 ~/.openclaw/addons/ingest.py tasks
 tasks/
   README.md         ← this file
   addon.md          ← add-on definition
-  tasks-skill/
-    SKILL.md        ← skill installed to ~/.openclaw/skills/tasks-skill/
+  tasks/
+    SKILL.md        ← skill installed to ~/.openclaw/skills/tasks/
 ```
