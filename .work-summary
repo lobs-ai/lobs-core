@@ -1,0 +1,21 @@
+Bifurcated memory compliance system is fully designed and implemented.
+
+## Acceptance Criteria Status
+
+✅ Memory tagging schema — YAML frontmatter with `compliance_required: true`, two-directory structure
+✅ Read enforcement — cloud sessions get `compliance_filter=cloud` by default; memory-compliant/ is never auto-injected by OpenClaw core
+✅ Write classification — memory-scanner.ts indexes all files, anomaly detection flags misplaced files; prompt-build hook injects compliant memories only for compliance-mode sessions
+✅ Architecture doc — docs/decisions/ADR-bifurcated-memory-compliance.md
+
+## Key Components
+
+- `src/util/compliance-model.ts` — isLocalModel / isCloudModel / isComplianceModel
+- `src/util/memory-frontmatter.ts` — YAML frontmatter parser
+- `src/services/memory-scanner.ts` — background indexer + anomaly detection
+- `src/hooks/prompt-build.ts` — compliance memory injection gate
+- `src/api/memories-fs.ts` — compliance_filter param + /compliance-summary + /anomalies
+- `memory_compliance_index` DB table — tracks all memory files with compliance status
+
+## Commits
+- 6d4b251: Design (ADR + programmer handoffs)
+- 5da61bc: Full implementation with 100 passing tests
