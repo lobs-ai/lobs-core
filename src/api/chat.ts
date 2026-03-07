@@ -22,8 +22,6 @@ function getGatewayConfig(): { port: number; token: string } {
   }
 }
 
-const SINK_SESSION_KEY = "agent:sink:paw-orchestrator-v2";
-
 async function gatewayInvoke(tool: string, args: Record<string, unknown>, sessionKey?: string): Promise<any> {
   const { port, token } = getGatewayConfig();
   if (!token) throw new Error("No gateway auth token configured");
@@ -57,6 +55,16 @@ const NOISE_PATTERNS = [
   /^NO_REPLY$/,
   /^\[System\]/,
   /^PAW plugin restarted/,
+  // Inter-agent / orchestrator messages
+  /^\[orchestrator\]/i,
+  /^\[sink\]/i,
+  /^orchestrator:/i,
+  /^Task assigned:/i,
+  /^Task completed:/i,
+  /^Worker (started|stopped|idle)/i,
+  /^Spawning agent/i,
+  /^\[paw-/i,
+  /^control loop/i,
 ];
 
 function isNoise(text: string): boolean {
@@ -109,14 +117,15 @@ export async function handleChatRequest(
       }
 
       try {
-        // Spawn through the sink session so it's not a child of main
-        // This prevents announce messages from polluting chat
+        // Spawn through the main agent so the chat inherits the user's
+        // personality (SOUL.md, IDENTITY.md, USER.md, workspace files).
+        // The task prompt reinforces this is a web chat context.
         const spawnResult = await gatewayInvoke("sessions_spawn", {
-          task: `You are a helpful AI assistant in a web chat interface called Nexus. Be conversational, concise, and helpful. You do NOT have access to the user's files, calendar, or personal data. Just be a good chat assistant.`,
+          task: `You are chatting with your human through the PAW web dashboard. Use your personality from SOUL.md and your identity from IDENTITY.md. Be yourself — conversational, helpful, and in-character. Read your workspace files to remember who you are and who you're talking to.`,
           mode: "session",
           model: sessionModel,
           thread: true,
-        }, SINK_SESSION_KEY);
+        });
 
         const ocSessionKey = spawnResult?.childSessionKey ?? spawnResult?.sessionKey;
         if (!ocSessionKey) {
