@@ -42,6 +42,9 @@ import { chooseModel, resolveTaskTier, TIER_MODELS, buildFallbackChain } from ".
 import { chooseHealthyModel, seedModelHealthFromHistory } from "./model-health.js";
 import { checkArtifacts } from "./artifact-check.js";
 import { validatePostSuccessArtifacts } from "./post-success-validator.js";
+import { LearningService, inferTaskCategory } from "../services/learning.js";
+
+const learningSvc = new LearningService();
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let executor: WorkflowExecutor | null = null;
@@ -892,6 +895,19 @@ function autoCloseSucceededTasks(): void {
       now,
     );
 
+    // ── Record learning outcome ─────────────────────────────────────────────
+    try {
+      const taskCategory = inferTaskCategory(task.title ?? "");
+      learningSvc.recordOutcome({
+        taskId: task.id,
+        agentType: task.agent ?? "programmer",
+        success: true,
+        taskCategory,
+      });
+    } catch (e) {
+      log().warn(`[LEARNING] recordOutcome (success) failed for task ${task.id.slice(0, 8)}: ${e}`);
+    }
+
     if (validation.status === "suspicious") {
       // Artifacts present but suspiciously fast — close AND warn
       const warningTitle = `⚡ Suspicious fast completion: ${task.title.slice(0, 60)}`;
@@ -998,6 +1014,18 @@ function incrementAndCheckSpawnCount(taskId: string): boolean {
       log().warn(
         `[SPAWN_GUARD] Task ${taskId.slice(0, 8)} auto-blocked — effective_fail=${effectiveFailCount} >= limit=${limit} (spawn=${newSpawnCount}, crash=${crashCount}, type=${task.shape ?? "other"})`
       );
+
+      // ── Record failure outcome for learning system ─────────────────────────
+      try {
+        const taskCategory = inferTaskCategory(task.title ?? "");
+        learningSvc.recordOutcome({
+          taskId,
+          agentType: task.agent ?? "programmer",
+          success: false,
+          taskCategory,
+        });
+      } catch {}
+
       return true;
     }
     log().debug?.(`[SPAWN_GUARD] Task ${taskId.slice(0, 8)} spawn=${newSpawnCount}, crash=${crashCount}, effective_fail=${effectiveFailCount}/${limit}`);
@@ -1043,7 +1071,22 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
     ? `\n\n⚠️ IMPORTANT: When you are done, you MUST run: git add -A && git commit -m "agent(${req.agentType}): <brief summary>"\nDo NOT finish without committing your changes.`
     : "";
   const taskContext = buildTaskContext({ projectId: (taskCtx["project_id"] as string) ?? undefined, agentType: req.agentType });
-  const finalPrompt = taskPrompt + contextBlock + gitReminder + taskContext;
+
+  // ── Learning injection ─────────────────────────────────────────────────────
+  // Inject relevant past learnings into the agent prompt before dispatch.
+  // Per design doc: prefix-style, REMINDER framing, max 3 learnings.
+  let learningInjection = "";
+  try {
+    const taskCategory = inferTaskCategory(taskTitle, taskNotes);
+    learningInjection = learningSvc.buildPromptInjection(req.agentType, taskCategory);
+    if (learningInjection) {
+      log().debug?.(`[LEARNING] Injecting ${learningInjection.split("REMINDER:").length - 1} learnings for ${req.agentType} (category=${taskCategory})`);
+    }
+  } catch (e) {
+    log().warn(`[LEARNING] Prompt injection failed: ${e}`);
+  }
+
+  const finalPrompt = taskPrompt + contextBlock + learningInjection + gitReminder + taskContext;
 
   // ── Artifact pre-flight check ──────────────────────────────────────────────
   // If the task declares expected_artifacts, check whether output files already

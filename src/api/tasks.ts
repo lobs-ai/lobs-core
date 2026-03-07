@@ -10,6 +10,9 @@ import { getDb } from "../db/connection.js";
 import { tasks, projects } from "../db/schema.js";
 import { json, error, parseBody, parseQuery } from "./index.js";
 import { readFileSync as _readFileSync } from "node:fs";
+import { LearningService } from "../services/learning.js";
+
+const learningSvc = new LearningService();
 
 // ── Normalization ─────────────────────────────────────────────────────────────
 
@@ -266,6 +269,29 @@ ${body.text}`;
       db.update(tasks).set({ complianceRequired: rawVal, updatedAt: new Date().toISOString() }).where(eq(tasks.id, id)).run();
       return json(res, normalizeTask(db.select().from(tasks).where(eq(tasks.id, id)).get() as Record<string, unknown>));
     }
+    // PATCH /api/tasks/:id/feedback — submit human feedback and trigger learning extraction
+    // Body: { feedback: string, review_state: "accepted" | "rejected" | "needs_revision" }
+    if (sub === "feedback" && req.method === "PATCH") {
+      const body = await parseBody(req) as Record<string, unknown>;
+      if (!body.feedback || typeof body.feedback !== "string") {
+        return error(res, "feedback (string) is required", 400);
+      }
+      const reviewState = (body.review_state ?? body.reviewState) as string;
+      if (!["accepted", "rejected", "needs_revision"].includes(reviewState)) {
+        return error(res, "review_state must be one of: accepted, rejected, needs_revision", 400);
+      }
+      const rowCheck = db.select({ id: tasks.id }).from(tasks).where(eq(tasks.id, id)).get();
+      if (!rowCheck) return error(res, "Not found", 404);
+
+      const result = learningSvc.addHumanFeedback({
+        taskId: id,
+        feedback: body.feedback,
+        reviewState: reviewState as "accepted" | "rejected" | "needs_revision",
+      });
+
+      return json(res, { ok: true, outcomeId: result.outcomeId, extracted: result.extracted });
+    }
+
     if (sub === "archive" && req.method === "POST") {
       db.update(tasks).set({ status: "archived", updatedAt: new Date().toISOString() }).where(eq(tasks.id, id)).run();
       return json(res, db.select().from(tasks).where(eq(tasks.id, id)).get());
