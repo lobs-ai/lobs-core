@@ -1053,6 +1053,54 @@ const DEFAULT_WORKFLOWS = [
   },
 
   // ══════════════════════════════════════════════════════════════════
+  // WEEKLY COMPLIANCE REPORT
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "weekly-compliance-report",
+    description: "Generate and deliver a weekly AI privacy report every Monday at 8am ET. Shows compliant (on-device) vs non-compliant (external cloud) AI call counts and percentages.",
+    trigger: { type: "schedule", cron: "0 8 * * 1", timezone: "America/New_York" },
+    is_active: true,
+    nodes: [
+      {
+        id: "generate",
+        type: "ts_call",
+        config: { callable: "compliance.weekly_report" },
+        on_success: "check_data",
+        on_failure: { retry: 1 },
+      },
+      {
+        id: "check_data",
+        type: "branch",
+        config: {
+          conditions: [{ match: "generate.has_data == true", goto: "notify" }],
+          default: "notify_empty",
+        },
+      },
+      {
+        id: "notify",
+        type: "notify",
+        config: {
+          channel: "internal",
+          message_template: "{generate.summary}",
+        },
+        on_success: "done",
+      },
+      {
+        id: "notify_empty",
+        type: "notify",
+        config: {
+          channel: "internal",
+          message_template: "📊 Weekly AI Privacy Report: No AI activity recorded in the past 7 days.",
+        },
+        on_success: "done",
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: "lobs", category: "compliance", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
   // INBOX PROCESSING
   // ══════════════════════════════════════════════════════════════════
   {

@@ -195,6 +195,135 @@ async function handleHierarchyRequest(res: ServerResponse): Promise<void> {
   }
 }
 
+/**
+ * GET /api/compliance/weekly-summary
+ *
+ * Returns a pre-computed weekly compliance summary (last 7 days) for the UI.
+ * This is the same data the weekly-compliance-report workflow generates,
+ * but computed on-demand so the page can always show fresh data.
+ *
+ * Response shape:
+ * {
+ *   generatedAt: string,
+ *   periodStart: string,
+ *   periodEnd: string,
+ *   schedule: { cron: string, description: string, nextRunLabel: string },
+ *   totalCount: number,
+ *   compliantCount: number,
+ *   nonCompliantCount: number,
+ *   compliantPct: number,
+ *   nonCompliantPct: number,
+ *   hasData: boolean,
+ *   providerBreakdown: Array<{ provider, compliant, calls, tokens }>,
+ * }
+ */
+async function handleWeeklySummaryRequest(res: ServerResponse): Promise<void> {
+  try {
+    const db = getRawDb();
+    const now = new Date();
+    const cutoff = new Date(now.getTime() - 7 * 24 * 3600_000).toISOString();
+
+    const CLOUD_PROVIDERS = new Set([
+      "anthropic", "openai", "google", "mistral", "cohere", "ai21",
+      "huggingface", "together", "replicate", "perplexity", "groq",
+      "anyscale", "fireworks", "deepinfra", "lepton", "azure",
+    ]);
+
+    function isCompliantLocal(provider: string, routeType: string): boolean {
+      if (routeType === "local") return true;
+      return !CLOUD_PROVIDERS.has(provider.toLowerCase());
+    }
+
+    const events = db.prepare(
+      `SELECT provider, route_type, requests, input_tokens, output_tokens, timestamp
+       FROM model_usage_events
+       WHERE timestamp >= ?
+       ORDER BY timestamp DESC`
+    ).all(cutoff) as UsageEvent[];
+
+    let compliantCount = 0;
+    let nonCompliantCount = 0;
+    const byProvider: Record<string, ProviderBucket> = {};
+
+    for (const e of events) {
+      const provider = e.provider ?? "unknown";
+      const routeType = e.route_type ?? "api";
+      const compliant = isCompliantLocal(provider, routeType);
+      const calls = e.requests ?? 1;
+      const tokens = (e.input_tokens ?? 0) + (e.output_tokens ?? 0);
+
+      if (compliant) compliantCount += calls;
+      else nonCompliantCount += calls;
+
+      const key = `${provider}::${String(compliant)}`;
+      const bucket = byProvider[key] ?? { compliant, calls: 0, tokens: 0 };
+      bucket.calls += calls;
+      bucket.tokens += tokens;
+      byProvider[key] = bucket;
+    }
+
+    const totalCount = compliantCount + nonCompliantCount;
+    const compliantPct = totalCount > 0 ? Math.round((compliantCount / totalCount) * 10000) / 100 : 0;
+    const nonCompliantPct = totalCount > 0 ? Math.round((nonCompliantCount / totalCount) * 10000) / 100 : 0;
+
+    const providerBreakdown = Object.entries(byProvider)
+      .map(([key, b]) => ({
+        provider: key.split("::")[0],
+        compliant: b.compliant,
+        calls: b.calls,
+        tokens: b.tokens,
+      }))
+      .sort((a, b) => b.calls - a.calls);
+
+    // Compute next Monday 8am ET label
+    const nextMonday = new Date(now);
+    const dayOfWeek = nextMonday.getDay(); // 0=Sun, 1=Mon
+    const daysUntilMonday = dayOfWeek === 0 ? 1 : (8 - dayOfWeek) % 7 || 7;
+    nextMonday.setDate(nextMonday.getDate() + daysUntilMonday);
+    nextMonday.setHours(8, 0, 0, 0);
+    const nextRunLabel = nextMonday.toLocaleDateString("en-US", {
+      weekday: "long", month: "short", day: "numeric",
+    }) + " at 8:00 AM ET";
+
+    return json(res, {
+      generatedAt: now.toISOString(),
+      periodStart: cutoff,
+      periodEnd: now.toISOString(),
+      schedule: {
+        cron: "0 8 * * 1",
+        description: "Runs every Monday at 8:00 AM Eastern Time",
+        nextRunLabel,
+      },
+      totalCount,
+      compliantCount,
+      nonCompliantCount,
+      compliantPct,
+      nonCompliantPct,
+      hasData: totalCount > 0,
+      providerBreakdown,
+    });
+  } catch (e) {
+    return json(res, {
+      generatedAt: new Date().toISOString(),
+      periodStart: "",
+      periodEnd: "",
+      schedule: {
+        cron: "0 8 * * 1",
+        description: "Runs every Monday at 8:00 AM Eastern Time",
+        nextRunLabel: "Monday",
+      },
+      totalCount: 0,
+      compliantCount: 0,
+      nonCompliantCount: 0,
+      compliantPct: 0,
+      nonCompliantPct: 0,
+      hasData: false,
+      providerBreakdown: [],
+      note: `Could not compute weekly summary: ${String(e)}`,
+    });
+  }
+}
+
 export async function handleComplianceRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -202,6 +331,7 @@ export async function handleComplianceRequest(
 ): Promise<void> {
   if (req.method !== "GET") return error(res, "Method not allowed", 405);
   if (sub === "hierarchy") return handleHierarchyRequest(res);
+  if (sub === "weekly-summary") return handleWeeklySummaryRequest(res);
   if (sub !== "status") return error(res, "Unknown compliance endpoint", 404);
 
   try {

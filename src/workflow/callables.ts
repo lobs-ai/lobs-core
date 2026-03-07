@@ -645,6 +645,108 @@ function inboxProcessThreads(_args: Record<string, unknown>, _ctx: CallableConte
   return { ok: true, processed: toProcess.length, items: toProcess.map(i => i.id) };
 }
 
+// ─── Compliance ───────────────────────────────────────────────────────────────
+
+/**
+ * compliance.weekly_report
+ *
+ * Computes a weekly compliance summary (last 7 days) using model_usage_events.
+ * Classifies each call as "compliant" (on-device/local) or "non-compliant" (cloud).
+ * Returns stats + a human-readable summary string for the notify node.
+ */
+function complianceWeeklyReport(_args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
+  const db = getDb();
+  const now = new Date();
+  const cutoff = new Date(now.getTime() - 7 * 24 * 3600_000).toISOString();
+
+  // Known cloud providers (matches isCompliantCall logic in usage.ts)
+  const CLOUD_PROVIDERS = new Set([
+    "anthropic", "openai", "google", "mistral", "cohere", "ai21",
+    "huggingface", "together", "replicate", "perplexity", "groq",
+    "anyscale", "fireworks", "deepinfra", "lepton", "azure",
+  ]);
+
+  function isCompliant(provider: string, routeType: string): boolean {
+    if (routeType === "local") return true;
+    return !CLOUD_PROVIDERS.has(provider.toLowerCase());
+  }
+
+  const events = db.select().from(modelUsageEvents)
+    .where(gte(modelUsageEvents.timestamp, cutoff))
+    .all();
+
+  let compliantCount = 0;
+  let nonCompliantCount = 0;
+  let compliantTokens = 0;
+  let nonCompliantTokens = 0;
+  const byProvider: Record<string, { compliant: boolean; calls: number; tokens: number }> = {};
+
+  for (const e of events) {
+    const provider = e.provider ?? "unknown";
+    const routeType = e.routeType ?? "api";
+    const compliant = isCompliant(provider, routeType);
+    const calls = e.requests ?? 1;
+    const tokens = (e.inputTokens ?? 0) + (e.outputTokens ?? 0);
+
+    if (compliant) { compliantCount += calls; compliantTokens += tokens; }
+    else { nonCompliantCount += calls; nonCompliantTokens += tokens; }
+
+    const key = `${provider}::${String(compliant)}`;
+    const b = byProvider[key] ?? { compliant, calls: 0, tokens: 0 };
+    b.calls += calls;
+    b.tokens += tokens;
+    byProvider[key] = b;
+  }
+
+  const totalCount = compliantCount + nonCompliantCount;
+  const compliantPct = totalCount > 0 ? Math.round((compliantCount / totalCount) * 1000) / 10 : 0;
+  const nonCompliantPct = totalCount > 0 ? Math.round((nonCompliantCount / totalCount) * 1000) / 10 : 0;
+
+  // Determine status tone
+  let tone = "🟢";
+  let toneLabel = "Great — most AI work is staying private.";
+  if (compliantPct < 40) { tone = "🔴"; toneLabel = "Most AI work is going to external services. Review sensitive tasks."; }
+  else if (compliantPct < 80) { tone = "🟡"; toneLabel = "Some AI work is going to external services. Review sensitive tasks."; }
+
+  // Format provider breakdown
+  const breakdownLines = Object.entries(byProvider)
+    .sort((a, b) => b[1].calls - a[1].calls)
+    .map(([key, b]) => {
+      const [prov] = key.split("::");
+      const icon = b.compliant ? "🔒" : "🌐";
+      const label = b.compliant ? "Protected" : "External";
+      return `  ${icon} ${prov} (${label}): ${b.calls.toLocaleString()} request${b.calls !== 1 ? "s" : ""}`;
+    })
+    .join("\n");
+
+  const weekLabel = `${new Date(cutoff).toLocaleDateString("en-US", { month: "short", day: "numeric" })} – ${now.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`;
+
+  const summary =
+    `${tone} **Weekly AI Privacy Report** — ${weekLabel}\n\n` +
+    `**${totalCount.toLocaleString()} total AI requests**\n` +
+    `🔒 Protected (on-device): ${compliantCount.toLocaleString()} (${compliantPct}%)\n` +
+    `🌐 External (cloud): ${nonCompliantCount.toLocaleString()} (${nonCompliantPct}%)\n\n` +
+    (breakdownLines ? `**By provider:**\n${breakdownLines}\n\n` : "") +
+    toneLabel;
+
+  log().info(`[CALLABLE] compliance.weekly_report: total=${totalCount} compliant=${compliantCount} (${compliantPct}%)`);
+
+  return {
+    ok: true,
+    period_start: cutoff,
+    period_end: now.toISOString(),
+    total_count: totalCount,
+    compliant_count: compliantCount,
+    non_compliant_count: nonCompliantCount,
+    compliant_pct: compliantPct,
+    non_compliant_pct: nonCompliantPct,
+    compliant_tokens: compliantTokens,
+    non_compliant_tokens: nonCompliantTokens,
+    summary,
+    has_data: totalCount > 0,
+  };
+}
+
 // ─── Registry ─────────────────────────────────────────────────────────────────
 
 const REGISTRY: Record<string, CallableFn | undefined> = {
@@ -700,6 +802,9 @@ const REGISTRY: Record<string, CallableFn | undefined> = {
 
   // Inbox
   "inbox.process_threads": inboxProcessThreads,
+
+  // Compliance
+  "compliance.weekly_report": complianceWeeklyReport,
 };
 
 export function getCallable(name: string): CallableFn | undefined {
