@@ -20,6 +20,8 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { getDb } from "../db/connection.js";
 import { workerRuns, tasks, projects } from "../db/schema.js";
 import { log } from "../util/logger.js";
+import { scanMessage } from "../util/compliance-scanner.js";
+import { isCloudModel } from "../util/compliance-model.js";
 
 const WORKSPACE_BASE = join(process.env.HOME || "/Users/lobs", ".openclaw");
 
@@ -130,6 +132,46 @@ export function registerPromptBuildHook(api: OpenClawPluginApi): void {
           compliantMemories.join("\n\n---\n\n") +
           "\n</compliance-memories>";
         log().debug?.(`[PAW] Injected ${compliantMemories.length} compliant memory file(s) for agent ${task.agent}`);
+      }
+    }
+
+    // ── SAIL compliance scanner ───────────────────────────────────────────
+    // Run BERT-small ONNX scan on the incoming prompt context (default-on).
+    // For complianceRequired tasks, also run the LLM deep scan (opt-in).
+    // On detection: warn in logs. Hard-blocking is NOT done here — the caller
+    // (routing layer) is responsible for rerouting or surfacing warnings.
+    // @see src/util/compliance-scanner.ts
+    const scanInput = [task.title, task.notes].filter(Boolean).join("\n");
+    if (scanInput) {
+      try {
+        const scanResult = await scanMessage(scanInput, { deepScan: isCompliant });
+
+        if (scanResult.sensitive) {
+          const model = (ctx as Record<string, unknown>).model as string | undefined;
+          const isCloud = model ? isCloudModel(model) : false;
+          const entityList = scanResult.entities.join(", ");
+
+          log().warn?.(
+            `[PAW] SAIL compliance scanner flagged task "${task.title}" ` +
+            `— tier=${scanResult.tier}, entities=[${entityList}], conf=${scanResult.confidence.toFixed(2)}, cloud=${isCloud}` +
+            (scanResult.reason ? `, reason="${scanResult.reason}"` : ""),
+          );
+
+          // Append a compliance warning to the prompt context so the agent
+          // is aware that its task description contains sensitive content.
+          if (isCloud) {
+            prependContext +=
+              "\n\n<sail-compliance-warning>\n" +
+              "⚠️ This task context was flagged by the SAIL compliance scanner. " +
+              `Detected: ${entityList}. ` +
+              "You are currently using a cloud model. Exercise caution — do NOT repeat or expand on any sensitive data in your response.\n" +
+              "</sail-compliance-warning>";
+          }
+        }
+      } catch (scanErr) {
+        // Scanner errors must never block the agent from running
+        const msg = scanErr instanceof Error ? scanErr.message : String(scanErr);
+        log().warn?.(`[PAW] Compliance scanner error (non-fatal): ${msg}`);
       }
     }
 
