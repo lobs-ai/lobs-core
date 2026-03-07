@@ -24,14 +24,19 @@ const KEYWORD_OVERRIDES: Record<string, string[]> = {
     "spawn", "model chooser", "model-chooser", "task router", "task-router",
     "reviewer", "smoke-test", "smoke test", "prompt sla", "batch api",
     "model tracking", "spawn_count", "spawn count", "agent status",
-    "reflection", "sweep", "inbox", "escalation",
+    "reflection", "reflections", "sweep", "inbox", "escalation",
+    "heartbeat", "stall", "watchdog", "stall_timeout", "stall-prevention",
+    "guardrail", "circuit breaker", "dedup", "deduplication",
+    "piiranha", "pii", "classifier", "artifact validation",
+    "researcher agent", "programmer agent", "writer agent",
   ],
   "2bfb7b22-f6ec-454a-9f82-7539a302badb": [
     "nexus", "dashboard", "glass card", "glasscard", "command palette",
   ],
   "proj-shared-mem": [
     "shared memory", "shared-memory", "lobs-shared-memory", "auto-commit",
-    "adr", "runbook",
+    "adr", "runbook", "index.md", "research index", "reflections to lobs",
+    "route.*reflections", "sync.*adr", "workspace adr",
   ],
   "c85119a5-0ee0-42b0-94c6-7c01a0139ce1": [
     "~/apps", "apps/", "apps/_template", "fastapi+html",

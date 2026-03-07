@@ -23,6 +23,7 @@ import { processPendingResumes } from "../index.js";
 import { WorkflowExecutor } from "../workflow/engine.js";
 import { popPendingSpawns, requeueSpawn, type SpawnRequest } from "../workflow/nodes.js";
 import { getDb, getRawDb } from "../db/connection.js";
+import { inferProjectId } from "../util/project-inference.js";
 import { workflowRuns, tasks as tasksTable } from "../db/schema.js";
 import { maybeFlushTriageQueue } from "./triage.js";
 import { buildTaskContext } from "../util/task-context.js";
@@ -255,16 +256,18 @@ function runTick(): void {
   try {
     if (hasCapacity()) {
       const readyTasks = findReadyTasks(5);
-      for (const task of readyTasks) {
+      for (let task of readyTasks) {
         if (!hasCapacity()) break;
 
 
 
-        // Project gate: tasks MUST have a project_id to be picked up.
-        // Unassigned tasks stay queued until explicitly assigned to a project.
+        // Project gate: tasks without a project_id are assigned a default rather than dropped.
         if (!task.projectId) {
-          log().debug?.(`orchestrator: task ${task.id.slice(0, 8)} has no project — skipping (project required)`);
-          continue;
+          const inferred = inferProjectId(task.title, task.notes);
+          const fallback = inferred ?? "proj-paw";
+          getRawDb().prepare(`UPDATE tasks SET project_id = ?, updated_at = datetime('now') WHERE id = ?`).run(fallback, task.id);
+          task = { ...task, projectId: fallback };
+          log().info(`orchestrator: task ${task.id.slice(0, 8)} had no project — assigned ${fallback} (inferred=${inferred ?? "none"})`);
         }
 
         if (task.projectId && task.agent && (projectHasActiveWorker(task.projectId, task.agent) || projectHasPendingSpawn(task.projectId, task.agent))) {
