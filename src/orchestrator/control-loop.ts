@@ -1160,6 +1160,49 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
     }
   }
 
+  // ── blocked_by dependency gate ─────────────────────────────────────────────────
+  // Defense-in-depth: skip spawning if any declared dependency is still active/pending.
+  // Primary enforcement is in scanner.findReadyTasks (hasUnresolvedBlockers).
+  // This catches edge cases where blocked_by was set after a workflow was already started
+  // or where a task was re-queued after a crash while its blockers were re-activated.
+  if (req.taskId) {
+    try {
+      const blockerRaw = getRawDb()
+        .prepare(`SELECT blocked_by FROM tasks WHERE id = ?`)
+        .get(req.taskId) as { blocked_by: string | null } | undefined;
+
+      if (blockerRaw?.blocked_by) {
+        let blockerIds: string[] = [];
+        try { blockerIds = JSON.parse(blockerRaw.blocked_by); } catch {}
+
+        if (Array.isArray(blockerIds) && blockerIds.length > 0) {
+          const placeholders = blockerIds.map(() => "?").join(", ");
+          const activeBlockers = getRawDb()
+            .prepare(
+              `SELECT id FROM tasks WHERE id IN (${placeholders}) ` +
+              `AND (status = 'active' OR work_state IN ('not_started', 'in_progress'))`
+            )
+            .all(...blockerIds) as Array<{ id: string }>;
+
+          if (activeBlockers.length > 0) {
+            const blockerStr = activeBlockers.map(b => b.id.slice(0, 8)).join(", ");
+            log().debug?.(
+              `[BLOCKED_BY_GATE] Task ${req.taskId.slice(0, 8)} spawn skipped — ` +
+              `${activeBlockers.length} active blocker(s): ${blockerStr} — re-queuing`
+            );
+            const blockedWorkerProjectId = (taskCtx["projectId"] as string) ?? (taskCtx["project_id"] as string) ?? undefined;
+            decrementPendingSpawns(blockedWorkerProjectId, req.agentType);
+            requeueSpawn(req);
+            return;
+          }
+        }
+      }
+    } catch (e) {
+      log().error(`[BLOCKED_BY_GATE] Check failed for task ${req.taskId.slice(0, 8)}: ${e}`);
+      // Fail open: proceed with spawn on error so a bad blocked_by value doesn't stall the task
+    }
+  }
+
   // ── Compliance gate: enforce local-model-only for compliant projects and tasks ──
   // Hierarchy: project.compliance_required=1 cascades to ALL tasks in the project.
   // task.compliance_required=1 also forces compliance for that specific task,
