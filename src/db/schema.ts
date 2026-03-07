@@ -88,6 +88,11 @@ export const tasks = sqliteTable("tasks", {
   //   effective_fail_count = spawn_count - crash_count
   // Only effective_fail_count is compared against the auto-block threshold.
   crashCount: integer("crash_count").default(0),
+  // Pre-flight artifact check: JSON array of ArtifactSpec objects.
+  // If set, processSpawnRequest checks these files before spawning a new session.
+  // Null/empty = no check (safe default — existing tasks are unaffected).
+  // @see src/orchestrator/artifact-check.ts for ArtifactSpec type and logic.
+  expectedArtifacts: text("expected_artifacts"),
   ...timestamps,
 });
 

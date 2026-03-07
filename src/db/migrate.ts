@@ -650,6 +650,15 @@ export function runMigrations(db: PawDB): void {
   // tasks where the agent never actually failed.
   try { db.run(sql`ALTER TABLE tasks ADD COLUMN crash_count INTEGER NOT NULL DEFAULT 0`); } catch {}
 
+  // ── Pre-flight artifact check: expected_artifacts column (idempotent) ────────
+  // Added: 2026-03-07 — JSON array of ArtifactSpec objects declared by the task.
+  // When set, processSpawnRequest checks whether expected output files already exist
+  // and are complete before spawning a new worker session. Prevents redundant
+  // rewrites when a worker crashed after writing but before marking the task done.
+  // null/empty = no-op (existing tasks are unaffected).
+  // @see docs/decisions/designs/preflight-artifact-check.md
+  try { db.run(sql`ALTER TABLE tasks ADD COLUMN expected_artifacts TEXT`); } catch {}
+
   // ── model_health: circuit breaker per (model, agent_type) ──────────────────
   db.run(sql`CREATE TABLE IF NOT EXISTS model_health (
     model                TEXT NOT NULL,

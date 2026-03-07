@@ -40,6 +40,7 @@ import {
 } from "./worker-manager.js";
 import { chooseModel, resolveTaskTier, TIER_MODELS, buildFallbackChain } from "./model-chooser.js";
 import { chooseHealthyModel, seedModelHealthFromHistory } from "./model-health.js";
+import { checkArtifacts } from "./artifact-check.js";
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let executor: WorkflowExecutor | null = null;
@@ -928,6 +929,66 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
     : "";
   const taskContext = buildTaskContext({ projectId: (taskCtx["project_id"] as string) ?? undefined, agentType: req.agentType });
   const finalPrompt = taskPrompt + contextBlock + gitReminder + taskContext;
+
+  // ── Artifact pre-flight check ──────────────────────────────────────────────
+  // If the task declares expected_artifacts, check whether output files already
+  // exist and are complete before spawning. Prevents redundant rewrites when a
+  // worker crashed after writing but before marking the task done.
+  // null/empty expected_artifacts = no-op (existing tasks are unaffected).
+  // @see src/orchestrator/artifact-check.ts
+  if (req.taskId) {
+    try {
+      const artifactProjectId = (taskCtx["project_id"] as string) ?? (taskCtx["projectId"] as string) ?? (projectCtx["id"] as string) ?? undefined;
+      const artifactRaw = getRawDb()
+        .prepare(`SELECT expected_artifacts FROM tasks WHERE id = ?`)
+        .get(req.taskId) as { expected_artifacts: string | null } | undefined;
+
+      if (artifactRaw?.expected_artifacts) {
+        let specs: unknown;
+        try { specs = JSON.parse(artifactRaw.expected_artifacts); } catch {}
+
+        const checkResult = checkArtifacts(specs);
+
+        if (checkResult.status === "skip_all_present") {
+          log().info(
+            `[ARTIFACT_CHECK] All artifacts present for task ${req.taskId.slice(0, 8)} — ` +
+            `auto-closing without spawn`
+          );
+          getRawDb().prepare(
+            `UPDATE tasks SET work_state = 'done', status = 'completed', ` +
+            `finished_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
+          ).run(req.taskId);
+          decrementPendingSpawns(artifactProjectId, req.agentType);
+          return;
+        }
+
+        if (checkResult.status === "skip_partial") {
+          log().warn(
+            `[ARTIFACT_CHECK] Partial artifacts for task ${req.taskId.slice(0, 8)} — ` +
+            `marking done+needs_review. Missing: ${checkResult.missing.join(", ")}`
+          );
+          getRawDb().prepare(
+            `UPDATE tasks SET work_state = 'done', status = 'completed', review_state = 'needs_review', ` +
+            `finished_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
+          ).run(req.taskId);
+          getRawDb().prepare(
+            `INSERT INTO inbox_items (id, title, content, type, requires_action, action_status, source_agent) ` +
+            `VALUES (lower(hex(randomblob(16))), ?, ?, 'notice', 1, 'pending', ?)`
+          ).run(
+            `Partial artifacts: ${taskTitle}`,
+            `Task auto-closed with partial artifacts. Missing:\n${(checkResult.missing as string[]).map(m => `- ${m}`).join("\n")}`,
+            req.agentType,
+          );
+          decrementPendingSpawns(artifactProjectId, req.agentType);
+          return;
+        }
+        // status === "proceed" → fall through to normal spawn
+      }
+    } catch (e) {
+      // Fail open: on any error, log and proceed with normal spawn
+      log().error(`[ARTIFACT_CHECK] check failed for task ${req.taskId.slice(0, 8)}: ${e}`);
+    }
+  }
 
   // ── Compliance gate: enforce local-model-only for compliant projects and tasks ──
   // Hierarchy: project.compliance_required=1 cascades to ALL tasks in the project.

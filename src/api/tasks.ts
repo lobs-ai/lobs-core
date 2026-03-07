@@ -294,6 +294,8 @@ ${body.text}`;
         compliance_required: "complianceRequired",
         // Also accept the Nexus UI convention
         compliant: "complianceRequired",
+        // Pre-flight artifact check: JSON array of ArtifactSpec objects
+        expected_artifacts: "expectedArtifacts",
       };
       for (const [apiKey, schemaKey] of Object.entries(fieldMap)) {
         if (apiKey in body) update[schemaKey] = body[apiKey];
@@ -348,6 +350,7 @@ ${body.text}`;
       modelTier: (body.model_tier as string) ?? "standard",
       blockedBy: Array.isArray(body.blocked_by) ? body.blocked_by as string[] : null,
       complianceRequired: Boolean(body.compliance_required),
+      expectedArtifacts: body.expected_artifacts != null ? JSON.stringify(body.expected_artifacts) : undefined,
       createdAt: now,
       updatedAt: now,
     }).run();

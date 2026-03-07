@@ -160,8 +160,10 @@ async function loadVocab(vocabPath: string | null): Promise<Map<string, number>>
 async function runInference(text: string, modelPath: string): Promise<WorkerOutput> {
   // Dynamic import — allows the worker to fail gracefully if onnxruntime-node
   // is not installed, instead of crashing the entire Node.js process.
-  let ort: typeof import("onnxruntime-node");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let ort: any;
   try {
+    // @ts-ignore — onnxruntime-node is an optional peer dep; may not be installed
     ort = await import("onnxruntime-node");
   } catch {
     return {
