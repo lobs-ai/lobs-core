@@ -251,27 +251,24 @@ Removed    → ingest.py --remove applied; entry removed from installed.json
 | `projects` add-on | ✅ complete |
 | `group-messaging` add-on | ✅ complete |
 | `example` add-on | ✅ complete |
+| `sync-addons` script | ✅ complete (`bin/sync-addons`) |
 | `ingest.py --remove` — reversal | ❌ not yet implemented |
-| PAW plugin `addons/` as source | ⚠️ partial (projects.md single-file exists) |
-| `sync-addons` script | ❌ not yet implemented |
 | Planned add-ons (inbox, meetings, memory, etc.) | ⚠️ scaffolded, not implemented |
+
+**Remaining gap:** `ingest.py` does not yet wrap inserted text with markers, and has no `--remove` command.
+Until this is implemented, un-ingesting requires manual editing of modified files.
 
 ---
 
 ## Implementation Plan
 
-### Milestone 1: Reversibility (Programmer handoff)
-- Add `--remove <name>` to `ingest.py`
-- Add markers to all text-insertion operations
-- Record `removal_hints` in `installed.json`
-- Retroactively mark already-installed sections (or note they need manual cleanup)
+### Milestone 1: Reversibility (Programmer handoff — next)
+- Wrap text insertions (`append`, `append-section`, `prepend`) with `<!-- addon:<name>:begin/end -->` markers in `ingest.py`
+- Record `removal_hints` in `installed.json` per-operation
+- Add `ingest.py --remove <name>` to find and strip marked blocks, restore `.bak` files, delete created files
+- Note: already-installed add-ons without markers will need manual cleanup or re-install
 
-### Milestone 2: PAW Plugin Structure (Programmer handoff)
-- Restructure `openclaw-plugin-paw/addons/` to use canonical directory format
-- Replace `addons/projects.md` with `addons/projects/addon.md` + bundled skills
-- Add `npm run sync-addons` script
-
-### Milestone 3: Remaining Add-ons (Programmer tasks, in progress)
+### Milestone 2: Remaining Add-ons (Programmer tasks, in progress)
 - Implement planned add-ons in priority order per `~/.openclaw/addons/README.md`
 - High: inbox, meetings
 - Medium: memory, chat, knowledge, reflections, research
