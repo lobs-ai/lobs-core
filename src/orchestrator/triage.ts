@@ -174,7 +174,9 @@ export async function maybeFlushTriageQueue(): Promise<void> {
     // Build the batch message
     let message = `**🔍 Triage Queue — ${pending.length} completed tasks need review**\n\n`;
     message += `Review each and decide: create follow-up tasks, mark as done, or dismiss.\n`;
-    message += `Use sqlite3 to create tasks: \`sqlite3 ~/.openclaw/plugins/paw/paw.db "INSERT INTO tasks ..."\`\n\n`;
+    message += `Use sqlite3 to create tasks (project_id is REQUIRED — tasks without it are skipped by the control loop):\n`;
+    message += `\`\`\`\nsqlite3 ~/.openclaw/plugins/paw/paw.db "INSERT INTO tasks (id, title, status, agent, model_tier, notes, project_id, created_at, updated_at) VALUES (lower(hex(randomblob(16))), '<title>', 'active', '<agent>', '<tier>', '<notes>', '<project_id>', datetime('now'), datetime('now'));"\n\`\`\`\n`;
+    message += `Available project_ids: proj-paw, paw-lite, paw-portal, paw-dashboard, proj-shared-mem, proj-flock. Choose the most relevant.\n\n`;
 
     for (const item of pending) {
       const status = item.succeeded ? "✅" : "❌";
