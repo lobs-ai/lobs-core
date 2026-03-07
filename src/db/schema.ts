@@ -153,6 +153,23 @@ export const workerRuns = sqliteTable("worker_runs", {
   durationSeconds: real("duration_seconds"),
   promptVariant: text("prompt_variant").notNull().default("A"),
   lastToolCallAt: text("last_tool_call_at"),
+  /**
+   * Failure classification: 'infra' | 'agent_quality' | null.
+   *
+   * 'infra'         — run failed due to infrastructure events, NOT agent logic:
+   *                   orphaned-on-restart, stale-run-watchdog, stall-watchdog,
+   *                   orchestrator_timeout, ghost-watchdog.
+   *                   These should NOT trigger quality-based retry or penalise
+   *                   agent reliability metrics. crash_count is incremented instead.
+   *
+   * 'agent_quality' — run failed due to deliberate agent behaviour or a model error
+   *                   that the agent produced (e.g. bad output, tool-call-timeout in
+   *                   an otherwise healthy session). These DO count against spawn_count
+   *                   and feed into reliability metrics and the circuit-breaker.
+   *
+   * null            — run succeeded (succeeded=1) or is still in-flight (ended_at IS NULL).
+   */
+  failureType: text("failure_type"),
 });
 
 // ─── Inbox ──────────────────────────────────────────────────────────────

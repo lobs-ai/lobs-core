@@ -650,6 +650,49 @@ export function runMigrations(db: PawDB): void {
   // tasks where the agent never actually failed.
   try { db.run(sql`ALTER TABLE tasks ADD COLUMN crash_count INTEGER NOT NULL DEFAULT 0`); } catch {}
 
+  // ── Failure type classification on worker_runs (idempotent) ──────────────────
+  // Added: 2026-03-07 — separates infra failure events (orphaned-on-restart,
+  // stale-run-watchdog, stall-watchdog, orchestrator_timeout) from genuine agent
+  // quality failures. Values: 'infra' | 'agent_quality' | NULL (success/in-flight).
+  //
+  // Infra failures do NOT trigger quality-based retry or circuit-breaker penalties.
+  // Agent quality failures DO count against reliability metrics and spawn limits.
+  //
+  // Backfill: classify existing failed rows from timeout_reason + summary.
+  try { db.run(sql`ALTER TABLE worker_runs ADD COLUMN failure_type TEXT`); } catch {}
+  try {
+    // Backfill rows where failure_type is NULL and succeeded = 0 (failed runs).
+    // Classification rules (matches classifyFailureType() in worker-manager.ts):
+    //   timeout_reason IN ('orphaned on restart','orphaned-on-restart',
+    //                      'stale_run_watchdog','stall_watchdog','orchestrator_timeout')
+    //     → 'infra'
+    //   summary LIKE 'ghost:%' OR summary LIKE 'stale_run_watchdog:%'
+    //       OR summary LIKE 'stall_watchdog:%'
+    //       OR summary = 'session dead — no progress'
+    //     → 'infra'
+    //   all others → 'agent_quality'
+    db.run(sql`
+      UPDATE worker_runs
+      SET failure_type = CASE
+        WHEN timeout_reason IN (
+          'orphaned on restart',
+          'orphaned-on-restart',
+          'stale_run_watchdog',
+          'stall_watchdog',
+          'orchestrator_timeout'
+        ) THEN 'infra'
+        WHEN summary LIKE 'ghost:%'
+          OR summary LIKE 'stale_run_watchdog:%'
+          OR summary LIKE 'stall_watchdog:%'
+          OR summary = 'session dead — no progress'
+        THEN 'infra'
+        ELSE 'agent_quality'
+      END
+      WHERE succeeded = 0
+        AND failure_type IS NULL
+    `);
+  } catch {}
+
   // ── Pre-flight artifact check: expected_artifacts column (idempotent) ────────
   // Added: 2026-03-07 — JSON array of ArtifactSpec objects declared by the task.
   // When set, processSpawnRequest checks whether expected output files already exist

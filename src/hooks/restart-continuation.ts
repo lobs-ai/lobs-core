@@ -21,8 +21,9 @@ export function registerRestartContinuationHook(api: any): void {
           "SELECT DISTINCT task_id FROM worker_runs WHERE ended_at IS NULL AND task_id IS NOT NULL"
         ).all() as Array<{ task_id: string }>;
 
-        // Fail orphaned worker runs (no ended_at) — these are crash-orphans, not agent failures
-        const orphaned = db.prepare("UPDATE worker_runs SET ended_at = datetime('now'), succeeded = 0, timeout_reason = 'orphaned on restart' WHERE ended_at IS NULL").run();
+        // Fail orphaned worker runs (no ended_at) — these are crash-orphans, NOT agent quality failures.
+        // failure_type = 'infra' ensures reliability metrics don't penalise agents for gateway restarts.
+        const orphaned = db.prepare("UPDATE worker_runs SET ended_at = datetime('now'), succeeded = 0, timeout_reason = 'orphaned on restart', failure_type = 'infra' WHERE ended_at IS NULL").run();
         if (orphaned.changes > 0) {
           log().info(`[PAW] Restart cleanup: failed ${orphaned.changes} orphaned worker runs`);
           // Increment crash_count for each affected in-progress task.

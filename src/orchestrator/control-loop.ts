@@ -37,6 +37,7 @@ import {
   decrementPendingSpawns,
   detectStaleWorkers,
   forceTerminateWorker,
+  type FailureType,
 } from "./worker-manager.js";
 import { chooseModel, resolveTaskTier, TIER_MODELS, buildFallbackChain } from "./model-chooser.js";
 import { chooseHealthyModel, seedModelHealthFromHistory } from "./model-health.js";
@@ -304,7 +305,9 @@ function runTick(): void {
       checkSessionAlive(sessionKey).then((alive: boolean) => {
         if (!alive) {
           log().warn("orchestrator: worker " + w.id + " (" + w.agentType + ") session dead after " + Math.round(runningMin) + "min — marking failed");
-          recordWorkerEnd({ workerId: sessionKey, agentType: w.agentType, succeeded: false, summary: "session dead — no progress" });
+          // Session-dead is an INFRA failure — the session was killed externally,
+          // not due to agent logic (e.g. OOM, gateway restart, system crash).
+          recordWorkerEnd({ workerId: sessionKey, agentType: w.agentType, succeeded: false, summary: "session dead — no progress", failureType: 'infra' });
         }
       }).catch(() => {});
     }
@@ -358,11 +361,14 @@ function runTick(): void {
               try {
                 const { workerRuns: wrTable } = require("../db/schema.js");
                 const wrRow = staleDb.select().from(wrTable).where(eq(wrTable.workerId, childKey)).get() as any;
+                // Stale-run-watchdog is an INFRA failure — session was killed by
+                // a gateway drain/restart, NOT a genuine agent quality failure.
                 recordWorkerEnd({
                   workerId: childKey,
                   agentType: wrRow?.agentType ?? "unknown",
                   succeeded: false,
                   summary: `stale_run_watchdog: session_dead after ${mins}min`,
+                  failureType: 'infra',
                 });
                 // Increment crash_count on the task — this is infra-failure, not agent failure
                 if (wrRow?.task_id) {
@@ -565,12 +571,15 @@ function runStallWatchdog(): void {
       `silent ${silentMin}min since ${stallSource} — threshold=${stallThresholdSec}s — marking stalled`
     );
 
-    // Close the worker_run as stalled
+    // Close the worker_run as stalled.
+    // Stall-watchdog is an INFRA failure — the session hung (resource exhaustion,
+    // model hang, infrastructure issue), NOT deliberate agent behaviour.
     const changed = db.prepare(`
       UPDATE worker_runs
       SET ended_at = ?,
           succeeded = 0,
           timeout_reason = 'stall_watchdog',
+          failure_type = 'infra',
           summary = ?
       WHERE id = ? AND ended_at IS NULL
     `).run(
@@ -695,10 +704,13 @@ function closeGhostRun(wr: GhostRunRow, now: string): void {
   const db = getRawDb();
   const staleMin = Math.round((Date.now() - new Date(wr.started_at).getTime()) / 60000);
 
-  // 1. Close the worker_run
+  // 1. Close the worker_run.
+  // Ghost-watchdog closures are INFRA failures — the session was killed by a
+  // gateway crash and never wrote ended_at. Not an agent quality issue.
   const changed = db.prepare(`
     UPDATE worker_runs
-    SET ended_at = ?, succeeded = 0, summary = 'ghost: watchdog closed stale run'
+    SET ended_at = ?, succeeded = 0, failure_type = 'infra',
+        summary = 'ghost: watchdog closed stale run'
     WHERE id = ? AND ended_at IS NULL
   `).run(now, wr.id);
 

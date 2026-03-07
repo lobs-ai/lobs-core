@@ -11,6 +11,45 @@ import { recordRunOutcome } from "./model-health.js";
 
 export const DEFAULT_MAX_WORKERS = 5;
 
+// ── Failure type classification ───────────────────────────────────────────────
+
+export type FailureType = 'infra' | 'agent_quality';
+
+/**
+ * Infrastructure failure reasons — runs that failed due to system events,
+ * NOT due to agent logic errors. These should NOT penalise reliability metrics
+ * or trigger quality-based retry. crash_count is incremented instead.
+ */
+const INFRA_TIMEOUT_REASONS = new Set<string>([
+  'orphaned on restart',
+  'orphaned-on-restart',
+  'stale_run_watchdog',
+  'stall_watchdog',
+  'orchestrator_timeout',
+]);
+
+/**
+ * Classify a failed worker_run as infrastructure or agent-quality failure.
+ *
+ * 'infra'         — gateway restart orphan, stale-run watchdog, stall watchdog,
+ *                   orchestrator timeout, ghost-run cleanup. NOT an agent bug.
+ * 'agent_quality' — deliberate agent failure (bad output, tool error, etc.)
+ *
+ * @param timeoutReason  The worker_runs.timeout_reason value
+ * @param summary        The worker_runs.summary value
+ */
+export function classifyFailureType(
+  timeoutReason: string | null | undefined,
+  summary: string | null | undefined,
+): FailureType {
+  if (timeoutReason && INFRA_TIMEOUT_REASONS.has(timeoutReason)) return 'infra';
+  if (summary?.startsWith('ghost:')) return 'infra';
+  if (summary?.startsWith('stale_run_watchdog:')) return 'infra';
+  if (summary?.startsWith('stall_watchdog:')) return 'infra';
+  if (summary === 'session dead — no progress') return 'infra';
+  return 'agent_quality';
+}
+
 export interface WorkerInfo {
   workerId: string;
   agentType: string | null;
@@ -145,10 +184,23 @@ export function recordWorkerEnd(opts: {
   outputTokens?: number;
   totalCostUsd?: number;
   durationSeconds?: number;
+  /**
+   * Optional explicit failure classification. When omitted and succeeded=false,
+   * failure type is inferred from timeoutReason+summary via classifyFailureType().
+   * Callers that know the failure origin should pass this explicitly for accuracy.
+   */
+  failureType?: FailureType;
 }): void {
   const db = getDb();
   const now = new Date().toISOString();
   try {
+    // Determine failure_type for failed runs:
+    //   - callers can pass it explicitly (most accurate)
+    //   - otherwise infer from summary (timeout_reason not available yet at this point)
+    const derivedFailureType: FailureType | null = opts.succeeded
+      ? null  // succeeded — no failure type
+      : (opts.failureType ?? classifyFailureType(null, opts.summary));
+
     const updatePayload: Record<string, unknown> = {
       endedAt: now,
       succeeded: opts.succeeded,
@@ -158,6 +210,7 @@ export function recordWorkerEnd(opts: {
       totalTokens: (opts.inputTokens ?? 0) + (opts.outputTokens ?? 0),
       totalCostUsd: opts.totalCostUsd ?? null,
       durationSeconds: opts.durationSeconds ?? null,
+      failureType: derivedFailureType,
     };
     // Only overwrite model if caller explicitly provides one — preserve the
     // value recorded at spawn time (which has the actual chosen model).
@@ -255,10 +308,14 @@ export function forceTerminateWorker(workerId: string, reason = "timeout"): void
     const model = workerRow?.model;
     const agentType = workerRow?.agentType;
 
+    // orchestrator_timeout and all forceTerminate calls are infra failures —
+    // they are caused by gateway timeouts, not deliberate agent behaviour.
+    const terminateFailureType: FailureType = classifyFailureType(reason, null);
     db.update(workerRuns).set({
       endedAt: now,
       succeeded: false,
       timeoutReason: reason,
+      failureType: terminateFailureType,
     }).where(eq(workerRuns.workerId, workerId)).run();
 
     // Reset the associated task back to not_started so it can be retried

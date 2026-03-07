@@ -23,6 +23,36 @@ export async function handleStatusRequest(
     const activeTasks = openTasks.filter(t => t.status === "active");
     const waitingTasks = openTasks.filter(t => t.status === "waiting_on");
     const blockedTasks = openTasks.filter(t => t.status === "blocked");
+
+    // Break failed workers into infra vs agent_quality using the failure_type column.
+    // Infra: orphaned-on-restart, stale-run-watchdog, stall-watchdog, etc.
+    // Agent quality: genuine agent failures (bad output, model error, etc.)
+    // Unclassified (NULL failure_type on pre-migration rows) counted in agent_quality
+    // to err on the conservative side.
+    const infraFailures = failedWorkers.filter(w => (w as any).failureType === 'infra').length;
+    const qualityFailures = failedWorkers.filter(w => (w as any).failureType !== 'infra').length;
+
+    // 30-day window for agent reliability metrics
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600_000).toISOString();
+    const recentRuns = db.select().from(workerRuns)
+      .where(and(gte(workerRuns.startedAt, thirtyDaysAgo)))
+      .all();
+    const recentFailed = recentRuns.filter(w => !w.succeeded);
+    const recentInfraFails = recentFailed.filter(w => (w as any).failureType === 'infra').length;
+    const recentQualityFails = recentFailed.filter(w => (w as any).failureType !== 'infra').length;
+
+    // Per-agent 30-day breakdown
+    const agentReliability: Record<string, { runs: number; infra_failures: number; quality_failures: number }> = {};
+    for (const run of recentRuns) {
+      const agentKey = run.agentType ?? 'unknown';
+      const entry = agentReliability[agentKey] ?? { runs: 0, infra_failures: 0, quality_failures: 0 };
+      entry.runs++;
+      if (!run.succeeded) {
+        if ((run as any).failureType === 'infra') entry.infra_failures++;
+        else entry.quality_failures++;
+      }
+      agentReliability[agentKey] = entry;
+    }
     
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
@@ -44,6 +74,22 @@ export async function handleStatusRequest(
         active: activeWorkers.length,
         total_completed: completedWorkers.length,
         total_failed: failedWorkers.length,
+        // Failure breakdown by type (all-time)
+        infra_failures: infraFailures,
+        quality_failures: qualityFailures,
+      },
+      // 30-day reliability metrics — split by failure type so infra events
+      // don't inflate agent quality failure counts
+      reliability_30d: {
+        total_failed: recentFailed.length,
+        infra_failures: recentInfraFails,
+        quality_failures: recentQualityFails,
+        by_agent: Object.entries(agentReliability).map(([type, v]) => ({
+          agent_type: type,
+          runs: v.runs,
+          infra_failures: v.infra_failures,
+          quality_failures: v.quality_failures,
+        })),
       },
       agents: [],
       tasks: {
