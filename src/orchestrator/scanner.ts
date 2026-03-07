@@ -20,6 +20,8 @@ export interface ReadyTask {
   escalationTier: number | null;
   retryCount: number | null;
   spawnCount: number | null;
+  /** Gateway-crash-orphaned run count. effective_fail = spawnCount - crashCount. */
+  crashCount: number | null;
 }
 
 /**
@@ -120,6 +122,7 @@ export function findReadyTasks(limit = 10): ReadyTask[] {
         escalationTier: r.escalationTier,
         retryCount: r.retryCount,
         spawnCount: r.spawnCount,
+        crashCount: r.crashCount ?? null,
       }));
   } catch (e) {
     log().error(`[SCANNER] findReadyTasks error: ${e}`);
@@ -159,6 +162,7 @@ export function findRetryableTasks(limit = 5): ReadyTask[] {
         escalationTier: r.escalationTier,
         retryCount: r.retryCount,
         spawnCount: r.spawnCount,
+        crashCount: r.crashCount ?? null,
       }));
   } catch (e) {
     log().error(`[SCANNER] findRetryableTasks error: ${e}`);

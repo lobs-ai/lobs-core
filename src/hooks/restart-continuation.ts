@@ -16,9 +16,27 @@ export function registerRestartContinuationHook(api: any): void {
         const dbPath = process.env.PAW_DB_PATH ?? join(homedir(), ".openclaw/plugins/paw/paw.db");
         const db = new Database(dbPath);
         
-        // Fail orphaned worker runs (no ended_at)
+        // Collect task IDs for in-flight runs BEFORE closing them (so we can increment crash_count)
+        const orphanedTaskRows = db.prepare(
+          "SELECT DISTINCT task_id FROM worker_runs WHERE ended_at IS NULL AND task_id IS NOT NULL"
+        ).all() as Array<{ task_id: string }>;
+
+        // Fail orphaned worker runs (no ended_at) — these are crash-orphans, not agent failures
         const orphaned = db.prepare("UPDATE worker_runs SET ended_at = datetime('now'), succeeded = 0, timeout_reason = 'orphaned on restart' WHERE ended_at IS NULL").run();
-        if (orphaned.changes > 0) log().info(`[PAW] Restart cleanup: failed ${orphaned.changes} orphaned worker runs`);
+        if (orphaned.changes > 0) {
+          log().info(`[PAW] Restart cleanup: failed ${orphaned.changes} orphaned worker runs`);
+          // Increment crash_count for each affected in-progress task.
+          // This prevents the spawn guard from auto-blocking tasks that only
+          // failed due to gateway crashes (effective_fail = spawn_count - crash_count).
+          for (const row of orphanedTaskRows) {
+            db.prepare(
+              "UPDATE tasks SET crash_count = COALESCE(crash_count, 0) + 1, updated_at = datetime('now') WHERE id = ? AND work_state = 'in_progress'"
+            ).run(row.task_id);
+          }
+          if (orphanedTaskRows.length > 0) {
+            log().info(`[PAW] Restart cleanup: incremented crash_count for ${orphanedTaskRows.length} task(s) (crash-orphaned)`);
+          }
+        }
         
         // Reset busy agents to idle
         const agents = db.prepare("UPDATE agent_status SET status = 'idle', current_task_id = NULL WHERE status = 'busy'").run();

@@ -563,11 +563,15 @@ function runStallWatchdog(): void {
 
     if (changed.changes === 0) continue; // already closed
 
-    // Reset task to not_started so it can be retried
+    // Reset task to not_started so it can be retried.
+    // NOTE: Do NOT reset spawn_count here. Stall-watchdog kills are not crash-orphans —
+    // a stalled agent may be a genuine agent failure. The spawn guard uses
+    // effective_fail_count = spawn_count - crash_count, so spawn_count correctly
+    // accumulates. crash_count is only incremented by gateway crash-orphan paths.
     if (wr.task_id) {
       db.prepare(`
         UPDATE tasks
-        SET work_state = 'not_started', spawn_count = 0, updated_at = ?
+        SET work_state = 'not_started', updated_at = ?
         WHERE id = ? AND work_state = 'in_progress'
       `).run(new Date(now).toISOString(), wr.task_id);
       log().warn(
@@ -681,13 +685,18 @@ function closeGhostRun(wr: GhostRunRow, now: string): void {
 
   log().warn(`[WATCHDOG] Closed ghost worker_run ${wr.id} (${wr.agent_type ?? "?"}) — stale ${staleMin}min, session=${wr.worker_id?.slice(0, 30) ?? "none"}`);
 
-  // 2. Reset task to not_started if still in_progress
+  // 2. Reset task to not_started if still in_progress.
+  // Increment crash_count (not reset spawn_count) — this run was a crash-orphan,
+  // not a genuine agent failure. The spawn guard uses effective_fail = spawn_count - crash_count.
   if (wr.task_id) {
     db.prepare(`
       UPDATE tasks
-      SET work_state = 'not_started', spawn_count = 0, updated_at = ?
+      SET work_state = 'not_started',
+          crash_count = COALESCE(crash_count, 0) + 1,
+          updated_at = ?
       WHERE id = ? AND work_state = 'in_progress'
     `).run(now, wr.task_id);
+    log().info(`[WATCHDOG] Incremented crash_count for task ${wr.task_id.slice(0, 8)} (ghost-orphaned by crash)`);
   }
 
   // 3. Fail workflow_runs stuck at a spawn node for this task
@@ -812,7 +821,22 @@ const SPAWN_COUNT_LIMIT_BY_TYPE: Record<string, number> = {
   other: 3,
 };
 
-function spawnCountLimitForType(taskType: string | null | undefined): number {
+/**
+ * Per-agent-type spawn limits. These override task-type limits when defined.
+ * Provides a tuning point per agent without schema changes.
+ */
+const SPAWN_LIMIT_BY_AGENT: Record<string, number> = {
+  architect: 3,
+  researcher: 3,
+  programmer: 3,
+  writer: 3,
+  reviewer: 3,
+};
+
+function spawnCountLimitForType(taskType: string | null | undefined, agentType?: string | null): number {
+  if (agentType && agentType in SPAWN_LIMIT_BY_AGENT) {
+    return SPAWN_LIMIT_BY_AGENT[agentType];
+  }
   if (taskType && taskType in SPAWN_COUNT_LIMIT_BY_TYPE) {
     return SPAWN_COUNT_LIMIT_BY_TYPE[taskType];
   }
@@ -820,9 +844,16 @@ function spawnCountLimitForType(taskType: string | null | undefined): number {
 }
 
 /**
- * Increment spawn_count for a task and check if it has exceeded the per-type limit.
- * Returns true if task was auto-blocked (spawn_count >= limit after increment).
- * The limit is determined by the task's task_type (falls back to SPAWN_COUNT_LIMIT=3).
+ * Increment spawn_count for a task and check if the effective fail count
+ * has exceeded the per-type/per-agent limit.
+ *
+ * effective_fail_count = spawn_count - crash_count
+ *
+ * Gateway crash-orphaned runs increment crash_count (via restart hook and watchdog),
+ * so they do NOT count as agent failures for the auto-block threshold.
+ * Only genuine agent failures (succeeded=0, not crash-orphaned) accumulate effective_fail_count.
+ *
+ * Returns true if task was auto-blocked (effective_fail_count >= limit after increment).
  */
 function incrementAndCheckSpawnCount(taskId: string): boolean {
   const db = getDb();
@@ -830,27 +861,30 @@ function incrementAndCheckSpawnCount(taskId: string): boolean {
     const task = db.select().from(tasksTable).where(eq(tasksTable.id, taskId)).get();
     if (!task) return false;
 
-    const limit = spawnCountLimitForType(task.shape);
-    const newCount = (task.spawnCount ?? 0) + 1;
+    const limit = spawnCountLimitForType(task.shape, task.agent);
+    const newSpawnCount = (task.spawnCount ?? 0) + 1;
+    const crashCount = task.crashCount ?? 0;
+    const effectiveFailCount = newSpawnCount - crashCount;
+
     db.update(tasksTable).set({
-      spawnCount: newCount,
+      spawnCount: newSpawnCount,
       updatedAt: new Date().toISOString(),
     }).where(eq(tasksTable.id, taskId)).run();
 
-    if (newCount >= limit) {
-      // Auto-block the task to stop runaway spawning
+    if (effectiveFailCount >= limit) {
+      // Auto-block the task to stop runaway agent failures
       db.update(tasksTable).set({
         workState: "blocked",
-        failureReason: `Auto-blocked: spawn_count reached ${newCount} (limit=${limit}, type=${task.shape ?? "other"}). Needs human review.`,
+        failureReason: `Auto-blocked: effective_fail_count=${effectiveFailCount} >= limit=${limit} (spawn=${newSpawnCount}, crash=${crashCount}, type=${task.shape ?? "other"}). Needs human review.`,
         updatedAt: new Date().toISOString(),
       }).where(eq(tasksTable.id, taskId)).run();
 
       log().warn(
-        `[SPAWN_GUARD] Task ${taskId.slice(0, 8)} auto-blocked — spawn_count=${newCount} >= limit=${limit} (type=${task.shape ?? "other"})`
+        `[SPAWN_GUARD] Task ${taskId.slice(0, 8)} auto-blocked — effective_fail=${effectiveFailCount} >= limit=${limit} (spawn=${newSpawnCount}, crash=${crashCount}, type=${task.shape ?? "other"})`
       );
       return true;
     }
-    log().debug?.(`[SPAWN_GUARD] Task ${taskId.slice(0, 8)} spawn_count now ${newCount}/${limit} (type=${task.shape ?? "other"})`);
+    log().debug?.(`[SPAWN_GUARD] Task ${taskId.slice(0, 8)} spawn=${newSpawnCount}, crash=${crashCount}, effective_fail=${effectiveFailCount}/${limit}`);
     return false;
   } catch (e) {
     log().error(`[SPAWN_GUARD] incrementAndCheckSpawnCount error: ${e}`);

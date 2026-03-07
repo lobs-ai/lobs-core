@@ -83,6 +83,11 @@ export const tasks = sqliteTable("tasks", {
   // compliant regardless of this flag. Setting this flag on a task forces compliance
   // even when the project itself is not marked compliant.
   complianceRequired: integer("compliance_required", { mode: "boolean" }).notNull().default(false),
+  // Crash-orphan counter: how many times this task's worker_run was killed by a
+  // gateway crash rather than a genuine agent failure. Used by the spawn guard:
+  //   effective_fail_count = spawn_count - crash_count
+  // Only effective_fail_count is compared against the auto-block threshold.
+  crashCount: integer("crash_count").default(0),
   ...timestamps,
 });
 

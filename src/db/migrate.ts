@@ -643,6 +643,13 @@ export function runMigrations(db: PawDB): void {
   // Can be set manually by the user or auto-applied by the classification engine.
   try { db.run(sql`ALTER TABLE chat_sessions ADD COLUMN compliance_required INTEGER NOT NULL DEFAULT 0`); } catch {}
 
+  // ── Spawn guard: crash_count column (idempotent) ──────────────────────────
+  // Added: 2026-03-07 — tracks gateway-crash-orphaned runs per task so the
+  // spawn guard can use effective_fail_count = spawn_count - crash_count
+  // instead of raw spawn_count. Prevents crash storms from auto-blocking
+  // tasks where the agent never actually failed.
+  try { db.run(sql`ALTER TABLE tasks ADD COLUMN crash_count INTEGER NOT NULL DEFAULT 0`); } catch {}
+
   // ── model_health: circuit breaker per (model, agent_type) ──────────────────
   db.run(sql`CREATE TABLE IF NOT EXISTS model_health (
     model                TEXT NOT NULL,
@@ -740,7 +747,7 @@ export function runMigrations(db: PawDB): void {
     db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)
       VALUES ('stall_watchdog', '{"enabled":true,"grace_period_seconds":60}', datetime('now'))`);
     db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)
-      VALUES ('stall_timeout:researcher', '300', datetime('now'))`);
+      VALUES ('stall_timeout:researcher', '900', datetime('now'))`);
     db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)
       VALUES ('stall_timeout:programmer', '600', datetime('now'))`);
     db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)
