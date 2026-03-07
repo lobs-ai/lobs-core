@@ -254,6 +254,13 @@ function runTick(): void {
 
 
 
+        // Project gate: tasks MUST have a project_id to be picked up.
+        // Unassigned tasks stay queued until explicitly assigned to a project.
+        if (!task.projectId) {
+          log().debug?.(`orchestrator: task ${task.id.slice(0, 8)} has no project — skipping (project required)`);
+          continue;
+        }
+
         if (task.projectId && task.agent && (projectHasActiveWorker(task.projectId, task.agent) || projectHasPendingSpawn(task.projectId, task.agent))) {
           log().debug?.(`orchestrator: project ${task.projectId.slice(0, 8)}:${task.agent} locked — skipping task ${task.id.slice(0, 8)}`);
           continue;

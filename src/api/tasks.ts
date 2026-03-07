@@ -315,11 +315,22 @@ ${body.text}`;
     const conditions = [];
     if (query.status) conditions.push(eq(tasks.status, query.status));
     if (query.project_id) conditions.push(eq(tasks.projectId, query.project_id));
+    // Direct compliance flag filter (does NOT include project-inherited compliance —
+    // use normalizeTaskBatch result's `compliant` field for the full effective value)
+    if (query.compliance_required === "true") conditions.push(eq(tasks.complianceRequired, true));
+    if (query.compliance_required === "false") conditions.push(eq(tasks.complianceRequired, false));
 
     const rows = conditions.length > 0
       ? db.select().from(tasks).where(and(...conditions)).orderBy(desc(tasks.updatedAt)).all()
       : db.select().from(tasks).orderBy(desc(tasks.updatedAt)).all();
-    return json(res, normalizeTaskBatch(rows as Record<string, unknown>[]));
+
+    const normalized = normalizeTaskBatch(rows as Record<string, unknown>[]);
+
+    // If caller requested effective compliance (including inheritance), post-filter
+    if (query.compliant === "true") return json(res, normalized.filter(r => r["compliant"]));
+    if (query.compliant === "false") return json(res, normalized.filter(r => !r["compliant"]));
+
+    return json(res, normalized);
   }
   if (req.method === "POST") {
     const body = await parseBody(req) as Record<string, unknown>;

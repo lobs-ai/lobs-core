@@ -86,12 +86,122 @@ function buildWindowData(events: UsageEvent[]): {
   return { totalCalls, compliantCalls, nonCompliantCalls, compliantPct, nonCompliantPct, providerBreakdown };
 }
 
+/**
+ * GET /api/compliance/hierarchy
+ *
+ * Returns a summary of compliance settings at each level (project / task / chat)
+ * so the Nexus UI can render visual indicators (shield icons, banners, etc.)
+ * for each entity.
+ *
+ * Response shape:
+ * {
+ *   generatedAt: string,
+ *   projects: { total, compliant, nonCompliant },
+ *   tasks: { total, compliant, inherited, explicit, nonCompliant },
+ *   chatSessions: { total, compliant, nonCompliant },
+ *   complianceModelConfigured: boolean,
+ *   complianceModel: string | null,
+ * }
+ */
+async function handleHierarchyRequest(res: ServerResponse): Promise<void> {
+  try {
+    const db = getRawDb();
+
+    const projectStats = db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN compliance_required = 1 THEN 1 ELSE 0 END) AS compliant
+      FROM projects
+      WHERE archived = 0 OR archived IS NULL
+    `).get() as { total: number; compliant: number };
+
+    // Compliant project IDs (for cascade calculation)
+    const compliantProjectIds = (db.prepare(
+      `SELECT id FROM projects WHERE compliance_required = 1`
+    ).all() as { id: string }[]).map(r => r.id);
+
+    // Tasks where compliance is explicitly set on the task
+    const taskExplicit = db.prepare(`
+      SELECT COUNT(*) AS cnt FROM tasks WHERE compliance_required = 1
+    `).get() as { cnt: number };
+
+    // Tasks where compliance is inherited from project (task not explicitly compliant, project is)
+    let taskInherited = 0;
+    if (compliantProjectIds.length > 0) {
+      const placeholders = compliantProjectIds.map(() => "?").join(",");
+      const res2 = db.prepare(`
+        SELECT COUNT(*) AS cnt FROM tasks
+        WHERE compliance_required = 0 OR compliance_required IS NULL
+          AND project_id IN (${placeholders})
+      `).get(...compliantProjectIds) as { cnt: number };
+      taskInherited = res2.cnt ?? 0;
+    }
+
+    const taskTotal = db.prepare(`SELECT COUNT(*) AS cnt FROM tasks`).get() as { cnt: number };
+    const taskCompliant = taskExplicit.cnt + taskInherited;
+
+    const chatStats = db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN compliance_required = 1 THEN 1 ELSE 0 END) AS compliant
+      FROM chat_sessions
+      WHERE is_active = 1
+    `).get() as { total: number; compliant: number };
+
+    // Check compliance_model setting
+    const cmRow = db.prepare(
+      `SELECT value FROM orchestrator_settings WHERE key = 'compliance_model'`
+    ).get() as { value: string } | undefined;
+    let complianceModel: string | null = null;
+    if (cmRow) {
+      try {
+        const parsed = JSON.parse(cmRow.value) as unknown;
+        if (typeof parsed === "string" && parsed.length > 0) complianceModel = parsed;
+      } catch {}
+    }
+
+    return json(res, {
+      generatedAt: new Date().toISOString(),
+      projects: {
+        total: projectStats.total ?? 0,
+        compliant: projectStats.compliant ?? 0,
+        nonCompliant: (projectStats.total ?? 0) - (projectStats.compliant ?? 0),
+      },
+      tasks: {
+        total: taskTotal.cnt ?? 0,
+        compliant: taskCompliant,
+        inherited: taskInherited,
+        explicit: taskExplicit.cnt ?? 0,
+        nonCompliant: (taskTotal.cnt ?? 0) - taskCompliant,
+      },
+      chatSessions: {
+        total: chatStats.total ?? 0,
+        compliant: chatStats.compliant ?? 0,
+        nonCompliant: (chatStats.total ?? 0) - (chatStats.compliant ?? 0),
+      },
+      complianceModelConfigured: complianceModel !== null,
+      complianceModel,
+    });
+  } catch (e) {
+    return json(res, {
+      generatedAt: new Date().toISOString(),
+      projects: { total: 0, compliant: 0, nonCompliant: 0 },
+      tasks: { total: 0, compliant: 0, inherited: 0, explicit: 0, nonCompliant: 0 },
+      chatSessions: { total: 0, compliant: 0, nonCompliant: 0 },
+      complianceModelConfigured: false,
+      complianceModel: null,
+      note: `Could not read hierarchy data: ${String(e)}`,
+    });
+  }
+}
+
 export async function handleComplianceRequest(
   req: IncomingMessage,
   res: ServerResponse,
   sub?: string,
 ): Promise<void> {
   if (req.method !== "GET") return error(res, "Method not allowed", 405);
+  if (sub === "hierarchy") return handleHierarchyRequest(res);
   if (sub !== "status") return error(res, "Unknown compliance endpoint", 404);
 
   try {
