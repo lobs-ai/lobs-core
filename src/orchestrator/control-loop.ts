@@ -728,20 +728,20 @@ function autoCloseSucceededTasks(): void {
         t.id,
         t.title,
         t.agent,
-        COUNT(wr.id)                                          AS run_count,
-        SUM(CASE WHEN wr.succeeded = 1 THEN 1 ELSE 0 END)    AS succeeded_count,
-        SUM(CASE WHEN wr.succeeded = 0 THEN 1 ELSE 0 END)    AS failed_count,
-        SUM(CASE WHEN wr.succeeded IS NULL THEN 1 ELSE 0 END) AS pending_count,
-        MAX(wr.ended_at)                                      AS last_run_at
+        COUNT(wr.id)                                              AS run_count,
+        MAX(wr.ended_at)                                          AS last_run_at
     FROM tasks t
     JOIN worker_runs wr ON wr.task_id = t.id
     WHERE t.status = 'active'
     GROUP BY t.id
     HAVING
         run_count > 0
-        AND succeeded_count = run_count
-        AND failed_count = 0
-        AND pending_count = 0
+        AND SUM(CASE WHEN wr.ended_at IS NULL THEN 1 ELSE 0 END) = 0
+        AND (
+            SELECT wr2.succeeded FROM worker_runs wr2
+            WHERE wr2.task_id = t.id AND wr2.ended_at IS NOT NULL
+            ORDER BY wr2.ended_at DESC LIMIT 1
+        ) = 1
     ORDER BY last_run_at ASC
   `).all() as Array<{
     id: string;
@@ -777,7 +777,7 @@ function autoCloseSucceededTasks(): void {
         agent: task.agent,
         run_count: task.run_count,
         last_run_at: task.last_run_at,
-        reason: "all_worker_runs_succeeded",
+        reason: "latest_worker_run_succeeded",
         closed_at: now,
       }),
       now,

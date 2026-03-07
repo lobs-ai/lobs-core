@@ -1,7 +1,7 @@
 {
   "name": "paw",
   "version": "0.1.0",
-  "description": "Personal AI Workforce — multi-agent orchestration plugin for OpenClaw",
+  "description": "Personal AI Workforce \u2014 multi-agent orchestration plugin for OpenClaw",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -9,7 +9,8 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "vitest",
-    "lint": "eslint src/"
+    "lint": "eslint src/",
+    "sync-addons": "bin/sync-addons"
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0",

@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+#
+# sync-addons — Sync PAW add-ons from plugin source to ~/.openclaw/addons/
+#
+# Usage:
+#   bin/sync-addons              # sync all add-ons
+#   bin/sync-addons tasks        # sync specific add-on
+#   bin/sync-addons --dry-run    # preview without copying
+#
+# This copies openclaw-plugin-paw/addons/<name>/ → ~/.openclaw/addons/<name>/
+# making the runtime catalog match the plugin source.
+#
+# Run this after updating add-ons in the plugin repo.
+
+set -euo pipefail
+
+PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC_DIR="$PLUGIN_DIR/addons"
+DEST_DIR="$HOME/.openclaw/addons"
+DRY_RUN=false
+FILTER=""
+
+# Parse args
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=true ;;
+    --help|-h)
+      echo "Usage: sync-addons [--dry-run] [addon-name]"
+      exit 0
+      ;;
+    -*) echo "Unknown flag: $arg"; exit 1 ;;
+    *) FILTER="$arg" ;;
+  esac
+done
+
+if [ ! -d "$SRC_DIR" ]; then
+  echo "Error: Source directory not found: $SRC_DIR"
+  exit 1
+fi
+
+if [ ! -d "$DEST_DIR" ]; then
+  echo "Error: Destination directory not found: $DEST_DIR"
+  echo "Is OpenClaw installed? Expected: $DEST_DIR"
+  exit 1
+fi
+
+echo "Syncing PAW add-ons..."
+echo "  Source:      $SRC_DIR"
+echo "  Destination: $DEST_DIR"
+if $DRY_RUN; then echo "  Mode:        DRY RUN (no files will be changed)"; fi
+echo ""
+
+SYNCED=0
+SKIPPED=0
+
+for addon_dir in "$SRC_DIR"/*/; do
+  name=$(basename "$addon_dir")
+
+  # Skip non-directories and files like README.md
+  [ -d "$addon_dir" ] || continue
+
+  # Filter to specific add-on if requested
+  if [ -n "$FILTER" ] && [ "$name" != "$FILTER" ]; then
+    continue
+  fi
+
+  # Must have addon.md to be a valid add-on
+  if [ ! -f "$addon_dir/addon.md" ]; then
+    echo "  [SKIP] $name — no addon.md found"
+    ((SKIPPED++)) || true
+    continue
+  fi
+
+  dest="$DEST_DIR/$name"
+
+  echo "  [SYNC] $name"
+  echo "         $addon_dir → $dest"
+
+  if $DRY_RUN; then
+    # Show what would change
+    if [ -d "$dest" ]; then
+      diff_out=$(diff -rq "$addon_dir" "$dest" 2>/dev/null || true)
+      if [ -z "$diff_out" ]; then
+        echo "         (no changes)"
+      else
+        echo "$diff_out" | sed 's/^/         /'
+      fi
+    else
+      echo "         (new — destination does not exist)"
+    fi
+  else
+    # Backup existing if present
+    if [ -d "$dest" ]; then
+      bak="$dest.bak"
+      rm -rf "$bak"
+      cp -r "$dest" "$bak"
+      echo "         [BAK] $bak"
+    fi
+
+    # Copy from source to destination
+    rm -rf "$dest"
+    cp -r "$addon_dir" "$dest"
+    echo "         ✓ synced"
+  fi
+
+  ((SYNCED++)) || true
+done
+
+echo ""
+if $DRY_RUN; then
+  echo "[DRY RUN] Would sync $SYNCED add-on(s). Run without --dry-run to apply."
+else
+  echo "Done. $SYNCED add-on(s) synced to $DEST_DIR"
+  echo ""
+  echo "To install an add-on:"
+  echo "  python3 $DEST_DIR/ingest.py --list"
+  echo "  python3 $DEST_DIR/ingest.py --dry-run <name>"
+  echo "  python3 $DEST_DIR/ingest.py <name>"
+fi
