@@ -150,16 +150,55 @@ try {
       break;
     }
 
+    /**
+     * reset-spawn <task-id>
+     *
+     * Operator tool: manually reset spawn_count and crash_count for a task and reactivate it.
+     *
+     * When to use:
+     *   Use this for tasks auto-blocked by the spawn guard due to INFRASTRUCTURE crashes
+     *   (gateway TypeErrors, OOM kills, etc.) that occurred before crash_count tracking was
+     *   implemented. These tasks have spawn_count >= 3 but crash_count = 0, so effective_fail
+     *   equals spawn_count and the guard treats them as exhausted from real agent failures.
+     *
+     *   DO NOT use this to bypass legitimate spawn exhaustion from real repeated agent errors.
+     *   Check failure_reason first — it should contain 'Auto-blocked' to be a crash orphan.
+     */
+    case "reset-spawn": {
+      const id = args.pos[0];
+      if (!id) die("Task ID required");
+      const row = db.prepare("SELECT id, title, agent, status, spawn_count, crash_count, failure_reason FROM tasks WHERE id = ? OR id LIKE ?")
+        .get(id, `${id}%`) as any;
+      if (!row) die(`Task not found: ${id}`);
+      const now = new Date().toISOString();
+      db.prepare(`
+        UPDATE tasks
+        SET status = 'active', work_state = 'not_started',
+            spawn_count = 0, crash_count = 0, failure_reason = NULL,
+            updated_at = ?
+        WHERE id = ?
+      `).run(now, row.id);
+      console.log(JSON.stringify({
+        ok: true,
+        id: row.id,
+        title: row.title,
+        previous: { status: row.status, spawn_count: row.spawn_count, crash_count: row.crash_count, failure_reason: row.failure_reason },
+        now: { status: "active", work_state: "not_started", spawn_count: 0, crash_count: 0, failure_reason: null },
+      }, null, 2));
+      break;
+    }
+
     default:
-      console.log(`Usage: paw-task <create|list|get|update|cancel|archive> [options]
+      console.log(`Usage: paw-task <create|list|get|update|cancel|archive|reset-spawn> [options]
 
 Commands:
-  create  --title "..." --agent <type> --tier <tier> [--notes "..."] [--project ID]
-  list    [--status active] [--agent programmer] [--limit 20]
-  get     <id-or-prefix>
-  update  <id> [--status ...] [--notes ...] [--agent ...] [--tier ...] [--title ...]
-  cancel  <id>
-  archive <id>
+  create       --title "..." --agent <type> --tier <tier> [--notes "..."] [--project ID]
+  list         [--status active] [--agent programmer] [--limit 20]
+  get          <id-or-prefix>
+  update       <id> [--status ...] [--notes ...] [--agent ...] [--tier ...] [--title ...]
+  cancel       <id>
+  archive      <id>
+  reset-spawn  <id>   Reset spawn_count/crash_count and reactivate a task blocked by infra crashes
 
 Agents: ${AGENTS.join(", ")}
 Tiers:  ${TIERS.join(", ")}`);

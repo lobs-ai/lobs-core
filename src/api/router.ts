@@ -29,6 +29,7 @@ import { handleMeetingsRequest, handleMeetingActionItemsRequest } from "./meetin
 import { handleYouTubeRequest } from "./youtube.js";
 import { handleComplianceRequest } from "./compliance.js";
 import { handleLearningRequest } from "./learning.js";
+import { handleAdminRequest } from "./admin.js";
 import { error } from "./index.js";
 
 const PREFIXES = ["/paw/api/", "/api/"];
@@ -77,6 +78,7 @@ export function registerPawRouter(api: OpenClawPluginApi): void {
         case "youtube":          await handleYouTubeRequest(req, res, parts[1], parts); return true;
         case "compliance":       await handleComplianceRequest(req, res, parts[1]); return true;
         case "learning":         await handleLearningRequest(req, res, parts[1], parts); return true;
+        case "admin":            await handleAdminRequest(req, res, parts); return true;
         default:                error(res, `Unknown resource: ${resource}`, 404); return true;
       }
     } catch (err) {
