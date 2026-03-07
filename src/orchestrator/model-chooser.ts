@@ -15,7 +15,8 @@ export type ModelTier = "micro" | "small" | "medium" | "standard" | "strong";
 
 export const TIER_MODELS: Record<ModelTier, string[]> = {
   micro: [
-    "anthropic/claude-haiku-4-5",
+    // Local-first: keep the cheapest tier off cloud providers.
+    "lmstudio/qwen/qwen3.5-35b-a3b",
   ],
   small: [
     "anthropic/claude-sonnet-4-6",
@@ -24,6 +25,7 @@ export const TIER_MODELS: Record<ModelTier, string[]> = {
     "anthropic/claude-sonnet-4-6",
   ],
   standard: [
+    // Default for most work
     "anthropic/claude-sonnet-4-6",
   ],
   strong: [
@@ -128,6 +130,14 @@ export interface ModelChoice {
  * 1. OpenClaw agent config (agents.list[agentType].model.primary)
  * 2. Tier-based fallback chain
  */
+function isCodexModel(model: string): boolean {
+  return model.startsWith("openai-codex/");
+}
+
+function stripCodex(models: string[]): string[] {
+  return models.filter(m => !isCodexModel(m));
+}
+
 export function chooseModel(
   tier?: ModelTier | string,
   agentType?: string,
@@ -139,13 +149,18 @@ export function chooseModel(
     const agentModels = loadAgentModels();
     const configEntry = agentModels[agentType];
     if (configEntry) {
-      log().debug?.(`[MODEL_CHOOSER] ${agentType} → agent-config: ${configEntry.primary}`);
-      return { model: configEntry.primary, tier: effectiveTier, source: "agent-config" };
+      // Safety: never pick Codex from config (and don't let it into fallbacks).
+      if (isCodexModel(configEntry.primary)) {
+        log().warn(`[MODEL_CHOOSER] ${agentType} agent-config primary is Codex (${configEntry.primary}); ignoring and using tier-default.`);
+      } else {
+        log().debug?.(`[MODEL_CHOOSER] ${agentType} → agent-config: ${configEntry.primary}`);
+        return { model: configEntry.primary, tier: effectiveTier, source: "agent-config" };
+      }
     }
   }
 
   // Fall back to tier-based selection
-  const candidates = TIER_MODELS[effectiveTier] ?? TIER_MODELS.standard;
+  const candidates = stripCodex(TIER_MODELS[effectiveTier] ?? TIER_MODELS.standard);
   const model = candidates[0];
   log().debug?.(`[MODEL_CHOOSER] ${agentType ?? "?"} → tier=${effectiveTier} model=${model}`);
   return { model, tier: effectiveTier, source: "tier-default" };
@@ -168,14 +183,19 @@ export function buildFallbackChain(
   tier: ModelTier,
   agentType?: string,
 ): string[] {
+  // Never allow Codex into PAW dispatch chains.
+  if (isCodexModel(preferredModel)) {
+    const tierModels = stripCodex(TIER_MODELS[tier] ?? TIER_MODELS.standard);
+    preferredModel = tierModels[0] ?? "anthropic/claude-sonnet-4-6";
+  }
   // 1. Use openclaw.json agent config fallbacks if available
   if (agentType) {
     const agentModels = loadAgentModels();
     const configEntry = agentModels[agentType];
     if (configEntry && configEntry.fallbacks.length > 0) {
       // Build chain: preferred model first, then config fallbacks (deduped)
-      const rest = configEntry.fallbacks.filter(m => m !== preferredModel);
-      const chain = [preferredModel, ...rest];
+      const rest = stripCodex(configEntry.fallbacks).filter(m => m !== preferredModel);
+      const chain = stripCodex([preferredModel, ...rest]);
       log().debug?.(`[MODEL_CHOOSER] ${agentType} fallback chain (from config): ${chain.join(" → ")}`);
       return chain;
     }
@@ -183,7 +203,7 @@ export function buildFallbackChain(
 
   // 2. Hardcoded per-agent fallback chains (cross-tier defaults)
   if (agentType && AGENT_FALLBACK_CHAINS[agentType]) {
-    const chain = AGENT_FALLBACK_CHAINS[agentType];
+    const chain = stripCodex(AGENT_FALLBACK_CHAINS[agentType]);
     // If preferred model matches chain head, use chain as-is
     if (chain[0] === preferredModel) return chain;
     // Move preferred model to front; keep rest of chain
@@ -192,9 +212,9 @@ export function buildFallbackChain(
   }
 
   // 3. No agent-specific chain — use tier fallbacks
-  const tierModels = TIER_MODELS[tier] ?? TIER_MODELS.standard;
+  const tierModels = stripCodex(TIER_MODELS[tier] ?? TIER_MODELS.standard);
   const tierFallbacks = tierModels.filter(m => m !== preferredModel);
-  return [preferredModel, ...tierFallbacks];
+  return stripCodex([preferredModel, ...tierFallbacks]);
 }
 
 function resolveTier(tier?: string, agentType?: string): ModelTier {
