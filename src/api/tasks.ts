@@ -260,6 +260,15 @@ ${body.text}`;
         }
       }
 
+      // Validate that all blocker IDs exist in the database
+      if (Array.isArray(blockedBy) && blockedBy.length > 0) {
+        const found = db.select({ id: tasks.id }).from(tasks).where(inArray(tasks.id, blockedBy as string[])).all();
+        if (found.length !== blockedBy.length) {
+          const notFound = (blockedBy as string[]).filter(bid => !found.find(r => r.id === bid));
+          return error(res, `Blocker task IDs not found: ${notFound.join(", ")}`, 400);
+        }
+      }
+
       db.update(tasks).set({
         blockedBy: blockedBy as string[] | null,
         updatedAt: new Date().toISOString(),
