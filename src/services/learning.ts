@@ -185,6 +185,31 @@ const PATTERNS: PatternDef[] = [
     lessonText: "Cite sources in written output. Unverified claims in docs and reports are rejected.",
     agentType: "writer",
   },
+  // ── Reviewer patterns ────────────────────────────────────────────────────
+  {
+    key: "cite_sources",
+    keywords: ["citation", "source", "reference", "evidence", "uncited", "no source", "unverified claim"],
+    lessonText: "Cite sources and evidence in review feedback. Reviewers who raise unsupported claims lose credibility and get ignored.",
+    agentType: "reviewer",
+  },
+  {
+    key: "actionable_feedback",
+    keywords: ["vague", "unclear feedback", "not actionable", "what to fix", "specific", "be specific", "what do you mean", "confusing review"],
+    lessonText: "Review comments must be specific and actionable — say exactly what to change and why. Vague feedback ('this is wrong') causes revision loops.",
+    agentType: "reviewer",
+  },
+  {
+    key: "create_paw_task",
+    keywords: ["handoff", "handoff file", "file", "no task", "missing task", "task created", "paw task", "create task", "didn't create"],
+    lessonText: "Create a PAW task (not a handoff file) for all findings requiring programmer follow-up. Reviewer findings without tasks are silently dropped.",
+    agentType: "reviewer",
+  },
+  {
+    key: "scope_review_to_diff",
+    keywords: ["out of scope", "unrelated", "tangent", "pre-existing", "existing code", "not part of", "scope"],
+    lessonText: "Limit review to the diff/changes in scope. Raising pre-existing issues outside the current change inflates rejection rates unfairly.",
+    agentType: "reviewer",
+  },
   // ── Architect patterns ───────────────────────────────────────────────────
   {
     key: "check_spec",

@@ -976,6 +976,34 @@ export function runMigrations(db: PawDB): void {
         confidence: 0.85,
         failureCount: 3,
       },
+      // Reviewer patterns — added 2026-03-07 to bootstrap reviewer learning
+      {
+        id: "seed-reviewer-actionable-feedback",
+        agentType: "reviewer",
+        patternName: "actionable_feedback",
+        lessonText: "Review comments must be specific and actionable — say exactly what to change and why. Vague feedback ('this is wrong') causes revision loops.",
+        taskCategory: null,
+        confidence: 0.85,
+        failureCount: 2,
+      },
+      {
+        id: "seed-reviewer-create-paw-task",
+        agentType: "reviewer",
+        patternName: "create_paw_task",
+        lessonText: "Create a PAW task (not a handoff file) for all findings requiring programmer follow-up. Reviewer findings without tasks are silently dropped.",
+        taskCategory: null,
+        confidence: 0.9,
+        failureCount: 3,
+      },
+      {
+        id: "seed-reviewer-scope-to-diff",
+        agentType: "reviewer",
+        patternName: "scope_review_to_diff",
+        lessonText: "Limit review to the diff/changes in scope. Raising pre-existing issues outside the current change inflates rejection rates unfairly.",
+        taskCategory: null,
+        confidence: 0.8,
+        failureCount: 2,
+      },
     ];
 
     for (const row of seedRows) {
