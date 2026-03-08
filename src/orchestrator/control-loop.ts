@@ -1300,10 +1300,13 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
   }
 
   // ── blocked_by dependency gate ─────────────────────────────────────────────────
-  // Defense-in-depth: skip spawning if any declared dependency is still active/pending.
+  // Defense-in-depth: skip spawning if any declared dependency is still unresolved.
   // Primary enforcement is in scanner.findReadyTasks (hasUnresolvedBlockers).
   // This catches edge cases where blocked_by was set after a workflow was already started
   // or where a task was re-queued after a crash while its blockers were re-activated.
+  // NOTE: Logic must stay aligned with scanner.ts TERMINAL_STATUSES / TERMINAL_WORK_STATES.
+  //   Terminal statuses: completed, closed, cancelled, rejected
+  //   Terminal work_states: completed, done
   if (req.taskId) {
     try {
       const blockerRaw = getRawDb()
@@ -1319,7 +1322,8 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
           const activeBlockers = getRawDb()
             .prepare(
               `SELECT id FROM tasks WHERE id IN (${placeholders}) ` +
-              `AND (status = 'active' OR work_state IN ('not_started', 'in_progress'))`
+              `AND status NOT IN ('completed', 'closed', 'cancelled', 'rejected') ` +
+              `AND (work_state IS NULL OR work_state NOT IN ('completed', 'done'))`
             )
             .all(...blockerIds) as Array<{ id: string }>;
 
