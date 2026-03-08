@@ -1055,6 +1055,7 @@ export function runMigrations(db: PawDB): void {
     status           TEXT NOT NULL DEFAULT 'active'
   )`);
   try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_discord_dm_users_discord_user_id ON discord_dm_users(discord_user_id)`); } catch {}
+  try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_discord_dm_users_client_id ON discord_dm_users(client_id)`); } catch {}
 
   db.run(sql`CREATE TABLE IF NOT EXISTS deployments (
     id              TEXT PRIMARY KEY,
@@ -1069,6 +1070,7 @@ export function runMigrations(db: PawDB): void {
   )`);
   try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_deployments_client_slug ON deployments(client_slug)`); } catch {}
   try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_deployments_status      ON deployments(status)`); } catch {}
+  try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_deployments_client_id   ON deployments(client_id)`); } catch {}
 }
 
 // ── Model Health circuit breaker table ──────────────────────────────────────

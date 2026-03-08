@@ -786,6 +786,7 @@ export const discordDmUsers = sqliteTable("discord_dm_users", {
   status: text("status").notNull().default("active"),
 }, (t) => ({
   idxDiscordUserId: index("idx_discord_dm_users_discord_user_id").on(t.discordUserId),
+  idxClientId: index("idx_discord_dm_users_client_id").on(t.clientId),
 }));
 
 // ─── Deployments ─────────────────────────────────────────────────────────────
@@ -807,6 +808,7 @@ export const deployments = sqliteTable("deployments", {
 }, (t) => ({
   idxClientSlug: index("idx_deployments_client_slug").on(t.clientSlug),
   idxStatus:     index("idx_deployments_status").on(t.status),
+  idxClientId:   index("idx_deployments_client_id").on(t.clientId),
 }));
 
 // ─── Memory Compliance Index ────────────────────────────────────────────────
