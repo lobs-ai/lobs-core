@@ -26,11 +26,13 @@ import { json, error, parseBody } from "./index.js";
 // ── Config (read from env at call time, not at import time) ──────────────────
 
 function cfg() {
+  const stateSecret = process.env.DISCORD_STATE_SECRET || process.env.GATEWAY_SECRET || "";
   return {
     clientId:        process.env.DISCORD_CLIENT_ID || "",
     clientSecret:    process.env.DISCORD_CLIENT_SECRET || "",
     callbackUrl:     process.env.DISCORD_OAUTH_CALLBACK_URL || "https://paw.engineering/api/discord/callback",
-    stateSecret:     process.env.DISCORD_STATE_SECRET || process.env.GATEWAY_SECRET || "changeme",
+    stateSecret,
+    stateSecretConfigured: stateSecret.length > 0,
     botPermissions:  "2048", // Send Messages
   };
 }
@@ -123,7 +125,10 @@ async function handleConnect(req: IncomingMessage, res: ServerResponse) {
 
   if (!clientId) return error(res, "client_id is required", 400);
 
-  const { clientId: botClientId, callbackUrl, botPermissions } = cfg();
+  const { clientId: botClientId, callbackUrl, botPermissions, stateSecretConfigured } = cfg();
+  if (!stateSecretConfigured) {
+    return error(res, "DISCORD_STATE_SECRET or GATEWAY_SECRET must be set", 503);
+  }
   if (!botClientId) return error(res, "DISCORD_CLIENT_ID not configured on server", 503);
 
   const nonce = randomUUID();
@@ -151,6 +156,10 @@ async function handleCallback(req: IncomingMessage, res: ServerResponse) {
 
   if (!code || !guildId) {
     return error(res, "Missing code or guild_id from Discord callback", 400);
+  }
+
+  if (!cfg().stateSecretConfigured) {
+    return error(res, "DISCORD_STATE_SECRET or GATEWAY_SECRET must be set", 503);
   }
 
   const statePayload = verifyState(state);
