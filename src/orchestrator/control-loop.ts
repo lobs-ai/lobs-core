@@ -1315,7 +1315,22 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
 
       if (blockerRaw?.blocked_by) {
         let blockerIds: string[] = [];
-        try { blockerIds = JSON.parse(blockerRaw.blocked_by); } catch {}
+        let parseOk = true;
+        try { blockerIds = JSON.parse(blockerRaw.blocked_by); } catch {
+          parseOk = false;
+        }
+
+        // Fail-safe: malformed blocked_by JSON → treat as blocked (requeue, don't spawn)
+        if (!parseOk || !Array.isArray(blockerIds)) {
+          log().error(
+            `[BLOCKED_BY_GATE] Task ${req.taskId.slice(0, 8)} has corrupt blocked_by JSON ` +
+            `(value: ${JSON.stringify(blockerRaw.blocked_by).slice(0, 80)}) — re-queuing without spawning`
+          );
+          const corruptProjectId = (taskCtx["projectId"] as string) ?? (taskCtx["project_id"] as string) ?? undefined;
+          decrementPendingSpawns(corruptProjectId, req.agentType);
+          requeueSpawn(req);
+          return;
+        }
 
         if (Array.isArray(blockerIds) && blockerIds.length > 0) {
           const placeholders = blockerIds.map(() => "?").join(", ");
@@ -1341,8 +1356,13 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
         }
       }
     } catch (e) {
-      log().error(`[BLOCKED_BY_GATE] Check failed for task ${req.taskId.slice(0, 8)}: ${e}`);
-      // Fail open: proceed with spawn on error so a bad blocked_by value doesn't stall the task
+      // Fail-safe: DB query or other unexpected error → requeue, don't spawn.
+      // Spawning on error would violate dependency ordering; better to retry later.
+      log().error(`[BLOCKED_BY_GATE] Check failed for task ${req.taskId.slice(0, 8)}: ${e} — re-queuing without spawning`);
+      const errorProjectId = (taskCtx["projectId"] as string) ?? (taskCtx["project_id"] as string) ?? undefined;
+      decrementPendingSpawns(errorProjectId, req.agentType);
+      requeueSpawn(req);
+      return;
     }
   }
 
