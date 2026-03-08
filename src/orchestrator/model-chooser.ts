@@ -15,8 +15,9 @@ export type ModelTier = "micro" | "small" | "medium" | "standard" | "strong";
 
 export const TIER_MODELS: Record<ModelTier, string[]> = {
   micro: [
-    // Local-first: keep the cheapest tier off cloud providers.
-    "lmstudio/qwen/qwen3.5-35b-a3b",
+    // Local-first would be ideal but qwen never makes tool calls (10+ stalls today).
+    // Use Claude Haiku as reliable micro-tier fallback.
+    "anthropic/claude-haiku-4-5",
   ],
   small: [
     "anthropic/claude-sonnet-4-6",
