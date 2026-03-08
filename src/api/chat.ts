@@ -120,11 +120,13 @@ export async function handleChatRequest(
         // Spawn through the main agent so the chat inherits the user's
         // personality (SOUL.md, IDENTITY.md, USER.md, workspace files).
         // The task prompt reinforces this is a web chat context.
+        // Spawn as a standalone session (not under main) to prevent
+        // the main agent from reacting to chat subagent completions.
         const spawnResult = await gatewayInvoke("sessions_spawn", {
           task: `You are chatting with your human through the PAW web dashboard. Use your personality from SOUL.md and your identity from IDENTITY.md. Be yourself — conversational, helpful, and in-character. Read your workspace files to remember who you are and who you're talking to.`,
           mode: "session",
           model: sessionModel,
-          thread: true,
+          label: `paw-chat-${Date.now()}`,
         });
 
         const ocSessionKey = spawnResult?.childSessionKey ?? spawnResult?.sessionKey;
