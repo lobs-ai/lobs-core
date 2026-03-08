@@ -232,6 +232,34 @@ ${body.text}`;
       }
       const rowCheck = db.select({ id: tasks.id }).from(tasks).where(eq(tasks.id, id)).get();
       if (!rowCheck) return error(res, "Not found", 404);
+
+      // Circular dependency detection via BFS
+      // Reject if adding these blockers would cause a cycle (including self-reference)
+      if (Array.isArray(blockedBy) && blockedBy.length > 0) {
+        // Self-reference check
+        if (blockedBy.includes(id)) {
+          return error(res, `Circular dependency: task ${id} cannot block itself`, 400);
+        }
+        // BFS: traverse from each proposed blocker; if we reach `id`, it's a cycle
+        const visited = new Set<string>();
+        const queue: string[] = [...blockedBy];
+        while (queue.length > 0) {
+          const current = queue.shift()!;
+          if (current === id) {
+            return error(res, `Circular dependency detected: adding these blockers would create a dependency cycle`, 400);
+          }
+          if (visited.has(current)) continue;
+          visited.add(current);
+          // Fetch this task's blocked_by to continue traversal
+          const dep = db.select({ blockedBy: tasks.blockedBy }).from(tasks).where(eq(tasks.id, current)).get();
+          if (dep && Array.isArray(dep.blockedBy)) {
+            for (const depId of dep.blockedBy as string[]) {
+              if (!visited.has(depId)) queue.push(depId);
+            }
+          }
+        }
+      }
+
       db.update(tasks).set({
         blockedBy: blockedBy as string[] | null,
         updatedAt: new Date().toISOString(),
