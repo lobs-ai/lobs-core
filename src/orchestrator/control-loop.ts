@@ -1051,6 +1051,96 @@ function incrementAndCheckSpawnCount(taskId: string): boolean {
   }
 }
 
+/**
+ * Detect whether a reviewer task is "complex" and needs scope bounding.
+ *
+ * Triggers phased review when:
+ * - 6+ distinct file paths mentioned in title or notes (>5 files)
+ * - 2+ distinct repo paths (multiple repos)
+ * - Simple/small reviews (CI, preflight, lint) are never flagged.
+ *
+ * Does NOT trigger for known simple review patterns even if notes are long.
+ */
+function detectComplexReview(taskTitle: string, taskNotes: string): boolean {
+  const combined = `${taskTitle}\n${taskNotes}`;
+
+  // Never trigger for explicitly simple review types
+  const simplePatterns = [
+    /\bCI\b.*check/i,
+    /\bpreflight\b/i,
+    /\blint\b/i,
+    /\bformat\b.*check/i,
+    /\btype.?check\b/i,
+    /\bsmoke.?test\b/i,
+  ];
+  if (simplePatterns.some(p => p.test(taskTitle))) return false;
+
+  // Count distinct file paths (lines or mentions matching /path/to/file.ext patterns)
+  const filePathMatches = combined.match(/(?:^|\s|`|'|")((?:~|\/[\w./-]+|\.\/?[\w./-]+)[\w-]+\.\w{1,6})(?:\s|`|'|"|$)/gm) ?? [];
+  const uniqueFiles = new Set(filePathMatches.map(m => m.trim()));
+  if (uniqueFiles.size > 5) return true;
+
+  // Count distinct repo paths (directories that look like repo roots)
+  const repoPathMatches = combined.match(/(?:~\/[\w/-]+|\/Users\/\w+\/[\w/-]+)/g) ?? [];
+  const uniqueRepos = new Set(
+    repoPathMatches
+      .map(p => p.replace(/\/[^/]+\.\w{1,6}$/, "").replace(/\/$/, "")) // strip filenames
+      .filter(p => p.length > 5)
+  );
+  if (uniqueRepos.size >= 2) return true;
+
+  // Long notes with code blocks (strong signal of multi-file scope)
+  const codeBlockCount = (combined.match(/```/g) ?? []).length / 2;
+  if (codeBlockCount >= 3 && taskNotes.length > 1500) return true;
+
+  return false;
+}
+
+/**
+ * Build phased review prompt injection for complex reviewer tasks.
+ *
+ * Instructs the reviewer to:
+ * 1. Work in three bounded phases (core logic → security → tests)
+ * 2. Write a partial checkpoint after each phase so value is preserved
+ *    even if the session is killed by the watchdog before completing all phases.
+ *
+ * The checkpoint path is task-scoped so checkpoints from different tasks don't collide.
+ */
+function buildPhasedReviewInstructions(checkpointBasePath: string): string {
+  return `
+
+⚠️ SCOPE BOUNDING — PHASED REVIEW REQUIRED
+
+This is a complex review spanning multiple files. To stay within the watchdog window,
+work in EXACTLY THREE phases and checkpoint after each one:
+
+**Phase 1 — Core Logic** (read only core implementation files, skip tests and security configs)
+- Focus: correctness, data flow, error handling, business logic
+- After reading 5 files OR completing Phase 1 analysis, write findings to:
+  ${checkpointBasePath}-phase1.md
+- Format: markdown with ## Phase 1: Core Logic header and findings list
+
+**Phase 2 — Security** (read only security-sensitive files: auth, input validation, secrets handling)
+- Focus: injection risks, auth bypass, secret exposure, IDOR
+- After completing, append to or write: ${checkpointBasePath}-phase2.md
+- Format: markdown with ## Phase 2: Security header and findings list
+
+**Phase 3 — Tests** (read only test files)
+- Focus: coverage gaps, assertion quality, edge cases not tested
+- After completing, write: ${checkpointBasePath}-phase3.md
+- Format: markdown with ## Phase 3: Tests header and findings list
+
+**CHECKPOINT RULE**: After reading your FIRST 5 files (regardless of phase), immediately write
+whatever findings you have so far to ${checkpointBasePath}-phase1.md — even if incomplete.
+This ensures zero value is lost if the session is killed early.
+
+**FINAL STEP**: Compile all phases into a single review in the standard output location.
+If killed before the final step, the phase checkpoint files contain your partial work.
+
+DO NOT try to read all files before writing — checkpoint early and often.
+`;
+}
+
 async function processSpawnRequest(req: SpawnRequest): Promise<void> {
   if (!gatewayToken) {
     throw new Error("No gateway auth token configured — cannot spawn agents");
@@ -1093,6 +1183,22 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
   }
   const taskContext = buildTaskContext({ projectId: (taskCtx["project_id"] as string) ?? undefined, agentType: req.agentType });
 
+  // ── Reviewer scope bounding (phased review) ───────────────────────────────
+  // When a reviewer task is "complex" (>5 file paths or spans multiple repos),
+  // inject phased review instructions at spawn time so the session stays within
+  // the watchdog window. The reviewer works in bounded phases and checkpoints
+  // partial findings so value is preserved even if the session is killed early.
+  // Simple reviews (CI, preflight, small diffs) are left untouched.
+  let reviewerPhasedInjection = "";
+  if (req.agentType === "reviewer") {
+    const isComplexReview = detectComplexReview(taskTitle, taskNotes);
+    if (isComplexReview) {
+      const checkpointPath = `/Users/lobs/lobs-shared-memory/review-checkpoints/${req.taskId?.slice(0, 8) ?? "unknown"}`;
+      reviewerPhasedInjection = buildPhasedReviewInstructions(checkpointPath);
+      log().info(`[REVIEWER_SCOPE] Complex review detected for task ${req.taskId?.slice(0, 8) ?? "?"} — injecting phased review instructions (checkpoint=${checkpointPath})`);
+    }
+  }
+
   // ── Learning injection ─────────────────────────────────────────────────────
   // Inject relevant past learnings into the agent prompt before dispatch.
   // Per design doc: prefix-style, REMINDER framing, max 3 learnings.
@@ -1107,7 +1213,7 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
     log().warn(`[LEARNING] Prompt injection failed: ${e}`);
   }
 
-  const finalPrompt = taskPrompt + contextBlock + learningInjection + architectReminder + gitReminder + taskContext;
+  const finalPrompt = taskPrompt + contextBlock + reviewerPhasedInjection + learningInjection + architectReminder + gitReminder + taskContext;
 
   // ── Artifact pre-flight check ──────────────────────────────────────────────
   // If the task declares expected_artifacts, check whether output files already
