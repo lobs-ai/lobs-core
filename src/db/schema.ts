@@ -83,6 +83,11 @@ export const tasks = sqliteTable("tasks", {
   // compliant regardless of this flag. Setting this flag on a task forces compliance
   // even when the project itself is not marked compliant.
   complianceRequired: integer("compliance_required", { mode: "boolean" }).notNull().default(false),
+  // Sensitivity flag set by sensitivity_classifier.py (synced from lobs-server).
+  // isCompliant=true means the task contains sensitive/regulated data (FERPA, HIPAA)
+  // and must ONLY be processed by a local model — never a cloud model.
+  // Default 0 (not sensitive / not yet classified). Enforcement in control-loop.ts.
+  isCompliant: integer("is_compliant", { mode: "boolean" }).notNull().default(false),
   // Crash-orphan counter: how many times this task's worker_run was killed by a
   // gateway crash rather than a genuine agent failure. Used by the spawn guard:
   //   effective_fail_count = spawn_count - crash_count

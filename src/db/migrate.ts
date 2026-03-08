@@ -693,6 +693,12 @@ export function runMigrations(db: PawDB): void {
     `);
   } catch {}
 
+  // ── Task sensitivity flag from lobs-server sensitivity_classifier (idempotent) ──
+  // is_compliant=1 means the task contains FERPA/HIPAA-sensitive data and must only
+  // run on a local model. Synced from lobs-server when the task sync gap is closed.
+  // Enforcement gate in control-loop.ts checks this alongside compliance_required.
+  try { db.run(sql`ALTER TABLE tasks ADD COLUMN is_compliant INTEGER NOT NULL DEFAULT 0`); } catch {}
+
   // ── Pre-flight artifact check: expected_artifacts column (idempotent) ────────
   // Added: 2026-03-07 — JSON array of ArtifactSpec objects declared by the task.
   // When set, processSpawnRequest checks whether expected output files already exist

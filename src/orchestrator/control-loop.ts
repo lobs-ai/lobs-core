@@ -1338,19 +1338,32 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
       projectCompliant = Boolean(proj?.compliance_required);
     }
 
-    // Check task-level compliance (either explicit flag OR project cascade)
+    // Check task-level compliance (either explicit flag OR project cascade OR sensitivity classifier)
     let taskCompliant = projectCompliant; // inherit from project by default
+    let sensitivityFlagged = false;
     if (!taskCompliant && spawnTaskId) {
       const taskRow = rawDb.prepare(
-        `SELECT compliance_required FROM tasks WHERE id = ?`
-      ).get(spawnTaskId) as { compliance_required: number | null } | undefined;
+        `SELECT compliance_required, is_compliant FROM tasks WHERE id = ?`
+      ).get(spawnTaskId) as { compliance_required: number | null; is_compliant: number | null } | undefined;
       taskCompliant = Boolean(taskRow?.compliance_required);
+      // is_compliant=1 is set by sensitivity_classifier.py (synced from lobs-server).
+      // A classified-sensitive task must never reach a cloud model tier — enforce here.
+      if (!taskCompliant && Boolean(taskRow?.is_compliant)) {
+        taskCompliant = true;
+        sensitivityFlagged = true;
+        log().info(
+          `[COMPLIANCE] Task ${spawnTaskId?.slice(0, 8) ?? "?"} flagged sensitive by classifier ` +
+          `(is_compliant=1) — enforcing local-model-only routing.`
+        );
+      }
     }
 
     if (taskCompliant) {
       complianceReason = projectCompliant
         ? `project ${spawnProjectId?.slice(0, 8) ?? "?"} compliance_required=1 (cascaded to task)`
-        : `task ${spawnTaskId?.slice(0, 8) ?? "?"} compliance_required=1`;
+        : sensitivityFlagged
+          ? `task ${spawnTaskId?.slice(0, 8) ?? "?"} is_compliant=1 (sensitivity classifier — FERPA/HIPAA)`
+          : `task ${spawnTaskId?.slice(0, 8) ?? "?"} compliance_required=1`;
 
       // Look up the configured local compliance model
       const cmRow = rawDb.prepare(
