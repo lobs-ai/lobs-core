@@ -813,7 +813,25 @@ function autoCloseSucceededTasks(): void {
     run_count: number;
     last_run_at: string;
     last_started_at: string | null;
+  }> as Array<{
+    id: string;
+    title: string;
+    agent: string;
+    project_id: string | null;
+    repo_path: string | null;
+    run_count: number;
+    last_run_at: string;
+    last_started_at: string | null;
+    expected_artifacts?: string | null;
   }>;
+
+  // Enrich candidates with expected_artifacts (not in the JOIN above to keep it simple)
+  for (const candidate of candidates) {
+    try {
+      const row = db.prepare(`SELECT expected_artifacts FROM tasks WHERE id = ?`).get(candidate.id) as { expected_artifacts: string | null } | undefined;
+      candidate.expected_artifacts = row?.expected_artifacts ?? null;
+    } catch { /* ignore */ }
+  }
 
   if (candidates.length === 0) return;
 
@@ -851,9 +869,13 @@ function autoCloseSucceededTasks(): void {
       : null;
 
     // ── Post-success artifact validation ──────────────────────────────────
+    let expectedArtifacts: unknown = null;
+    if (task.expected_artifacts) {
+      try { expectedArtifacts = JSON.parse(task.expected_artifacts); } catch { /* ignore */ }
+    }
     let validation: ReturnType<typeof validatePostSuccessArtifacts>;
     try {
-      validation = validatePostSuccessArtifacts(task.agent, task.repo_path, durationMs);
+      validation = validatePostSuccessArtifacts(task.agent, task.repo_path, durationMs, expectedArtifacts);
     } catch (e) {
       // Fail open: on error, close normally rather than blocking completions
       log().error(`[AUTO-CLOSE] Artifact validation error for task ${task.id.slice(0, 8)}: ${e}`);
@@ -1174,7 +1196,9 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
   const repoPath = (projectCtx["repo_path"] as string) || undefined;
   const gitReminder = (req.agentType === "programmer" || req.agentType === "architect") && repoPath
     ? `\n\n⚠️ IMPORTANT: When you are done, you MUST run: git add -A && git commit -m "agent(${req.agentType}): <brief summary>"\nDo NOT finish without committing your changes.`
-    : "";
+    : req.agentType === "writer"
+      ? `\n\n⚠️ IMPORTANT: When you are done, you MUST commit and push all output files, then verify the push succeeded (see AGENTS.md Final Step). Push failure is a task failure — do NOT report success if the push failed or if the push verification shows a SHA mismatch.`
+      : "";
   const architectReminder = req.agentType === "architect"
     ? `\n\n⚠️ SCOPE REMINDER: You are an architect agent. Your job is design-only. Produce a design doc or ADR. Do NOT write implementation code, do NOT create or modify source files beyond documentation. Stop as soon as you have a clear design artifact.`
     : "";

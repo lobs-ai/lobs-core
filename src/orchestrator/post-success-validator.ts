@@ -40,14 +40,16 @@ export type PostSuccessValidationResult =
 /**
  * Validate that a succeeded task actually produced output.
  *
- * @param agentType   agent role ("programmer" | "writer" | etc.)
- * @param repoPath    project repo path (from projects.repo_path), may be null
- * @param durationMs  how long the last run took (ended_at - started_at in ms), null if unknown
+ * @param agentType         agent role ("programmer" | "writer" | etc.)
+ * @param repoPath          project repo path (from projects.repo_path), may be null
+ * @param durationMs        how long the last run took (ended_at - started_at in ms), null if unknown
+ * @param expectedArtifacts parsed expected_artifacts from the task (ArtifactSpec[]), null to use heuristics
  */
 export function validatePostSuccessArtifacts(
   agentType: string | null,
   repoPath: string | null,
   durationMs: number | null,
+  expectedArtifacts: unknown = null,
 ): PostSuccessValidationResult {
   const agent = agentType ?? "unknown";
 
@@ -65,9 +67,19 @@ export function validatePostSuccessArtifacts(
     hasArtifacts = result.found;
     artifactDetail = result.detail;
   } else if (agent === "writer") {
-    const result = checkWriterArtifacts();
-    hasArtifacts = result.found;
-    artifactDetail = result.detail;
+    // If the task declared expected_artifacts, verify those specific paths exist.
+    // This catches false-success reports where git push failed (file may not be on remote,
+    // but more importantly it didn't end up in the expected location at all).
+    const specPaths = extractExpectedPaths(expectedArtifacts);
+    if (specPaths.length > 0) {
+      const result = checkExpectedArtifactPaths(specPaths);
+      hasArtifacts = result.found;
+      artifactDetail = result.detail;
+    } else {
+      const result = checkWriterArtifacts();
+      hasArtifacts = result.found;
+      artifactDetail = result.detail;
+    }
   }
 
   if (!hasArtifacts) {
@@ -187,4 +199,47 @@ function checkAnyRecentFiles(baseDir: string | null): { found: boolean; detail: 
   } catch { /* ignore */ }
 
   return { found: false, detail: "no recent file activity found" };
+}
+
+/**
+ * Extract path strings from an expected_artifacts spec (ArtifactSpec[]).
+ * Returns empty array if the input is not a valid spec array.
+ */
+function extractExpectedPaths(raw: unknown): string[] {
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  const paths: string[] = [];
+  for (const spec of raw) {
+    if (spec && typeof spec === "object" && typeof (spec as Record<string, unknown>)["path"] === "string") {
+      paths.push((spec as Record<string, unknown>)["path"] as string);
+    }
+  }
+  return paths;
+}
+
+/**
+ * Check that specific expected artifact paths exist on disk.
+ * Used for writer tasks that declare expected_artifacts in the task spec.
+ */
+function checkExpectedArtifactPaths(paths: string[]): { found: boolean; detail: string } {
+  const home = process.env["HOME"] ?? "";
+  const present: string[] = [];
+  const missing: string[] = [];
+
+  for (const p of paths) {
+    const resolved = p.replace(/^~/, home);
+    if (existsSync(resolved)) {
+      present.push(p);
+    } else {
+      missing.push(p);
+    }
+  }
+
+  if (missing.length > 0 && present.length === 0) {
+    return { found: false, detail: `expected artifacts missing: ${missing.join(", ")}` };
+  }
+  if (missing.length > 0) {
+    // Some present, some missing — treat as found but note partial
+    return { found: true, detail: `${present.length}/${paths.length} expected artifacts present; missing: ${missing.join(", ")}` };
+  }
+  return { found: true, detail: `all ${paths.length} expected artifact(s) present: ${present.join(", ")}` };
 }
