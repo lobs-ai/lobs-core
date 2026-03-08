@@ -18,6 +18,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { createHmac } from "node:crypto";
 import { getDb } from "../db/connection.js";
+import { encryptSecret } from "../services/crypto.js";
 import { discordGuilds, discordDmUsers, deployments } from "../db/schema.js";
 import { eq, and } from "drizzle-orm";
 import { json, error, parseBody } from "./index.js";
@@ -347,11 +348,22 @@ async function handleListDeployments(req: IncomingMessage, res: ServerResponse) 
   json(res, rows);
 }
 
-// ── Deployments: get one (includes secret — internal use only) ───────────────
+// ── Deployments: get one ─────────────────────────────────────────────────────
+// NOTE: gatewaySecret is intentionally omitted — it is write-only (PUT only).
 
 async function handleGetDeployment(req: IncomingMessage, res: ServerResponse, slug: string) {
   const db = getDb();
-  const row = db.select().from(deployments)
+  const row = db.select({
+    id:            deployments.id,
+    clientSlug:    deployments.clientSlug,
+    clientId:      deployments.clientId,
+    gatewayUrl:    deployments.gatewayUrl,
+    containerName: deployments.containerName,
+    isDemo:        deployments.isDemo,
+    status:        deployments.status,
+    provisionedAt: deployments.provisionedAt,
+    // gatewaySecret intentionally excluded — write-only field
+  }).from(deployments)
     .where(eq(deployments.clientSlug, slug))
     .get();
   if (!row) return error(res, `No deployment found for client_slug=${slug}`, 404);
@@ -380,10 +392,14 @@ async function handleUpsertDeployment(req: IncomingMessage, res: ServerResponse,
   const now = new Date().toISOString();
 
   if (existing) {
+    // Encrypt new secret if provided; otherwise keep existing encrypted value
+    const newSecret = body.gateway_secret != null
+      ? encryptSecret(body.gateway_secret)
+      : existing.gatewaySecret;
     db.update(deployments).set({
       clientId:      body.client_id      ?? existing.clientId,
       gatewayUrl:    body.gateway_url    ?? existing.gatewayUrl,
-      gatewaySecret: body.gateway_secret ?? existing.gatewaySecret,
+      gatewaySecret: newSecret,
       containerName: body.container_name ?? existing.containerName,
       isDemo:        body.is_demo        ?? existing.isDemo,
       status:        body.status         ?? existing.status,
@@ -395,7 +411,7 @@ async function handleUpsertDeployment(req: IncomingMessage, res: ServerResponse,
       clientSlug:    slug,
       clientId:      body.client_id      ?? null,
       gatewayUrl:    body.gateway_url,
-      gatewaySecret: body.gateway_secret ?? null,
+      gatewaySecret: encryptSecret(body.gateway_secret ?? null),
       containerName: body.container_name ?? `paw-client-${slug}`,
       isDemo:        body.is_demo        ?? false,
       provisionedAt: now,
@@ -403,7 +419,17 @@ async function handleUpsertDeployment(req: IncomingMessage, res: ServerResponse,
     }).run();
   }
 
-  const updated = db.select().from(deployments)
+  // Return updated row without the secret — gatewaySecret is write-only
+  const updated = db.select({
+    id:            deployments.id,
+    clientSlug:    deployments.clientSlug,
+    clientId:      deployments.clientId,
+    gatewayUrl:    deployments.gatewayUrl,
+    containerName: deployments.containerName,
+    isDemo:        deployments.isDemo,
+    status:        deployments.status,
+    provisionedAt: deployments.provisionedAt,
+  }).from(deployments)
     .where(eq(deployments.clientSlug, slug))
     .get();
   json(res, updated);

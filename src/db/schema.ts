@@ -798,6 +798,7 @@ export const deployments = sqliteTable("deployments", {
   clientSlug: text("client_slug").notNull().unique(),
   clientId: text("client_id"),
   gatewayUrl: text("gateway_url").notNull(),
+  /** SENSITIVE: stored encrypted at rest; never expose in API responses. */
   gatewaySecret: text("gateway_secret"),
   containerName: text("container_name"),
   isDemo: integer("is_demo", { mode: "boolean" }).notNull().default(false),
