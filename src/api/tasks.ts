@@ -366,8 +366,14 @@ ${body.text}`;
         // Pre-flight artifact check: JSON array of ArtifactSpec objects
         expected_artifacts: "expectedArtifacts",
       };
+      // Fields that must be JSON-stringified before persisting
+      const jsonFields = new Set(["expected_artifacts", "blocked_by"]);
       for (const [apiKey, schemaKey] of Object.entries(fieldMap)) {
-        if (apiKey in body) update[schemaKey] = body[apiKey];
+        if (apiKey in body) {
+          update[schemaKey] = jsonFields.has(apiKey) && body[apiKey] != null
+            ? JSON.stringify(body[apiKey])
+            : body[apiKey];
+        }
       }
       db.update(tasks).set(update).where(eq(tasks.id, id)).run();
       const updated = db.select().from(tasks).where(eq(tasks.id, id)).get();
