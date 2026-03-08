@@ -996,7 +996,6 @@ export function runMigrations(db: PawDB): void {
     // Non-fatal: seeding failures should not block startup
     console.warn("[LEARNING] Seed insert failed (non-fatal):", e);
   }
-}
 
   // ── PAW Message Routing: Discord tables (idempotent) ────────────────────────
   // Added: 2026-03-07 — central Discord bot routing.
@@ -1042,6 +1041,7 @@ export function runMigrations(db: PawDB): void {
   )`);
   try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_deployments_client_slug ON deployments(client_slug)`); } catch {}
   try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_deployments_status      ON deployments(status)`); } catch {}
+}
 
 // ── Model Health circuit breaker table ──────────────────────────────────────
 // Added: 2026-03-04 — tracks (model, agent_type) circuit state for dispatch routing

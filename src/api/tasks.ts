@@ -11,6 +11,7 @@ import { tasks, projects } from "../db/schema.js";
 import { json, error, parseBody, parseQuery } from "./index.js";
 import { readFileSync as _readFileSync } from "node:fs";
 import { LearningService } from "../services/learning.js";
+import { classifyAndLog } from "../services/task-sensitivity.js";
 
 const learningSvc = new LearningService();
 
@@ -189,6 +190,7 @@ ${body.text}`;
     for (const t of body.tasks) {
       if (!t.title?.trim()) continue;
       const taskId = randomUUID();
+      const braindumpIsCompliant = classifyAndLog(taskId, t.title, t.notes ?? "");
       db.insert(tasks).values({
         id: taskId,
         title: t.title,
@@ -197,6 +199,7 @@ ${body.text}`;
         notes: t.notes,
         agent: t.agent,
         modelTier: t.model_tier ?? "standard",
+        isCompliant: braindumpIsCompliant,
         createdAt: now,
         updatedAt: now,
       }).run();
@@ -320,6 +323,9 @@ ${body.text}`;
         compliance_required: "complianceRequired",
         // Also accept the Nexus UI convention
         compliant: "complianceRequired",
+        // Sensitivity classifier flag: set by task-sensitivity.ts at creation time
+        // or synced externally from lobs-server via PATCH. Forces local-model routing.
+        is_compliant: "isCompliant",
         // Pre-flight artifact check: JSON array of ArtifactSpec objects
         expected_artifacts: "expectedArtifacts",
       };
@@ -365,6 +371,17 @@ ${body.text}`;
     if (!body.title) return error(res, "title is required");
     const taskId = (body.id as string) ?? randomUUID();
     const now = new Date().toISOString();
+
+    // ── Sensitivity classification (Tier 1 regex, <1ms) ──────────────────
+    // Auto-classify the task based on FERPA/HIPAA/PII patterns in title+notes.
+    // If the caller already sets is_compliant=1 (e.g., synced from lobs-server),
+    // honour their value. Otherwise, run the classifier.
+    // is_compliant=1 forces local-model-only routing in the compliance gate.
+    const callerIsCompliant = body.is_compliant === 1 || body.is_compliant === true;
+    const autoIsCompliant = callerIsCompliant
+      ? true
+      : classifyAndLog(taskId, body.title as string, (body.notes as string) ?? "");
+
     db.insert(tasks).values({
       id: taskId,
       title: body.title as string,
@@ -376,6 +393,7 @@ ${body.text}`;
       modelTier: (body.model_tier as string) ?? "standard",
       blockedBy: Array.isArray(body.blocked_by) ? body.blocked_by as string[] : null,
       complianceRequired: Boolean(body.compliance_required),
+      isCompliant: autoIsCompliant,
       expectedArtifacts: body.expected_artifacts != null ? JSON.stringify(body.expected_artifacts) : undefined,
       createdAt: now,
       updatedAt: now,
