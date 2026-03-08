@@ -655,7 +655,7 @@ export class WorkflowExecutor {
               ` (${task.title.slice(0, 60)})\n` +
               triggerResult.reason
             );
-            queueReviewerFollowup(run.taskId!);
+            queueReviewerFollowup(run.taskId!, triggerResult);
           } else {
             log().info(
               `[REVIEW-GATE] ⏭  Skipping reviewer for task ${task.id.slice(0, 8)}` +

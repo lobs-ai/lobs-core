@@ -1,24 +1,33 @@
 /**
  * review-triggers.ts — Selective review trigger detection for the PAW orchestrator.
  *
- * Implements the criteria from agent-code-review-workflow.md:
+ * Implements the criteria from ADR-0013 (Systematic Agent Code Review):
  *   1. LARGE_REFACTOR    — >500 lines changed (added + removed)
  *   2. NEW_API_ENDPOINT  — new route handler detected in diff content
  *   3. DB_SCHEMA_CHANGE  — migration, model, or schema file modified
  *   4. SECURITY          — auth/token/crypto/permission-related changes
  *   5. TEST_SUITE        — >20 new test functions added
  *
- * Usage (from post-completion hook in engine.ts):
+ * Diff analysis is performed against HEAD~1..HEAD (post-commit) or staged
+ * changes. Non-sensitive diffs skip the mandatory reviewer path entirely.
+ *
+ * Optional: if sensitivity_classifier.py is available in lobs-server, the
+ * full diff is also run through the tier-1 regex classifier to catch FERPA/
+ * HIPAA/PII patterns. This is a best-effort enhancement; failures fall back
+ * to the built-in pattern matching above.
+ *
+ * Usage (from post-completion hooks in engine.ts and subagent.ts):
  *
  *   import { shouldTriggerReview, ReviewTriggerResult } from "../orchestrator/review-triggers.js";
  *
  *   const result = shouldTriggerReview({ repoPath, taskId, taskTitle });
  *   if (result.shouldReview) {
- *     queueReviewerFollowup(taskId);
+ *     queueReviewerFollowup(taskId, result);
  *   }
  */
 
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { log } from "../util/logger.js";
 
 // ---------------------------------------------------------------------------
@@ -27,6 +36,58 @@ import { log } from "../util/logger.js";
 
 const LINES_CHANGED_THRESHOLD = 500;   // LARGE_REFACTOR
 const NEW_TESTS_THRESHOLD = 20;         // TEST_SUITE
+
+// ---------------------------------------------------------------------------
+// Optional: sensitivity_classifier.py path (lobs-server)
+// Used for Tier-1 regex classification of diff content (FERPA/HIPAA/PII).
+// ---------------------------------------------------------------------------
+
+const SENSITIVITY_CLASSIFIER_PATH = `${process.env.HOME}/lobs-server/app/services/sensitivity_classifier.py`;
+
+/**
+ * Run the sensitivity_classifier.py Tier-1 regex check against diff content.
+ * Returns true if any SENSITIVE pattern matches (FERPA, HIPAA, PII, credentials).
+ * Returns null if the classifier is unavailable (fall through to built-in patterns).
+ *
+ * Uses a lightweight inline Python invocation of just the Tier-1 regex patterns
+ * to avoid the async/aiohttp overhead of the full LLM classification pipeline.
+ */
+function classifyDiffWithPython(diffContent: string): boolean | null {
+  if (!existsSync(SENSITIVITY_CLASSIFIER_PATH)) {
+    return null; // classifier not available — fall back to built-in patterns
+  }
+
+  // Inline Python script: import SENSITIVE_PATTERNS from classifier and run tier-1 regex.
+  // Writes "SENSITIVE" or "SAFE" to stdout.
+  const inlineScript = `
+import sys, re, os
+sys.path.insert(0, os.path.dirname("${SENSITIVITY_CLASSIFIER_PATH}"))
+from sensitivity_classifier import SENSITIVE_PATTERNS
+text = sys.stdin.read()
+for pat, label in SENSITIVE_PATTERNS:
+    if re.search(pat, text, re.IGNORECASE | re.MULTILINE):
+        print(f"SENSITIVE:{label}")
+        sys.exit(0)
+print("SAFE")
+`.trim();
+
+  try {
+    const result = spawnSync("python3", ["-c", inlineScript], {
+      input: diffContent.slice(0, 50_000), // cap to avoid memory issues
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+
+    if (result.status !== 0 || result.error) {
+      return null; // classifier failed — fall back
+    }
+
+    const output = (result.stdout ?? "").trim();
+    return output.startsWith("SENSITIVE");
+  } catch {
+    return null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Pattern matchers
@@ -263,12 +324,29 @@ export function shouldTriggerReview(input: ReviewTriggerInput): ReviewTriggerRes
       if (!securityChangeFound) {
         const pathSensitive = SECURITY_PATTERNS.some(p => p.test(path));
         const contentSensitive = SECURITY_PATTERNS.some(p => p.test(diff));
-        if (pathSensitive || contentSensitive) {
+
+        // Optional: run sensitivity_classifier.py Tier-1 regex for FERPA/HIPAA/PII
+        // patterns not covered by the built-in SECURITY_PATTERNS above.
+        let classifierSensitive = false;
+        let classifierDetail = "";
+        if (!pathSensitive && !contentSensitive) {
+          const classifierResult = classifyDiffWithPython(diff);
+          if (classifierResult === true) {
+            classifierSensitive = true;
+            classifierDetail = "sensitivity_classifier.py tier-1 regex (FERPA/HIPAA/PII)";
+          }
+        }
+
+        if (pathSensitive || contentSensitive || classifierSensitive) {
           securityChangeFound = true;
           matched.push("security");
-          reasons.push(
-            `security: ${pathSensitive ? `file path ${path} matches security pattern` : `diff content in ${path} matches security pattern`}`
-          );
+          if (classifierSensitive) {
+            reasons.push(`security: ${path} flagged by ${classifierDetail}`);
+          } else {
+            reasons.push(
+              `security: ${pathSensitive ? `file path ${path} matches security pattern` : `diff content in ${path} matches security pattern`}`
+            );
+          }
         }
       }
 

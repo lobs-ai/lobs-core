@@ -13,6 +13,7 @@ import { log } from "../util/logger.js";
 import { ReflectionService } from "../services/reflection.js";
 import { readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { shouldTriggerReview, type ReviewTriggerResult } from "../orchestrator/review-triggers.js";
 
 export function registerSubagentHooks(api: OpenClawPluginApi): void {
 
@@ -500,6 +501,33 @@ function updateTaskFromEnd(taskId: string, succeeded: boolean, reason?: string, 
     }).where(eq(tasks.id, taskId)).run();
     log().info(`[PAW] Task ${taskId.slice(0, 8)} work_state=done (workflow will finalize status)`);
 
+    // Diff-based auto-review trigger (ADR-0013).
+    // Analyze the git diff for security-sensitive patterns. If any trigger
+    // fires, queue a mandatory reviewer task before considering this done.
+    // Non-sensitive diffs pass through without spawning a reviewer.
+    if (agentType === "programmer") {
+      const triggerResult = shouldTriggerReview({
+        repoPath: scopePath ?? null,
+        taskId,
+        taskTitle: task?.title ?? taskId,
+      });
+
+      if (triggerResult.shouldReview) {
+        log().info(
+          `[REVIEW-GATE] ✅ Diff triggers auto-review for task ${taskId.slice(0, 8)}` +
+          ` (${(task?.title ?? "").slice(0, 60)})\n` +
+          triggerResult.reason
+        );
+        queueReviewerFollowup(taskId, triggerResult);
+      } else {
+        log().info(
+          `[REVIEW-GATE] ⏭  No review needed for task ${taskId.slice(0, 8)}` +
+          ` (${(task?.title ?? "").slice(0, 60)})\n` +
+          triggerResult.reason
+        );
+      }
+    }
+
     // Route to triage session for follow-up decisions
     triageWorkerCompletion(taskId, sessionKey!, agentType ?? "unknown", true).catch(e => {
       log().warn(`[PAW] Triage spawn failed for task ${taskId.slice(0, 8)}: ${e}`);
@@ -522,7 +550,18 @@ function updateTaskFromEnd(taskId: string, succeeded: boolean, reason?: string, 
   }
 }
 
-export function queueReviewerFollowup(taskId: string): void {
+/**
+ * Queue a mandatory reviewer task for a completed programmer task.
+ *
+ * When triggerResult is provided (diff-based trigger from ADR-0013), the reviewer
+ * notes are enriched with which sensitivity categories fired so the reviewer
+ * knows where to focus. Scope bounding is always included to prevent ghost sessions.
+ *
+ * Called from:
+ *   - updateTaskFromEnd (subagent completion path) — with triggerResult
+ *   - workflow/engine.ts (workflow completion path) — without triggerResult (legacy)
+ */
+export function queueReviewerFollowup(taskId: string, triggerResult?: ReviewTriggerResult): void {
   const db = getDb();
   const now = new Date().toISOString();
   const sourceTask = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
@@ -550,11 +589,39 @@ export function queueReviewerFollowup(taskId: string): void {
     return;
   }
 
+  // Build focused review instructions based on which diff triggers fired.
+  // Phased/scoped review: reviewer starts from the specific changed areas, not the whole repo.
+  const triggerLines: string[] = [];
+  if (triggerResult?.triggers?.length) {
+    triggerLines.push(`Triggered by: ${triggerResult.triggers.join(", ")}`);
+    triggerLines.push("Review focus (scope-bounded — do NOT audit the entire repo):");
+    if (triggerResult.triggers.includes("security")) {
+      triggerLines.push("  • Security: audit auth flows, token handling, encryption, and permission checks in the changed files only.");
+    }
+    if (triggerResult.triggers.includes("db_schema_change")) {
+      triggerLines.push("  • DB schema: verify migrations are reversible, indexes exist, no data loss.");
+    }
+    if (triggerResult.triggers.includes("new_api_endpoint")) {
+      triggerLines.push("  • New API: check input validation, auth guards, rate limiting, and response shapes.");
+    }
+    if (triggerResult.triggers.includes("large_refactor")) {
+      const linesChanged = triggerResult.stats?.linesChanged ?? 0;
+      triggerLines.push(`  • Large refactor (${linesChanged} lines): spot-check logic correctness and test coverage.`);
+    }
+    if (triggerResult.triggers.includes("test_suite")) {
+      triggerLines.push("  • Test suite: verify tests are meaningful (not just coverage padding) and actually test the changed code.");
+    }
+  }
+
   const reviewNotes = [
     `Auto-review for completed programmer task ${taskId.slice(0, 8)}.`,
     `Original task: ${sourceTask.title}`,
     scopePath ? `Scope directory: ${scopePath}` : "Scope directory: project output directory not recorded; inspect changed files from the completed run.",
-    "Focus on quick quality gate: missing tests, missing README/docs, and obvious bugs.",
+    ...(triggerLines.length > 0
+      ? triggerLines
+      : ["Focus on quick quality gate: missing tests, missing README/docs, and obvious bugs."]),
+    "",
+    "Phased review protocol: (1) bound scope to changed files only, (2) run targeted checks per category above, (3) mark done or create follow-up tasks.",
   ].join("\n");
 
   db.insert(tasks).values({
