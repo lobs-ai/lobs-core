@@ -6,7 +6,7 @@ import { eq, and, inArray, isNull, desc } from "drizzle-orm";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { getDb } from "../db/connection.js";
 import { workerRuns, tasks, workflowRuns, agentReflections, projects, modelUsageEvents } from "../db/schema.js";
-import { recordWorkerStart, recordWorkerEnd } from "../orchestrator/worker-manager.js";
+import { recordWorkerStart, recordWorkerEnd, hasCapacity, countActiveWorkers, DEFAULT_MAX_WORKERS } from "../orchestrator/worker-manager.js";
 import { triageWorkerCompletion } from "../orchestrator/triage.js";
 import { onSuccess, onFailure, classifyOutcome } from "../services/circuit-breaker.js";
 import { log } from "../util/logger.js";
@@ -15,8 +15,70 @@ import { readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { shouldTriggerReview, type ReviewTriggerResult } from "../orchestrator/review-triggers.js";
 import { emitWorkerRunTrace } from "../services/langfuse.js";
+import { cleanupTaskSidecar } from "./compaction.js";
+
+const SINK_SESSION_KEY = "agent:sink:paw-orchestrator-v2";
 
 export function registerSubagentHooks(api: OpenClawPluginApi): void {
+
+  // ── Pre-spawn capacity gate ─────────────────────────────────────────────
+  // Fires BEFORE the spawn happens. If PAW is at capacity, reject the spawn
+  // at the gateway level so the session is never created.
+  api.on("subagent_spawning", async (event, _ctx) => {
+    const ev = event as Record<string, unknown>;
+    // Only gate PAW-managed spawns (check label or agentId pattern)
+    const label = ev.label as string | undefined;
+    const agentId = ev.agentId as string | undefined;
+
+    // PAW workers are spawned with labels like "paw-worker-..." or agent IDs for PAW agents
+    const isPawSpawn = label?.startsWith("paw-") ||
+      agentId?.match(/^(programmer|writer|researcher|reviewer|architect)$/);
+
+    if (!isPawSpawn) return { status: "ok" as const };
+
+    if (!hasCapacity()) {
+      const active = countActiveWorkers();
+      log().warn(
+        `[PAW] subagent_spawning: REJECTED — at capacity (${active}/${DEFAULT_MAX_WORKERS}). ` +
+        `agent=${agentId} label=${label}`,
+      );
+      return { status: "error" as const, error: `PAW worker capacity exceeded (${active}/${DEFAULT_MAX_WORKERS})` };
+    }
+
+    log().debug?.(`[PAW] subagent_spawning: ALLOWED — agent=${agentId} label=${label}`);
+    return { status: "ok" as const };
+  });
+
+  // ── Completion delivery routing ─────────────────────────────────────────
+  // Route PAW-managed worker completions to the sink session instead of the
+  // default parent session. This prevents completion messages from polluting
+  // user-facing chat sessions.
+  api.on("subagent_delivery_target", async (event, _ctx) => {
+    const ev = event as Record<string, unknown>;
+    const childKey = ev.childSessionKey as string | undefined;
+    const requesterKey = ev.requesterSessionKey as string | undefined;
+
+    if (!childKey) return;
+
+    // Check if this is a PAW-managed worker by looking up the worker_runs table
+    const db = getDb();
+    const run = db.select().from(workerRuns)
+      .where(eq(workerRuns.workerId, childKey))
+      .get();
+
+    if (!run) return; // Not a PAW worker — let default routing handle it
+
+    // Route to sink session — suppress delivery to the original requester
+    // The sink session handles all PAW worker completions centrally
+    log().debug?.(
+      `[PAW] subagent_delivery_target: routing ${childKey.slice(0, 30)} completion to sink ` +
+      `(original requester: ${requesterKey?.slice(0, 30) ?? "unknown"})`,
+    );
+
+    // Return empty origin to suppress delivery to the parent session.
+    // The subagent_ended hook already handles result capture and triage.
+    return { origin: { channel: undefined, to: undefined } };
+  });
 
   api.on("subagent_spawned", async (event) => {
     const meta = (event as Record<string, unknown>).metadata as Record<string, unknown> | undefined;
@@ -511,6 +573,9 @@ function updateTaskFromEnd(taskId: string, succeeded: boolean, reason?: string, 
 
   const evalMetrics = computeEvalMetrics(taskId, succeeded);
   log().info(`[PAW] Task ${taskId.slice(0, 8)} eval_metrics=${JSON.stringify(evalMetrics)}`);
+
+  // Clean up compaction sidecar file regardless of outcome
+  cleanupTaskSidecar(taskId);
 
   if (succeeded) {
     const project = task?.projectId

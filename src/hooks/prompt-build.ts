@@ -94,10 +94,17 @@ export function registerPromptBuildHook(api: OpenClawPluginApi): void {
     log().debug?.(`[PAW] Prompt variant ${variant} for task ${task.id} (session ${sessionKey})`);
 
     // ── Build context blocks ──────────────────────────────────────────
+    //
+    // Static content → prependSystemContext (cached by providers, avoids per-turn cost)
+    // Dynamic content → prependContext (changes per task/turn)
 
+    // Static: agent role text (same for every turn in this session)
+    const staticLines: string[] = [];
+    if (task.agent) staticLines.push(`Agent Role: ${task.agent}`);
+
+    // Dynamic: task + project details (specific to this task assignment)
     const taskBlock: string[] = [`Task: ${task.title}`];
     if (task.notes) taskBlock.push(`Notes: ${task.notes}`);
-    if (task.agent) taskBlock.push(`Agent Role: ${task.agent}`);
 
     const projectBlock: string[] = [];
     if (project) {
@@ -119,8 +126,11 @@ export function registerPromptBuildHook(api: OpenClawPluginApi): void {
     const lines = [`<paw-task-context>`, ...innerLines, `</paw-task-context>`];
     let prependContext = lines.join("\n");
 
-    // ── Learning injection ────────────────────────────────────────────────
-    // Inject relevant learnings from past task outcomes into the prompt.
+    // Static system context: agent role + any stable guidance
+    let prependSystemContext = "";
+
+    // ── Learning injection (static — stable across session) ──────────────
+    // Inject relevant learnings from past task outcomes into the system context.
     // Hot-reloadable kill switch: returns "" if LEARNING_INJECTION_ENABLED=false.
     // Confidence threshold filters out low-confidence learnings (default 0.7).
     if (task.agent) {
@@ -128,17 +138,17 @@ export function registerPromptBuildHook(api: OpenClawPluginApi): void {
         const taskCategory = inferTaskCategory(task.title, task.notes ?? undefined);
         const learningBlock = learningService.buildPromptInjection(task.agent, taskCategory);
         if (learningBlock) {
-          prependContext += learningBlock;
-          log().debug?.(`[LEARNING] Injected learnings for agent=${task.agent} category=${taskCategory}`);
+          prependSystemContext += learningBlock;
+          log().debug?.(`[LEARNING] Injected learnings into system context for agent=${task.agent} category=${taskCategory}`);
         }
       } catch (e) {
         log().warn?.(`[LEARNING] Injection error (non-fatal): ${e}`);
       }
     }
 
-    // ── Compliance memory injection ───────────────────────────────────────
+    // ── Compliance memory injection (static — stable across session) ──────
     // When the task or project has compliance_required=true, append the agent's
-    // compliant memory files to the prompt. These files live in memory-compliant/
+    // compliant memory files to the system context. These files live in memory-compliant/
     // and are NEVER included in cloud model sessions (structural enforcement).
     const isCompliant =
       Boolean((task as Record<string, unknown>).complianceRequired) ||
@@ -147,11 +157,11 @@ export function registerPromptBuildHook(api: OpenClawPluginApi): void {
     if (isCompliant && task.agent) {
       const compliantMemories = await readCompliantMemories(task.agent);
       if (compliantMemories.length > 0) {
-        prependContext +=
+        prependSystemContext +=
           "\n\n<compliance-memories>\n" +
           compliantMemories.join("\n\n---\n\n") +
           "\n</compliance-memories>";
-        log().debug?.(`[PAW] Injected ${compliantMemories.length} compliant memory file(s) for agent ${task.agent}`);
+        log().debug?.(`[PAW] Injected ${compliantMemories.length} compliant memory file(s) into system context for agent ${task.agent}`);
       }
     }
 
@@ -195,6 +205,14 @@ export function registerPromptBuildHook(api: OpenClawPluginApi): void {
       }
     }
 
-    return { prependContext };
+    // Assemble static system context: agent role + learnings + compliance memories
+    if (staticLines.length > 0) {
+      prependSystemContext = `<paw-agent-context>\n${staticLines.join("\n")}\n</paw-agent-context>\n` + prependSystemContext;
+    }
+
+    return {
+      prependContext,
+      ...(prependSystemContext ? { prependSystemContext } : {}),
+    };
   });
 }
