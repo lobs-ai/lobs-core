@@ -14,6 +14,7 @@ import { ReflectionService } from "../services/reflection.js";
 import { readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { shouldTriggerReview, type ReviewTriggerResult } from "../orchestrator/review-triggers.js";
+import { emitWorkerRunTrace } from "../services/langfuse.js";
 
 export function registerSubagentHooks(api: OpenClawPluginApi): void {
 
@@ -78,6 +79,30 @@ export function registerSubagentHooks(api: OpenClawPluginApi): void {
         durationSeconds,
         usage,
       });
+
+      // ── Langfuse real-time trace (fire-and-forget) ────────────────────────
+      {
+        const task = workerRun.taskId
+          ? db.select().from(tasks).where(eq(tasks.id, workerRun.taskId)).get()
+          : undefined;
+        emitWorkerRunTrace({
+          workerRunId: workerRun.id ?? sessionKey,
+          taskId: workerRun.taskId,
+          taskTitle: task?.title,
+          agentType: workerRun.agentType ?? "unknown",
+          model: usage.model ?? workerRun.model ?? "unknown",
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          totalCostUsd: usage.totalCostUsd,
+          durationSeconds,
+          succeeded,
+          summary: undefined,
+          modelTier: task?.modelTier ?? undefined,
+          promptVariant: workerRun.promptVariant ?? undefined,
+          startedAt: workerRun.startedAt ?? undefined,
+          endedAt: new Date().toISOString(),
+        });
+      }
 
       // ── Circuit breaker: record outcome ───────────────────────────────────
       const cbModel = usage.model ?? workerRun.model ?? "unknown";
