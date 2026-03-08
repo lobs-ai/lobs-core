@@ -22,6 +22,9 @@ import { workerRuns, tasks, projects } from "../db/schema.js";
 import { log } from "../util/logger.js";
 import { scanMessage } from "../util/compliance-scanner.js";
 import { isCloudModel } from "../util/compliance-model.js";
+import { LearningService, inferTaskCategory } from "../services/learning.js";
+
+const learningService = new LearningService();
 
 const WORKSPACE_BASE = join(process.env.HOME || "/Users/lobs", ".openclaw");
 
@@ -115,6 +118,23 @@ export function registerPromptBuildHook(api: OpenClawPluginApi): void {
 
     const lines = [`<paw-task-context>`, ...innerLines, `</paw-task-context>`];
     let prependContext = lines.join("\n");
+
+    // ── Learning injection ────────────────────────────────────────────────
+    // Inject relevant learnings from past task outcomes into the prompt.
+    // Hot-reloadable kill switch: returns "" if LEARNING_INJECTION_ENABLED=false.
+    // Confidence threshold filters out low-confidence learnings (default 0.7).
+    if (task.agent) {
+      try {
+        const taskCategory = inferTaskCategory(task.title, task.notes ?? undefined);
+        const learningBlock = learningService.buildPromptInjection(task.agent, taskCategory);
+        if (learningBlock) {
+          prependContext += learningBlock;
+          log().debug?.(`[LEARNING] Injected learnings for agent=${task.agent} category=${taskCategory}`);
+        }
+      } catch (e) {
+        log().warn?.(`[LEARNING] Injection error (non-fatal): ${e}`);
+      }
+    }
 
     // ── Compliance memory injection ───────────────────────────────────────
     // When the task or project has compliance_required=true, append the agent's

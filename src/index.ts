@@ -157,11 +157,41 @@ const pawPlugin = {
       start: () => {
         startControlLoop({} as any, scanInterval);
         const ytSvc = new YouTubeService(); ytSvc.startRecoveryLoop(); (globalThis as any).__ytSvc = ytSvc;
+
+        // ── Learning extraction pass ────────────────────────────────────
+        // Run pattern extraction every hour so new feedback generates learnings
+        // without requiring manual POST /api/learning/extract calls.
+        // This is the "LessonExtractor" background runner.
+        const EXTRACTION_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+        const runExtraction = async () => {
+          try {
+            const { LearningService } = await import("./services/learning.js");
+            const svc = new LearningService();
+            const count = svc.runExtractionPass();
+            if (count > 0) {
+              log().info(`[LEARNING] Scheduled extraction pass: ${count} learnings updated`);
+            }
+          } catch (e) {
+            log().warn(`[LEARNING] Extraction pass error: ${e}`);
+          }
+        };
+        // Run once shortly after startup (delay 30s to avoid init contention)
+        const startupTimer = setTimeout(runExtraction, 30_000);
+        const extractionTimer = setInterval(runExtraction, EXTRACTION_INTERVAL_MS);
+        (globalThis as any).__learningExtractionTimers = { startupTimer, extractionTimer };
       },
       stop: () => {
         stopControlLoop();
         stopMemoryScanner();
         try { (globalThis as any).__ytSvc?.stopRecoveryLoop(); } catch {}
+        // Clean up learning extraction timers
+        try {
+          const timers = (globalThis as any).__learningExtractionTimers;
+          if (timers) {
+            clearTimeout(timers.startupTimer);
+            clearInterval(timers.extractionTimer);
+          }
+        } catch {}
         closeDb();
       },
     });
