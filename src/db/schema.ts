@@ -448,7 +448,9 @@ export const outcomeLearnings = sqliteTable("outcome_learnings", {
   confidence: real("confidence").notNull().default(1.0),
   successCount: integer("success_count").notNull().default(0),
   failureCount: integer("failure_count").notNull().default(0),
+  injectionHits: integer("injection_hits").notNull().default(0),
   sourceOutcomeIds: text("source_outcome_ids", { mode: "json" }),
+  source: text("source").notNull().default("feedback"), // 'feedback' | 'seed' | 'manual'
   isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
   ...timestamps,
 });
@@ -752,6 +754,59 @@ export const youtubeVideos = sqliteTable("youtube_videos", {
   projectId: text("project_id").references(() => projects.id),
   ...timestamps,
 });
+
+// ─── Message Routing: Discord Guilds ────────────────────────────────────────
+// Maps Discord guild (server) → PAW client container.
+// Populated by the OAuth2 callback when a client adds the PAW bot to their server.
+
+export const discordGuilds = sqliteTable("discord_guilds", {
+  id: id(),
+  guildId: text("guild_id").notNull().unique(),
+  guildName: text("guild_name"),
+  clientId: text("client_id").notNull(),
+  clientSlug: text("client_slug").notNull(),
+  addedAt: integer("added_at").notNull().default(sql`(unixepoch())`),
+  addedBy: text("added_by"),
+  status: text("status").notNull().default("active"),
+}, (t) => ({
+  idxGuildId:   index("idx_discord_guilds_guild_id").on(t.guildId),
+  idxClientId:  index("idx_discord_guilds_client_id").on(t.clientId),
+}));
+
+// ─── Message Routing: Discord DM Users ──────────────────────────────────────
+// Maps Discord user ID → PAW client container (for DM support).
+// Users opt in by registering their Discord user ID in the portal settings.
+
+export const discordDmUsers = sqliteTable("discord_dm_users", {
+  id: id(),
+  discordUserId: text("discord_user_id").notNull().unique(),
+  clientId: text("client_id").notNull(),
+  clientSlug: text("client_slug").notNull(),
+  registeredAt: integer("registered_at").notNull().default(sql`(unixepoch())`),
+  status: text("status").notNull().default("active"),
+}, (t) => ({
+  idxDiscordUserId: index("idx_discord_dm_users_discord_user_id").on(t.discordUserId),
+}));
+
+// ─── Deployments ─────────────────────────────────────────────────────────────
+// Tracks active PAW client container deployments.
+// Populated by provision-webhook.js after each successful provisioning.
+// The paw-discord-router reads this table to resolve client_slug → gateway info.
+
+export const deployments = sqliteTable("deployments", {
+  id: id(),
+  clientSlug: text("client_slug").notNull().unique(),
+  clientId: text("client_id"),
+  gatewayUrl: text("gateway_url").notNull(),
+  gatewaySecret: text("gateway_secret"),
+  containerName: text("container_name"),
+  isDemo: integer("is_demo", { mode: "boolean" }).notNull().default(false),
+  provisionedAt: text("provisioned_at").notNull().default(sql`(datetime('now'))`),
+  status: text("status").notNull().default("active"),
+}, (t) => ({
+  idxClientSlug: index("idx_deployments_client_slug").on(t.clientSlug),
+  idxStatus:     index("idx_deployments_status").on(t.status),
+}));
 
 // ─── Memory Compliance Index ────────────────────────────────────────────────
 // Tracks compliance metadata for all memory files across agent workspaces.

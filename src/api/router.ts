@@ -31,6 +31,7 @@ import { handleComplianceRequest } from "./compliance.js";
 import { handleLearningRequest } from "./learning.js";
 import { handleAdminRequest } from "./admin.js";
 import { handleDashboardRequest } from "./dashboard.js";
+import { handleDiscordRequest } from "./discord.js";
 import { error } from "./index.js";
 
 const PREFIXES = ["/paw/api/", "/api/"];
@@ -81,6 +82,7 @@ export function registerPawRouter(api: OpenClawPluginApi): void {
         case "learning":         await handleLearningRequest(req, res, parts[1], parts); return true;
         case "admin":            await handleAdminRequest(req, res, parts); return true;
         case "dashboard":        await handleDashboardRequest(req, res, parts[1]); return true;
+        case "discord":          await handleDiscordRequest(req, res, parts[1], parts); return true;
         default:                error(res, `Unknown resource: ${resource}`, 404); return true;
       }
     } catch (err) {

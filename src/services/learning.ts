@@ -20,6 +20,59 @@ import { getDb, getRawDb } from "../db/connection.js";
 import { taskOutcomes, outcomeLearnings, learningPlans, learningLessons } from "../db/schema.js";
 import { log } from "../util/logger.js";
 
+// ─── Kill Switch & Confidence Threshold ──────────────────────────────────────
+
+/**
+ * Check if learning injection is enabled.
+ * Hot-reloadable: reads env var AND DB setting on every call.
+ * Priority: env var LEARNING_INJECTION_ENABLED > DB setting > default true.
+ *
+ * To disable without restart: set env var LEARNING_INJECTION_ENABLED=false
+ * OR update orchestrator_settings: SET value='false' WHERE key='LEARNING_INJECTION_ENABLED'
+ */
+function isLearningInjectionEnabled(): boolean {
+  // Env var takes priority (fastest kill switch)
+  const envVal = process.env.LEARNING_INJECTION_ENABLED;
+  if (envVal !== undefined) {
+    return envVal.toLowerCase() !== "false" && envVal !== "0";
+  }
+  // Check DB setting (hot-reloadable since we query on each call)
+  try {
+    const rawDb = getRawDb();
+    const row = rawDb.prepare(
+      `SELECT value FROM orchestrator_settings WHERE key = 'LEARNING_INJECTION_ENABLED' LIMIT 1`
+    ).get() as { value: string } | undefined;
+    if (row) {
+      return row.value.toLowerCase() !== "false" && row.value !== "0";
+    }
+  } catch {}
+  return true; // Default: enabled
+}
+
+/**
+ * Get minimum confidence threshold for injection.
+ * Hot-reloadable: reads env var AND DB setting on every call.
+ * Default: 0.7
+ */
+function getMinConfidence(): number {
+  const envVal = process.env.LEARNING_MIN_CONFIDENCE;
+  if (envVal !== undefined) {
+    const parsed = parseFloat(envVal);
+    if (!isNaN(parsed)) return Math.max(0, Math.min(1, parsed));
+  }
+  try {
+    const rawDb = getRawDb();
+    const row = rawDb.prepare(
+      `SELECT value FROM orchestrator_settings WHERE key = 'LEARNING_MIN_CONFIDENCE' LIMIT 1`
+    ).get() as { value: string } | undefined;
+    if (row) {
+      const parsed = parseFloat(row.value);
+      if (!isNaN(parsed)) return Math.max(0, Math.min(1, parsed));
+    }
+  } catch {}
+  return 0.7; // Default threshold
+}
+
 // ─── Pattern Definitions ──────────────────────────────────────────────────────
 // Rule-based patterns per the design doc (Section: Task 2.1 — initial patterns for programmer)
 
@@ -74,7 +127,7 @@ const PATTERNS: PatternDef[] = [
     lessonText: "Run smoke tests after writing files (python3 -m py_compile or tsc --noEmit). Broken code is rejected.",
     agentType: "programmer",
   },
-  // Patterns for other agent types
+  // ── Researcher patterns ──────────────────────────────────────────────────
   {
     key: "cite_sources",
     keywords: ["citation", "source", "reference", "evidence", "uncited", "no source"],
@@ -88,9 +141,61 @@ const PATTERNS: PatternDef[] = [
     agentType: "researcher",
   },
   {
+    key: "write_index_file",
+    keywords: ["index", "index.md", "missing file", "no index", "directory index", "false success", "false-success"],
+    lessonText: "Always write research/INDEX.md when creating research directories. Tasks have been marked false-success because INDEX.md was missing.",
+    agentType: "researcher",
+    taskCategory: "research",
+  },
+  {
+    key: "avoid_scope_creep",
+    keywords: ["scope", "out of scope", "off topic", "tangent", "stall", "stalled", "wandering", "unrelated", "focus"],
+    lessonText: "Stay within task scope. Stall failures occur when exploring unrelated topics instead of delivering the requested research output.",
+    agentType: "researcher",
+    taskCategory: "research",
+  },
+  {
+    key: "structure_output",
+    keywords: ["structure", "format", "heading", "section", "unorganized", "hard to read", "no sections", "messy"],
+    lessonText: "Structure research output with clear headings and sections. Unorganized output is rejected.",
+    agentType: "researcher",
+  },
+  // ── Writer patterns ──────────────────────────────────────────────────────
+  {
+    key: "verify_git_push",
+    keywords: ["push", "git push", "push failed", "not pushed", "remote", "origin", "push error", "failed to push"],
+    lessonText: "Always run git push and verify exit code 0 before marking done. Writer tasks have been falsely marked success when git push silently failed.",
+    agentType: "writer",
+  },
+  {
+    key: "commit_before_push",
+    keywords: ["commit", "not committed", "uncommitted", "nothing to commit", "empty commit", "git add"],
+    lessonText: "Run 'git add -A && git commit' before git push. Tasks fail when files are written but never committed.",
+    agentType: "writer",
+  },
+  {
+    key: "actionable_output",
+    keywords: ["vague", "unclear", "hedging", "wishy-washy", "not actionable", "too general", "ambiguous", "no direction"],
+    lessonText: "Written output must be concrete and actionable. Avoid hedging language ('might', 'could', 'perhaps') — use declarative statements.",
+    agentType: "writer",
+  },
+  {
+    key: "cite_sources_writer",
+    keywords: ["citation", "source", "reference", "evidence", "uncited", "no source", "unverified"],
+    lessonText: "Cite sources in written output. Unverified claims in docs and reports are rejected.",
+    agentType: "writer",
+  },
+  // ── Architect patterns ───────────────────────────────────────────────────
+  {
     key: "check_spec",
     keywords: ["spec", "requirement", "acceptance criteria", "missing requirement", "out of scope"],
     lessonText: "Re-read the full spec and acceptance criteria before starting. Missed requirements cause rejection.",
+    agentType: "architect",
+  },
+  {
+    key: "design_only",
+    keywords: ["code", "implement", "writing code", "code change", "out of scope", "not your job", "architecture only"],
+    lessonText: "Architect scope is design-only. Do not write implementation code or make code changes.",
     agentType: "architect",
   },
 ];
@@ -266,9 +371,12 @@ export class LearningService {
   /**
    * Get relevant learnings to inject into an agent's prompt.
    * Returns formatted lesson strings (up to `limit`).
+   * Applies confidence threshold (default 0.7, configurable via env/DB).
    */
   getRelevantLearnings(agentType: string, taskCategory?: string, limit = 3): string[] {
     const db = getDb();
+    const minConfidence = getMinConfidence();
+
     const rows = db.select().from(outcomeLearnings)
       .where(and(
         eq(outcomeLearnings.agentType, agentType),
@@ -276,7 +384,8 @@ export class LearningService {
       ))
       .orderBy(desc(outcomeLearnings.confidence), desc(outcomeLearnings.updatedAt))
       .limit(limit * 3)
-      .all();
+      .all()
+      .filter(r => (r.confidence ?? 0) >= minConfidence); // Apply confidence threshold
 
     // Prefer category-matching learnings, then general ones
     const categoryMatch = taskCategory
@@ -285,16 +394,28 @@ export class LearningService {
     const general = rows.filter(r => !r.taskCategory);
     const merged = [...categoryMatch, ...general].slice(0, limit);
 
-    return merged.map(r => `${r.lessonText}`);
+    return merged.map(r => r.lessonText);
   }
 
   /**
    * Build a learning injection block for an agent prompt.
    * Per design doc: prefix-style injection, IMPORTANT/REMINDER framing.
+   *
+   * Kill switch: returns "" if LEARNING_INJECTION_ENABLED=false (env var or DB).
+   * Hot-reloadable: kill switch is checked on every call.
    */
   buildPromptInjection(agentType: string, taskCategory?: string): string {
+    // ── Kill switch check (hot-reloadable) ────────────────────────────────
+    if (!isLearningInjectionEnabled()) {
+      log().debug?.(`[LEARNING] Injection disabled by kill switch for ${agentType}`);
+      return "";
+    }
+
     const learnings = this.getRelevantLearnings(agentType, taskCategory, 3);
     if (!learnings.length) return "";
+
+    // Track injection hits for metrics
+    this._recordInjectionHits(agentType, taskCategory, learnings.length);
 
     const lines = learnings.map(l => `REMINDER: ${l}`).join("\n\n");
     return `\n\n## Lessons from Past Tasks\n\n${lines}\n\n---`;
@@ -302,10 +423,12 @@ export class LearningService {
 
   /**
    * Get learning system stats for an agent (for stats API).
+   * Includes injection hit rate and kill switch status.
    */
   getStats(agentType: string, lookbackDays = 30): {
     agentType: string;
     window: { start: string; end: string };
+    killSwitch: { enabled: boolean; minConfidence: number };
     outcomes: {
       total: number;
       withFeedback: number;
@@ -316,8 +439,10 @@ export class LearningService {
     learnings: {
       total: number;
       active: number;
+      seeded: number;
       avgConfidence: number;
-      topPatterns: Array<{ patternName: string; confidence: number; successCount: number; failureCount: number }>;
+      totalInjectionHits: number;
+      topPatterns: Array<{ patternName: string; confidence: number; successCount: number; failureCount: number; injectionHits: number; source: string }>;
     };
   } {
     const db = getDb();
@@ -341,13 +466,19 @@ export class LearningService {
       .all();
 
     const activeLearnings = allLearnings.filter(l => l.isActive);
+    const seededLearnings = allLearnings.filter(l => (l as typeof l & { source?: string }).source === "seed");
     const avgConfidence = activeLearnings.length
       ? activeLearnings.reduce((sum, l) => sum + (l.confidence ?? 0), 0) / activeLearnings.length
       : 0;
+    const totalInjectionHits = activeLearnings.reduce((sum, l) => sum + ((l as typeof l & { injectionHits?: number }).injectionHits ?? 0), 0);
 
     return {
       agentType,
       window: { start: windowStart, end: windowEnd },
+      killSwitch: {
+        enabled: isLearningInjectionEnabled(),
+        minConfidence: getMinConfidence(),
+      },
       outcomes: {
         total: allOutcomes.length,
         withFeedback: withFeedback.length,
@@ -358,14 +489,76 @@ export class LearningService {
       learnings: {
         total: allLearnings.length,
         active: activeLearnings.length,
+        seeded: seededLearnings.length,
         avgConfidence: Math.round(avgConfidence * 100) / 100,
+        totalInjectionHits,
         topPatterns: activeLearnings.slice(0, 5).map(l => ({
           patternName: l.patternName,
           confidence: Math.round((l.confidence ?? 0) * 100) / 100,
           successCount: l.successCount ?? 0,
           failureCount: l.failureCount ?? 0,
+          injectionHits: (l as typeof l & { injectionHits?: number }).injectionHits ?? 0,
+          source: (l as typeof l & { source?: string }).source ?? "feedback",
         })),
       },
+    };
+  }
+
+  /**
+   * Get aggregated stats across all agents.
+   * Used by the /api/learning/stats?agent=all endpoint.
+   */
+  getAllStats(lookbackDays = 30): {
+    enabled: boolean;
+    minConfidence: number;
+    agents: string[];
+    totals: {
+      outcomes: number;
+      withFeedback: number;
+      accepted: number;
+      rejected: number;
+      acceptanceRate: number;
+      learnings: number;
+      activeLearnings: number;
+      seededLearnings: number;
+      totalInjectionHits: number;
+    };
+    byAgent: Record<string, ReturnType<LearningService["getStats"]>>;
+  } {
+    const agents = ["programmer", "researcher", "writer", "reviewer", "architect"];
+    const byAgent: Record<string, ReturnType<LearningService["getStats"]>> = {};
+    let totOutcomes = 0, totFeedback = 0, totAccepted = 0, totRejected = 0;
+    let totLearnings = 0, totActive = 0, totSeeded = 0, totHits = 0;
+
+    for (const agent of agents) {
+      const s = this.getStats(agent, lookbackDays);
+      byAgent[agent] = s;
+      totOutcomes += s.outcomes.total;
+      totFeedback += s.outcomes.withFeedback;
+      totAccepted += s.outcomes.accepted;
+      totRejected += s.outcomes.rejected;
+      totLearnings += s.learnings.total;
+      totActive += s.learnings.active;
+      totSeeded += s.learnings.seeded;
+      totHits += s.learnings.totalInjectionHits;
+    }
+
+    return {
+      enabled: isLearningInjectionEnabled(),
+      minConfidence: getMinConfidence(),
+      agents,
+      totals: {
+        outcomes: totOutcomes,
+        withFeedback: totFeedback,
+        accepted: totAccepted,
+        rejected: totRejected,
+        acceptanceRate: totFeedback > 0 ? totAccepted / totFeedback : 0,
+        learnings: totLearnings,
+        activeLearnings: totActive,
+        seededLearnings: totSeeded,
+        totalInjectionHits: totHits,
+      },
+      byAgent,
     };
   }
 
@@ -511,6 +704,31 @@ export class LearningService {
   }
 
   // ── Private Helpers ────────────────────────────────────────────────────────
+
+  /**
+   * Increment injection_hits counter for learnings that were injected.
+   * Called by buildPromptInjection() when learnings are successfully injected.
+   */
+  private _recordInjectionHits(agentType: string, taskCategory: string | undefined, count: number): void {
+    if (count <= 0) return;
+    try {
+      const rawDb = getRawDb();
+      // Increment injection_hits on the top-N active learnings for this agent
+      // that meet the confidence threshold (same set that was returned by getRelevantLearnings)
+      const minConf = getMinConfidence();
+      rawDb.prepare(`
+        UPDATE outcome_learnings
+        SET injection_hits = injection_hits + 1,
+            updated_at = ?
+        WHERE agent_type = ?
+          AND is_active = 1
+          AND confidence >= ?
+        LIMIT ?
+      `).run(new Date().toISOString(), agentType, minConf, count);
+    } catch (e) {
+      log().warn(`[LEARNING] Failed to record injection hits: ${e}`);
+    }
+  }
 
   /**
    * Extract patterns from feedback text and create/update learnings.

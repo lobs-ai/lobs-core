@@ -877,7 +877,171 @@ export function runMigrations(db: PawDB): void {
         )`);
     }
   } catch {}
+
+  // ── Learning system: new columns (idempotent) ────────────────────────────
+  // Added: 2026-03-07 — injection_hits tracks how many times a learning has been
+  // injected into an agent prompt; source distinguishes seeded/synthetic records
+  // from real feedback-derived learnings.
+  try { db.run(sql`ALTER TABLE outcome_learnings ADD COLUMN injection_hits INTEGER NOT NULL DEFAULT 0`); } catch {}
+  try { db.run(sql`ALTER TABLE outcome_learnings ADD COLUMN source TEXT NOT NULL DEFAULT 'feedback'`); } catch {}
+
+  // ── Kill switch: seed LEARNING_INJECTION_ENABLED setting (INSERT OR IGNORE) ──
+  // Set to "false" to disable all learning injection without code change.
+  // Hot-reloadable: buildPromptInjection() reads this on every call.
+  try {
+    db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)
+      VALUES ('LEARNING_INJECTION_ENABLED', 'true', datetime('now'))`);
+    db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)
+      VALUES ('LEARNING_MIN_CONFIDENCE', '0.7', datetime('now'))`);
+  } catch {}
+
+  // ── Seed synthetic outcome_learnings from known failure patterns ──────────
+  // Source='seed' marks these as synthetic (safe to query separately from real data).
+  // Based on: researcher stall failures 2026-03-06, writer push failures, programmer review rejections.
+  // INSERT OR IGNORE on (agent_type, pattern_name) ensures idempotent re-runs.
+  try {
+    const seedRows: Array<{ id: string; agentType: string; patternName: string; lessonText: string; taskCategory: string | null; confidence: number; failureCount: number }> = [
+      // Researcher failures — stall patterns observed 2026-03-06
+      {
+        id: "seed-researcher-stall-scope",
+        agentType: "researcher",
+        patternName: "avoid_scope_creep",
+        lessonText: "Stay within task scope. Researcher sessions stalled on 2026-03-06 by exploring unrelated branches instead of delivering the requested research output.",
+        taskCategory: "research",
+        confidence: 0.85,
+        failureCount: 3,
+      },
+      {
+        id: "seed-researcher-stall-index",
+        agentType: "researcher",
+        patternName: "write_index_file",
+        lessonText: "Always write research/INDEX.md when creating research directories. Previous researcher task was marked false-success because the INDEX.md file was missing.",
+        taskCategory: "research",
+        confidence: 0.9,
+        failureCount: 2,
+      },
+      {
+        id: "seed-researcher-cite",
+        agentType: "researcher",
+        patternName: "cite_sources",
+        lessonText: "Cite sources and references in research output. Unsupported claims cause rejection.",
+        taskCategory: "research",
+        confidence: 0.8,
+        failureCount: 1,
+      },
+      // Writer failures — push and tone patterns
+      {
+        id: "seed-writer-git-push",
+        agentType: "writer",
+        patternName: "verify_git_push",
+        lessonText: "Always run git push and verify it succeeds (exit 0) before marking a task done. Writer tasks have been falsely marked success when git push silently failed.",
+        taskCategory: "docs",
+        confidence: 0.9,
+        failureCount: 3,
+      },
+      {
+        id: "seed-writer-commit-before-push",
+        agentType: "writer",
+        patternName: "commit_before_push",
+        lessonText: "Run 'git add -A && git commit' before git push. Writer tasks have failed because files were written but never committed, causing an empty push.",
+        taskCategory: null,
+        confidence: 0.85,
+        failureCount: 2,
+      },
+      {
+        id: "seed-writer-actionable",
+        agentType: "writer",
+        patternName: "actionable_output",
+        lessonText: "Written output must be concrete and actionable. Avoid hedging language ('might', 'could', 'perhaps') in design docs and task notes — use declarative statements.",
+        taskCategory: "docs",
+        confidence: 0.75,
+        failureCount: 1,
+      },
+      // Programmer patterns — supplement existing feedback-derived learnings
+      {
+        id: "seed-programmer-push-verify",
+        agentType: "programmer",
+        patternName: "verify_push_success",
+        lessonText: "Verify git push exits 0 before reporting task done. Treat any non-zero push exit as task failure requiring immediate fix.",
+        taskCategory: "feature",
+        confidence: 0.9,
+        failureCount: 2,
+      },
+      {
+        id: "seed-programmer-no-placeholders",
+        agentType: "programmer",
+        patternName: "no_placeholders",
+        lessonText: "Never use TODO, placeholder, or stub implementations. Reviewers reject code with TODO comments and incomplete logic.",
+        taskCategory: null,
+        confidence: 0.85,
+        failureCount: 3,
+      },
+    ];
+
+    for (const row of seedRows) {
+      const now = new Date().toISOString();
+      db.run(sql`
+        INSERT OR IGNORE INTO outcome_learnings
+          (id, agent_type, pattern_name, lesson_text, task_category, confidence,
+           success_count, failure_count, injection_hits, source_outcome_ids,
+           source, is_active, created_at, updated_at)
+        VALUES
+          (${row.id}, ${row.agentType}, ${row.patternName}, ${row.lessonText},
+           ${row.taskCategory}, ${row.confidence},
+           0, ${row.failureCount}, 0, '[]',
+           'seed', 1, ${now}, ${now})
+      `);
+    }
+  } catch (e) {
+    // Non-fatal: seeding failures should not block startup
+    console.warn("[LEARNING] Seed insert failed (non-fatal):", e);
+  }
 }
+
+  // ── PAW Message Routing: Discord tables (idempotent) ────────────────────────
+  // Added: 2026-03-07 — central Discord bot routing.
+  // discord_guilds:   maps guild_id → client_slug (added when client connects bot via OAuth2)
+  // discord_dm_users: maps Discord user_id → client_slug (DM support, user self-registers)
+  // deployments:      tracks active PAW client containers + gateway auth info
+  //
+  // The paw-discord-router service reads these tables to route incoming Discord messages
+  // to the correct PAW client container gateway.
+  db.run(sql`CREATE TABLE IF NOT EXISTS discord_guilds (
+    id          TEXT PRIMARY KEY,
+    guild_id    TEXT UNIQUE NOT NULL,
+    guild_name  TEXT,
+    client_id   TEXT NOT NULL,
+    client_slug TEXT NOT NULL,
+    added_at    INTEGER NOT NULL DEFAULT (unixepoch()),
+    added_by    TEXT,
+    status      TEXT NOT NULL DEFAULT 'active'
+  )`);
+  try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_discord_guilds_guild_id  ON discord_guilds(guild_id)`); } catch {}
+  try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_discord_guilds_client_id ON discord_guilds(client_id)`); } catch {}
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS discord_dm_users (
+    id               TEXT PRIMARY KEY,
+    discord_user_id  TEXT UNIQUE NOT NULL,
+    client_id        TEXT NOT NULL,
+    client_slug      TEXT NOT NULL,
+    registered_at    INTEGER NOT NULL DEFAULT (unixepoch()),
+    status           TEXT NOT NULL DEFAULT 'active'
+  )`);
+  try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_discord_dm_users_discord_user_id ON discord_dm_users(discord_user_id)`); } catch {}
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS deployments (
+    id              TEXT PRIMARY KEY,
+    client_slug     TEXT UNIQUE NOT NULL,
+    client_id       TEXT,
+    gateway_url     TEXT NOT NULL,
+    gateway_secret  TEXT,
+    container_name  TEXT,
+    is_demo         INTEGER NOT NULL DEFAULT 0,
+    provisioned_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    status          TEXT NOT NULL DEFAULT 'active'
+  )`);
+  try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_deployments_client_slug ON deployments(client_slug)`); } catch {}
+  try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_deployments_status      ON deployments(status)`); } catch {}
 
 // ── Model Health circuit breaker table ──────────────────────────────────────
 // Added: 2026-03-04 — tracks (model, agent_type) circuit state for dispatch routing
