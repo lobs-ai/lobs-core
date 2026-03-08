@@ -380,6 +380,10 @@ function runTick(): void {
                     `UPDATE tasks SET crash_count = COALESCE(crash_count, 0) + 1, updated_at = ? WHERE id = ?`
                   ).run(nowIso, wrRow.task_id);
                   log().info(`[STALE_RUN_WATCHDOG] Incremented crash_count for task ${String(wrRow.task_id).slice(0, 8)} (infra failure: session_dead after ${mins}min)`);
+                  maybeSendCrashAlert(
+                    String(wrRow.task_id),
+                    `stale_run_watchdog: session_dead after ${mins}min (worker=${childKey.slice(0, 30)})`
+                  );
                 }
               } catch {}
             }
@@ -482,6 +486,93 @@ function processPendingMeetings(): void {
 }
 
 // ── Stall watchdog ────────────────────────────────────────────────────────────
+
+// ── Crash alert helpers ───────────────────────────────────────────────────────
+
+/**
+ * Read the crash alert threshold from env var PAW_CRASH_ALERT_THRESHOLD,
+ * then fall back to orchestrator_settings key 'crash_alert_threshold', then 5.
+ */
+function getCrashAlertThreshold(): number {
+  const envVal = parseInt(process.env.PAW_CRASH_ALERT_THRESHOLD ?? "", 10);
+  if (!isNaN(envVal) && envVal > 0) return envVal;
+  try {
+    const row = getRawDb().prepare(
+      `SELECT value FROM orchestrator_settings WHERE key = 'crash_alert_threshold'`
+    ).get() as { value: string } | undefined;
+    if (row) {
+      const val = parseInt(row.value, 10);
+      if (!isNaN(val) && val > 0) return val;
+    }
+  } catch {}
+  return 5;
+}
+
+/**
+ * After a crash_count increment, check whether the task has crossed the alert
+ * threshold. If so:
+ *   - emit a [CRASH_ALERT] warning log (always)
+ *   - create an inbox_items alert row (only when no pending alert already exists
+ *     for this task, to avoid inbox flooding on subsequent ticks)
+ *
+ * Does NOT mutate task status — read/alert only.
+ */
+function maybeSendCrashAlert(taskId: string, lastFailureReason: string): void {
+  try {
+    const db = getRawDb();
+    const threshold = getCrashAlertThreshold();
+
+    const task = db.prepare(
+      `SELECT id, title, crash_count, spawn_count FROM tasks WHERE id = ?`
+    ).get(taskId) as {
+      id: string;
+      title: string;
+      crash_count: number | null;
+      spawn_count: number | null;
+    } | undefined;
+
+    if (!task) return;
+    const crashCount = task.crash_count ?? 0;
+    if (crashCount < threshold) return;
+
+    // Always emit a warning log
+    log().warn(
+      `[CRASH_ALERT] ⚠️  Task ${taskId.slice(0, 8)} ("${(task.title ?? "").slice(0, 60)}") ` +
+      `has crashed ${crashCount} times (spawn=${task.spawn_count ?? 0}, threshold=${threshold}). ` +
+      `Last failure: ${lastFailureReason}`
+    );
+
+    // Avoid duplicate inbox items: skip if a pending alert already exists for this task
+    const existing = db.prepare(
+      `SELECT id FROM inbox_items ` +
+      `WHERE title LIKE ? AND action_status = 'pending' LIMIT 1`
+    ).get(`%${taskId.slice(0, 8)}%`) as { id: string } | undefined;
+
+    if (existing) return; // already alerted, don't flood
+
+    const alertTitle = `⚠️ Stuck task alert: ${(task.title ?? "").slice(0, 60)}`;
+    const alertContent =
+      `Task **${taskId.slice(0, 8)}** has failed **${crashCount}** times and may be permanently stuck.\n\n` +
+      `- **Title:** ${task.title ?? "(unknown)"}\n` +
+      `- **Task ID:** \`${taskId}\`\n` +
+      `- **crash_count:** ${crashCount} (alert threshold: ${threshold})\n` +
+      `- **spawn_count:** ${task.spawn_count ?? 0}\n` +
+      `- **Last failure reason:** ${lastFailureReason}\n\n` +
+      `Review the task, fix the root cause, then reset or close it manually. ` +
+      `The orchestrator will NOT change task status automatically.`;
+
+    db.prepare(
+      `INSERT INTO inbox_items (id, title, content, type, requires_action, action_status, source_agent) ` +
+      `VALUES (lower(hex(randomblob(16))), ?, ?, 'alert', 1, 'pending', 'orchestrator')`
+    ).run(alertTitle, alertContent);
+
+    log().warn(
+      `[CRASH_ALERT] Inbox alert created for task ${taskId.slice(0, 8)} (crash_count=${crashCount})`
+    );
+  } catch (e) {
+    log().error(`[CRASH_ALERT] Failed to send crash alert for task ${taskId}: ${e}`);
+  }
+}
 
 /**
  * Load stall watchdog config from orchestrator_settings.
@@ -610,6 +701,10 @@ function runStallWatchdog(): void {
       log().warn(
         `[STALL_WATCHDOG] Reset task ${wr.task_id.slice(0, 8)} to not_started after stall (${agentType}, ${silentMin}min silent) — crash_count++`
       );
+      maybeSendCrashAlert(
+        wr.task_id,
+        `stall_watchdog: ${agentType} silent ${silentMin}min (threshold=${stallThresholdSec}s, ref=${stallSource})`
+      );
     }
 
     // Fail any workflow_run stuck at a spawn node for this task
@@ -733,6 +828,10 @@ function closeGhostRun(wr: GhostRunRow, now: string): void {
       WHERE id = ? AND work_state = 'in_progress'
     `).run(now, wr.task_id);
     log().info(`[WATCHDOG] Incremented crash_count for task ${wr.task_id.slice(0, 8)} (ghost-orphaned by crash)`);
+    maybeSendCrashAlert(
+      wr.task_id,
+      `ghost_watchdog: session=${wr.worker_id?.slice(0, 30) ?? "none"}, stale ${staleMin}min (agent=${wr.agent_type ?? "?"})`
+    );
   }
 
   // 3. Fail workflow_runs stuck at a spawn node for this task
