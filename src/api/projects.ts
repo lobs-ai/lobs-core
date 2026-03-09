@@ -7,12 +7,28 @@ import { json, error, parseBody, parseQuery } from "./index.js";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "../util/logger.js";
-import { getGatewayConfig } from "../orchestrator/control-loop.js";
 
 // ── Gateway helpers ───────────────────────────────────────────────────────────
 
+let _gwPort: number | null = null;
+let _gwToken: string | null = null;
+
+function loadGatewayConfig(): { port: number; token: string } {
+  if (_gwToken !== null) return { port: _gwPort!, token: _gwToken };
+  try {
+    const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+    _gwPort = cfg?.gateway?.port ?? 18789;
+    _gwToken = cfg?.gateway?.auth?.token ?? "";
+  } catch {
+    _gwPort = 18789;
+    _gwToken = "";
+  }
+  return { port: _gwPort!, token: _gwToken! };
+}
+
 async function gatewayInvoke(tool: string, args: Record<string, unknown>): Promise<any> {
-  const { port, token } = getGatewayConfig();
+  const { port, token } = loadGatewayConfig();
   if (!token) throw new Error("No gateway auth token configured");
   const res = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
     method: "POST",
