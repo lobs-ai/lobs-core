@@ -65,6 +65,8 @@ const NOISE_PATTERNS = [
   /^Spawning agent/i,
   /^\[paw-/i,
   /^control loop/i,
+  /^\[Subagent Context\]/i,
+  /^\[Subagent Task\]/i,
 ];
 
 function isNoise(text: string): boolean {
@@ -124,9 +126,11 @@ export async function handleChatRequest(
         // the main agent from reacting to chat subagent completions.
         const spawnResult = await gatewayInvoke("sessions_spawn", {
           task: `You are chatting with your human through the PAW web dashboard. Use your personality from SOUL.md and your identity from IDENTITY.md. Be yourself — conversational, helpful, and in-character. Read your workspace files to remember who you are and who you're talking to.`,
-          mode: "session",
+          mode: "run",
           model: sessionModel,
           label: `paw-chat-${Date.now()}`,
+          runTimeoutSeconds: 0,
+          cleanup: "keep",
         });
 
         const ocSessionKey = spawnResult?.childSessionKey ?? spawnResult?.sessionKey;
