@@ -956,10 +956,21 @@ function autoCloseSucceededTasks(): void {
     VALUES (lower(hex(randomblob(16))), 'auto_close_succeeded', 'processed', json(?), ?)
   `);
 
-  const inboxStmt = db.prepare(`
+  // Dedup: only insert inbox notice if no pending item exists with the same title
+  const inboxDedupCheck = db.prepare(
+    `SELECT COUNT(*) as cnt FROM inbox_items WHERE title = ? AND action_status = 'pending'`
+  );
+  const inboxInsertRaw = db.prepare(`
     INSERT INTO inbox_items (id, title, content, type, requires_action, action_status, source_agent)
     VALUES (lower(hex(randomblob(16))), ?, ?, 'notice', 1, 'pending', ?)
   `);
+  const inboxStmt = {
+    run: (title: string, content: string, agent: string) => {
+      const { cnt } = inboxDedupCheck.get(title) as { cnt: number };
+      if (cnt > 0) return; // already exists, skip
+      inboxInsertRaw.run(title, content, agent);
+    },
+  };
 
   for (const task of candidates) {
     // Calculate duration of the last run

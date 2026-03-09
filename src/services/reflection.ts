@@ -287,13 +287,15 @@ Reflection ID: ${reflectionId}`;
   runSweep(sinceHours = 24): { processed: number; routed: number; tasksProposed: number } {
     const db = getDb();
     const since = new Date(Date.now() - sinceHours * 3600 * 1000).toISOString();
+    // Only sweep reflections not yet swept — prevents duplicate inbox items
     const reflections = db.select().from(agentReflections)
       .where(and(
         eq(agentReflections.status, "completed"),
         gte(agentReflections.createdAt, since),
       ))
       .orderBy(desc(agentReflections.createdAt))
-      .all();
+      .all()
+      .filter((r: any) => !(r.result as Record<string, unknown> | null)?.swept);
 
     let routed = 0;
     let tasksCreated = 0;
@@ -343,6 +345,19 @@ Reflection ID: ${reflectionId}`;
             }
           }
         }
+      }
+    }
+
+    // Mark processed reflections as swept so they aren't re-processed
+    for (const r of reflections) {
+      try {
+        const existing = r.result as Record<string, unknown> | null ?? {};
+        db.update(agentReflections)
+          .set({ result: { ...existing, swept: true } })
+          .where(eq(agentReflections.id, r.id))
+          .run();
+      } catch (e) {
+        log().warn(`[REFLECTION] Failed to mark reflection ${r.id.slice(0, 8)} as swept: ${String(e)}`);
       }
     }
 
@@ -655,10 +670,24 @@ Reflection ID: ${reflectionId}`;
     const db = getDb();
     const now = new Date().toISOString();
     const title = suggestion.split(/[.!?]/)[0].trim().slice(0, 100) || suggestion.slice(0, 100);
+    const fullTitle = ` \u{1F4CB} ${agentType}: ${title}`;
+    // Dedup: skip if a pending/done/needs_rafe item with similar title already exists
+    try {
+      const existing = db.select({ cnt: sql<number>`COUNT(*)` }).from(inboxItems)
+        .where(and(
+          sql`substr(title, 1, 50) = substr(${fullTitle}, 1, 50)`,
+          inArray(sql`action_status`, ["pending", "done", "needs_rafe"]),
+        ))
+        .get();
+      if (existing && existing.cnt > 0) {
+        log().debug?.(`[REFLECTION] Skipping duplicate inbox suggestion: "${title.slice(0, 60)}"`);
+        return;
+      }
+    } catch { /* fall through to insert */ }
     try {
       db.insert(inboxItems).values({
         id: randomUUID(),
-        title: ` ${"\u{1F4CB}"} ${agentType}: ${title}`,
+        title: fullTitle,
         content: `**Agent:** ${agentType}\n**Type:** ${type}\n\n${suggestion}`,
         summary: suggestion.slice(0, 200),
         isRead: false,
