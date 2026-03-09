@@ -40,7 +40,7 @@ import {
   forceTerminateWorker,
   type FailureType,
 } from "./worker-manager.js";
-import { chooseModel, resolveTaskTier, TIER_MODELS, buildFallbackChain } from "./model-chooser.js";
+import { chooseModel, resolveTaskTier, TIER_MODELS, buildFallbackChain, type ModelTier } from "./model-chooser.js";
 import { chooseHealthyModel, seedModelHealthFromHistory } from "./model-health.js";
 import { checkArtifacts } from "./artifact-check.js";
 import { validatePostSuccessArtifacts } from "./post-success-validator.js";

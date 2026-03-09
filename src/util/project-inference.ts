@@ -42,6 +42,22 @@ const KEYWORD_OVERRIDES: Record<string, string[]> = {
     "~/apps", "apps/", "apps/_template", "fastapi+html",
   ],
   "proj-flock": ["flock"],
+  "paw-sail": [
+    "sail", "lobs-sail", "sail container", "sail docker", "openclaw container",
+    "paw container", "single-tenant", "sail frontend",
+  ],
+  "paw-ship": [
+    "ship", "lobs-sets-sail", "ship api", "hoist-sail", "traefik",
+    "bosun", "lookout", "crow", "sail infra", "multi-tenant infra",
+    "provision", "ship-api",
+  ],
+  "paw-portal": [
+    "paw hub", "paw-hub", "portal", "landing page", "waitlist",
+    "blog", "activation", "signup", "marketing site",
+  ],
+  "paw-lite": [
+    "paw lite", "paw-lite", "openclaw-plugin-paw-lite",
+  ],
 };
 
 function loadRules(): ProjectRule[] {
