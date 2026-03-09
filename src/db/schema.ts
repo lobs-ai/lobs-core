@@ -811,6 +811,30 @@ export const deployments = sqliteTable("deployments", {
   idxClientId:   index("idx_deployments_client_id").on(t.clientId),
 }));
 
+// ─── Plugin System ──────────────────────────────────────────────────────────
+
+export const plugins = sqliteTable("plugins", {
+  id: text("id").primaryKey(),               // "smart-reply", "thread-summarizer", etc.
+  name: text("name").notNull(),
+  description: text("description"),
+  category: text("category").notNull(),      // "dev" | "academic" | "productivity" | "lifestyle"
+  enabled: integer("enabled").notNull().default(0),
+  config: text("config").default("{}"),                   // JSON user settings
+  configSchema: text("config_schema").default("{}"),      // JSON schema for settings UI
+  uiAffordances: text("ui_affordances").default("[]"),    // JSON array of UIAffordance definitions
+  ...timestamps,
+});
+
+export const uiConfig = sqliteTable("ui_config", {
+  id: text("id").primaryKey().default("default"),
+  layout: text("layout").notNull().default("command-center"),
+  widgetOrder: text("widget_order").default("[]"),        // JSON array of widget IDs
+  hiddenWidgets: text("hidden_widgets").default("[]"),    // JSON array of hidden widget IDs
+  agentHighlights: text("agent_highlights").default("[]"), // JSON array of {widgetId, reason, ttl}
+  updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
+  updatedBy: text("updated_by").default("system"),        // "agent" | "user"
+});
+
 // ─── Memory Compliance Index ────────────────────────────────────────────────
 // Tracks compliance metadata for all memory files across agent workspaces.
 // Populated by the memory scanner service; enables compliance reports and

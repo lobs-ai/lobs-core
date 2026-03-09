@@ -222,6 +222,7 @@ export function runMigrations(db: PawDB): void {
     inefficiencies TEXT,
     system_risks TEXT,
     missed_opportunities TEXT,
+    new_ideas TEXT,
     identity_adjustments TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     completed_at TEXT
@@ -698,6 +699,8 @@ export function runMigrations(db: PawDB): void {
   // run on a local model. Synced from lobs-server when the task sync gap is closed.
   // Enforcement gate in control-loop.ts checks this alongside compliance_required.
   try { db.run(sql`ALTER TABLE tasks ADD COLUMN is_compliant INTEGER NOT NULL DEFAULT 0`); } catch {}
+  // ── agent_reflections: add new_ideas column (idempotent) ────────────────────
+  try { db.run(sql`ALTER TABLE agent_reflections ADD COLUMN new_ideas TEXT`); } catch {}
 
   // ── Pre-flight artifact check: expected_artifacts column (idempotent) ────────
   // Added: 2026-03-07 — JSON array of ArtifactSpec objects declared by the task.
@@ -1071,9 +1074,345 @@ export function runMigrations(db: PawDB): void {
   try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_deployments_client_slug ON deployments(client_slug)`); } catch {}
   try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_deployments_status      ON deployments(status)`); } catch {}
   try { db.run(sql`CREATE INDEX IF NOT EXISTS idx_deployments_client_id   ON deployments(client_id)`); } catch {}
-}
 
-// ── Model Health circuit breaker table ──────────────────────────────────────
-// Added: 2026-03-04 — tracks (model, agent_type) circuit state for dispatch routing
+  // ── Plugin System ─────────────────────────────────────────────────────────
+  // Added: 2026-03-09 — plugin registry and UI config for Nexus micro-features
+  db.run(sql`CREATE TABLE IF NOT EXISTS plugins (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    description   TEXT,
+    category      TEXT NOT NULL,
+    enabled       INTEGER NOT NULL DEFAULT 0,
+    config        TEXT DEFAULT '{}',
+    config_schema TEXT DEFAULT '{}',
+    ui_affordances TEXT DEFAULT '[]',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS ui_config (
+    id               TEXT PRIMARY KEY DEFAULT 'default',
+    layout           TEXT NOT NULL DEFAULT 'command-center',
+    widget_order     TEXT DEFAULT '[]',
+    hidden_widgets   TEXT DEFAULT '[]',
+    agent_highlights TEXT DEFAULT '[]',
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by       TEXT DEFAULT 'system'
+  )`);
+
+  // Seed default ui_config row
+  try {
+    db.run(sql`INSERT OR IGNORE INTO ui_config (id, layout, updated_at)
+      VALUES ('default', 'command-center', datetime('now'))`);
+  } catch {}
+
+  // Seed plugins
+  try {
+    const seedPlugins: Array<{
+      id: string;
+      name: string;
+      description: string;
+      category: string;
+      enabled: number;
+      uiAffordances: unknown[];
+    }> = [
+      {
+        id: "smart-reply",
+        name: "Smart Reply",
+        description: "Suggests quick reply chips on inbox messages.",
+        category: "productivity",
+        enabled: 1,
+        uiAffordances: [
+          {
+            id: "reply-chips",
+            type: "chips",
+            target: "inbox-message",
+            label: "Reply suggestions",
+            aiAction: "suggest-reply",
+          },
+        ],
+      },
+      {
+        id: "thread-summarizer",
+        name: "Thread Summarizer",
+        description: "Adds a summarize button to inbox threads and chat conversations.",
+        category: "productivity",
+        enabled: 1,
+        uiAffordances: [
+          {
+            id: "summarize-button-inbox",
+            type: "button",
+            target: "inbox-message",
+            label: "Summarize thread",
+            icon: "summarize",
+            aiAction: "summarize",
+          },
+          {
+            id: "summarize-button-chat",
+            type: "button",
+            target: "chat-session",
+            label: "Summarize chat",
+            icon: "summarize",
+            aiAction: "summarize",
+          },
+        ],
+      },
+      {
+        id: "pr-insights",
+        name: "PR Insights",
+        description: "Shows AI-generated change summaries inline on PR widgets.",
+        category: "dev",
+        enabled: 1,
+        uiAffordances: [
+          {
+            id: "pr-change-summary",
+            type: "inline-text",
+            target: "pr-widget",
+            label: "Change summary",
+            aiAction: "explain",
+          },
+        ],
+      },
+      {
+        id: "commit-message-gen",
+        name: "Commit Message Generator",
+        description: "Generates conventional commit messages from staged diffs.",
+        category: "dev",
+        enabled: 0,
+        uiAffordances: [
+          {
+            id: "commit-gen-button",
+            type: "button",
+            target: "pr-widget",
+            label: "Generate commit message",
+            icon: "commit",
+            aiAction: "generate",
+          },
+        ],
+      },
+      {
+        id: "task-summarizer",
+        name: "Task Summarizer",
+        description: "Adds a summarize button to task cards.",
+        category: "productivity",
+        enabled: 1,
+        uiAffordances: [
+          {
+            id: "task-summarize-button",
+            type: "button",
+            target: "task-card",
+            label: "Summarize task",
+            icon: "summarize",
+            aiAction: "summarize",
+          },
+        ],
+      },
+      {
+        id: "calendar-context",
+        name: "Calendar Context",
+        description: "Shows a context panel on calendar events with relevant recent work.",
+        category: "productivity",
+        enabled: 0,
+        uiAffordances: [
+          {
+            id: "calendar-context-panel",
+            type: "context-panel",
+            target: "calendar-event",
+            label: "Related work",
+            aiAction: "summarize",
+          },
+        ],
+      },
+      {
+        id: "rewrite-assist",
+        name: "Rewrite Assist",
+        description: "Adds a rewrite menu to text inputs for tone and length adjustments.",
+        category: "productivity",
+        enabled: 0,
+        uiAffordances: [
+          {
+            id: "rewrite-menu",
+            type: "rewrite-menu",
+            target: "text-input",
+            label: "Rewrite",
+            aiAction: "rewrite",
+          },
+        ],
+      },
+      {
+        id: "error-explainer",
+        name: "Error Explainer",
+        description: "Adds an explain button to error and log displays.",
+        category: "dev",
+        enabled: 0,
+        uiAffordances: [
+          {
+            id: "explain-error-button",
+            type: "button",
+            target: "log-display",
+            label: "Explain error",
+            icon: "help",
+            aiAction: "explain",
+          },
+        ],
+      },
+      {
+        id: "schedule-optimizer",
+        name: "Schedule Optimizer",
+        description: "Shows inline suggestions for what to do in schedule gaps.",
+        category: "productivity",
+        enabled: 0,
+        uiAffordances: [
+          {
+            id: "schedule-gap-suggestion",
+            type: "inline-text",
+            target: "calendar-event",
+            label: "Gap suggestion",
+            aiAction: "suggest-reply",
+          },
+        ],
+      },
+      {
+        id: "stale-item-nudge",
+        name: "Stale Item Nudge",
+        description: "Badges aging PRs and tasks that haven't had activity.",
+        category: "dev",
+        enabled: 0,
+        uiAffordances: [
+          {
+            id: "stale-badge-pr",
+            type: "badge",
+            target: "pr-widget",
+            label: "Stale",
+            aiAction: "explain",
+          },
+          {
+            id: "stale-badge-task",
+            type: "badge",
+            target: "task-card",
+            label: "Stale",
+            aiAction: "explain",
+          },
+        ],
+      },
+      {
+        id: "project-health",
+        name: "Project Health",
+        description: "Shows AI-generated health assessments on project cards.",
+        category: "dev",
+        enabled: 1,
+        uiAffordances: [
+          {
+            id: "project-health-inline",
+            type: "inline-text",
+            target: "project-card",
+            label: "Health assessment",
+            aiAction: "assess",
+          },
+        ],
+      },
+      {
+        id: "meeting-actions",
+        name: "Meeting Actions",
+        description: "Extracts actionable items from meeting notes as chips.",
+        category: "productivity",
+        enabled: 1,
+        uiAffordances: [
+          {
+            id: "meeting-action-chips",
+            type: "chips",
+            target: "meeting-card",
+            label: "Action items",
+            aiAction: "extract-actions",
+          },
+        ],
+      },
+      {
+        id: "daily-digest",
+        name: "Daily Digest",
+        description: "Shows a daily summary context panel on the dashboard.",
+        category: "productivity",
+        enabled: 1,
+        uiAffordances: [
+          {
+            id: "daily-digest-panel",
+            type: "context-panel",
+            target: "dashboard",
+            label: "Daily summary",
+            aiAction: "daily-summary",
+          },
+        ],
+      },
+      {
+        id: "performance-insights",
+        name: "Performance Insights",
+        description: "Shows AI-generated performance insights on team and usage pages.",
+        category: "dev",
+        enabled: 1,
+        uiAffordances: [
+          {
+            id: "performance-insights-inline",
+            type: "inline-text",
+            target: "usage-page",
+            label: "Performance insights",
+            aiAction: "insights",
+          },
+        ],
+      },
+      {
+        id: "workflow-insights",
+        name: "Workflow Insights",
+        description: "Shows AI-generated insights on workflow cards.",
+        category: "dev",
+        enabled: 0,
+        uiAffordances: [
+          {
+            id: "workflow-insights-inline",
+            type: "inline-text",
+            target: "workflow-card",
+            label: "Workflow insights",
+            aiAction: "insights",
+          },
+        ],
+      },
+      {
+        id: "cost-optimizer",
+        name: "Cost Optimizer",
+        description: "Suggests cost optimizations on the usage page.",
+        category: "productivity",
+        enabled: 0,
+        uiAffordances: [
+          {
+            id: "cost-optimizer-inline",
+            type: "inline-text",
+            target: "usage-page",
+            label: "Cost optimization",
+            aiAction: "optimize",
+          },
+        ],
+      },
+    ];
+
+    const now = new Date().toISOString();
+    for (const p of seedPlugins) {
+      db.run(sql`INSERT OR IGNORE INTO plugins
+        (id, name, description, category, enabled, config, config_schema, ui_affordances, created_at, updated_at)
+        VALUES (
+          ${p.id},
+          ${p.name},
+          ${p.description},
+          ${p.category},
+          ${p.enabled},
+          '{}',
+          '{}',
+          ${JSON.stringify(p.uiAffordances)},
+          ${now},
+          ${now}
+        )`);
+    }
+  } catch (e) {
+    console.warn("[PLUGINS] Seed insert failed (non-fatal):", e);
+  }
+}
 
 

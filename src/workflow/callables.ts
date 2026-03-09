@@ -432,11 +432,30 @@ function diagnosticsRunOnce(_args: Record<string, unknown>, _ctx: CallableContex
   const stuckThreshold = new Date(Date.now() - 30 * 60 * 1000).toISOString();
   const activeTasks = db.select().from(tasks).where(eq(tasks.status, "active")).all();
 
+  // Expire stale reflections (active for > 30 min — workers have 5min timeout)
+  const reflectionStaleThreshold = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  const staleReflections = db.select().from(agentReflections)
+    .where(and(
+      eq(agentReflections.status, "active"),
+      lte(agentReflections.createdAt, reflectionStaleThreshold),
+    ))
+    .all();
+  if (staleReflections.length > 0) {
+    for (const r of staleReflections) {
+      db.update(agentReflections)
+        .set({ status: "expired", completedAt: now })
+        .where(eq(agentReflections.id, r.id))
+        .run();
+    }
+    log().info(`[DIAGNOSTICS] Expired ${staleReflections.length} stale reflections`);
+  }
+
   const issues: string[] = [];
   if (staleWorkers.length > 0) issues.push(`${staleWorkers.length} stale workers`);
+  if (staleReflections.length > 0) issues.push(`${staleReflections.length} stale reflections expired`);
 
   log().info(`[CALLABLE] diagnostics.run_once: ${issues.length === 0 ? "healthy" : issues.join(", ")}`);
-  return { ok: true, stale_workers: staleWorkers.length, active_tasks: activeTasks.length, issues, healthy: issues.length === 0 };
+  return { ok: true, stale_workers: staleWorkers.length, active_tasks: activeTasks.length, stale_reflections_expired: staleReflections.length, issues, healthy: issues.length === 0 };
 }
 
 // ─── Learning ─────────────────────────────────────────────────────────────────

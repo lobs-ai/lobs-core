@@ -100,7 +100,8 @@ export function registerSubagentHooks(api: OpenClawPluginApi): void {
     if (!sessionKey) return;
 
     const reason = ev.reason as string | undefined;
-    const succeeded = reason !== "error" && reason !== "timeout";
+    const FAILURE_REASONS = ["error", "timeout", "subagent-error", "subagent-timeout"];
+    const succeeded = !FAILURE_REASONS.includes(reason ?? "");
 
     log().info(`[PAW] subagent_ended: session=${sessionKey} reason=${reason} succeeded=${succeeded}`);
 
