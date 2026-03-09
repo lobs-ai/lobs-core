@@ -7,14 +7,9 @@ import { json, error, parseBody, parseQuery } from "./index.js";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "../util/logger.js";
+import { getGatewayConfig } from "../orchestrator/control-loop.js";
 
 // ── Gateway helpers ───────────────────────────────────────────────────────────
-
-function getGatewayConfig(): { port: number; token: string } {
-  const port = Number(process.env.OPENCLAW_GATEWAY_PORT ?? process.env.GATEWAY_PORT ?? 4440);
-  const token = process.env.OPENCLAW_AUTH_TOKEN ?? process.env.GATEWAY_TOKEN ?? "";
-  return { port, token };
-}
 
 async function gatewayInvoke(tool: string, args: Record<string, unknown>): Promise<any> {
   const { port, token } = getGatewayConfig();
