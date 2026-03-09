@@ -2,10 +2,32 @@ import { randomUUID } from "node:crypto";
 import { eq, desc } from "drizzle-orm";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getDb } from "../db/connection.js";
-import { projects } from "../db/schema.js";
+import { projects, textDumps } from "../db/schema.js";
 import { json, error, parseBody, parseQuery } from "./index.js";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { log } from "../util/logger.js";
+
+// ── Gateway helpers ───────────────────────────────────────────────────────────
+
+function getGatewayConfig(): { port: number; token: string } {
+  const port = Number(process.env.OPENCLAW_GATEWAY_PORT ?? process.env.GATEWAY_PORT ?? 4440);
+  const token = process.env.OPENCLAW_AUTH_TOKEN ?? process.env.GATEWAY_TOKEN ?? "";
+  return { port, token };
+}
+
+async function gatewayInvoke(tool: string, args: Record<string, unknown>): Promise<any> {
+  const { port, token } = getGatewayConfig();
+  if (!token) throw new Error("No gateway auth token configured");
+  const res = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+    body: JSON.stringify({ tool, args }),
+  });
+  if (!res.ok) throw new Error(`Gateway ${tool} failed (${res.status}): ${await res.text()}`);
+  const data = (await res.json()) as any;
+  return data?.result?.details ?? data?.result ?? data;
+}
 
 // ── Normalization ─────────────────────────────────────────────────────────────
 
@@ -69,6 +91,72 @@ export async function handleProjectRequest(
     if (sub === "github-sync" && req.method === "POST") {
       // Stub — actual sync would be handled by the github integration
       return json(res, { status: "queued", message: "GitHub sync queued" });
+    }
+
+    // POST /api/projects/:id/braindump — brain dump raw text, spawn agent to parse into tasks
+    if (sub === "braindump" && req.method === "POST") {
+      const project = db.select().from(projects).where(eq(projects.id, id)).get();
+      if (!project) return error(res, "Project not found", 404);
+
+      const body = await parseBody(req) as Record<string, unknown>;
+      const rawText = body.text as string;
+      if (!rawText || rawText.trim().length === 0) return error(res, "text is required", 400);
+
+      // Save the raw dump for reference
+      const dumpId = randomUUID();
+      const now = new Date().toISOString();
+      db.insert(textDumps).values({
+        id: dumpId,
+        text: rawText,
+        projectId: id,
+        status: "processing",
+        createdAt: now,
+        updatedAt: now,
+      }).run();
+
+      // Spawn a sub-agent to parse the brain dump into tasks
+      const projectTitle = (project as any).title ?? id;
+      const prompt = `[BRAINDUMP] Process this brain dump into PAW tasks for project "${projectTitle}" (project_id: ${id}).
+
+## Instructions
+Parse the following raw text into individual, actionable tasks. For each task:
+1. Determine a clear, concise title
+2. Pick the right agent type (programmer, writer, researcher, architect, reviewer)
+3. Pick a model tier (micro for trivial, small/medium for moderate, standard for real work, strong for complex architecture)
+4. Write structured notes with Problem, Acceptance Criteria, and Context sections
+5. Insert each task into the PAW DB using sqlite3
+
+Use this INSERT template for each task:
+\`\`\`
+sqlite3 ~/.openclaw/plugins/paw/paw.db "INSERT INTO tasks (id, title, status, agent, model_tier, notes, project_id, created_at, updated_at) VALUES (lower(hex(randomblob(16))), '<title>', 'active', '<agent>', '<tier>', '<notes>', '${id}', datetime('now'), datetime('now'));"
+\`\`\`
+
+Important rules:
+- Split large items into multiple focused tasks (one concern per task)
+- Architect tasks are DESIGN ONLY (specs, ADRs) — never implementation
+- If something needs both design and implementation, create TWO tasks
+- Skip anything too vague to be actionable — note what you skipped and why
+- After creating all tasks, reply with a summary of what was created
+
+## Raw Brain Dump
+${rawText}`;
+
+      try {
+        await gatewayInvoke("sessions_spawn", {
+          task: prompt,
+          mode: "run",
+          model: "anthropic/claude-sonnet-4-6",
+          runTimeoutSeconds: 300,
+          cleanup: "keep",
+        });
+        log().info(`[BRAINDUMP] Spawned agent for project ${id} (dump ${dumpId.slice(0, 8)})`);
+      } catch (e) {
+        log().error(`[BRAINDUMP] Failed to spawn agent: ${e}`);
+        db.update(textDumps).set({ status: "failed", updatedAt: new Date().toISOString() }).where(eq(textDumps.id, dumpId)).run();
+        return error(res, `Failed to spawn processing agent: ${String(e)}`, 500);
+      }
+
+      return json(res, { id: dumpId, status: "processing", project_id: id, message: `Brain dump received. Processing into tasks for ${projectTitle}.` }, 202);
     }
 
     if (req.method === "GET") {
