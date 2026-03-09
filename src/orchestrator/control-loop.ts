@@ -40,7 +40,8 @@ import {
   forceTerminateWorker,
   type FailureType,
 } from "./worker-manager.js";
-import { chooseModel, resolveTaskTier, TIER_MODELS, buildFallbackChain, type ModelTier } from "./model-chooser.js";
+import { chooseModel, resolveTaskTier, TIER_MODELS, buildFallbackChain, escalationModel, type ModelTier } from "./model-chooser.js";
+import { EscalationManager, ESCALATION_TIERS, type EscalationTier } from "./escalation.js";
 import { chooseHealthyModel, seedModelHealthFromHistory } from "./model-health.js";
 import { checkArtifacts } from "./artifact-check.js";
 import { validatePostSuccessArtifacts } from "./post-success-validator.js";
@@ -1557,6 +1558,58 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
     log().error(`[COMPLIANCE] Failed to check compliance flags: ${e}`);
   }
 
+  // ── Escalation: fire on repeated task failures ───────────────────────────
+  // On each retry (effectiveFailCount > 0), escalate the task through tiers so
+  // persistent failures surface alerts and eventually reach human review.
+  // Runs BEFORE model selection so the updated escalationTier can influence
+  // the model choice below.
+  let taskEscalationTier = 0;
+  if (req.taskId) {
+    try {
+      const escalTaskRow = getRawDb()
+        .prepare(`SELECT spawn_count, crash_count, escalation_tier, project_id FROM tasks WHERE id = ?`)
+        .get(req.taskId) as { spawn_count: number | null; crash_count: number | null; escalation_tier: number | null; project_id: string | null } | undefined;
+      if (escalTaskRow) {
+        const spawnCount = escalTaskRow.spawn_count ?? 0;
+        const crashCount = escalTaskRow.crash_count ?? 0;
+        const effectiveFailCount = spawnCount - crashCount;
+        taskEscalationTier = escalTaskRow.escalation_tier ?? 0;
+        // Only escalate when there are genuine prior failures (not first spawn, not crash-only)
+        if (effectiveFailCount > 0) {
+          const escalationMgr = new EscalationManager();
+          const escalProjectId = escalTaskRow.project_id ?? spawnProjectId ?? "";
+          const errorLog = `Task ${req.taskId.slice(0, 8)} has failed ${effectiveFailCount} time(s) (spawn=${spawnCount}, crash=${crashCount}, agent=${req.agentType}).`;
+          const escalResult = escalationMgr.escalate(
+            req.taskId,
+            escalProjectId,
+            errorLog,
+            taskEscalationTier as EscalationTier,
+          );
+          taskEscalationTier = escalResult.tier;
+          log().info(
+            `[ESCALATION] Task ${req.taskId.slice(0, 8)} → tier ${escalResult.tier} ` +
+            `(action=${escalResult.action}, agent=${req.agentType}, fail_count=${effectiveFailCount})`
+          );
+          // HUMAN tier: task is now waiting_on — abort spawn so human can intervene
+          if (escalResult.tier === ESCALATION_TIERS.HUMAN) {
+            log().warn(
+              `[ESCALATION] Task ${req.taskId.slice(0, 8)} reached HUMAN tier — ` +
+              `aborting spawn, status set to waiting_on`
+            );
+            decrementPendingSpawns(spawnProjectId, req.agentType);
+            writeSpawnResult(req.runId, req.nodeId, {
+              status: "failed",
+              error: `Human escalation required: task ${req.taskId.slice(0, 8)} exhausted automated recovery. Status set to waiting_on.`,
+            });
+            return;
+          }
+        }
+      }
+    } catch (e) {
+      log().warn(`[ESCALATION] escalate() failed for task ${req.taskId.slice(0, 8)}: ${e}`);
+    }
+  }
+
   // ── Circuit-breaker-aware model selection ────────────────────────────────
   let model: string;
   let circuitDegraded = false;
@@ -1566,9 +1619,15 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
     model = complianceOverrideModel;
     log().info(`[COMPLIANCE] Using local-only model: ${model} (no cloud fallback)`);
   } else {
-    const modelChoice = req.modelTier
-      ? chooseModel(req.modelTier, req.agentType)
-      : chooseModel("standard", req.agentType);
+    // If the task has been escalated, bump to next model tier so retries use a stronger model
+    const modelChoice = taskEscalationTier > 0
+      ? escalationModel(
+          (req.modelTier as ModelTier | undefined) ?? resolveTaskTier({ agent: req.agentType }),
+          req.agentType,
+        )
+      : req.modelTier
+        ? chooseModel(req.modelTier, req.agentType)
+        : chooseModel("standard", req.agentType);
 
     // Build fallback chain: uses AGENT_FALLBACK_CHAINS if available, else tier-level alternatives
     const primaryModel = modelChoice.model;
