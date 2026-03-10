@@ -648,6 +648,15 @@ function updateTaskFromEnd(taskId: string, succeeded: boolean, reason?: string, 
  * notes are enriched with which sensitivity categories fired so the reviewer
  * knows where to focus. Scope bounding is always included to prevent ghost sessions.
  *
+ * CRITICAL: The scopePath for reviewer tasks is derived from either:
+ *   1. sourceTask.artifactPath (if the task was created with an explicit artifact path), OR
+ *   2. project.repoPath (if the task's project is in the database), OR
+ *   3. undefined (no scope — reviewer will scan from root)
+ *
+ * The scope directory MUST EXIST on disk. If a project's repoPath points to a
+ * nonexistent directory, auto-review will be skipped (see guard below). Always
+ * verify project.repoPath values in the database match actual on-disk paths.
+ *
  * Called from:
  *   - updateTaskFromEnd (subagent completion path) — with triggerResult
  *   - workflow/engine.ts (workflow completion path) — without triggerResult (legacy)
