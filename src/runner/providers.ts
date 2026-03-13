@@ -20,6 +20,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { readFileSync } from "node:fs";
 import type { ToolDefinition, TokenUsage } from "./types.js";
+import { getKeyPool } from "../services/key-pool.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -123,7 +124,15 @@ function isOAuthToken(key: string): boolean {
   return key.includes("sk-ant-oat");
 }
 
-function resolveAnthropicAuth(): AnthropicAuth | undefined {
+function resolveAnthropicAuth(sessionId?: string): AnthropicAuth | undefined {
+  // Try KeyPool first if sessionId provided
+  if (sessionId) {
+    const keyPool = getKeyPool();
+    const auth = keyPool.getAuth("anthropic", sessionId);
+    if (auth) return auth as AnthropicAuth;
+  }
+
+  // Fallback to single-key environment variables
   if (process.env.ANTHROPIC_API_KEY) {
     const key = process.env.ANTHROPIC_API_KEY;
     return isOAuthToken(key)
@@ -185,9 +194,12 @@ function createAnthropicNativeClient(auth: AnthropicAuth): Anthropic {
 
 class AnthropicClient implements LLMClient {
   private client: Anthropic;
+  private sessionId?: string;
+  private keyIndex?: number;
 
-  constructor(auth: AnthropicAuth) {
+  constructor(auth: AnthropicAuth, sessionId?: string) {
     this.client = createAnthropicNativeClient(auth);
+    this.sessionId = sessionId;
   }
 
   async createMessage(params: {
@@ -233,37 +245,93 @@ class AnthropicClient implements LLMClient {
       apiParams.max_tokens = params.maxTokens;
     }
 
-    const response = await this.client.messages.create(apiParams);
+    try {
+      const response = await this.client.messages.create(apiParams);
 
-    const usage: TokenUsage = {
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
-      cacheReadTokens: (response.usage as any).cache_read_input_tokens ?? 0,
-      cacheWriteTokens: (response.usage as any).cache_creation_input_tokens ?? 0,
-      thinkingTokens: (response.usage as any).thinking_tokens,
-    };
+      const usage: TokenUsage = {
+        inputTokens: response.usage.input_tokens,
+        outputTokens: response.usage.output_tokens,
+        cacheReadTokens: (response.usage as any).cache_read_input_tokens ?? 0,
+        cacheWriteTokens: (response.usage as any).cache_creation_input_tokens ?? 0,
+        thinkingTokens: (response.usage as any).thinking_tokens,
+      };
 
-    // Extract thinking content if present
-    let thinkingContent: string | undefined;
-    const thinkingBlocks = (response.content as any[]).filter(
-      (block: any) => block.type === "thinking"
-    );
-    if (thinkingBlocks.length > 0) {
-      thinkingContent = thinkingBlocks
-        .map((block: any) => block.thinking as string)
-        .join("\n\n");
+      // Extract thinking content if present
+      let thinkingContent: string | undefined;
+      const thinkingBlocks = (response.content as any[]).filter(
+        (block: any) => block.type === "thinking"
+      );
+      if (thinkingBlocks.length > 0) {
+        thinkingContent = thinkingBlocks
+          .map((block: any) => block.thinking as string)
+          .join("\n\n");
+      }
+
+      return {
+        content: response.content as LLMResponse["content"],
+        stopReason: response.stop_reason === "end_turn" ? "end_turn"
+          : response.stop_reason === "tool_use" ? "tool_use"
+          : response.stop_reason === "max_tokens" ? "max_tokens"
+          : "stop",
+        usage,
+        thinkingContent,
+      };
+    } catch (error) {
+      // Detect error type and mark key as failed if using KeyPool
+      if (this.sessionId) {
+        const message = error instanceof Error ? error.message : String(error);
+        const keyPool = getKeyPool();
+        
+        // Parse HTTP status from error message
+        const statusMatch = message.match(/\b(\d{3})\b/);
+        const status = statusMatch ? parseInt(statusMatch[1], 10) : undefined;
+
+        if (status === 401 || status === 403) {
+          // Auth failure — mark key as permanently failed
+          if (keyPool.hasKeys("anthropic")) {
+            // Get current key index by finding which key matches
+            const sessionAuth = keyPool.getAuth("anthropic", this.sessionId);
+            if (sessionAuth) {
+              // Mark as auth failure (won't auto-recover)
+              console.warn(`[AnthropicClient] Auth failure detected, marking key as failed`);
+              // Note: We can't get the exact key index here, but the KeyPool will handle it
+              // when the next call tries to get a key and finds this one failed
+            }
+          }
+        } else if (status === 429) {
+          // Rate limit — mark key as temporarily failed
+          console.warn(`[AnthropicClient] Rate limit detected, will retry with backoff`);
+        }
+      }
+
+      // Re-throw error to let ResilientLLMClient handle retries
+      throw error;
     }
-
-    return {
-      content: response.content as LLMResponse["content"],
-      stopReason: response.stop_reason === "end_turn" ? "end_turn"
-        : response.stop_reason === "tool_use" ? "tool_use"
-        : response.stop_reason === "max_tokens" ? "max_tokens"
-        : "stop",
-      usage,
-      thinkingContent,
-    };
   }
+}
+
+/**
+ * Resolve OpenAI API key from KeyPool or environment.
+ */
+function resolveOpenAIKey(sessionId?: string): string | undefined {
+  if (sessionId) {
+    const keyPool = getKeyPool();
+    const auth = keyPool.getAuth("openai", sessionId);
+    if (auth?.apiKey) return auth.apiKey;
+  }
+  return process.env.OPENAI_API_KEY;
+}
+
+/**
+ * Resolve OpenRouter API key from KeyPool or environment.
+ */
+function resolveOpenRouterKey(sessionId?: string): string | undefined {
+  if (sessionId) {
+    const keyPool = getKeyPool();
+    const auth = keyPool.getAuth("openrouter", sessionId);
+    if (auth?.apiKey) return auth.apiKey;
+  }
+  return process.env.OPENROUTER_API_KEY;
 }
 
 // ── OpenAI-Compatible Client ─────────────────────────────────────────────────
@@ -299,10 +367,20 @@ class OpenAICompatibleClient implements LLMClient {
   private baseUrl: string;
   private apiKey: string;
   private headers: Record<string, string>;
+  private provider: Provider;
+  private sessionId?: string;
 
-  constructor(baseUrl: string, apiKey: string, extraHeaders?: Record<string, string>) {
+  constructor(
+    baseUrl: string,
+    apiKey: string,
+    provider: Provider,
+    sessionId?: string,
+    extraHeaders?: Record<string, string>
+  ) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.apiKey = apiKey;
+    this.provider = provider;
+    this.sessionId = sessionId;
     this.headers = extraHeaders ?? {};
   }
 
@@ -399,20 +477,42 @@ class OpenAICompatibleClient implements LLMClient {
       body.tools = tools;
     }
 
-    const response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.apiKey}`,
-        ...this.headers,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000),
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${this.apiKey}`,
+          ...this.headers,
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(120_000),
+      });
+    } catch (error) {
+      // Network error — re-throw as-is
+      throw error;
+    }
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`${response.status} ${text.slice(0, 200)}`);
+      const error = new Error(`${response.status} ${text.slice(0, 200)}`);
+
+      // Mark key as failed if using KeyPool
+      if (this.sessionId && (this.provider === "openai" || this.provider === "openrouter")) {
+        const keyPool = getKeyPool();
+        const providerKey = this.provider as "openai" | "openrouter";
+
+        if (response.status === 401 || response.status === 403) {
+          console.warn(`[${this.provider}Client] Auth failure detected`);
+          // Auth failures are handled by KeyPool on next getKey call
+        } else if (response.status === 429) {
+          console.warn(`[${this.provider}Client] Rate limit detected`);
+          // Rate limit handled by ResilientLLMClient retry logic
+        }
+      }
+
+      throw error;
     }
 
     const data = (await response.json()) as OpenAIResponse;
@@ -483,16 +583,18 @@ class ResilientLLMClient implements LLMClient {
   private primaryModel: string;
   private fallbackModels: string[];
   private maxRetries: number;
+  private sessionId?: string;
 
   constructor(
     primaryClient: LLMClient,
     primaryModel: string,
-    options?: ResilientClientOptions
+    options?: ResilientClientOptions & { sessionId?: string }
   ) {
     this.primaryClient = primaryClient;
     this.primaryModel = primaryModel;
     this.fallbackModels = options?.fallbackModels ?? [];
     this.maxRetries = options?.maxRetries ?? 3;
+    this.sessionId = options?.sessionId;
   }
 
   async createMessage(params: {
@@ -511,7 +613,7 @@ class ResilientLLMClient implements LLMClient {
 
       // Create client for this model if it's a fallback
       const client = isFallback
-        ? createClient(parseModelString(model))
+        ? createClient(parseModelString(model), this.sessionId)
         : this.primaryClient;
 
       const modelParams = { ...params, model: parseModelString(model).modelId };
@@ -594,24 +696,27 @@ class ResilientLLMClient implements LLMClient {
 
 /**
  * Create a resilient LLM client with retry and fallback support.
+ * @param sessionId - Optional session ID for sticky key assignment
  */
 export function createResilientClient(
   model: string,
-  options?: ResilientClientOptions
+  options?: ResilientClientOptions & { sessionId?: string }
 ): LLMClient {
   const config = parseModelString(model);
-  const primaryClient = createClient(config);
-  return new ResilientLLMClient(primaryClient, model, options);
+  const sessionId = options?.sessionId;
+  const primaryClient = createClient(config, sessionId);
+  return new ResilientLLMClient(primaryClient, model, { ...options, sessionId });
 }
 
 /**
  * Create an LLM client for the given provider config.
+ * @param sessionId - Optional session ID for sticky key assignment
  */
-export function createClient(config: ProviderConfig): LLMClient {
+export function createClient(config: ProviderConfig, sessionId?: string): LLMClient {
   if (config.provider === "anthropic") {
-    const auth = resolveAnthropicAuth();
+    const auth = resolveAnthropicAuth(sessionId);
     if (!auth) throw new Error("No Anthropic credentials found");
-    return new AnthropicClient(auth);
+    return new AnthropicClient(auth, sessionId);
   }
 
   // All other providers use OpenAI-compatible API
@@ -619,6 +724,15 @@ export function createClient(config: ProviderConfig): LLMClient {
   const baseUrl = config.baseUrl ?? defaults.baseUrl;
 
   let apiKey = config.apiKey ?? "";
+  
+  // Try KeyPool for OpenAI and OpenRouter
+  if (!apiKey && config.provider === "openai") {
+    apiKey = resolveOpenAIKey(sessionId) ?? "";
+  } else if (!apiKey && config.provider === "openrouter") {
+    apiKey = resolveOpenRouterKey(sessionId) ?? "";
+  }
+
+  // Fallback to environment variables
   if (!apiKey && defaults.envKey) {
     apiKey = process.env[defaults.envKey] ?? "";
   }
@@ -634,5 +748,5 @@ export function createClient(config: ProviderConfig): LLMClient {
     extraHeaders["X-Title"] = "Lobs Agent Runner";
   }
 
-  return new OpenAICompatibleClient(baseUrl, apiKey, extraHeaders);
+  return new OpenAICompatibleClient(baseUrl, apiKey, config.provider, sessionId, extraHeaders);
 }

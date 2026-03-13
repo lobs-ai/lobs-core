@@ -108,10 +108,12 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
   // Resolve provider from model string
   const providerConfig = parseModelString(spec.model);
 
-  // Create LLM client
+  // Create LLM client with session ID for sticky key assignment
   let client;
   try {
-    client = createClient(providerConfig);
+    // Use taskId or runId as sessionId for sticky key assignment (prompt caching benefit)
+    const sessionId = spec.context?.taskId ?? runId;
+    client = createClient(providerConfig, sessionId);
   } catch (error) {
     return {
       succeeded: false,
