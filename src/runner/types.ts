@@ -98,19 +98,12 @@ export interface ToolResult {
   is_error?: boolean;
 }
 
-/** Cost per million tokens by model (partial match on key) */
-export const MODEL_COSTS: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> = {
-  // Sonnet 4.5
-  "claude-sonnet-4-6": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-  "claude-sonnet-4-5": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-  // Sonnet 4
-  "claude-sonnet-4": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-  // Opus 4.6
-  "claude-opus-4-6": { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
-  // Opus 4
-  "claude-opus-4": { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
-  // Haiku 4.5
-  "claude-haiku-4-5": { input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1 },
-  // Haiku 3.5
-  "claude-haiku-3-5": { input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1 },
-};
+import { getModelConfig } from "../config/models.js";
+
+/** Cost per million tokens by model (reads from config) */
+export function getModelCosts(): Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> {
+  return getModelConfig().costs;
+}
+
+/** @deprecated Use getModelCosts() — kept for backwards compat */
+export const MODEL_COSTS = getModelConfig().costs;

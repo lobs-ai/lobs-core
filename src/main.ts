@@ -14,6 +14,10 @@ import { startServer } from "./server.js";
 import { setLogger, log } from "./util/logger.js";
 import { resolve } from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
+import { initToolGate } from "./runner/tool-gate.js";
+import { getCronManager } from "./orchestrator/cron.js";
+import { runHeartbeat } from "./orchestrator/heartbeat.js";
+import { runReflection } from "./orchestrator/reflection.js";
 
 const HOME = process.env.HOME ?? "";
 const DB_PATH = resolve(HOME, ".openclaw/plugins/lobs/lobs.db");
@@ -61,6 +65,39 @@ async function main() {
     console.warn(`Workflow seed warning: ${err}`);
   }
 
+  // Initialize hook system and tool gating
+  console.log("Initializing hook system...");
+  initToolGate();
+
+  // Set up cron jobs
+  console.log("Setting up cron jobs...");
+  const cronManager = getCronManager();
+  
+  // Heartbeat: every 30 minutes
+  cronManager.addJob({
+    id: "heartbeat",
+    name: "System Heartbeat",
+    schedule: "*/30 * * * *",
+    enabled: true,
+    handler: async () => {
+      await runHeartbeat();
+    },
+  });
+  
+  // Reflection: every 6 hours
+  cronManager.addJob({
+    id: "reflection",
+    name: "Self-Reflection",
+    schedule: "0 */6 * * *",
+    enabled: true,
+    handler: async () => {
+      await runReflection();
+    },
+  });
+  
+  cronManager.start();
+  console.log("Cron manager started");
+
   // Start the control loop
   startControlLoop({} as any, SCAN_INTERVAL_MS);
   console.log(`Control loop started (scan every ${SCAN_INTERVAL_MS / 1000}s)`);
@@ -72,6 +109,7 @@ async function main() {
   // Handle shutdown
   const shutdown = () => {
     console.log("\nShutting down...");
+    cronManager.stop();
     stopControlLoop();
     closeDb();
     process.exit(0);

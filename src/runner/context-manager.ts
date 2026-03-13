@@ -16,31 +16,15 @@
  */
 
 import type { LLMMessage } from "./providers.js";
+import { getContextLimit as getContextLimitFromConfig } from "../config/models.js";
 
-const CONTEXT_LIMITS: Record<string, number> = {
-  "claude-sonnet-4-6": 200_000,
-  "claude-sonnet-4": 200_000,
-  "claude-opus-4-6": 200_000,
-  "claude-opus-4": 200_000,
-  "claude-haiku-4": 200_000,
-  "qwen": 32_000,
-  "gpt-4": 128_000,
-  "gpt-4o": 128_000,
-};
-
-const DEFAULT_CONTEXT_LIMIT = 128_000;
 const CONTEXT_WARNING_THRESHOLD = 0.8; // 80%
 
 /**
- * Get the context limit for a model.
+ * Get the context limit for a model (reads from config).
  */
 export function getContextLimit(model: string): number {
-  for (const [key, limit] of Object.entries(CONTEXT_LIMITS)) {
-    if (model.includes(key)) {
-      return limit;
-    }
-  }
-  return DEFAULT_CONTEXT_LIMIT;
+  return getContextLimitFromConfig(model);
 }
 
 /**

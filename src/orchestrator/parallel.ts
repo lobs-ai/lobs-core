@@ -6,6 +6,7 @@
  */
 
 import { log } from "../util/logger.js";
+import { getModelForTier } from "../config/models.js";
 import { runAgent } from "../runner/index.js";
 import type { AgentResult } from "../runner/types.js";
 import { getDb, getRawDb } from "../db/connection.js";
@@ -191,13 +192,5 @@ export async function executeParallel(group: ParallelGroup): Promise<ParallelRes
 // ── Model Resolution ─────────────────────────────────────────────────────────
 
 function resolveModel(tier: string, _agentType: string): string {
-  const tierMap: Record<string, string> = {
-    micro: "lmstudio/qwen2.5-coder:7b",
-    small: "anthropic/claude-sonnet-4-6",
-    medium: "anthropic/claude-sonnet-4-6",
-    standard: "anthropic/claude-sonnet-4-6",
-    strong: "anthropic/claude-opus-4-6",
-  };
-
-  return tierMap[tier] ?? tierMap.standard;
+  return getModelForTier(tier);
 }

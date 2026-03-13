@@ -25,13 +25,7 @@ const AGENT_DEFAULT_TOOLS: Record<string, ToolName[]> = {
 };
 
 // Model tier mapping (simplified — orchestrator has the full version)
-const TIER_TO_MODEL: Record<string, string> = {
-  micro: "lmstudio/qwen3.5-9b",
-  small: "anthropic/claude-sonnet-4-6",
-  medium: "anthropic/claude-sonnet-4-6",
-  standard: "anthropic/claude-sonnet-4-6",
-  strong: "anthropic/claude-opus-4-6",
-};
+import { getModelForTier } from "../../config/models.js";
 
 export const AGENT_CONTROL_TOOLS: ToolDefinition[] = [
   {
@@ -158,7 +152,7 @@ export async function executeSpawnAgent(input: Record<string, unknown>, parentCw
   const timeout = Math.min((input.timeout as number) ?? 600, 900);
   const extraTools = (input.extra_tools as string[]) ?? [];
 
-  const model = TIER_TO_MODEL[modelTier] ?? TIER_TO_MODEL.standard;
+  const model = getModelForTier(modelTier);
   const tools = [...(AGENT_DEFAULT_TOOLS[agentType] ?? AGENT_DEFAULT_TOOLS.programmer)] as ToolName[];
 
   // Add extra tools
@@ -255,7 +249,7 @@ export async function executeRunPipeline(input: Record<string, unknown>, parentC
 
   for (let i = 0; i < stages.length; i++) {
     const stage = stages[i];
-    const model = TIER_TO_MODEL[stage.modelTier] ?? TIER_TO_MODEL.standard;
+    const model = getModelForTier(stage.modelTier);
     const tools = [...(AGENT_DEFAULT_TOOLS[stage.agentType] ?? AGENT_DEFAULT_TOOLS.programmer)] as ToolName[];
 
     // Build task with previous output as context

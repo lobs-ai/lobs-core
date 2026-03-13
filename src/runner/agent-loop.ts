@@ -18,6 +18,7 @@ import { parseModelString, createClient, type LLMMessage, type LLMResponse } fro
 import { createHash, randomBytes } from "node:crypto";
 import { SessionTranscript, type TurnRecord } from "./session-transcript.js";
 import { shouldCompact, compactMessages } from "./context-manager.js";
+import { getHookRegistry } from "./hooks.js";
 
 export type { AgentSpec, AgentResult };
 
@@ -79,6 +80,30 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
   // Generate or use existing run ID for session persistence
   const runId = spec.context?.taskId ?? randomBytes(8).toString("hex");
   const transcript = new SessionTranscript(spec.agent, runId);
+
+  // Emit before_agent_start hook
+  const hookRegistry = getHookRegistry();
+  const startEvent = await hookRegistry.emit({
+    hookName: "before_agent_start",
+    agentType: spec.agent,
+    taskId: spec.context?.taskId,
+    data: { spec },
+    timestamp: new Date(),
+  });
+  
+  // If hook cancelled the start, return early
+  if (!startEvent) {
+    return {
+      succeeded: false,
+      output: "",
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      costUsd: 0,
+      durationSeconds: 0,
+      turns: 0,
+      stopReason: "error",
+      error: "Agent start cancelled by hook",
+    };
+  }
 
   // Resolve provider from model string
   const providerConfig = parseModelString(spec.model);
@@ -163,7 +188,31 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
           console.log(
             `[Context compaction] Reduced messages from ${beforeCount} to ${afterCount} (${usage.inputTokens.toLocaleString()} input tokens)`
           );
+          
+          // Emit session_compacted hook
+          await hookRegistry.emit({
+            hookName: "session_compacted",
+            agentType: spec.agent,
+            taskId: spec.context?.taskId,
+            data: { beforeCount, afterCount, inputTokens: usage.inputTokens },
+            timestamp: new Date(),
+          });
         }
+      }
+
+      // Emit before_llm_call hook
+      const beforeLlmEvent = await hookRegistry.emit({
+        hookName: "before_llm_call",
+        agentType: spec.agent,
+        taskId: spec.context?.taskId,
+        data: { turn: turns, model: spec.model, messageCount: messages.length },
+        timestamp: new Date(),
+      });
+      
+      // If hook cancelled the call, break loop
+      if (!beforeLlmEvent) {
+        stopReason = "error";
+        break;
       }
 
       // Call the LLM
@@ -185,6 +234,19 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
         }
         throw error;
       }
+
+      // Emit after_llm_call hook
+      await hookRegistry.emit({
+        hookName: "after_llm_call",
+        agentType: spec.agent,
+        taskId: spec.context?.taskId,
+        data: { 
+          turn: turns, 
+          stopReason: response.stopReason,
+          usage: response.usage,
+        },
+        timestamp: new Date(),
+      });
 
       // Track usage
       usage.inputTokens += response.usage.inputTokens;
@@ -259,11 +321,69 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
           break;
         }
 
-        // Execute tool calls in parallel
+        // Execute tool calls with hooks
         const results = await Promise.all(
-          toolCalls.map((call) =>
-            executeTool(call.name, call.input, call.id, spec.cwd)
-          )
+          toolCalls.map(async (call) => {
+            // Emit before_tool_call hook
+            const beforeToolEvent = await hookRegistry.emit({
+              hookName: "before_tool_call",
+              agentType: spec.agent,
+              taskId: spec.context?.taskId,
+              data: { 
+                toolName: call.name, 
+                params: call.input,
+                toolUseId: call.id,
+                allowedTools: spec.tools,
+                denied: false,
+                reason: undefined,
+              },
+              timestamp: new Date(),
+            });
+            
+            // If hook cancelled the tool call, return denial
+            if (!beforeToolEvent) {
+              return {
+                tool_use_id: call.id,
+                type: "tool_result" as const,
+                content: "Tool call denied by policy",
+                is_error: true,
+              };
+            }
+            
+            // If hook modified the event to deny it
+            if ((beforeToolEvent.data as Record<string, unknown>).denied) {
+              return {
+                tool_use_id: call.id,
+                type: "tool_result" as const,
+                content: String((beforeToolEvent.data as Record<string, unknown>).reason ?? "Tool call denied by policy"),
+                is_error: true,
+              };
+            }
+            
+            // Execute the tool
+            const result = await executeTool(call.name, call.input, call.id, spec.cwd);
+            
+            // Emit after_tool_call hook
+            const afterToolEvent = await hookRegistry.emit({
+              hookName: "after_tool_call",
+              agentType: spec.agent,
+              taskId: spec.context?.taskId,
+              data: { 
+                toolName: call.name,
+                toolUseId: call.id,
+                result,
+                isError: result.is_error,
+              },
+              timestamp: new Date(),
+            });
+            
+            // Hook can modify the result
+            if (afterToolEvent && (afterToolEvent.data as Record<string, unknown>).result) {
+              return (afterToolEvent.data as Record<string, unknown>).result as ToolResult;
+            }
+            
+            return result;
+          })
         );
 
         // Track tool calls for loop detection
@@ -286,17 +406,38 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
           stopReason = "error";
           const errorMsg = `Tool loop detected: ${recentCalls[recentCalls.length - 1].name} repeated ${loopCount} times with identical arguments. Breaking loop.`;
           
-          return {
+          const durationSeconds = (Date.now() - startTime) / 1000;
+          const result: AgentResult = {
             succeeded: false,
             output: lastTextOutput,
             usage,
             costUsd: calculateCost(spec.model, usage),
-            durationSeconds: (Date.now() - startTime) / 1000,
+            durationSeconds,
             turns,
             stopReason,
             error: errorMsg,
             thinkingContent: thinkingContent || undefined,
           };
+
+          // Emit on_error hook
+          await hookRegistry.emit({
+            hookName: "on_error",
+            agentType: spec.agent,
+            taskId: spec.context?.taskId,
+            data: { error: errorMsg, turns, durationSeconds },
+            timestamp: new Date(),
+          });
+
+          // Emit after_agent_end hook
+          await hookRegistry.emit({
+            hookName: "after_agent_end",
+            agentType: spec.agent,
+            taskId: spec.context?.taskId,
+            data: { result, durationSeconds, turns, error: errorMsg },
+            timestamp: new Date(),
+          });
+          
+          return result;
         }
 
         if (loopCount === 3) {
@@ -355,7 +496,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       timestamp: new Date().toISOString(),
     });
 
-    return {
+    const result: AgentResult = {
       succeeded: stopReason === "end_turn",
       output: lastTextOutput,
       usage,
@@ -365,10 +506,30 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       stopReason,
       thinkingContent: thinkingContent || undefined,
     };
+
+    // Emit after_agent_end hook
+    await hookRegistry.emit({
+      hookName: "after_agent_end",
+      agentType: spec.agent,
+      taskId: spec.context?.taskId,
+      data: { result, durationSeconds, turns },
+      timestamp: new Date(),
+    });
+
+    return result;
   } catch (error) {
     const durationSeconds = (Date.now() - startTime) / 1000;
     const costUsd = calculateCost(spec.model, usage);
     const message = error instanceof Error ? error.message : String(error);
+
+    // Emit on_error hook
+    await hookRegistry.emit({
+      hookName: "on_error",
+      agentType: spec.agent,
+      taskId: spec.context?.taskId,
+      data: { error: message, turns, durationSeconds },
+      timestamp: new Date(),
+    });
 
     // Write error summary
     transcript.writeSummary({
@@ -385,7 +546,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       timestamp: new Date().toISOString(),
     });
 
-    return {
+    const result: AgentResult = {
       succeeded: false,
       output: lastTextOutput,
       usage,
@@ -396,6 +557,17 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       error: message,
       thinkingContent: thinkingContent || undefined,
     };
+
+    // Emit after_agent_end hook (even on error)
+    await hookRegistry.emit({
+      hookName: "after_agent_end",
+      agentType: spec.agent,
+      taskId: spec.context?.taskId,
+      data: { result, durationSeconds, turns, error: message },
+      timestamp: new Date(),
+    });
+
+    return result;
   }
 }
 

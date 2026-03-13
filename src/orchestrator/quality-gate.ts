@@ -1,3 +1,4 @@
+import { getModelForTier } from "../config/models.js";
 /**
  * Quality gate auto-review system.
  *
@@ -127,7 +128,7 @@ FEEDBACK:
     const result = await runAgent({
       task: reviewPrompt,
       agent: "reviewer",
-      model: config.reviewModel ?? "anthropic/claude-sonnet-4-6",
+      model: config.reviewModel ?? getModelForTier("small"),
       cwd: repoPath,
       tools: ["read", "exec"], // Reviewer can read files and run checks
       timeout: 600, // 10 minutes for review

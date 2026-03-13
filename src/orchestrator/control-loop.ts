@@ -1093,12 +1093,9 @@ function autoCloseSucceededTasks(): void {
 
 /** Model ID mapping: orchestrator → Anthropic OAuth endpoint format */
 function mapModelForRunner(orchestratorModel: string): string {
-  const mappings: Record<string, string> = {
-    "anthropic/claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
-    "anthropic/claude-sonnet-4-5": "anthropic/claude-sonnet-4-5-20250929",
-    "anthropic/claude-opus-4-6": "anthropic/claude-opus-4-6",
-    "anthropic/claude-haiku-4-5": "anthropic/claude-haiku-4-5-20250507",
-  };
+  // Models accept non-dated aliases now (sonnet-4-6, opus-4-6)
+  // Just pass through — the API resolves aliases
+  const mappings: Record<string, string> = {};
 
   // If it's an LM Studio model, ensure lmstudio/ prefix
   if (orchestratorModel.includes("lmstudio") || orchestratorModel.startsWith("local/")) {

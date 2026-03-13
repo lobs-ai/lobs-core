@@ -40,6 +40,13 @@ export async function handleUsageRequest(
   res: ServerResponse,
   sub?: string,
 ): Promise<void> {
+  // Route v2 endpoints to native usage tracker (worker_runs based)
+  if (sub?.startsWith("v2")) {
+    const v2Sub = sub.replace("v2/", "").replace("v2", "dashboard");
+    handleUsageV2(v2Sub, res);
+    return;
+  }
+
   const db = getDb();
   const q = parseQuery(req.url ?? "");
   const window = q.window ?? "month";
@@ -352,4 +359,35 @@ export async function handleUsageRequest(
   }
 
   return error(res, "Unknown usage endpoint", 404);
+}
+
+// ── V2 Usage API — pulls from worker_runs (native runner) ────────────────────
+
+import { getUsageDashboard, getUsageSummary, getDailyCosts } from "../services/usage-tracker.js";
+
+/**
+ * Handle /api/usage/v2/* requests.
+ * These use the native runner's worker_runs table instead of the legacy modelUsageEvents.
+ */
+export function handleUsageV2(sub: string, res: ServerResponse): void {
+  try {
+    if (sub === "dashboard") {
+      json(res, getUsageDashboard());
+      return;
+    }
+
+    if (sub === "summary") {
+      json(res, getUsageSummary(30));
+      return;
+    }
+
+    if (sub === "daily-costs") {
+      json(res, getDailyCosts(30));
+      return;
+    }
+
+    error(res, `Unknown v2 usage endpoint: ${sub}`, 404);
+  } catch (err) {
+    error(res, `Usage v2 error: ${String(err)}`, 500);
+  }
 }

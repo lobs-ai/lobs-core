@@ -17,9 +17,10 @@
  */
 
 import { log } from "../util/logger.js";
+import { getLocalConfig } from "../config/models.js";
 
-const LM_STUDIO_BASE = process.env.LM_STUDIO_URL ?? "http://localhost:1234/v1";
-const DEFAULT_MODEL = process.env.LOCAL_MODEL ?? "qwen3-4b";
+const LM_STUDIO_BASE = process.env.LM_STUDIO_URL ?? getLocalConfig().baseUrl;
+const DEFAULT_MODEL = process.env.LOCAL_MODEL ?? getLocalConfig().chatModel;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_INPUT_CHARS = 8000; // Keep prompts small for local models
 
