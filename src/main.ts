@@ -18,6 +18,10 @@ import { initToolGate } from "./runner/tool-gate.js";
 import { getCronManager } from "./orchestrator/cron.js";
 import { runHeartbeat } from "./orchestrator/heartbeat.js";
 import { runReflection } from "./orchestrator/reflection.js";
+import { browserService } from "./services/browser.js";
+import { skillsService } from "./services/skills.js";
+import { discordService } from "./services/discord.js";
+import { loadDiscordConfig } from "./config/discord.js";
 
 const HOME = process.env.HOME ?? "";
 const DB_PATH = resolve(HOME, ".openclaw/plugins/lobs/lobs.db");
@@ -69,6 +73,11 @@ async function main() {
   console.log("Initializing hook system...");
   initToolGate();
 
+  // Load skills
+  console.log("Loading skills...");
+  skillsService.loadAll();
+  console.log(`Loaded ${skillsService.getAll().length} skills`);
+
   // Set up cron jobs
   console.log("Setting up cron jobs...");
   const cronManager = getCronManager();
@@ -104,11 +113,22 @@ async function main() {
 
   // Start HTTP server (Nexus dashboard + API)
   startServer(HTTP_PORT);
+  
+  // Connect Discord bot if configured
+  const discordConfig = loadDiscordConfig();
+  if (discordConfig) {
+    discordService.connect(discordConfig).catch(err => {
+      console.error("[discord] Failed to connect:", err);
+    });
+  }
+  
   console.log("=== lobs-core ready ===");
 
   // Handle shutdown
-  const shutdown = () => {
+  const shutdown = async () => {
     console.log("\nShutting down...");
+    await browserService.shutdown();
+    await discordService.shutdown();
     cronManager.stop();
     stopControlLoop();
     closeDb();

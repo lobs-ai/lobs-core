@@ -36,6 +36,7 @@ import { handlePluginsRequest, handleUiAffordancesRequest, handleUiConfigRequest
 import { handleSchedulerRequest } from "./scheduler.js";
 import { handleGitHubRequest } from "./github.js";
 import { handleDailyBriefRequest } from "./daily-brief.js";
+import { handleSkillsRequest } from "./skills.js";
 import { error } from "./index.js";
 
 const PREFIXES = ["/paw/api/", "/api/"];
@@ -93,6 +94,7 @@ export function registerPawRouter(api: OpenClawPluginApi): void {
         case "scheduler":       await handleSchedulerRequest(req, res, parts[1], parts); return true;
         case "github":          await handleGitHubRequest(req, res, parts[1], parts); return true;
         case "daily-brief":     await handleDailyBriefRequest(req, res, parts[1]); return true;
+        case "skills":          await handleSkillsRequest(req, res, parts[1]); return true;
         default:                error(res, `Unknown resource: ${resource}`, 404); return true;
       }
     } catch (err) {
@@ -154,6 +156,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       case "youtube":         await handleYouTubeRequest(req, res, parts[1], parts); return;
       case "topics":          await handleTopicsRequest(req, res, parts[1], parts); return;
       case "tiles":           await handleTilesRequest(req, res, parts[1], parts); return;
+      case "skills":          await handleSkillsRequest(req, res, parts[1]); return;
       default:                error(res, `Unknown resource: ${resource}`, 404); return;
     }
   } catch (err) {

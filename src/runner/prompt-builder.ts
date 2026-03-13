@@ -12,6 +12,7 @@ import { readFileSync, existsSync } from "node:fs";
 import type { AgentSpec } from "./types.js";
 import { assembleContext, type AssembledContext } from "./context-engine.js";
 import { getAgentFiles, getRecentHistory, type AgentType } from "./workspace-manager.js";
+import { skillsService } from "../services/skills.js";
 
 // ── Agent Templates ──────────────────────────────────────────────────────────
 
@@ -190,7 +191,37 @@ export async function buildSmartSystemPrompt(spec: AgentSpec): Promise<{
     parts.push(`\n---\n${context.contextBlock}\n---`);
   }
 
-  // 6. Add any additional raw context (for backwards compatibility)
+  // 6. Match and inject relevant skills
+  try {
+    // Extract task title and notes
+    let taskTitle = "";
+    let taskNotes = "";
+    
+    if (typeof spec.task === "string") {
+      taskTitle = spec.task;
+    } else if (spec.task && typeof spec.task === "object") {
+      taskTitle = (spec.task as any).title ?? "";
+      taskNotes = (spec.task as any).notes ?? "";
+    }
+    
+    const matchedSkills = skillsService.matchSkills(taskTitle, taskNotes, spec.agent);
+    
+    if (matchedSkills.length > 0) {
+      // Limit to 2 most relevant skills to avoid bloating the prompt
+      const topSkills = matchedSkills.slice(0, 2);
+      parts.push("\n---\n## Relevant Skills\n");
+      
+      for (const skill of topSkills) {
+        parts.push(`### ${skill.name}\n\n${skill.instructions}\n`);
+      }
+      
+      parts.push("---");
+    }
+  } catch (err) {
+    // Skip if skills service unavailable
+  }
+
+  // 7. Add any additional raw context (for backwards compatibility)
   if (spec.context?.additionalContext) {
     parts.push(`\n${spec.context.additionalContext}`);
   }
