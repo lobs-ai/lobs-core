@@ -20,7 +20,11 @@ export async function handleResearchRequest(
   const sub = parts[2]; // e.g. "doc", "sources", "requests", "deliverables"
   const subId = parts[3];
 
-  if (!projectId) return error(res, "projectId required", 400);
+  // If no projectId, return empty results gracefully
+  if (!projectId) {
+    const memos = db.select().from(researchMemos).orderBy(desc(researchMemos.createdAt)).all();
+    return json(res, { memos });
+  }
 
   if (!sub || sub === undefined) {
     // GET /api/research/:projectId — overview

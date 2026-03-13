@@ -37,6 +37,79 @@ export async function handleGitHubRequest(
   sub?: string,
   _parts: string[] = [],
 ): Promise<void> {
+  // GET /api/github/prs — aggregate PRs across repos
+  if (sub === "prs" && req.method === "GET") {
+    const query = parseQuery(req.url ?? "");
+    const limit = parseInt(query.limit ?? "20", 10);
+
+    try {
+      const repos = [
+        "paw-engineering/paw-hub",
+        "paw-engineering/paw-portal",
+        "paw-engineering/paw-site",
+        "paw-engineering/ship-api",
+        "paw-engineering/paw-plugin",
+        "lobs-ai/lobs-core",
+        "lobs-ai/lobs-memory",
+      ];
+
+      const allPRs: any[] = [];
+      for (const repo of repos) {
+        try {
+          const prs = execSync(
+            `gh pr list --repo ${repo} --json number,title,state,author,createdAt,url --limit ${limit}`,
+            { encoding: "utf-8", timeout: 5000 }
+          );
+          const parsed = JSON.parse(prs);
+          allPRs.push(...parsed.map((pr: any) => ({ ...pr, repo })));
+        } catch {
+          // Repo might not exist or have no PRs, skip
+        }
+      }
+
+      // Sort by createdAt descending
+      allPRs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      return json(res, { prs: allPRs.slice(0, limit * 2) });
+    } catch (err) {
+      return error(res, `Failed to fetch PRs: ${String(err)}`, 500);
+    }
+  }
+
+  // GET /api/github/ci — aggregate CI runs across repos
+  if (sub === "ci" && req.method === "GET") {
+    const query = parseQuery(req.url ?? "");
+    const limit = parseInt(query.limit ?? "20", 10);
+
+    try {
+      const repos = [
+        "paw-engineering/paw-hub",
+        "paw-engineering/paw-portal",
+        "paw-engineering/paw-site",
+        "lobs-ai/lobs-core",
+      ];
+
+      const allRuns: any[] = [];
+      for (const repo of repos) {
+        try {
+          const runs = execSync(
+            `gh run list --repo ${repo} --json name,status,conclusion,createdAt,url --limit ${limit}`,
+            { encoding: "utf-8", timeout: 5000 }
+          );
+          const parsed = JSON.parse(runs);
+          allRuns.push(...parsed.map((run: any) => ({ ...run, repo })));
+        } catch {
+          // Repo might not exist or have no CI, skip
+        }
+      }
+
+      // Sort by createdAt descending
+      allRuns.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      return json(res, { runs: allRuns.slice(0, limit * 2) });
+    } catch (err) {
+      return error(res, `Failed to fetch CI runs: ${String(err)}`, 500);
+    }
+  }
+
   if (sub === "feed" && req.method === "GET") {
     // Check cache
     const now = Date.now();

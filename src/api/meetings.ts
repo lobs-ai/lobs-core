@@ -9,6 +9,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { log } from "../util/logger.js";
 
 const svc = new MeetingsService();
 
@@ -221,30 +222,45 @@ export async function handleMeetingActionItemsRequest(
 
   // GET /api/meetings/action-items?assignee=rafe — all action items across meetings
   if (meetingId === "action-items" && req.method === "GET") {
-    const q = parseQuery(req.url ?? "");
-    let rows = db.select().from(meetingActionItems).orderBy(desc(meetingActionItems.createdAt)).all();
-    if (q.assignee) rows = rows.filter(r => r.assignee === q.assignee);
-    if (q.status) rows = rows.filter(r => r.status === q.status);
-    return json(res, rows);
+    try {
+      const q = parseQuery(req.url ?? "");
+      let rows = db.select().from(meetingActionItems).orderBy(desc(meetingActionItems.createdAt)).all();
+      if (q.assignee) rows = rows.filter(r => r.assignee === q.assignee);
+      if (q.status) rows = rows.filter(r => r.status === q.status);
+      return json(res, rows);
+    } catch (err) {
+      log().error(`meetings: failed to fetch action items: ${err}`);
+      return json(res, []); // Return empty array gracefully
+    }
   }
 
   // GET /api/meetings/:id/action-items — action items for a specific meeting
   if (meetingId && parts[2] === "action-items" && req.method === "GET") {
-    const rows = db.select().from(meetingActionItems)
-      .where(eq(meetingActionItems.meetingId, meetingId))
-      .orderBy(desc(meetingActionItems.createdAt))
-      .all();
-    return json(res, rows);
+    try {
+      const rows = db.select().from(meetingActionItems)
+        .where(eq(meetingActionItems.meetingId, meetingId))
+        .orderBy(desc(meetingActionItems.createdAt))
+        .all();
+      return json(res, rows);
+    } catch (err) {
+      log().error(`meetings: failed to fetch action items for meeting ${meetingId}: ${err}`);
+      return json(res, []); // Return empty array gracefully
+    }
   }
 
   // PATCH /api/meetings/action-items/:itemId — update status
   if (meetingId === "action-items" && parts[2] && req.method === "PATCH") {
-    const body = (await parseBody(req)) as any;
-    const updates: any = { updatedAt: new Date().toISOString() };
-    if (body.status) updates.status = body.status;
-    if (body.assignee !== undefined) updates.assignee = body.assignee;
-    db.update(meetingActionItems).set(updates).where(eq(meetingActionItems.id, parts[2])).run();
-    return json(res, { ok: true });
+    try {
+      const body = (await parseBody(req)) as any;
+      const updates: any = { updatedAt: new Date().toISOString() };
+      if (body.status) updates.status = body.status;
+      if (body.assignee !== undefined) updates.assignee = body.assignee;
+      db.update(meetingActionItems).set(updates).where(eq(meetingActionItems.id, parts[2])).run();
+      return json(res, { ok: true });
+    } catch (err) {
+      log().error(`meetings: failed to update action item ${parts[2]}: ${err}`);
+      return error(res, "Failed to update action item", 500);
+    }
   }
 
   return error(res, "Not found", 404);
