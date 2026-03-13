@@ -1094,8 +1094,9 @@ function autoCloseSucceededTasks(): void {
 /** Model ID mapping: orchestrator → Anthropic OAuth endpoint format */
 function mapModelForRunner(orchestratorModel: string): string {
   const mappings: Record<string, string> = {
-    "anthropic/claude-sonnet-4-6": "anthropic/claude-sonnet-4-20250514",
-    "anthropic/claude-opus-4-6": "anthropic/claude-opus-4-20250724",
+    "anthropic/claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
+    "anthropic/claude-sonnet-4-5": "anthropic/claude-sonnet-4-5-20250929",
+    "anthropic/claude-opus-4-6": "anthropic/claude-opus-4-6",
     "anthropic/claude-haiku-4-5": "anthropic/claude-haiku-4-5-20250507",
   };
 
@@ -1181,7 +1182,7 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
       agent: req.agentType,
       model: runnerModel,
       cwd: repoPath,
-      tools: ["exec", "read", "write", "edit", "memory_search", "memory_read"],
+      tools: ["exec", "read", "write", "edit", "memory_search", "memory_read", "memory_write", "spawn_agent", "run_pipeline"],
       timeout: 900, // 15 minutes
       maxTurns: 200,
     });

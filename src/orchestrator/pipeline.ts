@@ -239,10 +239,10 @@ export function researchAndWritePipeline(): Pipeline {
 function resolveModel(tier: string, _agentType: string): string {
   const tierMap: Record<string, string> = {
     micro: "lmstudio/qwen2.5-coder:7b",
-    small: "anthropic/claude-sonnet-4-5-20250514",
-    medium: "anthropic/claude-sonnet-4-5-20250514",
-    standard: "anthropic/claude-sonnet-4-5-20250514",
-    strong: "anthropic/claude-opus-4-20250724",
+    small: "anthropic/claude-sonnet-4-6",
+    medium: "anthropic/claude-sonnet-4-6",
+    standard: "anthropic/claude-sonnet-4-6",
+    strong: "anthropic/claude-opus-4-6",
   };
 
   return tierMap[tier] ?? tierMap.standard;

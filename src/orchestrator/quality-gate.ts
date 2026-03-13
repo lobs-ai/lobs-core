@@ -127,7 +127,7 @@ FEEDBACK:
     const result = await runAgent({
       task: reviewPrompt,
       agent: "reviewer",
-      model: config.reviewModel ?? "anthropic/claude-sonnet-4-5-20250514",
+      model: config.reviewModel ?? "anthropic/claude-sonnet-4-6",
       cwd: repoPath,
       tools: ["read", "exec"], // Reviewer can read files and run checks
       timeout: 600, // 10 minutes for review

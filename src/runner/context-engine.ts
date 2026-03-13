@@ -291,35 +291,13 @@ export async function classifyTaskWithLLM(text: string): Promise<TaskType | null
   if (llmClassifyCache.has(cacheKey)) return llmClassifyCache.get(cacheKey)!;
 
   try {
-    const response = await fetch("http://localhost:1234/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "qwen2.5-1.5b-instruct-mlx",
-        messages: [
-          {
-            role: "user",
-            content: `Classify this task into exactly one category. Reply with ONLY the category name, nothing else.\n\nCategories: coding, debugging, architecture, review, research, documentation, devops\n\nTask: ${text.slice(0, 500)}\n\nCategory:`,
-          },
-        ],
-        max_tokens: 10,
-        temperature: 0,
-      }),
-      signal: AbortSignal.timeout(5000),
-    });
-
-    if (!response.ok) return null;
-
-    const data = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-    const answer = data.choices?.[0]?.message?.content?.trim().toLowerCase() ?? "";
-
-    // Validate the response is a known type
+    // Use local classifier for fast, free categorization
+    const { classify } = await import("./local-classifier.js");
     const validTypes: TaskType[] = ["coding", "debugging", "architecture", "review", "research", "documentation", "devops"];
-    const matched = validTypes.find(t => answer.includes(t));
+    const result = await classify(text.slice(0, 500), [...validTypes]);
 
-    if (matched) {
+    if (result.confidence > 0.3) {
+      const matched = result.category as TaskType;
       llmClassifyCache.set(cacheKey, matched);
       return matched;
     }

@@ -17,20 +17,20 @@ const HOME = process.env.HOME ?? "";
 
 // Default tools each agent type gets
 const AGENT_DEFAULT_TOOLS: Record<string, ToolName[]> = {
-  programmer: ["exec", "read", "write", "edit", "memory_search", "memory_read"],
-  reviewer: ["exec", "read", "memory_search", "memory_read"],
+  programmer: ["exec", "read", "write", "edit", "memory_search", "memory_read", "memory_write"],
+  reviewer: ["exec", "read", "memory_search", "memory_read", "memory_write"],
   researcher: ["exec", "read", "write", "web_search", "memory_search", "memory_read", "memory_write"],
-  writer: ["read", "write", "edit", "memory_search", "memory_read"],
-  architect: ["read", "write", "memory_search", "memory_read"],
+  writer: ["read", "write", "edit", "memory_search", "memory_read", "memory_write"],
+  architect: ["read", "write", "memory_search", "memory_read", "memory_write"],
 };
 
 // Model tier mapping (simplified — orchestrator has the full version)
 const TIER_TO_MODEL: Record<string, string> = {
   micro: "lmstudio/qwen3.5-9b",
-  small: "anthropic/claude-sonnet-4-20250514",
-  medium: "anthropic/claude-sonnet-4-20250514",
-  standard: "anthropic/claude-sonnet-4-20250514",
-  strong: "anthropic/claude-opus-4-20250514",
+  small: "anthropic/claude-sonnet-4-6",
+  medium: "anthropic/claude-sonnet-4-6",
+  standard: "anthropic/claude-sonnet-4-6",
+  strong: "anthropic/claude-opus-4-6",
 };
 
 export const AGENT_CONTROL_TOOLS: ToolDefinition[] = [

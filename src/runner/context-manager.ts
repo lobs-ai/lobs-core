@@ -18,7 +18,9 @@
 import type { LLMMessage } from "./providers.js";
 
 const CONTEXT_LIMITS: Record<string, number> = {
+  "claude-sonnet-4-6": 200_000,
   "claude-sonnet-4": 200_000,
+  "claude-opus-4-6": 200_000,
   "claude-opus-4": 200_000,
   "claude-haiku-4": 200_000,
   "qwen": 32_000,
