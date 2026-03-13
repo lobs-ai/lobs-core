@@ -1920,3 +1920,82 @@ function writeSpawnResult(
     updatedAt: new Date().toISOString(),
   }).where(eq(workflowRuns.id, runId)).run();
 }
+
+// ── Task Decomposition Helpers ──────────────────────────────────────────────
+
+/**
+ * Check if a task should be decomposed before execution.
+ *
+ * Decompose if:
+ * - Title mentions "design AND implement" (separate phases)
+ * - Task has multiple distinct deliverables
+ * - Notes are very long (>2000 chars) with multiple subsections
+ */
+async function shouldDecomposeTask(task: { title: string; notes?: string }): Promise<boolean> {
+  const title = task.title.toLowerCase();
+  const notes = task.notes ?? "";
+
+  // Check for "design AND implement" pattern
+  if (/design.{0,10}(and|&).{0,10}implement/i.test(title)) {
+    return true;
+  }
+
+  // Check for multiple deliverables
+  const deliverableKeywords = ["design", "implement", "test", "document", "deploy", "review"];
+  const mentionedDeliverables = deliverableKeywords.filter((kw) =>
+    title.includes(kw) || notes.includes(kw),
+  );
+  if (mentionedDeliverables.length >= 3) {
+    return true;
+  }
+
+  // Check for very long notes with multiple subsections
+  if (notes.length > 2000) {
+    const subsectionCount = (notes.match(/^#{1,3}\s+/gm) ?? []).length;
+    if (subsectionCount >= 3) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Get the pipeline ID for a task, if it uses one.
+ *
+ * Returns null if task doesn't use a pipeline.
+ */
+function getTaskPipeline(task: { title: string; notes?: string }): string | null {
+  const db = getRawDb();
+
+  // Check if task has a pipeline field set
+  const row = db
+    .prepare(`SELECT notes FROM tasks WHERE id = ?`)
+    .get(task.title) as { notes: string | null } | undefined;
+
+  if (row?.notes) {
+    // Look for pipeline directive in notes
+    const pipelineMatch = row.notes.match(/pipeline:\s*(\S+)/i);
+    if (pipelineMatch) {
+      return pipelineMatch[1];
+    }
+  }
+
+  // Auto-detect based on patterns
+  const title = task.title.toLowerCase();
+  const notes = (task.notes ?? "").toLowerCase();
+
+  if (title.includes("implement") && title.includes("review")) {
+    return "implement-and-review";
+  }
+
+  if (title.includes("design") && title.includes("implement")) {
+    return "design-and-implement";
+  }
+
+  if (title.includes("research") && title.includes("write")) {
+    return "research-and-write";
+  }
+
+  return null;
+}
