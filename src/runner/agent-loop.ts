@@ -15,7 +15,9 @@ import { MODEL_COSTS as COSTS } from "./types.js";
 import { getToolDefinitions, executeTool } from "./tools/index.js";
 import { buildSystemPrompt, buildSmartSystemPrompt } from "./prompt-builder.js";
 import { parseModelString, createClient, type LLMMessage, type LLMResponse } from "./providers.js";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { SessionTranscript, type TurnRecord } from "./session-transcript.js";
+import { shouldCompact, compactMessages } from "./context-manager.js";
 
 export type { AgentSpec, AgentResult };
 
@@ -74,6 +76,10 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
   const startTime = Date.now();
   const maxTurns = spec.maxTurns ?? DEFAULT_MAX_TURNS;
 
+  // Generate or use existing run ID for session persistence
+  const runId = spec.context?.taskId ?? randomBytes(8).toString("hex");
+  const transcript = new SessionTranscript(spec.agent, runId);
+
   // Resolve provider from model string
   const providerConfig = parseModelString(spec.model);
 
@@ -128,6 +134,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
   let turns = 0;
   let lastTextOutput = "";
   let stopReason: AgentResult["stopReason"] = "end_turn";
+  let thinkingContent = "";
 
   // Tool loop detection — track last 10 tool calls
   const recentCalls: ToolCallRecord[] = [];
@@ -146,6 +153,19 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
 
       turns++;
 
+      // Check if we need to compact context
+      if (shouldCompact(usage.inputTokens, spec.model)) {
+        const beforeCount = messages.length;
+        messages.splice(0, messages.length, ...compactMessages(messages));
+        const afterCount = messages.length;
+
+        if (beforeCount !== afterCount) {
+          console.log(
+            `[Context compaction] Reduced messages from ${beforeCount} to ${afterCount} (${usage.inputTokens.toLocaleString()} input tokens)`
+          );
+        }
+      }
+
       // Call the LLM
       let response: LLMResponse;
       try {
@@ -155,6 +175,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
           messages,
           tools,
           maxTokens: DEFAULT_MAX_TOKENS,
+          thinking: spec.thinking,
         });
       } catch (error) {
         // Check if it's a timeout
@@ -170,6 +191,29 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       usage.outputTokens += response.usage.outputTokens;
       usage.cacheReadTokens += response.usage.cacheReadTokens;
       usage.cacheWriteTokens += response.usage.cacheWriteTokens;
+      if (response.usage.thinkingTokens) {
+        usage.thinkingTokens = (usage.thinkingTokens ?? 0) + response.usage.thinkingTokens;
+      }
+
+      // Capture thinking content
+      if (response.thinkingContent) {
+        thinkingContent += (thinkingContent ? "\n\n" : "") + response.thinkingContent;
+      }
+
+      // Extract tool calls from response for transcript
+      const toolCalls = response.content
+        .filter((block): block is { type: "tool_use"; id: string; name: string; input: Record<string, unknown> } => block.type === "tool_use")
+        .map((block) => ({ name: block.name, input: block.input }));
+
+      // Write turn to transcript
+      transcript.writeTurn({
+        turn: turns,
+        timestamp: new Date().toISOString(),
+        messages: [...messages], // Snapshot current messages
+        response,
+        usage,
+        toolCalls,
+      });
 
       // Progress callback
       if (spec.onProgress) {
@@ -215,18 +259,15 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
           break;
         }
 
-        // Execute tool calls
-        const results: ToolResult[] = [];
-        for (const call of toolCalls) {
-          const result = await executeTool(
-            call.name,
-            call.input,
-            call.id,
-            spec.cwd,
-          );
-          results.push(result);
+        // Execute tool calls in parallel
+        const results = await Promise.all(
+          toolCalls.map((call) =>
+            executeTool(call.name, call.input, call.id, spec.cwd)
+          )
+        );
 
-          // Track this tool call for loop detection
+        // Track tool calls for loop detection
+        for (const call of toolCalls) {
           const callRecord: ToolCallRecord = {
             name: call.name,
             argsHash: hashToolArgs(call.input),
@@ -254,6 +295,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
             turns,
             stopReason,
             error: errorMsg,
+            thinkingContent: thinkingContent || undefined,
           };
         }
 
@@ -299,6 +341,20 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
     const durationSeconds = (Date.now() - startTime) / 1000;
     const costUsd = calculateCost(spec.model, usage);
 
+    // Write final summary
+    transcript.writeSummary({
+      type: "summary",
+      runId,
+      agentType: spec.agent,
+      taskId: spec.context?.taskId,
+      succeeded: stopReason === "end_turn",
+      totalTurns: turns,
+      totalUsage: usage,
+      durationSeconds,
+      stopReason,
+      timestamp: new Date().toISOString(),
+    });
+
     return {
       succeeded: stopReason === "end_turn",
       output: lastTextOutput,
@@ -307,11 +363,27 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       durationSeconds,
       turns,
       stopReason,
+      thinkingContent: thinkingContent || undefined,
     };
   } catch (error) {
     const durationSeconds = (Date.now() - startTime) / 1000;
     const costUsd = calculateCost(spec.model, usage);
     const message = error instanceof Error ? error.message : String(error);
+
+    // Write error summary
+    transcript.writeSummary({
+      type: "summary",
+      runId,
+      agentType: spec.agent,
+      taskId: spec.context?.taskId,
+      succeeded: false,
+      totalTurns: turns,
+      totalUsage: usage,
+      durationSeconds,
+      stopReason: "error",
+      error: message,
+      timestamp: new Date().toISOString(),
+    });
 
     return {
       succeeded: false,
@@ -322,6 +394,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       turns,
       stopReason: "error",
       error: message,
+      thinkingContent: thinkingContent || undefined,
     };
   }
 }

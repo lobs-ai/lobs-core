@@ -1,14 +1,17 @@
 /**
  * Memory tools — query lobs-memory search server for semantic recall.
  *
- * Two tools:
+ * Three tools:
  * - memory_search: semantic search across indexed docs (markdown, notes, ADRs, etc.)
  * - memory_read: read specific lines from a file (for diving deeper into search results)
+ * - memory_write: write learnings/decisions back to memory during agent runs
  *
- * Both tools query http://localhost:7420 (lobs-memory server).
+ * memory_search and memory_read query http://localhost:7420 (lobs-memory server).
+ * memory_write appends to ~/lobs-shared-memory/learnings.md or a specified file.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import type { ToolDefinition } from "../types.js";
 
 const MEMORY_SERVER = "http://localhost:7420";
@@ -190,5 +193,76 @@ export async function memoryReadTool(
     return `${header}\n${numbered}`;
   } catch (error) {
     return `Error reading file: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+// ── memory_write ─────────────────────────────────────────────────────────────
+
+export const memoryWriteToolDefinition: ToolDefinition = {
+  name: "memory_write",
+  description:
+    "Write a learning, decision, or important finding to persistent memory. " +
+    "Use when you discover something that should be remembered for future runs. " +
+    "Appends to ~/lobs-shared-memory/learnings.md (or a specified file) with timestamp.",
+  input_schema: {
+    type: "object",
+    properties: {
+      content: {
+        type: "string",
+        description: "What to remember — the learning, decision, or finding",
+      },
+      category: {
+        type: "string",
+        enum: ["learning", "decision", "finding"],
+        description: "Category of memory entry",
+      },
+      file: {
+        type: "string",
+        description: "Optional: specific file to append to (default: learnings.md in ~/lobs-shared-memory)",
+      },
+    },
+    required: ["content", "category"],
+  },
+};
+
+export async function memoryWriteTool(
+  params: Record<string, unknown>,
+): Promise<string> {
+  const content = params.content as string;
+  const category = params.category as string;
+
+  if (!content || typeof content !== "string") {
+    return "Error: content is required and must be a string";
+  }
+
+  if (!category || !["learning", "decision", "finding"].includes(category)) {
+    return "Error: category must be one of: learning, decision, finding";
+  }
+
+  // Resolve target file
+  const homeDir = process.env.HOME ?? "";
+  let targetFile = params.file as string | undefined;
+
+  if (!targetFile) {
+    targetFile = `${homeDir}/lobs-shared-memory/learnings.md`;
+  } else {
+    // Resolve ~ in custom path
+    targetFile = targetFile.replace(/^~/, homeDir);
+  }
+
+  try {
+    // Ensure directory exists
+    mkdirSync(dirname(targetFile), { recursive: true });
+
+    // Format the entry
+    const timestamp = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+    const entry = `- **[${timestamp}] [${category}]** — ${content}\n`;
+
+    // Append to file
+    appendFileSync(targetFile, entry, "utf-8");
+
+    return `Wrote to memory: ${targetFile}\nEntry: ${entry.trim()}`;
+  } catch (error) {
+    return `Error writing to memory: ${error instanceof Error ? error.message : String(error)}`;
   }
 }

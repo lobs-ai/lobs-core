@@ -25,9 +25,14 @@ export interface AgentSpec {
   context?: AgentContext;
   /** Callback for progress updates */
   onProgress?: (update: ProgressUpdate) => void;
+  /** Extended thinking mode (Anthropic) */
+  thinking?: {
+    type: "enabled";
+    budgetTokens: number;
+  };
 }
 
-export type ToolName = "exec" | "read" | "write" | "edit" | "web_search" | "web_fetch" | "memory_search" | "memory_read";
+export type ToolName = "exec" | "read" | "write" | "edit" | "web_search" | "web_fetch" | "memory_search" | "memory_read" | "memory_write";
 
 export interface AgentContext {
   taskId?: string;
@@ -58,6 +63,8 @@ export interface AgentResult {
   error?: string;
   /** Files created or modified during the run */
   artifacts?: string[];
+  /** Extended thinking content (if thinking mode enabled) */
+  thinkingContent?: string;
 }
 
 export interface TokenUsage {
@@ -65,6 +72,7 @@ export interface TokenUsage {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  thinkingTokens?: number;
 }
 
 export interface ProgressUpdate {

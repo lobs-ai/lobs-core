@@ -49,6 +49,7 @@ export interface LLMResponse {
   }>;
   stopReason: "end_turn" | "tool_use" | "max_tokens" | "stop";
   usage: TokenUsage;
+  thinkingContent?: string;
 }
 
 export interface LLMClient {
@@ -58,6 +59,10 @@ export interface LLMClient {
     messages: LLMMessage[];
     tools: ToolDefinition[];
     maxTokens: number;
+    thinking?: {
+      type: "enabled";
+      budgetTokens: number;
+    };
   }): Promise<LLMResponse>;
 }
 
@@ -191,21 +196,63 @@ class AnthropicClient implements LLMClient {
     messages: LLMMessage[];
     tools: ToolDefinition[];
     maxTokens: number;
+    thinking?: {
+      type: "enabled";
+      budgetTokens: number;
+    };
   }): Promise<LLMResponse> {
-    const response = await this.client.messages.create({
+    // Apply prompt caching — wrap system prompt in array format with cache_control on last block
+    const systemParam: string | Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> =
+      [{ type: "text", text: params.system, cache_control: { type: "ephemeral" } }];
+
+    // Apply cache_control to last tool definition
+    const tools = [...params.tools] as Anthropic.Tool[];
+    if (tools.length > 0) {
+      tools[tools.length - 1] = {
+        ...tools[tools.length - 1],
+        cache_control: { type: "ephemeral" },
+      };
+    }
+
+    // Build API params — use any to allow thinking extension
+    const apiParams: any = {
       model: params.model,
-      max_tokens: params.maxTokens,
-      system: params.system,
-      tools: params.tools as Anthropic.Tool[],
+      system: systemParam,
+      tools,
       messages: params.messages as Anthropic.MessageParam[],
-    });
+    };
+
+    // Thinking mode — use max_output_tokens instead of max_tokens when thinking is enabled
+    if (params.thinking) {
+      apiParams.thinking = {
+        type: params.thinking.type,
+        budget_tokens: params.thinking.budgetTokens,
+      };
+      apiParams.max_output_tokens = params.maxTokens;
+    } else {
+      apiParams.max_tokens = params.maxTokens;
+    }
+
+    const response = await this.client.messages.create(apiParams);
 
     const usage: TokenUsage = {
       inputTokens: response.usage.input_tokens,
       outputTokens: response.usage.output_tokens,
-      cacheReadTokens: (response.usage as unknown as Record<string, number>).cache_read_input_tokens ?? 0,
-      cacheWriteTokens: (response.usage as unknown as Record<string, number>).cache_creation_input_tokens ?? 0,
+      cacheReadTokens: (response.usage as any).cache_read_input_tokens ?? 0,
+      cacheWriteTokens: (response.usage as any).cache_creation_input_tokens ?? 0,
+      thinkingTokens: (response.usage as any).thinking_tokens,
     };
+
+    // Extract thinking content if present
+    let thinkingContent: string | undefined;
+    const thinkingBlocks = (response.content as any[]).filter(
+      (block: any) => block.type === "thinking"
+    );
+    if (thinkingBlocks.length > 0) {
+      thinkingContent = thinkingBlocks
+        .map((block: any) => block.thinking as string)
+        .join("\n\n");
+    }
 
     return {
       content: response.content as LLMResponse["content"],
@@ -214,6 +261,7 @@ class AnthropicClient implements LLMClient {
         : response.stop_reason === "max_tokens" ? "max_tokens"
         : "stop",
       usage,
+      thinkingContent,
     };
   }
 }
@@ -264,6 +312,10 @@ class OpenAICompatibleClient implements LLMClient {
     messages: LLMMessage[];
     tools: ToolDefinition[];
     maxTokens: number;
+    thinking?: {
+      type: "enabled";
+      budgetTokens: number;
+    };
   }): Promise<LLMResponse> {
     // Convert to OpenAI format
     const messages: Array<Record<string, unknown>> = [
@@ -418,6 +470,139 @@ const PROVIDER_DEFAULTS: Record<Provider, { baseUrl: string; envKey: string }> =
   openrouter: { baseUrl: "https://openrouter.ai/api", envKey: "OPENROUTER_API_KEY" },
   "openai-compatible": { baseUrl: "http://localhost:8080", envKey: "" },
 };
+
+// ── Resilient Client Wrapper ─────────────────────────────────────────────────
+
+interface ResilientClientOptions {
+  fallbackModels?: string[];
+  maxRetries?: number;
+}
+
+class ResilientLLMClient implements LLMClient {
+  private primaryClient: LLMClient;
+  private primaryModel: string;
+  private fallbackModels: string[];
+  private maxRetries: number;
+
+  constructor(
+    primaryClient: LLMClient,
+    primaryModel: string,
+    options?: ResilientClientOptions
+  ) {
+    this.primaryClient = primaryClient;
+    this.primaryModel = primaryModel;
+    this.fallbackModels = options?.fallbackModels ?? [];
+    this.maxRetries = options?.maxRetries ?? 3;
+  }
+
+  async createMessage(params: {
+    model: string;
+    system: string;
+    messages: LLMMessage[];
+    tools: ToolDefinition[];
+    maxTokens: number;
+    thinking?: { type: "enabled"; budgetTokens: number };
+  }): Promise<LLMResponse> {
+    const modelsToTry = [this.primaryModel, ...this.fallbackModels];
+
+    for (let modelIdx = 0; modelIdx < modelsToTry.length; modelIdx++) {
+      const model = modelsToTry[modelIdx];
+      const isFallback = modelIdx > 0;
+
+      // Create client for this model if it's a fallback
+      const client = isFallback
+        ? createClient(parseModelString(model))
+        : this.primaryClient;
+
+      const modelParams = { ...params, model: parseModelString(model).modelId };
+
+      let attempt = 0;
+      while (attempt < this.maxRetries) {
+        attempt++;
+
+        try {
+          return await client.createMessage(modelParams);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const status = this.extractHttpStatus(message);
+
+          // Auth errors — fail immediately
+          if (status === 401 || status === 403) {
+            throw new Error(`Authentication failed for model ${model}: ${message}`);
+          }
+
+          // Rate limit — retry with backoff
+          if (status === 429) {
+            const retryAfter = this.extractRetryAfter(message);
+            const waitTime = retryAfter ?? this.exponentialBackoff(attempt);
+
+            if (attempt < this.maxRetries) {
+              await this.sleep(waitTime * 1000);
+              continue;
+            }
+          }
+
+          // Server errors — retry once after 5s
+          if (status && status >= 500 && status < 600) {
+            if (attempt === 1) {
+              await this.sleep(5000);
+              continue;
+            }
+          }
+
+          // Overloaded error — retry once after 30s
+          if (message.includes("overloaded_error")) {
+            if (attempt === 1) {
+              await this.sleep(30000);
+              continue;
+            }
+          }
+
+          // All retries exhausted for this model
+          if (isFallback || modelIdx === modelsToTry.length - 1) {
+            // Last model — propagate error
+            throw error;
+          }
+
+          // Try next fallback model
+          break;
+        }
+      }
+    }
+
+    throw new Error("All models and retries exhausted");
+  }
+
+  private extractHttpStatus(message: string): number | undefined {
+    const match = message.match(/\b(\d{3})\b/);
+    return match ? parseInt(match[1], 10) : undefined;
+  }
+
+  private extractRetryAfter(message: string): number | undefined {
+    const match = message.match(/retry[_-]after[:\s]+(\d+)/i);
+    return match ? parseInt(match[1], 10) : undefined;
+  }
+
+  private exponentialBackoff(attempt: number): number {
+    return Math.min(5 * Math.pow(3, attempt - 1), 45); // 5s, 15s, 45s
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+}
+
+/**
+ * Create a resilient LLM client with retry and fallback support.
+ */
+export function createResilientClient(
+  model: string,
+  options?: ResilientClientOptions
+): LLMClient {
+  const config = parseModelString(model);
+  const primaryClient = createClient(config);
+  return new ResilientLLMClient(primaryClient, model, options);
+}
 
 /**
  * Create an LLM client for the given provider config.

@@ -6,7 +6,7 @@ import type { ToolDefinition, ToolName, ToolResult } from "../types.js";
 import { execToolDefinition, execTool } from "./exec.js";
 import { readToolDefinition, readTool, writeToolDefinition, writeTool, editToolDefinition, editTool } from "./files.js";
 import { webSearchToolDefinition, webSearchTool, webFetchToolDefinition, webFetchTool } from "./web.js";
-import { memorySearchToolDefinition, memorySearchTool, memoryReadToolDefinition, memoryReadTool } from "./memory.js";
+import { memorySearchToolDefinition, memorySearchTool, memoryReadToolDefinition, memoryReadTool, memoryWriteToolDefinition, memoryWriteTool } from "./memory.js";
 
 export type ToolExecutor = (params: Record<string, unknown>, cwd: string) => Promise<string>;
 
@@ -47,6 +47,10 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   memory_read: {
     definition: memoryReadToolDefinition,
     execute: (params) => memoryReadTool(params),
+  },
+  memory_write: {
+    definition: memoryWriteToolDefinition,
+    execute: (params) => memoryWriteTool(params),
   },
 };
 
