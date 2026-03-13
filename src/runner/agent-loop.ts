@@ -1,131 +1,48 @@
 /**
  * Agent loop — the core LLM ↔ tool execution cycle.
  *
- * This is our own agent runner. No OpenClaw dependency.
- * Uses the Anthropic SDK directly, executes tools in-process.
+ * Multi-provider: Anthropic (native), OpenAI, LM Studio, OpenRouter, any OpenAI-compatible.
+ * Uses provider abstraction to normalize all responses to a common format.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
-import { readFileSync } from "node:fs";
 import type {
   AgentSpec,
   AgentResult,
   TokenUsage,
   ToolResult,
-  MODEL_COSTS,
 } from "./types.js";
 import { MODEL_COSTS as COSTS } from "./types.js";
 import { getToolDefinitions, executeTool } from "./tools/index.js";
-import { buildSystemPrompt } from "./prompt-builder.js";
+import { buildSystemPrompt, buildSmartSystemPrompt } from "./prompt-builder.js";
+import { parseModelString, createClient, type LLMMessage, type LLMResponse } from "./providers.js";
 
-// Re-export for convenience
 export type { AgentSpec, AgentResult };
 
 const DEFAULT_MAX_TURNS = 200;
 const DEFAULT_MAX_TOKENS = 16384;
 
-interface AnthropicAuth {
-  apiKey?: string;
-  authToken?: string;
-  isOAuth: boolean;
-}
-
-/** Check if a key is an OAuth token (vs standard API key) */
-function isOAuthToken(key: string): boolean {
-  return key.includes("sk-ant-oat");
-}
-
-/**
- * Resolve Anthropic credentials from available sources:
- * 1. ANTHROPIC_API_KEY env var (standard API key)
- * 2. ANTHROPIC_AUTH_TOKEN env var (OAuth token)
- * 3. OpenClaw auth profiles (OAuth tokens stored as "token" field)
- */
-function resolveAnthropicAuth(): AnthropicAuth | undefined {
-  // Check env first
-  if (process.env.ANTHROPIC_API_KEY) {
-    const key = process.env.ANTHROPIC_API_KEY;
-    return isOAuthToken(key)
-      ? { authToken: key, isOAuth: true }
-      : { apiKey: key, isOAuth: false };
-  }
-  if (process.env.ANTHROPIC_AUTH_TOKEN) {
-    return { authToken: process.env.ANTHROPIC_AUTH_TOKEN, isOAuth: true };
-  }
-
-  // Check OpenClaw auth profiles
-  const profilePaths = [
-    `${process.env.HOME}/.openclaw/agents/main/agent/auth-profiles.json`,
-    `${process.env.HOME}/.openclaw/agents/programmer/agent/auth-profiles.json`,
-    `${process.env.HOME}/.openclaw/agents/reviewer/agent/auth-profiles.json`,
-  ];
-
-  for (const path of profilePaths) {
-    try {
-      const data = JSON.parse(readFileSync(path, "utf-8"));
-      const profiles = data.profiles ?? data;
-      for (const [key, profile] of Object.entries(profiles)) {
-        if (!key.startsWith("anthropic:")) continue;
-        const p = profile as Record<string, unknown>;
-
-        const token = (p.token ?? p.apiKey) as string | undefined;
-        if (token && typeof token === "string") {
-          return isOAuthToken(token)
-            ? { authToken: token, isOAuth: true }
-            : { apiKey: token, isOAuth: false };
-        }
-      }
-    } catch {
-      // Skip unreadable files
-    }
-  }
-
-  return undefined;
-}
-
-/**
- * Create an Anthropic client configured for the given auth method.
- * OAuth tokens require special headers (beta flags, user-agent, Claude Code identity).
- */
-function createAnthropicClient(auth: AnthropicAuth): Anthropic {
-  if (auth.isOAuth) {
-    return new Anthropic({
-      apiKey: null,
-      authToken: auth.authToken,
-      defaultHeaders: {
-        "accept": "application/json",
-        "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
-        "user-agent": "claude-cli/2.1.62",
-        "x-app": "cli",
-      },
-    });
-  }
-
-  return new Anthropic({
-    apiKey: auth.apiKey,
-    defaultHeaders: {
-      "accept": "application/json",
-      "anthropic-beta": "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
-    },
-  });
-}
-
 /**
  * Run an agent to completion.
  *
  * The loop:
- * 1. Build system prompt + task message
- * 2. Call Anthropic API
- * 3. If tool_use → execute tools → feed results back → goto 2
- * 4. If end_turn → extract output → return result
+ * 1. Parse model string → resolve provider + credentials
+ * 2. Build system prompt + task message
+ * 3. Call LLM API
+ * 4. If tool_use → execute tools → feed results back → goto 3
+ * 5. If end_turn → extract output → return result
  */
 export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
   const startTime = Date.now();
   const maxTurns = spec.maxTurns ?? DEFAULT_MAX_TURNS;
 
-  // Initialize Anthropic client
-  const auth = resolveAnthropicAuth();
-  if (!auth) {
+  // Resolve provider from model string
+  const providerConfig = parseModelString(spec.model);
+
+  // Create LLM client
+  let client;
+  try {
+    client = createClient(providerConfig);
+  } catch (error) {
     return {
       succeeded: false,
       output: "",
@@ -134,19 +51,30 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       durationSeconds: 0,
       turns: 0,
       stopReason: "error",
-      error: "No Anthropic credentials found. Set ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or configure OpenClaw auth profiles.",
+      error: error instanceof Error ? error.message : String(error),
     };
   }
-  const client = createAnthropicClient(auth);
 
-  // Build system prompt
-  const systemPrompt = spec.systemPrompt ?? buildSystemPrompt(spec);
+  // Build system prompt — use smart context engine if no explicit system prompt
+  let systemPrompt: string;
+  if (spec.systemPrompt) {
+    systemPrompt = spec.systemPrompt;
+  } else {
+    try {
+      // Try smart prompt with context engine (needs lobs-memory running)
+      const smart = await buildSmartSystemPrompt(spec);
+      systemPrompt = smart.systemPrompt;
+    } catch {
+      // Fall back to static prompt if context engine unavailable
+      systemPrompt = buildSystemPrompt(spec);
+    }
+  }
 
   // Get tool definitions for the API
   const tools = getToolDefinitions(spec.tools);
 
   // Initialize message history
-  const messages: Anthropic.MessageParam[] = [
+  const messages: LLMMessage[] = [
     { role: "user", content: spec.task },
   ];
 
@@ -162,10 +90,8 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
   let lastTextOutput = "";
   let stopReason: AgentResult["stopReason"] = "end_turn";
 
-  // Timeout controller
+  // Timeout
   const timeoutMs = spec.timeout * 1000;
-  const abortController = new AbortController();
-  const timeoutTimer = setTimeout(() => abortController.abort(), timeoutMs);
 
   try {
     while (turns < maxTurns) {
@@ -177,18 +103,19 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
 
       turns++;
 
-      // Call the API
-      let response: Anthropic.Message;
+      // Call the LLM
+      let response: LLMResponse;
       try {
-        response = await client.messages.create({
-          model: spec.model,
-          max_tokens: DEFAULT_MAX_TOKENS,
+        response = await client.createMessage({
+          model: providerConfig.modelId,
           system: systemPrompt,
-          tools: tools as Anthropic.Tool[],
           messages,
+          tools,
+          maxTokens: DEFAULT_MAX_TOKENS,
         });
       } catch (error) {
-        if (abortController.signal.aborted) {
+        // Check if it's a timeout
+        if (Date.now() - startTime > timeoutMs) {
           stopReason = "timeout";
           break;
         }
@@ -196,14 +123,10 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       }
 
       // Track usage
-      usage.inputTokens += response.usage.input_tokens;
-      usage.outputTokens += response.usage.output_tokens;
-      if ("cache_read_input_tokens" in response.usage) {
-        usage.cacheReadTokens += (response.usage as unknown as Record<string, number>).cache_read_input_tokens ?? 0;
-      }
-      if ("cache_creation_input_tokens" in response.usage) {
-        usage.cacheWriteTokens += (response.usage as unknown as Record<string, number>).cache_creation_input_tokens ?? 0;
-      }
+      usage.inputTokens += response.usage.inputTokens;
+      usage.outputTokens += response.usage.outputTokens;
+      usage.cacheReadTokens += response.usage.cacheReadTokens;
+      usage.cacheWriteTokens += response.usage.cacheWriteTokens;
 
       // Progress callback
       if (spec.onProgress) {
@@ -217,7 +140,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       }
 
       // Add assistant response to history
-      messages.push({ role: "assistant", content: response.content });
+      messages.push({ role: "assistant", content: response.content as LLMMessage["content"] });
 
       // Extract any text output
       for (const block of response.content) {
@@ -227,15 +150,21 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       }
 
       // Check stop reason
-      if (response.stop_reason === "end_turn") {
+      if (response.stopReason === "end_turn" || response.stopReason === "stop") {
         stopReason = "end_turn";
         break;
       }
 
+      if (response.stopReason === "max_tokens") {
+        stopReason = "max_turns";
+        break;
+      }
+
       // If we got tool_use, execute them
-      if (response.stop_reason === "tool_use") {
+      if (response.stopReason === "tool_use") {
         const toolCalls = response.content.filter(
-          (block): block is Anthropic.ToolUseBlock => block.type === "tool_use"
+          (block): block is { type: "tool_use"; id: string; name: string; input: Record<string, unknown> } =>
+            block.type === "tool_use"
         );
 
         if (toolCalls.length === 0) {
@@ -243,12 +172,12 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
           break;
         }
 
-        // Execute tool calls (sequentially for now — can parallelize later)
+        // Execute tool calls
         const results: ToolResult[] = [];
         for (const call of toolCalls) {
           const result = await executeTool(
             call.name,
-            call.input as Record<string, unknown>,
+            call.input,
             call.id,
             spec.cwd,
           );
@@ -258,7 +187,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
         // Add tool results to history
         messages.push({
           role: "user",
-          content: results as Anthropic.ToolResultBlockParam[],
+          content: results as unknown as LLMMessage["content"],
         });
 
         continue;
@@ -299,8 +228,6 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       stopReason: "error",
       error: message,
     };
-  } finally {
-    clearTimeout(timeoutTimer);
   }
 }
 
@@ -308,7 +235,6 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
  * Calculate cost based on model pricing.
  */
 function calculateCost(model: string, usage: TokenUsage): number {
-  // Find matching cost entry (partial match)
   const costEntry = Object.entries(COSTS).find(([key]) => model.includes(key));
   if (!costEntry) return 0;
 
@@ -319,5 +245,5 @@ function calculateCost(model: string, usage: TokenUsage): number {
     (usage.cacheReadTokens * rates.cacheRead) / 1_000_000 +
     (usage.cacheWriteTokens * rates.cacheWrite) / 1_000_000;
 
-  return Math.round(cost * 1_000_000) / 1_000_000; // 6 decimal places
+  return Math.round(cost * 1_000_000) / 1_000_000;
 }

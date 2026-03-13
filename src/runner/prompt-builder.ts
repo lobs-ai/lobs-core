@@ -10,6 +10,7 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import type { AgentSpec } from "./types.js";
+import { assembleContext, type AssembledContext } from "./context-engine.js";
 
 // ── Agent Templates ──────────────────────────────────────────────────────────
 
@@ -116,6 +117,48 @@ export function buildSystemPrompt(spec: AgentSpec): string {
   }
 
   return parts.join("\n");
+}
+
+/**
+ * Build a system prompt with intelligent context from the context engine.
+ *
+ * This is the upgraded path — uses task classification, token budgeting,
+ * and multi-layer retrieval instead of static context assembly.
+ */
+export async function buildSmartSystemPrompt(spec: AgentSpec): Promise<{
+  systemPrompt: string;
+  context: AssembledContext;
+}> {
+  // Assemble context using the engine
+  const context = await assembleContext({
+    task: spec.task,
+    agentType: spec.agent,
+    projectId: spec.context?.projectId,
+    contextRefs: spec.context?.contextRefs?.map(r => r.path),
+  });
+
+  // Build the base prompt (agent template + working dir + date)
+  const parts: string[] = [];
+
+  const template = AGENT_TEMPLATES[spec.agent] ?? DEFAULT_TEMPLATE;
+  parts.push(template);
+  parts.push(`\nWorking directory: ${spec.cwd}`);
+  parts.push(`Current date: ${new Date().toISOString().split("T")[0]}`);
+
+  // Add the intelligently assembled context
+  if (context.contextBlock) {
+    parts.push(`\n---\n${context.contextBlock}\n---`);
+  }
+
+  // Add any additional raw context (for backwards compatibility)
+  if (spec.context?.additionalContext) {
+    parts.push(`\n${spec.context.additionalContext}`);
+  }
+
+  return {
+    systemPrompt: parts.join("\n"),
+    context,
+  };
 }
 
 /**

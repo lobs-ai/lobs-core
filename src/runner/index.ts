@@ -21,5 +21,9 @@
 
 export { runAgent } from "./agent-loop.js";
 export type { AgentSpec, AgentResult, TokenUsage, ProgressUpdate, ToolName } from "./types.js";
-export { buildSystemPrompt, loadContextRefs } from "./prompt-builder.js";
+export { buildSystemPrompt, buildSmartSystemPrompt, loadContextRefs } from "./prompt-builder.js";
+export { assembleContext, classifyTask, allocateBudget } from "./context-engine.js";
+export type { TaskType, TaskClassification, TokenBudget, AssembledContext, ContextEngineConfig } from "./context-engine.js";
 export { getToolDefinitions, executeTool } from "./tools/index.js";
+export { parseModelString, createClient } from "./providers.js";
+export type { Provider, ProviderConfig, LLMClient, LLMMessage, LLMResponse } from "./providers.js";
