@@ -24,7 +24,7 @@ import { WorkflowExecutor } from "../workflow/engine.js";
 import { popPendingSpawns, requeueSpawn, type SpawnRequest } from "../workflow/nodes.js";
 import { getDb, getRawDb } from "../db/connection.js";
 import { inferProjectId } from "../util/project-inference.js";
-import { workflowRuns, workerRuns as workerRunsTable, tasks as tasksTable } from "../db/schema.js";
+import { workflowRuns, workerRuns as workerRunsTable, tasks as tasksTable, inboxItems } from "../db/schema.js";
 import { maybeFlushTriageQueue } from "./triage.js";
 import { buildTaskContext } from "../util/task-context.js";
 import { findReadyTasks } from "./scanner.js";
@@ -41,7 +41,7 @@ import {
   type FailureType,
 } from "./worker-manager.js";
 import { chooseModel, resolveTaskTier, TIER_MODELS, buildFallbackChain, escalationModel, type ModelTier } from "./model-chooser.js";
-import { EscalationManager, ESCALATION_TIERS, type EscalationTier } from "./escalation.js";
+import { EscalationManager } from "./escalation.js";
 import { chooseHealthyModel, seedModelHealthFromHistory } from "./model-health.js";
 import { checkArtifacts } from "./artifact-check.js";
 import { validatePostSuccessArtifacts } from "./post-success-validator.js";
@@ -60,6 +60,102 @@ export function getGatewayConfig(): { port: number; token: string } {
   return { port: gatewayPort, token: gatewayToken };
 }
 let isFirstTick = true;
+
+// ─── Escalation (inline) ─────────────────────────────────────────────────────
+
+const ESCALATION_TIERS = {
+  RETRY: 0,
+  ALERT: 1,
+  AGENT_SWITCH: 2,
+  DIAGNOSTIC: 3,
+  HUMAN: 4,
+} as const;
+
+type EscalationTier = typeof ESCALATION_TIERS[keyof typeof ESCALATION_TIERS];
+
+interface EscalationResult {
+  tier: EscalationTier;
+  action: string;
+  alertId?: string;
+  newAgentType?: string;
+}
+
+function escalateTask(taskId: string, projectId: string, errorLog: string, currentTier: EscalationTier = 0): EscalationResult {
+  const db = getDb();
+  const task = db.select().from(tasksTable).where(eq(tasksTable.id, taskId)).get();
+  const taskTitle = task?.title ?? taskId.slice(0, 8);
+  const nextTier = Math.min(currentTier + 1, ESCALATION_TIERS.HUMAN) as EscalationTier;
+
+  // Update task escalation tier
+  db.update(tasksTable).set({ escalationTier: nextTier, updatedAt: new Date().toISOString() })
+    .where(eq(tasksTable.id, taskId)).run();
+
+  log().warn(`[ESCALATION] Task ${taskId.slice(0, 8)} → tier ${nextTier} (${tierName(nextTier)})`);
+
+  switch (nextTier) {
+    case ESCALATION_TIERS.ALERT: {
+      const alertId = createFailureAlert(taskId, projectId, taskTitle, errorLog, "medium");
+      return { tier: nextTier, action: "alert_created", alertId };
+    }
+    case ESCALATION_TIERS.AGENT_SWITCH: {
+      const newAgent = pickAlternativeAgent(task?.agent ?? "programmer");
+      db.update(tasksTable).set({ agent: newAgent, workState: "not_started", updatedAt: new Date().toISOString() })
+        .where(eq(tasksTable.id, taskId)).run();
+      const alertId = createFailureAlert(taskId, projectId, taskTitle,
+        `Auto-switched from ${task?.agent} → ${newAgent}\n\n${errorLog}`, "medium");
+      return { tier: nextTier, action: "agent_switched", newAgentType: newAgent, alertId };
+    }
+    case ESCALATION_TIERS.DIAGNOSTIC: {
+      const alertId = createFailureAlert(taskId, projectId, taskTitle,
+        `**Diagnostic trigger** — task has failed ${nextTier} times.\n\n${errorLog}`, "high");
+      return { tier: nextTier, action: "diagnostic_triggered", alertId };
+    }
+    case ESCALATION_TIERS.HUMAN:
+    default: {
+      const alertId = createFailureAlert(taskId, projectId, taskTitle,
+        `**🚨 HUMAN INTERVENTION REQUIRED** — all automated recovery exhausted.\n\n${errorLog}`, "critical");
+      db.update(tasksTable).set({ status: "waiting_on", updatedAt: new Date().toISOString() })
+        .where(eq(tasksTable.id, taskId)).run();
+      return { tier: nextTier, action: "human_escalated", alertId };
+    }
+  }
+}
+
+function createFailureAlert(taskId: string, projectId: string, taskTitle: string, errorLog: string, severity = "medium"): string {
+  const db = getDb();
+  const alertId = `alert_${taskId.slice(0, 8)}_${Date.now()}`;
+  const now = new Date().toISOString();
+  const body = `**Task ID:** \`${taskId}\`\n**Project:** \`${projectId}\`\n**Severity:** ${severity}\n\n**Error:**\n\`\`\`\n${errorLog.slice(0, 1000)}\n\`\`\``;
+  try {
+    db.insert(inboxItems).values({
+      id: alertId,
+      title: `🚨 Task Failure: ${taskTitle}`,
+      content: body,
+      summary: `Task ${taskId.slice(0, 8)} failed in ${projectId}`,
+      isRead: false,
+      modifiedAt: now,
+    }).run();
+    log().info(`[ESCALATION] Created alert ${alertId} (severity=${severity})`);
+  } catch (e) {
+    log().error(`[ESCALATION] Failed to create alert: ${String(e)}`);
+  }
+  return alertId;
+}
+
+function pickAlternativeAgent(currentAgent: string): string {
+  const alternatives: Record<string, string> = {
+    programmer: "architect",
+    architect: "programmer",
+    researcher: "programmer",
+    writer: "researcher",
+    reviewer: "programmer",
+  };
+  return alternatives[currentAgent] ?? "programmer";
+}
+
+function tierName(tier: EscalationTier): string {
+  return Object.entries(ESCALATION_TIERS).find(([, v]) => v === tier)?.[0].toLowerCase() ?? "unknown";
+}
 
 // ── Native Runner Config ─────────────────────────────────────────────────────
 
