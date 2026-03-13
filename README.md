@@ -1,52 +1,69 @@
-# openclaw-plugin-paw
+# lobs-core
 
-**Personal AI Workforce** — a multi-agent orchestration plugin for OpenClaw.
-
-Replaces `lobs-server` (Python/FastAPI) with a single TypeScript plugin that runs inside OpenClaw. No separate server, no HTTP bridge, no polling.
-
-## What It Does
-
-- **Task Management** — CRUD for tasks and projects with status tracking
-- **Workflow Engine** — DAG-based task execution with branching, gates, retries
-- **Agent Orchestration** — Spawn, track, and manage specialist workers (programmer, researcher, writer, architect, reviewer)
-- **Model Routing** — Tier-based model selection (micro→strong) with per-agent fallback chains
-- **Approval Tiers** — Auto/Lobs/Rafe approval gating on dangerous operations
-- **Reflection Cycle** — Post-task and periodic agent reflections with learning extraction
-- **Integrations** — Google Calendar, Gmail, GitHub sync
-- **API** — Full REST API for Mission Control and Mobile clients
+Personal AI agent system. Runs standalone — orchestrates worker agents with its own LLM execution loop, context engine, and memory search.
 
 ## Architecture
 
-    OpenClaw Gateway
-      └── PAW Plugin (this)
-            ├── Hooks (model-resolve, subagent, tool-gate, prompt-build, agent-end)
-            ├── Services (orchestrator control loop, reflection cycle)
-            ├── HTTP Routes (/paw/api/*)
-            ├── Workflow Engine (DAG executor + 19 default workflows)
-            └── SQLite (better-sqlite3 + drizzle-orm)
+```
+lobs-core/
+├── src/               ← The engine
+│   ├── runner/        ← Agent execution (LLM loop, tools, providers)
+│   ├── orchestrator/  ← Control loop, model routing, worker lifecycle
+│   ├── workflow/      ← Task routing, scheduling, workflow engine
+│   ├── db/            ← SQLite database (drizzle-orm)
+│   └── main.ts        ← Standalone entry point
+├── memory/            ← Submodule: lobs-memory (semantic search server)
+├── nexus/             ← Submodule: lobs-nexus (web dashboard)
+└── tests/             ← Integration + unit tests
+```
 
-## Config
+### Submodules
 
-In your OpenClaw config:
+| Module | Repo | Purpose |
+|--------|------|---------|
+| `memory/` | [lobs-ai/lobs-memory](https://github.com/lobs-ai/lobs-memory) | Semantic search: BM25 + vector + neural reranking |
+| `nexus/` | [lobs-ai/lobs-nexus](https://github.com/lobs-ai/lobs-nexus) | Web dashboard (React/Vite) |
 
-    plugins:
-      paw:
-        dbPath: ~/.openclaw/plugins/paw/paw.db
-        scanIntervalMs: 10000
-        maxConcurrentWorkers: 2
-        defaultModelTier: standard
+### Separate repos
 
-## API
+| Repo | Purpose |
+|------|---------|
+| [lobs-ai/lobs-memory-plugin](https://github.com/lobs-ai/lobs-memory-plugin) | OpenClaw plugin for memory tools (thin HTTP proxy) |
 
-All routes under /paw/api/ — tasks, projects, agents, inbox, worker, workflows, status.
+## Running
 
-## Data Migration
+```bash
+# Build
+npm run build
 
-    OLD_DB=~/lobs-server/lobs.db NEW_DB=~/.openclaw/plugins/paw/paw.db npx tsx src/util/migrate-data.ts
+# Run standalone
+node dist/main.js
 
-## Development
+# Run tests
+npm test
+```
 
-    npm install
-    npm run build
-    npm run dev
-    npm test
+## Agent Runner
+
+The runner calls LLM APIs directly with in-process tool execution:
+
+- **Anthropic** — native API with OAuth token auth
+- **LM Studio** — local models via OpenAI-compatible API
+- **OpenRouter** — cloud model routing
+- **Any OpenAI-compatible** endpoint
+
+### Tools available to agents
+
+`exec`, `read`, `write`, `edit`, `web_search`, `web_fetch`, `memory_search`, `memory_read`
+
+### Context Engine
+
+Before each agent run, the context engine:
+1. Classifies the task (coding/debugging/architecture/review/research/docs/devops)
+2. Allocates token budget per category
+3. Searches lobs-memory for relevant context (decisions, learnings, project docs)
+4. Assembles a structured prompt with workspace files + injected context
+
+## Legacy
+
+`src/hooks/`, `src/api/`, `src/services/`, `src/integrations/`, `src/index.ts` — OpenClaw plugin infrastructure, kept for reference. The standalone entry point is `src/main.ts`.

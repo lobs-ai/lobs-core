@@ -1,3 +1,6 @@
 [submodule "memory"]
 	path = memory
 	url = git@github.com:lobs-ai/lobs-memory.git
+[submodule "nexus"]
+	path = nexus
+	url = git@github.com:lobs-ai/lobs-nexus.git

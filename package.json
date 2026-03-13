@@ -1,7 +1,7 @@
 {
-  "name": "openclaw-plugin-lobs",
+  "name": "lobs-core",
   "version": "0.1.0",
-  "description": "Personal AI Workforce \u2014 multi-agent orchestration plugin for OpenClaw",
+  "description": "Personal AI agent system \u2014 orchestrator, runner, context engine",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,7 +10,8 @@
     "dev": "tsc --watch",
     "test": "vitest",
     "lint": "eslint src/",
-    "sync-addons": "bin/sync-addons"
+    "sync-addons": "bin/sync-addons",
+    "start": "node dist/main.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0",
