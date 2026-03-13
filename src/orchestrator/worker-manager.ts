@@ -3,9 +3,9 @@
  * Port of lobs-server/app/orchestrator/worker_manager.py
  */
 
-import { eq, and, isNull } from "drizzle-orm";
-import { getDb } from "../db/connection.js";
-import { workerRuns, agentStatus as agentStatusTable } from "../db/schema.js";
+import { eq, and, isNull, isNotNull, inArray } from "drizzle-orm";
+import { getDb, getRawDb } from "../db/connection.js";
+import { workerRuns, workflowRuns, agentStatus as agentStatusTable } from "../db/schema.js";
 import { log } from "../util/logger.js";
 import { recordRunOutcome } from "./model-health.js";
 
@@ -320,7 +320,7 @@ export function forceTerminateWorker(workerId: string, reason = "timeout"): void
 
     // Reset the associated task back to not_started so it can be retried
     if (taskId) {
-      const { getRawDb } = require("../db/connection.js");
+
       getRawDb().prepare(`UPDATE tasks SET work_state = 'not_started', updated_at = datetime('now') WHERE id = ? AND work_state = 'in_progress'`).run(taskId);
       log().warn(`[WORKER_MANAGER] Reset task ${taskId.slice(0, 8)} to not_started after worker termination`);
     }
@@ -372,9 +372,9 @@ export function projectHasPendingSpawn(projectId: string, agentType?: string): b
 
 /** Count workflow runs that are in-flight for tasks (running or pending with a task_id) */
 export function countInFlightTaskRuns(): number {
-  const { getDb } = require("../db/connection.js");
-  const { workflowRuns } = require("../db/schema.js");
-  const { inArray, isNotNull, and } = require("drizzle-orm");
+
+
+
   const db = getDb();
   const runs = db.select().from(workflowRuns)
     .where(and(

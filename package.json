@@ -28,12 +28,6 @@
   "peerDependencies": {
     "openclaw": ">=1.0.0"
   },
-  "openclaw": {
-    "extensions": [
-      "./dist/index.js"
-    ],
-    "id": "paw"
-  },
   "bin": {
     "paw-task": "./src/cli/paw-task.ts",
     "paw-inbox": "./src/cli/paw-inbox.ts",

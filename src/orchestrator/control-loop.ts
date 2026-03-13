@@ -15,16 +15,16 @@
  * don't pollute the main session.
  */
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, statSync } from "node:fs";
 import type { OpenClawPluginServiceContext } from "openclaw/plugin-sdk";
-import { eq, and } from "drizzle-orm";
+import { eq, and, isNull, isNotNull, inArray } from "drizzle-orm";
 import { log } from "../util/logger.js";
 import { processPendingResumes } from "../index.js";
 import { WorkflowExecutor } from "../workflow/engine.js";
 import { popPendingSpawns, requeueSpawn, type SpawnRequest } from "../workflow/nodes.js";
 import { getDb, getRawDb } from "../db/connection.js";
 import { inferProjectId } from "../util/project-inference.js";
-import { workflowRuns, tasks as tasksTable } from "../db/schema.js";
+import { workflowRuns, workerRuns as workerRunsTable, tasks as tasksTable } from "../db/schema.js";
 import { maybeFlushTriageQueue } from "./triage.js";
 import { buildTaskContext } from "../util/task-context.js";
 import { findReadyTasks } from "./scanner.js";
@@ -107,7 +107,7 @@ async function checkSessionAlive(sessionKey: string): Promise<boolean> {
       const transcriptDir = `${process.env.HOME}/.openclaw/agents/${agentId}/sessions`;
       const transcriptPath = `${transcriptDir}/${uuidMatch[1]}.jsonl`;
       try {
-        const { statSync } = require("node:fs");
+        // statSync imported at top level
         const stat = statSync(transcriptPath);
         const fileAgeMs = Date.now() - stat.mtimeMs;
         const FILE_STALE_MS = 30 * 60 * 1000; // 30 min — matches runTimeoutSeconds
@@ -308,21 +308,21 @@ function runTick(): void {
   // Check worker_runs with no ended_at — if session is dead, mark failed.
   try {
     const liveDb = getDb();
-    const { workerRuns: wrTable } = require("../db/schema.js");
-    const { isNull } = require("drizzle-orm");
+    const wrTable = workerRunsTable;
+    
     const openWorkers = liveDb.select().from(wrTable).where(isNull(wrTable.endedAt)).all();
     for (const w of openWorkers) {
       const sessionKey = w.workerId;
       if (!sessionKey) continue;
-      const runningMin = (Date.now() - new Date(w.startedAt).getTime()) / 60000;
+      const runningMin = (Date.now() - new Date(w.startedAt ?? Date.now()).getTime()) / 60000;
       if (runningMin < 12) continue; // give workers time — long model calls can take 5-10min
 
       checkSessionAlive(sessionKey).then((alive: boolean) => {
         if (!alive) {
-          log().warn("orchestrator: worker " + w.id + " (" + w.agentType + ") session dead after " + Math.round(runningMin) + "min — marking failed");
+          log().warn("orchestrator: worker " + w.id + " (" + (w.agentType ?? "unknown") + ") session dead after " + Math.round(runningMin) + "min — marking failed");
           // Session-dead is an INFRA failure — the session was killed externally,
           // not due to agent logic (e.g. OOM, gateway restart, system crash).
-          recordWorkerEnd({ workerId: sessionKey, agentType: w.agentType, succeeded: false, summary: "session dead — no progress", failureType: 'infra' });
+          recordWorkerEnd({ workerId: sessionKey, agentType: w.agentType ?? "unknown", succeeded: false, summary: "session dead — no progress", failureType: 'infra' });
         }
       }).catch(() => {});
     }
@@ -374,7 +374,7 @@ function runTick(): void {
               // Do NOT reset task to not_started here — let the ghost watchdog (step 8)
               // handle task cleanup via closeGhostRun which also increments crash_count.
               try {
-                const { workerRuns: wrTable } = require("../db/schema.js");
+                const wrTable = workerRunsTable;
                 const wrRow = staleDb.select().from(wrTable).where(eq(wrTable.workerId, childKey)).get() as any;
                 // Stale-run-watchdog is an INFRA failure — session was killed by
                 // a gateway drain/restart, NOT a genuine agent quality failure.
@@ -723,7 +723,7 @@ function runStallWatchdog(): void {
     if (wr.task_id) {
       try {
         const liveDb = getDb();
-        const { workflowRuns: wrTable } = require("../db/schema.js");
+        const wrTable = workflowRuns;
         const stuckRuns = liveDb.select().from(wrTable)
           .where(and(eq(wrTable.status, "running"), eq(wrTable.taskId, wr.task_id)))
           .all()
