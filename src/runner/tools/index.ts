@@ -5,7 +5,7 @@
 import type { ToolDefinition, ToolName, ToolResult } from "../types.js";
 import { execToolDefinition, execTool } from "./exec.js";
 import { readToolDefinition, readTool, writeToolDefinition, writeTool, editToolDefinition, editTool } from "./files.js";
-import { webSearchToolDefinition, webSearchTool } from "./web.js";
+import { webSearchToolDefinition, webSearchTool, webFetchToolDefinition, webFetchTool } from "./web.js";
 
 export type ToolExecutor = (params: Record<string, unknown>, cwd: string) => Promise<string>;
 
@@ -35,10 +35,9 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
     definition: webSearchToolDefinition,
     execute: (params) => webSearchTool(params),
   },
-  // Placeholders — will be added later
   web_fetch: {
-    definition: { name: "web_fetch", description: "Not yet implemented", input_schema: { type: "object", properties: {} } },
-    execute: async () => { throw new Error("web_fetch is not yet implemented"); },
+    definition: webFetchToolDefinition,
+    execute: (params) => webFetchTool(params),
   },
   memory_search: {
     definition: { name: "memory_search", description: "Not yet implemented", input_schema: { type: "object", properties: {} } },
@@ -51,7 +50,7 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
  */
 export function getToolDefinitions(tools: ToolName[]): ToolDefinition[] {
   return tools
-    .filter((name) => TOOL_REGISTRY[name] && name !== "web_fetch" && name !== "memory_search")
+    .filter((name) => TOOL_REGISTRY[name] && name !== "memory_search")
     .map((name) => TOOL_REGISTRY[name].definition);
 }
 

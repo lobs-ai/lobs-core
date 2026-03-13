@@ -677,3 +677,172 @@ const DEFAULT_PROJECTS: ProjectMapping[] = [
     keywords: ["mobile", "ios", "swift", "app"],
   },
 ];
+
+// ── Session Compaction ───────────────────────────────────────────────────────
+
+/** Structured session compression output */
+export interface CompactedSession {
+  decisionsMade: string[];
+  failedApproaches: string[];
+  keyFindings: string[];
+  currentState: string[];
+  remainingWork: string[];
+}
+
+/** Pattern matchers for extracting structured information */
+const DECISION_PATTERNS = [
+  /(?:decided|choosing|going with|opted for|selected|picked)\s+(.+?)(?:\.|$)/gi,
+  /(?:will use|using|implemented with)\s+(.+?)(?:\.|$)/gi,
+];
+
+const FAILURE_PATTERNS = [
+  /(?:error|failed|didn't work|doesn't work|won't work|broken|issue)\s*:?\s*(.+?)(?:\.|$)/gi,
+  /(?:reverted|rolled back|abandoned|discarded)\s+(.+?)(?:\.|$)/gi,
+  /(?:tried .+ but)\s+(.+?)(?:\.|$)/gi,
+];
+
+const FINDING_PATTERNS = [
+  /(?:found|discovered|learned|realized)\s+(?:that\s+)?(.+?)(?:\.|$)/gi,
+  /(?:turns out|it appears)\s+(?:that\s+)?(.+?)(?:\.|$)/gi,
+];
+
+const STATE_PATTERNS = [
+  /(?:currently|now|at this point)\s+(.+?)(?:\.|$)/gi,
+  /(?:have|has)\s+(?:been|successfully)\s+(.+?)(?:\.|$)/gi,
+];
+
+const REMAINING_PATTERNS = [
+  /(?:need to|needs to|must|should|todo|remaining)\s+(.+?)(?:\.|$)/gi,
+  /(?:still need|haven't yet|not yet)\s+(.+?)(?:\.|$)/gi,
+];
+
+/**
+ * Compact a session (conversation messages) into structured compression.
+ * 
+ * Instead of vague summaries, extracts specific categories:
+ * - Decisions made
+ * - Failed approaches
+ * - Key findings
+ * - Current state
+ * - Remaining work
+ * 
+ * @param messages - Array of conversation messages (role + content)
+ * @returns Structured compression
+ */
+export function compactSession(messages: Array<{ role: string; content: string }>): CompactedSession {
+  const result: CompactedSession = {
+    decisionsMade: [],
+    failedApproaches: [],
+    keyFindings: [],
+    currentState: [],
+    remainingWork: [],
+  };
+
+  // Combine all text content
+  const allText = messages
+    .map(m => typeof m.content === "string" ? m.content : "")
+    .join("\n");
+
+  // Extract decisions
+  for (const pattern of DECISION_PATTERNS) {
+    const matches = allText.matchAll(pattern);
+    for (const match of matches) {
+      if (match[1] && match[1].trim().length > 10) {
+        const cleaned = match[1].trim();
+        if (!result.decisionsMade.some(d => d.includes(cleaned.slice(0, 30)))) {
+          result.decisionsMade.push(cleaned);
+        }
+      }
+    }
+  }
+
+  // Extract failures
+  for (const pattern of FAILURE_PATTERNS) {
+    const matches = allText.matchAll(pattern);
+    for (const match of matches) {
+      if (match[1] && match[1].trim().length > 10) {
+        const cleaned = match[1].trim();
+        if (!result.failedApproaches.some(f => f.includes(cleaned.slice(0, 30)))) {
+          result.failedApproaches.push(cleaned);
+        }
+      }
+    }
+  }
+
+  // Extract findings
+  for (const pattern of FINDING_PATTERNS) {
+    const matches = allText.matchAll(pattern);
+    for (const match of matches) {
+      if (match[1] && match[1].trim().length > 10) {
+        const cleaned = match[1].trim();
+        if (!result.keyFindings.some(f => f.includes(cleaned.slice(0, 30)))) {
+          result.keyFindings.push(cleaned);
+        }
+      }
+    }
+  }
+
+  // Extract current state
+  for (const pattern of STATE_PATTERNS) {
+    const matches = allText.matchAll(pattern);
+    for (const match of matches) {
+      if (match[1] && match[1].trim().length > 10) {
+        const cleaned = match[1].trim();
+        if (!result.currentState.some(s => s.includes(cleaned.slice(0, 30)))) {
+          result.currentState.push(cleaned);
+        }
+      }
+    }
+  }
+
+  // Extract remaining work
+  for (const pattern of REMAINING_PATTERNS) {
+    const matches = allText.matchAll(pattern);
+    for (const match of matches) {
+      if (match[1] && match[1].trim().length > 10) {
+        const cleaned = match[1].trim();
+        if (!result.remainingWork.some(r => r.includes(cleaned.slice(0, 30)))) {
+          result.remainingWork.push(cleaned);
+        }
+      }
+    }
+  }
+
+  // Limit each category to top 10 items (most relevant)
+  result.decisionsMade = result.decisionsMade.slice(0, 10);
+  result.failedApproaches = result.failedApproaches.slice(0, 10);
+  result.keyFindings = result.keyFindings.slice(0, 10);
+  result.currentState = result.currentState.slice(0, 10);
+  result.remainingWork = result.remainingWork.slice(0, 10);
+
+  return result;
+}
+
+/**
+ * Format a compacted session into a readable text summary.
+ */
+export function formatCompactedSession(compacted: CompactedSession): string {
+  const sections: string[] = [];
+
+  if (compacted.decisionsMade.length > 0) {
+    sections.push("DECISIONS MADE:\n" + compacted.decisionsMade.map(d => `- ${d}`).join("\n"));
+  }
+
+  if (compacted.failedApproaches.length > 0) {
+    sections.push("FAILED APPROACHES:\n" + compacted.failedApproaches.map(f => `- ${f}`).join("\n"));
+  }
+
+  if (compacted.keyFindings.length > 0) {
+    sections.push("KEY FINDINGS:\n" + compacted.keyFindings.map(f => `- ${f}`).join("\n"));
+  }
+
+  if (compacted.currentState.length > 0) {
+    sections.push("CURRENT STATE:\n" + compacted.currentState.map(s => `- ${s}`).join("\n"));
+  }
+
+  if (compacted.remainingWork.length > 0) {
+    sections.push("REMAINING WORK:\n" + compacted.remainingWork.map(r => `- ${r}`).join("\n"));
+  }
+
+  return sections.join("\n\n");
+}

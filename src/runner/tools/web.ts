@@ -1,9 +1,10 @@
 /**
- * Web search tool — Brave Search API.
- * 
- * web_fetch intentionally omitted — will be added later with a custom implementation.
+ * Web tools — search (Brave API) and fetch (Scrapling).
  */
 
+import { spawn } from "node:child_process";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ToolDefinition } from "../types.js";
 
 export const webSearchToolDefinition: ToolDefinition = {
@@ -118,4 +119,103 @@ export async function webSearchTool(
   }
 
   return output;
+}
+
+// ── web_fetch via Scrapling ──────────────────────────────────────────────────
+
+export const webFetchToolDefinition: ToolDefinition = {
+  name: "web_fetch",
+  description:
+    "Fetch and extract readable content from a URL. Returns clean text/markdown from web pages. " +
+    "Handles anti-bot systems and dynamic content. Use for reading articles, docs, and web pages.",
+  input_schema: {
+    type: "object",
+    properties: {
+      url: {
+        type: "string",
+        description: "HTTP or HTTPS URL to fetch",
+      },
+      maxChars: {
+        type: "number",
+        description: "Maximum characters to return (default 50000)",
+      },
+      mode: {
+        type: "string",
+        enum: ["markdown", "text"],
+        description: "Extraction mode (default: markdown)",
+      },
+    },
+    required: ["url"],
+  },
+};
+
+/** Path to the Python venv and script */
+const VENV_PYTHON = resolve(process.env.HOME ?? "", "lobs/lobs-core/tools-venv/bin/python3");
+const FETCH_SCRIPT = resolve(process.env.HOME ?? "", "lobs/lobs-core/src/runner/tools/web_fetch.py");
+
+export async function webFetchTool(
+  params: Record<string, unknown>,
+): Promise<string> {
+  const url = params.url as string;
+  if (!url || typeof url !== "string") {
+    throw new Error("url is required and must be a string");
+  }
+
+  // Validate URL
+  try {
+    const parsed = new URL(url);
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      throw new Error("Only HTTP and HTTPS URLs are supported");
+    }
+  } catch (e) {
+    if (e instanceof Error && e.message.includes("Only HTTP")) throw e;
+    throw new Error(`Invalid URL: ${url}`);
+  }
+
+  const maxChars = typeof params.maxChars === "number" ? params.maxChars : 50000;
+  const mode = (params.mode as string) ?? "markdown";
+
+  return new Promise<string>((resolve, reject) => {
+    const args = [FETCH_SCRIPT, url, "--max-chars", String(maxChars), "--mode", mode];
+    let stdout = "";
+    let stderr = "";
+
+    const proc = spawn(VENV_PYTHON, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 45_000,
+    });
+
+    proc.stdout.on("data", (data: Buffer) => { stdout += data.toString(); });
+    proc.stderr.on("data", (data: Buffer) => { stderr += data.toString(); });
+
+    proc.on("error", (err) => {
+      resolve(`Error running web_fetch: ${err.message}`);
+    });
+
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        resolve(`web_fetch failed (exit ${code}): ${stderr.slice(0, 500)}`);
+        return;
+      }
+
+      try {
+        const result = JSON.parse(stdout);
+        if (!result.ok) {
+          resolve(`Failed to fetch ${url}: ${result.error}`);
+          return;
+        }
+
+        const parts: string[] = [];
+        if (result.title) parts.push(`Title: ${result.title}`);
+        parts.push(`URL: ${result.url}`);
+        parts.push(`Length: ${result.length} chars${result.truncated ? " (truncated)" : ""}`);
+        parts.push("");
+        parts.push(result.content);
+
+        resolve(parts.join("\n"));
+      } catch {
+        resolve(stdout || `web_fetch returned no output`);
+      }
+    });
+  });
 }

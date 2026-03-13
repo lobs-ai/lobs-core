@@ -15,11 +15,50 @@ import { MODEL_COSTS as COSTS } from "./types.js";
 import { getToolDefinitions, executeTool } from "./tools/index.js";
 import { buildSystemPrompt, buildSmartSystemPrompt } from "./prompt-builder.js";
 import { parseModelString, createClient, type LLMMessage, type LLMResponse } from "./providers.js";
+import { createHash } from "node:crypto";
 
 export type { AgentSpec, AgentResult };
 
 const DEFAULT_MAX_TURNS = 200;
 const DEFAULT_MAX_TOKENS = 16384;
+
+/** Track recent tool calls for loop detection */
+interface ToolCallRecord {
+  name: string;
+  argsHash: string;
+}
+
+/**
+ * Hash tool arguments for comparison.
+ * Normalizes JSON to detect functionally identical calls.
+ */
+function hashToolArgs(args: Record<string, unknown>): string {
+  const normalized = JSON.stringify(args, Object.keys(args).sort());
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+}
+
+/**
+ * Check for consecutive tool call loops.
+ * Returns the repeat count of the most recent pattern.
+ */
+function detectToolLoop(recentCalls: ToolCallRecord[]): number {
+  if (recentCalls.length < 3) return 0;
+
+  const latest = recentCalls[recentCalls.length - 1];
+  let consecutiveCount = 0;
+
+  // Count how many times the latest call appears consecutively from the end
+  for (let i = recentCalls.length - 1; i >= 0; i--) {
+    const call = recentCalls[i];
+    if (call.name === latest.name && call.argsHash === latest.argsHash) {
+      consecutiveCount++;
+    } else {
+      break;
+    }
+  }
+
+  return consecutiveCount;
+}
 
 /**
  * Run an agent to completion.
@@ -89,6 +128,10 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
   let turns = 0;
   let lastTextOutput = "";
   let stopReason: AgentResult["stopReason"] = "end_turn";
+
+  // Tool loop detection — track last 10 tool calls
+  const recentCalls: ToolCallRecord[] = [];
+  const MAX_RECENT_CALLS = 10;
 
   // Timeout
   const timeoutMs = spec.timeout * 1000;
@@ -182,6 +225,58 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
             spec.cwd,
           );
           results.push(result);
+
+          // Track this tool call for loop detection
+          const callRecord: ToolCallRecord = {
+            name: call.name,
+            argsHash: hashToolArgs(call.input),
+          };
+          recentCalls.push(callRecord);
+          if (recentCalls.length > MAX_RECENT_CALLS) {
+            recentCalls.shift();
+          }
+        }
+
+        // Check for tool loops
+        const loopCount = detectToolLoop(recentCalls);
+
+        if (loopCount >= 5) {
+          // Force-stop at 5 repeats
+          stopReason = "error";
+          const errorMsg = `Tool loop detected: ${recentCalls[recentCalls.length - 1].name} repeated ${loopCount} times with identical arguments. Breaking loop.`;
+          
+          return {
+            succeeded: false,
+            output: lastTextOutput,
+            usage,
+            costUsd: calculateCost(spec.model, usage),
+            durationSeconds: (Date.now() - startTime) / 1000,
+            turns,
+            stopReason,
+            error: errorMsg,
+          };
+        }
+
+        if (loopCount === 3) {
+          // Inject warning at 3 repeats
+          const warningMsg = `WARNING: You appear to be repeating the same action (${recentCalls[recentCalls.length - 1].name}). This approach isn't working. Try a different strategy or tool.`;
+          
+          messages.push({
+            role: "user",
+            content: [{ type: "text", text: warningMsg }],
+          });
+
+          // Progress callback for the warning
+          if (spec.onProgress) {
+            spec.onProgress({ 
+              turn: turns, 
+              type: "error", 
+              text: warningMsg,
+              usage 
+            });
+          }
+
+          continue;
         }
 
         // Add tool results to history

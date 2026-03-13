@@ -11,6 +11,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import type { AgentSpec } from "./types.js";
 import { assembleContext, type AssembledContext } from "./context-engine.js";
+import { getAgentFiles, getRecentHistory, type AgentType } from "./workspace-manager.js";
 
 // ── Agent Templates ──────────────────────────────────────────────────────────
 
@@ -122,14 +123,61 @@ export function buildSystemPrompt(spec: AgentSpec): string {
 /**
  * Build a system prompt with intelligent context from the context engine.
  *
- * This is the upgraded path — uses task classification, token budgeting,
- * and multi-layer retrieval instead of static context assembly.
+ * This is the upgraded path — uses:
+ * - Agent workspace files (AGENTS.md, SOUL.md) as base
+ * - Task classification and token budgeting
+ * - Multi-layer context retrieval
+ * - Recent run history (last 3 summaries)
  */
 export async function buildSmartSystemPrompt(spec: AgentSpec): Promise<{
   systemPrompt: string;
   context: AssembledContext;
 }> {
-  // Assemble context using the engine
+  const parts: string[] = [];
+
+  // 1. Load agent workspace files (AGENTS.md + SOUL.md)
+  //    These replace the static templates
+  const agentType = spec.agent as AgentType;
+  const validAgentTypes: AgentType[] = ["programmer", "writer", "researcher", "reviewer", "architect"];
+  
+  if (validAgentTypes.includes(agentType)) {
+    try {
+      const files = getAgentFiles(agentType);
+      
+      // Use AGENTS.md as the primary instructions
+      parts.push(files.agents);
+      
+      // Add SOUL.md for personality/behavior guidance
+      parts.push(`\n---\n${files.soul}\n---`);
+    } catch {
+      // Fall back to static template if workspace files unavailable
+      const template = AGENT_TEMPLATES[spec.agent] ?? DEFAULT_TEMPLATE;
+      parts.push(template);
+    }
+  } else {
+    // Unknown agent type — use static template
+    const template = AGENT_TEMPLATES[spec.agent] ?? DEFAULT_TEMPLATE;
+    parts.push(template);
+  }
+
+  // 2. Add working directory and date
+  parts.push(`\nWorking directory: ${spec.cwd}`);
+  parts.push(`Current date: ${new Date().toISOString().split("T")[0]}`);
+
+  // 3. Load recent run history (last 3 summaries) for this agent type
+  if (validAgentTypes.includes(agentType)) {
+    try {
+      const history = getRecentHistory(agentType, 3);
+      if (history.length > 0) {
+        const historyText = history.join("\n\n---\n\n");
+        parts.push(`\n# Recent Run History\n\nLearn from these recent runs:\n\n${historyText}`);
+      }
+    } catch {
+      // Skip if history unavailable
+    }
+  }
+
+  // 4. Assemble intelligent context using the context engine
   const context = await assembleContext({
     task: spec.task,
     agentType: spec.agent,
@@ -137,20 +185,12 @@ export async function buildSmartSystemPrompt(spec: AgentSpec): Promise<{
     contextRefs: spec.context?.contextRefs?.map(r => r.path),
   });
 
-  // Build the base prompt (agent template + working dir + date)
-  const parts: string[] = [];
-
-  const template = AGENT_TEMPLATES[spec.agent] ?? DEFAULT_TEMPLATE;
-  parts.push(template);
-  parts.push(`\nWorking directory: ${spec.cwd}`);
-  parts.push(`Current date: ${new Date().toISOString().split("T")[0]}`);
-
-  // Add the intelligently assembled context
+  // 5. Add the intelligently assembled context
   if (context.contextBlock) {
     parts.push(`\n---\n${context.contextBlock}\n---`);
   }
 
-  // Add any additional raw context (for backwards compatibility)
+  // 6. Add any additional raw context (for backwards compatibility)
   if (spec.context?.additionalContext) {
     parts.push(`\n${spec.context.additionalContext}`);
   }
