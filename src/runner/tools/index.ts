@@ -7,6 +7,7 @@ import { execToolDefinition, execTool } from "./exec.js";
 import { readToolDefinition, readTool, writeToolDefinition, writeTool, editToolDefinition, editTool } from "./files.js";
 import { webSearchToolDefinition, webSearchTool, webFetchToolDefinition, webFetchTool } from "./web.js";
 import { memorySearchToolDefinition, memorySearchTool, memoryReadToolDefinition, memoryReadTool, memoryWriteToolDefinition, memoryWriteTool } from "./memory.js";
+import { AGENT_CONTROL_TOOLS, executeSpawnAgent, executeRunPipeline } from "./agent-control.js";
 
 export type ToolExecutor = (params: Record<string, unknown>, cwd: string) => Promise<string>;
 
@@ -51,6 +52,14 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   memory_write: {
     definition: memoryWriteToolDefinition,
     execute: (params) => memoryWriteTool(params),
+  },
+  spawn_agent: {
+    definition: AGENT_CONTROL_TOOLS[0],
+    execute: (params, cwd) => executeSpawnAgent(params, cwd),
+  },
+  run_pipeline: {
+    definition: AGENT_CONTROL_TOOLS[1],
+    execute: (params, cwd) => executeRunPipeline(params, cwd),
   },
 };
 

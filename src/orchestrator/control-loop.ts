@@ -1120,10 +1120,20 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
   const taskNotes = (taskCtx["notes"] as string) ?? "";
   const taskId = req.taskId ?? undefined;
   const projectId = (taskCtx["project_id"] as string) ?? (projectCtx["id"] as string) ?? undefined;
-  const repoPath = (projectCtx["repo_path"] as string) ?? undefined;
+  let repoPath = (projectCtx["repo_path"] as string) ?? undefined;
 
+  // Fallback: look up project in DB if repo_path not in context
+  if (!repoPath && projectId) {
+    try {
+      const row = getRawDb().prepare("SELECT repo_path FROM projects WHERE id = ?").get(projectId) as { repo_path?: string } | undefined;
+      if (row?.repo_path) repoPath = row.repo_path;
+    } catch { /* ignore */ }
+  }
+
+  // Last resort: default to lobs-core
   if (!repoPath) {
-    throw new Error("No repo_path in project context — cannot spawn native runner without cwd");
+    repoPath = `${process.env.HOME}/lobs/lobs-core`;
+    log().warn(`orchestrator: no repo_path for task — defaulting to ${repoPath}`);
   }
 
   // Extract context_refs

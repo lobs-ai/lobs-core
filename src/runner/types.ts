@@ -32,7 +32,7 @@ export interface AgentSpec {
   };
 }
 
-export type ToolName = "exec" | "read" | "write" | "edit" | "web_search" | "web_fetch" | "memory_search" | "memory_read" | "memory_write";
+export type ToolName = "exec" | "read" | "write" | "edit" | "web_search" | "web_fetch" | "memory_search" | "memory_read" | "memory_write" | "spawn_agent" | "run_pipeline";
 
 export interface AgentContext {
   taskId?: string;
