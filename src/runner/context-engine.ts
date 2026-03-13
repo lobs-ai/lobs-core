@@ -179,11 +179,30 @@ const TASK_TYPE_PATTERNS: Array<{ type: TaskType; patterns: RegExp[]; weight: nu
 const CODE_FILE_PATTERN = /\b[\w-]+\.(ts|tsx|js|jsx|py|swift|go|rs|java|rb|css|html|sql|yaml|yml|json|toml)\b/gi;
 const PROJECT_KEYWORDS_PATTERN = /\b(paw|lobs|nexus|flock|openclaw|ship-?api|sail)\b/gi;
 
+/** Direct mapping from agent type to task type */
+const AGENT_TYPE_MAP: Record<string, TaskType> = {
+  programmer: "coding",
+  reviewer: "review",
+  architect: "architecture",
+  researcher: "research",
+  writer: "documentation",
+};
+
 /**
  * Classify a task/prompt to determine what kind of context to load.
- * Uses pattern matching — fast, no LLM call needed.
+ *
+ * Priority:
+ * 1. Agent type mapping (if agentType provided) — instant, authoritative
+ * 2. Regex pattern matching — fast, no LLM call
+ * 3. LLM classification via classifyTaskWithLLM() — for ambiguous cases (called externally)
  */
-export function classifyTask(text: string, projects?: ProjectMapping[]): TaskClassification {
+export function classifyTask(
+  text: string,
+  projects?: ProjectMapping[],
+  agentType?: string,
+): TaskClassification {
+  // If agent type is known, use direct mapping for task type
+  const agentTaskType = agentType ? AGENT_TYPE_MAP[agentType] : undefined;
   // Score each task type
   const scores: Record<TaskType, number> = {
     coding: 0, debugging: 0, architecture: 0, review: 0,
@@ -211,6 +230,12 @@ export function classifyTask(text: string, projects?: ProjectMapping[]): TaskCla
 
   // If no strong signal, default to conversation
   if (bestScore < 1) bestType = "conversation";
+
+  // Agent type takes priority over regex when available
+  if (agentTaskType) {
+    bestType = agentTaskType;
+    bestScore = 5; // high confidence
+  }
 
   // Extract entities (file names, etc.)
   const entities: string[] = [];
@@ -248,6 +273,61 @@ function extractTopic(text: string): string {
     w.length > 3 && !["this", "that", "with", "from", "have", "will", "should", "could", "would", "make", "want"].includes(w.toLowerCase())
   );
   return words.slice(0, 5).join(" ") || "general";
+}
+
+// ── LLM-based Task Classifier ────────────────────────────────────────────────
+
+/** Cache for LLM classification results */
+const llmClassifyCache = new Map<string, TaskType>();
+
+/**
+ * Classify a task using a small local LLM (for ambiguous cases).
+ * Only called when regex confidence is low (< 0.3).
+ * Uses lmstudio/qwen2.5-1.5b-instruct-mlx for fast, free classification.
+ */
+export async function classifyTaskWithLLM(text: string): Promise<TaskType | null> {
+  // Check cache first
+  const cacheKey = text.slice(0, 200);
+  if (llmClassifyCache.has(cacheKey)) return llmClassifyCache.get(cacheKey)!;
+
+  try {
+    const response = await fetch("http://localhost:1234/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "qwen2.5-1.5b-instruct-mlx",
+        messages: [
+          {
+            role: "user",
+            content: `Classify this task into exactly one category. Reply with ONLY the category name, nothing else.\n\nCategories: coding, debugging, architecture, review, research, documentation, devops\n\nTask: ${text.slice(0, 500)}\n\nCategory:`,
+          },
+        ],
+        max_tokens: 10,
+        temperature: 0,
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!response.ok) return null;
+
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const answer = data.choices?.[0]?.message?.content?.trim().toLowerCase() ?? "";
+
+    // Validate the response is a known type
+    const validTypes: TaskType[] = ["coding", "debugging", "architecture", "review", "research", "documentation", "devops"];
+    const matched = validTypes.find(t => answer.includes(t));
+
+    if (matched) {
+      llmClassifyCache.set(cacheKey, matched);
+      return matched;
+    }
+
+    return null;
+  } catch {
+    return null; // Timeout or error — fall back to regex
+  }
 }
 
 // ── Token Budget Allocator ───────────────────────────────────────────────────
@@ -364,7 +444,7 @@ export async function assembleContext(params: {
   const projects = params.config?.projects ?? DEFAULT_PROJECTS;
 
   // 1. Classify the task
-  const classification = classifyTask(params.task, projects);
+  const classification = classifyTask(params.task, projects, params.agentType);
 
   // Override project if explicitly provided
   if (params.projectId) {

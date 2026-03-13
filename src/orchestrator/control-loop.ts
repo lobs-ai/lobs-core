@@ -46,6 +46,8 @@ import { chooseHealthyModel, seedModelHealthFromHistory } from "./model-health.j
 import { checkArtifacts } from "./artifact-check.js";
 import { validatePostSuccessArtifacts } from "./post-success-validator.js";
 import { LearningService, inferTaskCategory } from "../services/learning.js";
+import { runAgent, assembleContext } from "../runner/index.js";
+import type { AgentResult } from "../runner/index.js";
 
 const learningSvc = new LearningService();
 
@@ -58,6 +60,11 @@ export function getGatewayConfig(): { port: number; token: string } {
   return { port: gatewayPort, token: gatewayToken };
 }
 let isFirstTick = true;
+
+// ── Native Runner Config ─────────────────────────────────────────────────────
+
+/** Use our custom agent runner instead of OpenClaw sessions_spawn */
+const USE_NATIVE_RUNNER = true; // Set to false to fall back to OpenClaw sessions_spawn
 
 
 /** Session key for the sink agent — spawns route here to avoid polluting main */
@@ -220,7 +227,11 @@ function runTick(): void {
       }
 
       incrementPendingSpawns(spawnProjectId, req.agentType);
-      processSpawnRequest(req).catch((err) => {
+      
+      // Route through native runner or OpenClaw sessions_spawn
+      const spawnHandler = USE_NATIVE_RUNNER ? processSpawnWithRunner : processSpawnRequest;
+      
+      spawnHandler(req).catch((err) => {
         log().error(`orchestrator: spawn failed for run ${req.runId.slice(0, 8)}: ${err}`);
         decrementPendingSpawns(spawnProjectId, req.agentType);
         writeSpawnResult(req.runId, req.nodeId, {
@@ -1079,6 +1090,151 @@ function autoCloseSucceededTasks(): void {
 }
 
 // ── Spawn processing ─────────────────────────────────────────────────────────
+
+/** Model ID mapping: orchestrator → Anthropic OAuth endpoint format */
+function mapModelForRunner(orchestratorModel: string): string {
+  const mappings: Record<string, string> = {
+    "anthropic/claude-sonnet-4-6": "anthropic/claude-sonnet-4-20250514",
+    "anthropic/claude-opus-4-6": "anthropic/claude-opus-4-20250724",
+    "anthropic/claude-haiku-4-5": "anthropic/claude-haiku-4-5-20250507",
+  };
+
+  // If it's an LM Studio model, ensure lmstudio/ prefix
+  if (orchestratorModel.includes("lmstudio") || orchestratorModel.startsWith("local/")) {
+    return orchestratorModel.startsWith("lmstudio/") 
+      ? orchestratorModel 
+      : `lmstudio/${orchestratorModel.replace(/^local\//, "")}`;
+  }
+
+  return mappings[orchestratorModel] ?? orchestratorModel;
+}
+
+/**
+ * Process a spawn request using our native agent runner.
+ * Calls the Anthropic API directly instead of routing through OpenClaw sessions_spawn.
+ */
+async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
+  const taskCtx = (req.context?.task ?? {}) as Record<string, unknown>;
+  const projectCtx = (req.context?.project ?? {}) as Record<string, unknown>;
+  const taskTitle = (taskCtx["title"] as string) ?? "Workflow task";
+  const taskNotes = (taskCtx["notes"] as string) ?? "";
+  const taskId = req.taskId ?? undefined;
+  const projectId = (taskCtx["project_id"] as string) ?? (projectCtx["id"] as string) ?? undefined;
+  const repoPath = (projectCtx["repo_path"] as string) ?? undefined;
+
+  if (!repoPath) {
+    throw new Error("No repo_path in project context — cannot spawn native runner without cwd");
+  }
+
+  // Extract context_refs
+  const contextRefs = (taskCtx["context_refs"] ?? taskCtx["contextRefs"] ?? []) as string[];
+
+  // Choose model
+  const modelChoice = req.modelTier
+    ? chooseModel(req.modelTier, req.agentType)
+    : chooseModel("standard", req.agentType);
+  
+  const orchestratorModel = modelChoice.model;
+  const runnerModel = mapModelForRunner(orchestratorModel);
+
+  log().info(
+    `[NATIVE_RUNNER] Spawning ${req.agentType} for run ${req.runId.slice(0, 8)} ` +
+    `(task=${taskId?.slice(0, 8) ?? "none"}, model=${runnerModel})`
+  );
+
+  // Assemble intelligent context
+  const assembledContext = await assembleContext({
+    task: `${taskTitle}\n\n${taskNotes}`,
+    agentType: req.agentType,
+    projectId,
+    contextRefs,
+  });
+
+  // Build task prompt with context
+  const taskPrompt = `${taskTitle}\n\n${taskNotes}`.trim();
+  const fullPrompt = `${taskPrompt}\n\n${assembledContext.contextBlock}`;
+
+  // Record worker start
+  const workerId = `native:${req.agentType}:${Date.now()}`;
+  recordWorkerStart({
+    workerId,
+    agentType: req.agentType,
+    taskId,
+    projectId,
+    model: orchestratorModel,
+  });
+
+  try {
+    // Run the agent
+    const result: AgentResult = await runAgent({
+      task: fullPrompt,
+      agent: req.agentType,
+      model: runnerModel,
+      cwd: repoPath,
+      tools: ["exec", "read", "write", "edit"],
+      timeout: 900, // 15 minutes
+      maxTurns: 200,
+    });
+
+    // Extract artifacts (files modified/created)
+    const artifacts = result.artifacts ?? [];
+
+    // Compact the conversation to extract learnings
+    // Note: runAgent doesn't expose raw messages yet, so we'll use output as a proxy
+    const summary = result.output.slice(0, 2000); // First 2K chars as summary
+    
+    // Record worker end
+    recordWorkerEnd({
+      workerId,
+      agentType: req.agentType,
+      succeeded: result.succeeded,
+      summary,
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+      totalCostUsd: result.costUsd,
+      durationSeconds: result.durationSeconds,
+      failureType: result.succeeded ? undefined : 'agent_quality',
+    });
+
+    // Update task status
+    if (result.succeeded && taskId) {
+      const db = getRawDb();
+      db.prepare(`
+        UPDATE tasks
+        SET work_state = 'done',
+            finished_at = datetime('now'),
+            updated_at = datetime('now')
+        WHERE id = ?
+      `).run(taskId);
+    }
+
+    // Write spawn result
+    decrementPendingSpawns(projectId, req.agentType);
+    writeSpawnResult(req.runId, req.nodeId, {
+      childSessionKey: workerId,
+      status: result.succeeded ? "completed" : "failed",
+      ...(result.error ? { error: result.error } : {}),
+    });
+
+    log().info(
+      `[NATIVE_RUNNER] Completed ${req.agentType} run ${req.runId.slice(0, 8)} ` +
+      `(success=${result.succeeded}, turns=${result.turns}, tokens=${result.usage.inputTokens + result.usage.outputTokens}, cost=$${result.costUsd.toFixed(4)})`
+    );
+
+  } catch (error) {
+    // Record failure
+    recordWorkerEnd({
+      workerId,
+      agentType: req.agentType,
+      succeeded: false,
+      summary: `Runner error: ${error instanceof Error ? error.message : String(error)}`,
+      failureType: 'infra',
+    });
+
+    decrementPendingSpawns(projectId, req.agentType);
+    throw error;
+  }
+}
 
 const SPAWN_COUNT_LIMIT = 3;
 
