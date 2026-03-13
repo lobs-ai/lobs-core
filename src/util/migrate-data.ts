@@ -11,7 +11,7 @@ import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 
 const OLD_DB_PATH = process.env.OLD_DB ?? `${process.env.HOME}/lobs-server/lobs.db`;
-const NEW_DB_PATH = process.env.NEW_DB ?? `${process.env.HOME}/.openclaw/plugins/paw/paw.db`;
+const NEW_DB_PATH = process.env.NEW_DB ?? `${process.env.HOME}/.openclaw/plugins/lobs/lobs.db`;
 
 // Tables to migrate in order (respecting foreign key dependencies)
 const TABLES_IN_ORDER = [

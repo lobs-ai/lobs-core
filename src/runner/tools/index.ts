@@ -1,0 +1,94 @@
+/**
+ * Tool registry — maps tool names to definitions and executors.
+ */
+
+import type { ToolDefinition, ToolName, ToolResult } from "../types.js";
+import { execToolDefinition, execTool } from "./exec.js";
+import { readToolDefinition, readTool, writeToolDefinition, writeTool, editToolDefinition, editTool } from "./files.js";
+import { webSearchToolDefinition, webSearchTool } from "./web.js";
+
+export type ToolExecutor = (params: Record<string, unknown>, cwd: string) => Promise<string>;
+
+interface ToolEntry {
+  definition: ToolDefinition;
+  execute: ToolExecutor;
+}
+
+const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
+  exec: {
+    definition: execToolDefinition,
+    execute: execTool,
+  },
+  read: {
+    definition: readToolDefinition,
+    execute: readTool,
+  },
+  write: {
+    definition: writeToolDefinition,
+    execute: writeTool,
+  },
+  edit: {
+    definition: editToolDefinition,
+    execute: editTool,
+  },
+  web_search: {
+    definition: webSearchToolDefinition,
+    execute: (params) => webSearchTool(params),
+  },
+  // Placeholders — will be added later
+  web_fetch: {
+    definition: { name: "web_fetch", description: "Not yet implemented", input_schema: { type: "object", properties: {} } },
+    execute: async () => { throw new Error("web_fetch is not yet implemented"); },
+  },
+  memory_search: {
+    definition: { name: "memory_search", description: "Not yet implemented", input_schema: { type: "object", properties: {} } },
+    execute: async () => { throw new Error("memory_search is not yet implemented"); },
+  },
+};
+
+/**
+ * Get tool definitions for the Anthropic API.
+ */
+export function getToolDefinitions(tools: ToolName[]): ToolDefinition[] {
+  return tools
+    .filter((name) => TOOL_REGISTRY[name] && name !== "web_fetch" && name !== "memory_search")
+    .map((name) => TOOL_REGISTRY[name].definition);
+}
+
+/**
+ * Execute a tool call and return the result.
+ */
+export async function executeTool(
+  toolName: string,
+  params: Record<string, unknown>,
+  toolUseId: string,
+  cwd: string,
+): Promise<ToolResult> {
+  const entry = TOOL_REGISTRY[toolName as ToolName];
+
+  if (!entry) {
+    return {
+      tool_use_id: toolUseId,
+      type: "tool_result",
+      content: `Unknown tool: ${toolName}`,
+      is_error: true,
+    };
+  }
+
+  try {
+    const result = await entry.execute(params, cwd);
+    return {
+      tool_use_id: toolUseId,
+      type: "tool_result",
+      content: result,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      tool_use_id: toolUseId,
+      type: "tool_result",
+      content: `Error: ${message}`,
+      is_error: true,
+    };
+  }
+}

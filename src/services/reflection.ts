@@ -81,33 +81,50 @@ export class ReflectionService {
     const windowStart = new Date(Date.now() - windowHours * 3600 * 1000).toISOString();
 
     for (const agent of REFLECTION_AGENTS) {
-      const recent = db.select().from(agentReflections)
+      // Only skip agents that have a COMPLETED reflection within the window
+      const completed = db.select().from(agentReflections)
         .where(and(
           eq(agentReflections.agentType, agent),
-          inArray(agentReflections.status, ["completed", "active"]),
+          eq(agentReflections.status, "completed"),
           gte(agentReflections.createdAt, windowStart),
         ))
         .limit(1)
         .get();
 
-      if (!recent) {
-        const id = randomUUID();
-        const now = new Date().toISOString();
-        const windowEnd = new Date();
-        const ws = new Date(windowEnd.getTime() - windowHours * 3600 * 1000);
-        db.insert(agentReflections).values({
-          id,
-          agentType: agent,
-          reflectionType: "strategic",
-          status: "active",
-          windowStart: ws.toISOString(),
-          windowEnd: windowEnd.toISOString(),
-          contextPacket: {},
-          createdAt: now,
-        }).run();
-        log().info(`[REFLECTION] Picked ${agent} for next reflection (id=${id.slice(0, 8)})`);
-        return { agentType: agent, reflectionId: id };
+      if (completed) continue; // Already reflected successfully in this window
+
+      // Check for an existing active (unprocessed) reflection to pick up
+      const pending = db.select().from(agentReflections)
+        .where(and(
+          eq(agentReflections.agentType, agent),
+          eq(agentReflections.status, "active"),
+        ))
+        .orderBy(desc(agentReflections.createdAt))
+        .limit(1)
+        .get();
+
+      if (pending) {
+        log().info(`[REFLECTION] Picked ${agent} for reflection (existing active id=${pending.id.slice(0, 8)})`);
+        return { agentType: agent, reflectionId: pending.id };
       }
+
+      // No active or completed — create a new one
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      const windowEnd = new Date();
+      const ws = new Date(windowEnd.getTime() - windowHours * 3600 * 1000);
+      db.insert(agentReflections).values({
+        id,
+        agentType: agent,
+        reflectionType: "strategic",
+        status: "active",
+        windowStart: ws.toISOString(),
+        windowEnd: windowEnd.toISOString(),
+        contextPacket: {},
+        createdAt: now,
+      }).run();
+      log().info(`[REFLECTION] Picked ${agent} for next reflection (new id=${id.slice(0, 8)})`);
+      return { agentType: agent, reflectionId: id };
     }
 
     log().info(`[REFLECTION] All agents reflected within ${windowHours}h window`);

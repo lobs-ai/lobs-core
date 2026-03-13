@@ -7,7 +7,7 @@ import Database from "better-sqlite3";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-const DB_PATH = process.env.PAW_DB_PATH ?? join(homedir(), ".openclaw/plugins/paw/paw.db");
+const DB_PATH = process.env.PAW_DB_PATH ?? join(homedir(), ".openclaw/plugins/lobs/lobs.db");
 
 let _db: Database.Database | null = null;
 

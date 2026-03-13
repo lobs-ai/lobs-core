@@ -2,7 +2,7 @@
  * Task sensitivity classifier — Tier 1 regex-based FERPA/HIPAA/PII detection.
  *
  * Mirrors the Tier 1 logic from lobs-server/app/services/sensitivity_classifier.py
- * but runs natively in the plugin so is_compliant is set in the plugin DB (paw.db)
+ * but runs natively in the plugin so is_compliant is set in the plugin DB (lobs.db)
  * at task creation time — no cross-DB sync required.
  *
  * Called synchronously from the task POST handler before the row is inserted.

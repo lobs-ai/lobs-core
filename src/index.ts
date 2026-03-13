@@ -28,11 +28,11 @@ import { startMemoryScanner, stopMemoryScanner } from "./services/memory-scanner
 import { setLogger, log } from "./util/logger.js";
 import type { PawConfig } from "./util/types.js";
 
-const DEFAULT_DB_PATH = "~/.openclaw/plugins/paw/paw.db";
+const DEFAULT_DB_PATH = "~/.openclaw/plugins/lobs/lobs.db";
 const DEFAULT_SCAN_INTERVAL = 3_000;
 
 const pawPlugin = {
-  id: "paw",
+  id: "lobs",
   name: "PAW — Personal AI Workforce",
   description: "Multi-agent orchestration, task management, and workflow engine",
   version: "0.1.0",
@@ -155,7 +155,7 @@ const pawPlugin = {
     const scanInterval = cfg.scanIntervalMs ?? DEFAULT_SCAN_INTERVAL;
 
     api.registerService({
-      id: "paw-orchestrator",
+      id: "lobs-orchestrator",
       start: () => {
         startControlLoop({} as any, scanInterval);
         const ytSvc = new YouTubeService(); ytSvc.startRecoveryLoop(); (globalThis as any).__ytSvc = ytSvc;

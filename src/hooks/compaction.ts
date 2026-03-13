@@ -17,7 +17,7 @@ import { getDb } from "../db/connection.js";
 import { workerRuns, tasks, projects } from "../db/schema.js";
 import { log } from "../util/logger.js";
 
-const SIDECAR_DIR = join(process.env.HOME || "/Users/lobs", ".openclaw/plugins/paw");
+const SIDECAR_DIR = join(process.env.HOME || "/Users/lobs", ".openclaw/plugins/lobs");
 
 function sidecarPath(taskId: string): string {
   return join(SIDECAR_DIR, `task-context-${taskId}.json`);

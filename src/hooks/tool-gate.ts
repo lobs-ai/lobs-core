@@ -104,7 +104,7 @@ export function registerToolGateHook(api: OpenClawPluginApi): void {
       for (const pattern of HARD_BLOCK_EXEC_PATTERNS) {
         if (pattern.test(command)) {
           log().warn(`[PAW] HARD BLOCK: exec pattern "${pattern}" matched for worker on task ${task.id.slice(0, 8)}: ${command.slice(0, 200)}`);
-          return { block: true, blockReason: "Workers cannot modify openclaw.json, paw.db, or gateway config. Only the orchestrator or Lobs can do this." };
+          return { block: true, blockReason: "Workers cannot modify openclaw.json, lobs.db, or gateway config. Only the orchestrator or Lobs can do this." };
         }
       }
     }

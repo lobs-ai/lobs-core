@@ -13,7 +13,7 @@ export function registerRestartContinuationHook(api: any): void {
         const Database = require("better-sqlite3");
         const { join } = require("node:path");
         const { homedir } = require("node:os");
-        const dbPath = process.env.PAW_DB_PATH ?? join(homedir(), ".openclaw/plugins/paw/paw.db");
+        const dbPath = process.env.PAW_DB_PATH ?? join(homedir(), ".openclaw/plugins/lobs/lobs.db");
         const db = new Database(dbPath);
         
         // Collect task IDs for in-flight runs BEFORE closing them (so we can increment crash_count)

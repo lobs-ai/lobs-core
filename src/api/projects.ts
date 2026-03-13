@@ -139,7 +139,7 @@ Parse the following raw text into individual, actionable tasks. For each task:
 
 Use this INSERT template for each task:
 \`\`\`
-sqlite3 ~/.openclaw/plugins/paw/paw.db "INSERT INTO tasks (id, title, status, agent, model_tier, notes, project_id, created_at, updated_at) VALUES (lower(hex(randomblob(16))), '<title>', 'active', '<agent>', '<tier>', '<notes>', '${id}', datetime('now'), datetime('now'));"
+sqlite3 ~/.openclaw/plugins/lobs/lobs.db "INSERT INTO tasks (id, title, status, agent, model_tier, notes, project_id, created_at, updated_at) VALUES (lower(hex(randomblob(16))), '<title>', 'active', '<agent>', '<tier>', '<notes>', '${id}', datetime('now'), datetime('now'));"
 \`\`\`
 
 Important rules:

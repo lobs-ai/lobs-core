@@ -33,6 +33,9 @@ import { handleAdminRequest } from "./admin.js";
 import { handleDashboardRequest } from "./dashboard.js";
 import { handleDiscordRequest } from "./discord.js";
 import { handlePluginsRequest, handleUiAffordancesRequest, handleUiConfigRequest } from "./plugins.js";
+import { handleSchedulerRequest } from "./scheduler.js";
+import { handleGitHubRequest } from "./github.js";
+import { handleDailyBriefRequest } from "./daily-brief.js";
 import { error } from "./index.js";
 
 const PREFIXES = ["/paw/api/", "/api/"];
@@ -87,6 +90,9 @@ export function registerPawRouter(api: OpenClawPluginApi): void {
         case "plugins":         await handlePluginsRequest(req, res, parts[1], parts); return true;
         case "ui-affordances":  await handleUiAffordancesRequest(req, res); return true;
         case "ui-config":       await handleUiConfigRequest(req, res); return true;
+        case "scheduler":       await handleSchedulerRequest(req, res, parts[1], parts); return true;
+        case "github":          await handleGitHubRequest(req, res, parts[1], parts); return true;
+        case "daily-brief":     await handleDailyBriefRequest(req, res, parts[1]); return true;
         default:                error(res, `Unknown resource: ${resource}`, 404); return true;
       }
     } catch (err) {
