@@ -215,7 +215,7 @@ export function classifyTask(text: string, projects?: ProjectMapping[]): TaskCla
   // Extract entities (file names, etc.)
   const entities: string[] = [];
   const fileMatches = text.match(CODE_FILE_PATTERN);
-  if (fileMatches) entities.push(...new Set(fileMatches));
+  if (fileMatches) entities.push(...Array.from(new Set(fileMatches)));
 
   // Detect project
   let project: string | undefined;
@@ -745,7 +745,7 @@ export function compactSession(messages: Array<{ role: string; content: string }
 
   // Extract decisions
   for (const pattern of DECISION_PATTERNS) {
-    const matches = allText.matchAll(pattern);
+    const matches = Array.from(allText.matchAll(pattern));
     for (const match of matches) {
       if (match[1] && match[1].trim().length > 10) {
         const cleaned = match[1].trim();
@@ -758,7 +758,7 @@ export function compactSession(messages: Array<{ role: string; content: string }
 
   // Extract failures
   for (const pattern of FAILURE_PATTERNS) {
-    const matches = allText.matchAll(pattern);
+    const matches = Array.from(allText.matchAll(pattern));
     for (const match of matches) {
       if (match[1] && match[1].trim().length > 10) {
         const cleaned = match[1].trim();
@@ -771,7 +771,7 @@ export function compactSession(messages: Array<{ role: string; content: string }
 
   // Extract findings
   for (const pattern of FINDING_PATTERNS) {
-    const matches = allText.matchAll(pattern);
+    const matches = Array.from(allText.matchAll(pattern));
     for (const match of matches) {
       if (match[1] && match[1].trim().length > 10) {
         const cleaned = match[1].trim();
@@ -784,7 +784,7 @@ export function compactSession(messages: Array<{ role: string; content: string }
 
   // Extract current state
   for (const pattern of STATE_PATTERNS) {
-    const matches = allText.matchAll(pattern);
+    const matches = Array.from(allText.matchAll(pattern));
     for (const match of matches) {
       if (match[1] && match[1].trim().length > 10) {
         const cleaned = match[1].trim();
@@ -797,7 +797,7 @@ export function compactSession(messages: Array<{ role: string; content: string }
 
   // Extract remaining work
   for (const pattern of REMAINING_PATTERNS) {
-    const matches = allText.matchAll(pattern);
+    const matches = Array.from(allText.matchAll(pattern));
     for (const match of matches) {
       if (match[1] && match[1].trim().length > 10) {
         const cleaned = match[1].trim();
