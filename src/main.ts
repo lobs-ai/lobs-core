@@ -17,7 +17,6 @@ import { existsSync, mkdirSync } from "node:fs";
 import { initToolGate } from "./runner/tool-gate.js";
 import { getCronManager } from "./orchestrator/cron.js";
 import { runHeartbeat } from "./orchestrator/heartbeat.js";
-import { runReflection } from "./orchestrator/reflection.js";
 import { browserService } from "./services/browser.js";
 import { skillsService } from "./services/skills.js";
 import { discordService } from "./services/discord.js";
@@ -93,16 +92,16 @@ async function main() {
     },
   });
   
-  // Reflection: every 6 hours
-  cronManager.addJob({
-    id: "reflection",
-    name: "Self-Reflection",
-    schedule: "0 */6 * * *",
-    enabled: true,
-    handler: async () => {
-      await runReflection();
-    },
-  });
+  // Reflection: disabled (reflection.ts removed during simplification)
+  // cronManager.addJob({
+  //   id: "reflection",
+  //   name: "Self-Reflection",
+  //   schedule: "0 */6 * * *",
+  //   enabled: true,
+  //   handler: async () => {
+  //     // await runReflection();
+  //   },
+  // });
   
   cronManager.start();
   console.log("Cron manager started");

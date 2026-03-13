@@ -22,6 +22,7 @@ import { encryptSecret } from "../services/crypto.js";
 import { discordGuilds, discordDmUsers, deployments } from "../db/schema.js";
 import { eq, and } from "drizzle-orm";
 import { json, error, parseBody } from "./index.js";
+import { discordService } from "../services/discord.js";
 
 // ── Config (read from env at call time, not at import time) ──────────────────
 
@@ -111,6 +112,11 @@ export async function handleDiscordRequest(
       if (method === "GET")    return handleGetDeployment(req, res, slug);
       if (method === "PUT")    return handleUpsertDeployment(req, res, slug);
     }
+  }
+
+  // GET /api/discord/status
+  if (sub === "status" && method === "GET") {
+    return handleBotStatus(req, res);
   }
 
   error(res, `Discord: no route for ${method} /api/discord/${sub}`, 404);
@@ -442,4 +448,14 @@ async function handleUpsertDeployment(req: IncomingMessage, res: ServerResponse,
     .where(eq(deployments.clientSlug, slug))
     .get();
   json(res, updated);
+}
+
+// ── Bot Status ────────────────────────────────────────────────────────────────
+
+async function handleBotStatus(req: IncomingMessage, res: ServerResponse) {
+  const connected = discordService.isConnected();
+  json(res, {
+    connected,
+    guild: connected ? (process.env.DISCORD_GUILD_ID ?? null) : null,
+  });
 }

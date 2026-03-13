@@ -8,6 +8,7 @@ import { getDb, getRawDb } from "../db/connection.js";
 import { workerRuns, workflowRuns, agentStatus as agentStatusTable } from "../db/schema.js";
 import { log } from "../util/logger.js";
 import { recordRunOutcome } from "./model-health.js";
+import { discordService } from "../services/discord.js";
 
 export const DEFAULT_MAX_WORKERS = 5;
 
@@ -268,6 +269,25 @@ export function recordWorkerEnd(opts: {
         } else {
           recordRunOutcome(model, opts.agentType, opts.succeeded, opts.summary ?? '');
         }
+      }
+    }
+
+    // ── Discord notification ──────────────────────────────────────────────
+    if (discordService.isConnected() && opts.taskId) {
+      // Fetch task title from DB
+      const taskRow = getRawDb().prepare(`SELECT title FROM tasks WHERE id = ?`).get(opts.taskId) as { title: string } | undefined;
+      if (taskRow) {
+        discordService.notifyCompletion({
+          title: taskRow.title,
+          agent: opts.agentType,
+          succeeded: opts.succeeded,
+          summary: opts.summary,
+          duration: opts.durationSeconds,
+          cost: opts.totalCostUsd,
+        }).catch(err => {
+          // Fire-and-forget — don't block on Discord failures
+          log().debug?.(`[WORKER_MANAGER] Discord notification failed: ${err}`);
+        });
       }
     }
   } catch (e) {
