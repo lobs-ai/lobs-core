@@ -22,7 +22,8 @@ export async function handleSchedulerRequest(
   if (!jobName && method === "GET") {
     try {
       const output = execSync("openclaw cron list --json", { encoding: "utf-8" });
-      const jobs = JSON.parse(output);
+      const parsed = JSON.parse(output);
+      const jobs = Array.isArray(parsed) ? parsed : (parsed.jobs ?? []);
       
       // Transform to frontend format
       const formatted = jobs.map((job: any) => ({
