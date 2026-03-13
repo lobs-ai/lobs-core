@@ -27,7 +27,7 @@ export interface AgentSpec {
   onProgress?: (update: ProgressUpdate) => void;
 }
 
-export type ToolName = "exec" | "read" | "write" | "edit" | "web_search" | "web_fetch" | "memory_search";
+export type ToolName = "exec" | "read" | "write" | "edit" | "web_search" | "web_fetch" | "memory_search" | "memory_read";
 
 export interface AgentContext {
   taskId?: string;

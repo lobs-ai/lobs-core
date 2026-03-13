@@ -1171,7 +1171,7 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
       agent: req.agentType,
       model: runnerModel,
       cwd: repoPath,
-      tools: ["exec", "read", "write", "edit"],
+      tools: ["exec", "read", "write", "edit", "memory_search", "memory_read"],
       timeout: 900, // 15 minutes
       maxTurns: 200,
     });
