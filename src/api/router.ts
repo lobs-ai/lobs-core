@@ -105,3 +105,58 @@ export function registerPawRouter(api: OpenClawPluginApi): void {
   api.registerHttpRoute({ path: "/paw/api", handler, auth: "plugin", match: "prefix" });
   api.registerHttpRoute({ path: "/api", handler, auth: "plugin", match: "prefix" });
 }
+
+/**
+ * Standalone API handler — for use without OpenClaw.
+ * Wire this into the HTTP server directly.
+ */
+export async function handleApiRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const pathname = decodeURIComponent(url.pathname);
+
+  const prefix = PREFIXES.find(p => pathname.startsWith(p));
+  if (!prefix) {
+    error(res, "Not found", 404);
+    return;
+  }
+
+  const rest = pathname.slice(prefix.length);
+  const parts = rest.split("/").filter(Boolean);
+  const resource = parts[0];
+
+  try {
+    switch (resource) {
+      case "health":          res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ status: "ok", version: "0.1.0", uptime: process.uptime() })); return;
+      case "tasks":           await handleTaskRequest(req, res, parts[1], parts); return;
+      case "projects":        await handleProjectRequest(req, res, parts[1], parts); return;
+      case "agents":          await handleAgentRequest(req, res, parts[1]); return;
+      case "status":          await handleStatusRequest(req, res, parts[1], parts); return;
+      case "inbox":           await handleInboxRequest(req, res, parts[1], parts); return;
+      case "worker":          await handleWorkerRequest(req, res, parts[1], parts); return;
+      case "workflows":       await handleWorkflowRequest(req, res, parts[1]); return;
+      case "workflow-runs":   await handleWorkflowRunsRequest(req, res, parts[1], parts); return;
+      case "orchestrator":    await handleOrchestratorRequest(req, res, parts.slice(1)); return;
+      case "chat":            await handleChatRequest(req, res, parts[1], parts); return;
+      case "memories":        await handleMemoriesRequest(req, res, parts[1], parts); return;
+      case "usage":           await handleUsageRequest(req, res, parts[1]); return;
+      case "reflections":     await handleReflectionsRequest(req, res, parts[1], parts); return;
+      case "meetings":        await handleMeetingsRequest(req, res, parts[1], parts); return;
+      case "knowledge":       await handleKnowledgeRequest(req, res, parts[1], parts); return;
+      case "knowledge-fs":    await handleKnowledgeFsRequest(req, res, parts[1], parts); return;
+      case "memories-fs":     await handleMemoriesFsRequest(req, res, parts[1]); return;
+      case "scheduler":       await handleSchedulerRequest(req, res, parts[1], parts); return;
+      case "github":          await handleGitHubRequest(req, res, parts[1], parts); return;
+      case "daily-brief":     await handleDailyBriefRequest(req, res, parts[1]); return;
+      case "learning":        await handleLearningRequest(req, res, parts[1], parts); return;
+      case "tracker":         await handleTrackerRequest(req, res, parts); return;
+      case "research":        await handleResearchRequest(req, res, parts[1], parts); return;
+      case "documents":       await handleDocumentsRequest(req, res, parts[1], parts); return;
+      case "youtube":         await handleYouTubeRequest(req, res, parts[1], parts); return;
+      case "topics":          await handleTopicsRequest(req, res, parts[1], parts); return;
+      case "tiles":           await handleTilesRequest(req, res, parts[1], parts); return;
+      default:                error(res, `Unknown resource: ${resource}`, 404); return;
+    }
+  } catch (err) {
+    if (!res.headersSent) error(res, `Internal error: ${String(err)}`, 500);
+  }
+}

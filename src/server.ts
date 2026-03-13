@@ -39,18 +39,7 @@ const MIME_TYPES: Record<string, string> = {
   ".avif": "image/avif",
 };
 
-/** API route handler type (matches existing router pattern) */
-type ApiHandler = (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
-
-let apiRouter: ApiHandler | null = null;
-
-/**
- * Register the API router function.
- * Called from main.ts after API routes are set up.
- */
-export function setApiRouter(handler: ApiHandler): void {
-  apiRouter = handler;
-}
+import { handleApiRequest } from "./api/router.js";
 
 /**
  * Serve a static file from Nexus dist directory.
@@ -130,21 +119,16 @@ export function startServer(port: number): void {
       return;
     }
 
-    // API routes: /api/* and /paw/api/* (backwards compat)
+    // API routes: /api/* and /paw/api/* — handled by lobs-core API router
     if (url.startsWith("/api/") || url.startsWith("/paw/api/")) {
-      if (apiRouter) {
-        try {
-          await apiRouter(req, res);
-        } catch (err) {
-          log().error(`API error: ${err}`);
-          if (!res.headersSent) {
-            res.writeHead(500, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "Internal server error" }));
-          }
+      try {
+        await handleApiRequest(req, res);
+      } catch (err) {
+        log().error(`API error: ${err}`);
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Internal server error" }));
         }
-      } else {
-        res.writeHead(503, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "API not ready" }));
       }
       return;
     }
