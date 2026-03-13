@@ -10,6 +10,7 @@ import { initDb, closeDb, getRawDb } from "./db/connection.js";
 import { runMigrations } from "./db/migrate.js";
 import { seedDefaultWorkflows } from "./workflow/seeds.js";
 import { startControlLoop, stopControlLoop } from "./orchestrator/control-loop.js";
+import { startServer } from "./server.js";
 import { setLogger, log } from "./util/logger.js";
 import { resolve } from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
@@ -17,6 +18,7 @@ import { existsSync, mkdirSync } from "node:fs";
 const HOME = process.env.HOME ?? "";
 const DB_PATH = resolve(HOME, ".openclaw/plugins/lobs/lobs.db");
 const SCAN_INTERVAL_MS = 10_000;
+const HTTP_PORT = parseInt(process.env.LOBS_PORT ?? "9420", 10);
 
 // Simple console logger matching the OpenClaw logger interface
 const consoleLogger = {
@@ -62,6 +64,9 @@ async function main() {
   // Start the control loop
   startControlLoop({} as any, SCAN_INTERVAL_MS);
   console.log(`Control loop started (scan every ${SCAN_INTERVAL_MS / 1000}s)`);
+
+  // Start HTTP server (Nexus dashboard + API)
+  startServer(HTTP_PORT);
   console.log("=== lobs-core ready ===");
 
   // Handle shutdown
