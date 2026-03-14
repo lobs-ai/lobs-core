@@ -8,6 +8,7 @@ import { getDb } from "../db/connection.js";
 import { plugins, uiConfig } from "../db/schema.js";
 import { json, error, parseBody } from "./index.js";
 import type { PawPlugin, UIAffordance } from "../types/plugin.js";
+import { getModelForTier } from "../config/models.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -193,7 +194,7 @@ async function callModel(prompt: string): Promise<string> {
         sessionKey: "agent:sink:paw-orchestrator-v2",
         args: {
           task: prompt,
-          model: "anthropic/claude-haiku-4-5",
+          model: getModelForTier("small"),
           mode: "run",
           cleanup: "delete",
           runTimeoutSeconds: 30,
@@ -220,7 +221,7 @@ async function callModel(prompt: string): Promise<string> {
       const { execSync } = await import("node:child_process");
       const escaped = prompt.replace(/'/g, "'\\''");
       return execSync(
-        `openclaw run --model anthropic/claude-haiku-4-5 --print '${escaped}'`,
+        `openclaw run --model ${getModelForTier("small")} --print '${escaped}'`,
         { timeout: 30_000, encoding: "utf8" },
       ).trim();
     } catch {

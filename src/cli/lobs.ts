@@ -26,6 +26,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from "
 import { resolve, dirname } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { validateAllConfigs, printValidationResults } from "../config/validator.js";
+import { getModelConfig } from "../config/models.js";
 
 const HOME = process.env.HOME ?? "";
 const LOBS_PORT = parseInt(process.env.LOBS_PORT ?? "9420", 10);
@@ -485,27 +486,8 @@ function cmdInit() {
   // Create skeleton config files (if they don't exist)
   const modelsPath = resolve(CONFIG_DIR, "models.json");
   if (!existsSync(modelsPath)) {
-    const modelsTemplate = {
-      tiers: {
-        micro: "lmstudio/qwen3-4b",
-        small: "anthropic/claude-haiku-4-5",
-        medium: "anthropic/claude-sonnet-4-6",
-        standard: "anthropic/claude-sonnet-4-6",
-        strong: "anthropic/claude-opus-4-6",
-      },
-      agents: {
-        programmer: { primary: "anthropic/claude-sonnet-4-6", fallbacks: ["anthropic/claude-haiku-4-5"] },
-        researcher: { primary: "anthropic/claude-sonnet-4-6", fallbacks: ["anthropic/claude-opus-4-6"] },
-        writer: { primary: "anthropic/claude-sonnet-4-6", fallbacks: ["anthropic/claude-opus-4-6"] },
-        reviewer: { primary: "anthropic/claude-sonnet-4-6", fallbacks: ["anthropic/claude-opus-4-6"] },
-        architect: { primary: "anthropic/claude-opus-4-6", fallbacks: ["anthropic/claude-sonnet-4-6"] },
-      },
-      local: {
-        baseUrl: "http://localhost:1234/v1",
-        chatModel: "qwen3-4b",
-        embeddingModel: "text-embedding-qwen3-embedding-4b",
-      },
-    };
+    const cfg = getModelConfig();
+    const modelsTemplate = { tiers: cfg.tiers, agents: cfg.agents, local: cfg.local };
     writeFileSync(modelsPath, JSON.stringify(modelsTemplate, null, 2));
     console.log(colorize("✓", "green") + " Created models.json");
   } else {

@@ -12,6 +12,7 @@ import { json, error, parseBody, parseQuery } from "./index.js";
 import { readFileSync as _readFileSync } from "node:fs";
 import { LearningService } from "../services/learning.js";
 import { classifyAndLog } from "../services/task-sensitivity.js";
+import { getModelForTier } from "../config/models.js";
 
 const learningSvc = new LearningService();
 
@@ -164,8 +165,8 @@ ${body.text}`;
       task: userPrompt,
       system: systemPrompt,
       model: body.model_tier_override
-        ? (body.model_tier_override === "micro" ? "anthropic/claude-haiku-4-5" : "anthropic/claude-haiku-4-5")
-        : "anthropic/claude-haiku-4-5",
+        ? getModelForTier(body.model_tier_override)
+        : getModelForTier("small"),
       mode: "run",
       cleanup: "kill",
       runTimeoutSeconds: 60,

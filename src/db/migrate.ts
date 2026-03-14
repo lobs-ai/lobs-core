@@ -6,6 +6,7 @@
 
 import { sql } from "drizzle-orm";
 import type { PawDB } from "./connection.js";
+import { getAgentModel, getAgentFallbacks, getModelForTier } from "../config/models.js";
 
 export function runMigrations(db: PawDB): void {
   // For now, use raw SQL to create tables.
@@ -862,14 +863,11 @@ export function runMigrations(db: PawDB): void {
 
   // ── Seed fallback tier chains per agent type (circuit-breaker dispatch order) ──
   // INSERT OR IGNORE so manual overrides via SQL are preserved.
-  const fallbackChains = {
-    programmer: ["anthropic/claude-sonnet-4-6", "anthropic/claude-haiku-4-5"],
-    architect:  ["anthropic/claude-opus-4-6", "anthropic/claude-sonnet-4-6"],
-    reviewer:   ["anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6"],
-    researcher: ["anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6"],
-    writer:     ["anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6"],
-    "inbox-responder": ["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-4-6"],
-  };
+  const fallbackChains: Record<string, string[]> = {};
+  for (const agentType of ["programmer", "architect", "reviewer", "researcher", "writer"]) {
+    fallbackChains[agentType] = [getAgentModel(agentType), ...getAgentFallbacks(agentType)];
+  }
+  fallbackChains["inbox-responder"] = [getModelForTier("small"), getModelForTier("standard")];
   try {
     for (const [agentType, chain] of Object.entries(fallbackChains)) {
       db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)

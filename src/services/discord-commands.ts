@@ -9,6 +9,7 @@ import { Client, REST, Routes, SlashCommandBuilder, EmbedBuilder, CommandInterac
 import type { DiscordConfig } from "./discord.js";
 import type { MainAgent } from "./main-agent.js";
 import { getRawDb } from "../db/connection.js";
+import { getModelForTier } from "../config/models.js";
 
 let mainAgentRef: MainAgent | null = null;
 

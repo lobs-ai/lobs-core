@@ -9,6 +9,7 @@
 import { randomUUID } from "node:crypto";
 import { parseModelString, createClient } from "../runner/providers.js";
 import type { LLMMessage, LLMClient } from "../runner/providers.js";
+import { getModelForTier } from "../config/models.js";
 import { getToolDefinitions, executeTool } from "../runner/tools/index.js";
 import type { ToolName } from "../runner/types.js";
 import { getToolsForSession, getSessionType } from "../runner/tools/tool-sets.js";
@@ -867,7 +868,7 @@ export class MainAgent {
       .join("\n");
 
     // Use a cheap model for summarization
-    const config = parseModelString("anthropic/claude-haiku-4-5");
+    const config = parseModelString(getModelForTier("small"));
     const client = createClient(config);
 
     try {

@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { getDb } from "../db/connection.js";
 import { chatSessions } from "../db/schema.js";
 import { log } from "../util/logger.js";
+import { getModelForTier } from "../config/models.js";
 
 // ── Config ──────────────────────────────────────────────────────────────
 
@@ -20,7 +21,7 @@ const MIN_NEW_MESSAGES = 3;
 const MIN_INTERVAL_SECONDS = 60;
 
 /** Model to use for summarization (micro tier) */
-const SUMMARY_MODEL = "anthropic/claude-haiku-4-5";
+const SUMMARY_MODEL = getModelForTier("small");
 
 // ── Gateway helpers ─────────────────────────────────────────────────────
 
@@ -209,7 +210,7 @@ Reply with ONLY the summary, nothing else.`;
       log().info(`[CHAT-SUMMARY] Micro model returned empty, trying fallback`);
       const fallbackResult = await gatewayInvoke("sessions_spawn", {
         task: prompt,
-        model: "anthropic/claude-sonnet-4-6",
+        model: getModelForTier("standard"),
         mode: "run",
         cleanup: "kill",
         runTimeoutSeconds: 60,

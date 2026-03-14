@@ -5,6 +5,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { json, error, parseBody, parseQuery } from "./index.js";
 import { YouTubeService } from "../services/youtube.js";
+import { getModelForTier } from "../config/models.js";
 
 const svc = new YouTubeService();
 
@@ -79,7 +80,7 @@ USER QUESTION: ${body.message}`;
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
         body: JSON.stringify({
           tool: "sessions_spawn",
-          args: { task: prompt, mode: "run", model: "anthropic/claude-sonnet-4-6", runTimeoutSeconds: 60, cleanup: "keep" },
+          args: { task: prompt, mode: "run", model: getModelForTier("standard"), runTimeoutSeconds: 60, cleanup: "keep" },
           sessionKey: "agent:sink:paw-orchestrator-v2",
         }),
       });

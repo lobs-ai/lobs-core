@@ -10,6 +10,7 @@
  */
 
 import { parseModelString, createClient } from "../runner/providers.js";
+import { getModelForTier } from "../config/models.js";
 import type { LLMMessage } from "../runner/providers.js";
 
 export interface CompactionConfig {
@@ -28,7 +29,7 @@ export interface CompactionConfig {
 const DEFAULT_CONFIG: CompactionConfig = {
   threshold: 120_000,
   summarizeRatio: 0.6,
-  model: "anthropic/claude-haiku-4-5-20250514",
+  model: getModelForTier("small"),
   maxSummaryTokens: 3000,
   preserveIdentifiers: true,
 };

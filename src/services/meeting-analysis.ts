@@ -11,6 +11,7 @@ import { getDb } from "../db/connection.js";
 import { meetings, meetingActionItems, tasks, inboxItems } from "../db/schema.js";
 import { log } from "../util/logger.js";
 import { classifyApprovalTier } from "../util/approval-tier.js";
+import { getModelForTier } from "../config/models.js";
 
 function gatewayCfg(): { port: number; token: string } {
   const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
@@ -48,7 +49,7 @@ Remember: Write the COMPLETE analysis to ${outFile} using the Write tool. That f
   const spawnResult = await gatewayInvoke("sessions_spawn", {
     task: wrappedTask,
     mode: "run",
-    model: "anthropic/claude-sonnet-4-6",
+    model: getModelForTier("standard"),
     thinking: "off",
     runTimeoutSeconds: Math.floor(timeoutMs / 1000),
     cleanup: "delete",
