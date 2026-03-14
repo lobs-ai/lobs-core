@@ -1,13 +1,13 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { execSync } from "node:child_process";
 import { json, error } from "./index.js";
+import { getCronService } from "../services/cron.js";
 
 /**
- * Scheduler endpoint — manage OpenClaw cron jobs.
- * 
- * GET /api/scheduler → list all cron jobs
+ * Scheduler endpoint — manage cron jobs via the CronService.
+ *
+ * GET  /api/scheduler           → list all cron jobs
  * POST /api/scheduler/:name/toggle → toggle enabled state
- * POST /api/scheduler/:name/run → trigger immediate run
+ * POST /api/scheduler/:name/run    → trigger immediate run (not yet supported)
  */
 
 export async function handleSchedulerRequest(
@@ -17,20 +17,28 @@ export async function handleSchedulerRequest(
   parts: string[] = [],
 ): Promise<void> {
   const method = req.method;
+  const cronService = getCronService();
+
+  if (!cronService) {
+    return error(res, "Cron service not initialized", 500);
+  }
 
   // GET /api/scheduler — list all jobs
   if (!jobName && method === "GET") {
     try {
-      const output = execSync("openclaw cron list --json", { encoding: "utf-8" });
-      const parsed = JSON.parse(output);
-      const jobs = Array.isArray(parsed) ? parsed : (parsed.jobs ?? []);
-      
-      // Transform to frontend format
-      const formatted = jobs.map((job: any) => ({
-        name: job.name ?? job.id,
-        cron: job.schedule ?? job.cron ?? "unknown",
-        enabled: job.enabled !== false, // Default true if missing
-        last_run: job.lastRun ?? job.lastFired ?? null,
+      const jobs = cronService.listJobs();
+      const formatted = jobs.map((job) => ({
+        name: job.name,
+        id: job.id,
+        cron:
+          job.schedule.kind === "cron"
+            ? job.schedule.expr
+            : job.schedule.kind === "every"
+              ? `every ${job.schedule.everyMs}ms`
+              : `at ${job.schedule.at}`,
+        kind: job.schedule.kind,
+        enabled: job.enabled,
+        last_run: job.lastFired ?? null,
       }));
 
       return json(res, { jobs: formatted });
@@ -42,43 +50,32 @@ export async function handleSchedulerRequest(
   // POST /api/scheduler/:name/toggle
   if (jobName && parts[2] === "toggle" && method === "POST") {
     try {
-      // Get current state
-      const listOutput = execSync("openclaw cron list --json", { encoding: "utf-8" });
-      const jobs = JSON.parse(listOutput);
-      const job = jobs.find((j: any) => (j.name ?? j.id) === jobName);
-      
+      const jobs = cronService.listJobs();
+      const job = jobs.find((j) => j.name === jobName || j.id === jobName);
+
       if (!job) {
         return error(res, `Job not found: ${jobName}`, 404);
       }
 
-      const currentlyEnabled = job.enabled !== false;
-      const action = currentlyEnabled ? "disable" : "enable";
-      
-      execSync(`openclaw cron ${action} ${jobName}`, { encoding: "utf-8" });
-      
-      return json(res, { 
-        success: true, 
-        name: jobName, 
-        enabled: !currentlyEnabled 
+      cronService.toggleJob(job.id, !job.enabled);
+
+      return json(res, {
+        success: true,
+        name: job.name,
+        enabled: !job.enabled,
       });
     } catch (err) {
       return error(res, `Failed to toggle job: ${String(err)}`, 500);
     }
   }
 
-  // POST /api/scheduler/:name/run
+  // POST /api/scheduler/:name/run — not yet wired (would need to expose fireJob)
   if (jobName && parts[2] === "run" && method === "POST") {
-    try {
-      execSync(`openclaw cron run ${jobName}`, { encoding: "utf-8" });
-      
-      return json(res, { 
-        success: true, 
-        name: jobName, 
-        message: "Job triggered successfully" 
-      });
-    } catch (err) {
-      return error(res, `Failed to run job: ${String(err)}`, 500);
-    }
+    return error(
+      res,
+      "Manual job triggering not yet supported via API",
+      501,
+    );
   }
 
   return error(res, "Invalid scheduler endpoint", 404);

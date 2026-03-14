@@ -17,6 +17,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { initToolGate } from "./runner/tool-gate.js";
 import { getCronManager } from "./orchestrator/cron.js";
 import { runHeartbeat } from "./orchestrator/heartbeat.js";
+import { initCronService } from "./services/cron.js";
 import { randomUUID } from "node:crypto";
 import { browserService } from "./services/browser.js";
 import { skillsService } from "./services/skills.js";
@@ -109,6 +110,12 @@ async function main() {
   cronManager.start();
   console.log("Cron manager started");
 
+  // Set up DB-backed cron service (agent-managed jobs / reminders)
+  console.log("Setting up cron service...");
+  const cronService = initCronService(getRawDb());
+  cronService.seedDefaults();
+  cronService.start();
+
   // Start the control loop
   startControlLoop({} as any, SCAN_INTERVAL_MS);
   console.log(`Control loop started (scan every ${SCAN_INTERVAL_MS / 1000}s)`);
@@ -163,6 +170,7 @@ async function main() {
     console.log("\nShutting down...");
     await browserService.shutdown();
     await discordService.shutdown();
+    cronService.stop();
     cronManager.stop();
     stopControlLoop();
     closeDb();

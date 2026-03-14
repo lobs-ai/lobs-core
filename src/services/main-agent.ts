@@ -29,6 +29,7 @@ const MAIN_AGENT_TOOLS: ToolName[] = [
   "memory_search",
   "memory_read",
   "memory_write",
+  "cron",
 ];
 
 interface PendingMessage {

@@ -8,6 +8,7 @@ import { readToolDefinition, readTool, writeToolDefinition, writeTool, editToolD
 import { webSearchToolDefinition, webSearchTool, webFetchToolDefinition, webFetchTool } from "./web.js";
 import { memorySearchToolDefinition, memorySearchTool, memoryReadToolDefinition, memoryReadTool, memoryWriteToolDefinition, memoryWriteTool } from "./memory.js";
 import { AGENT_CONTROL_TOOLS, executeSpawnAgent, executeRunPipeline } from "./agent-control.js";
+import { cronToolDefinition, executeCronTool } from "./cron.js";
 
 export type ToolExecutor = (params: Record<string, unknown>, cwd: string) => Promise<string>;
 
@@ -60,6 +61,10 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   run_pipeline: {
     definition: AGENT_CONTROL_TOOLS[1],
     execute: (params, cwd) => executeRunPipeline(params, cwd),
+  },
+  cron: {
+    definition: cronToolDefinition,
+    execute: (params) => executeCronTool(params),
   },
 };
 
