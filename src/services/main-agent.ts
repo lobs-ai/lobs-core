@@ -100,6 +100,16 @@ export class MainAgent {
 
   /** Handle an incoming user message — queues if busy, processes if free */
   async handleMessage(msg: PendingMessage): Promise<void> {
+    if (this.processing) {
+      // Don't store in DB yet — will be stored as part of the queued block
+      this.messageQueue.push(msg);
+      console.log(
+        `[main-agent] Queued message (${this.messageQueue.length} pending)`,
+      );
+      return;
+    }
+
+    // Store in DB (only for non-queued messages)
     this.db
       .prepare(
         `INSERT INTO main_agent_messages
@@ -114,14 +124,6 @@ export class MainAgent {
         msg.channelId,
         Math.ceil(msg.content.length / 4),
       );
-
-    if (this.processing) {
-      this.messageQueue.push(msg);
-      console.log(
-        `[main-agent] Queued message (${this.messageQueue.length} pending)`,
-      );
-      return;
-    }
 
     await this.processConversation(msg.channelId);
   }
@@ -494,8 +496,21 @@ export class MainAgent {
       (m, i) =>
         `---\nQueued #${i + 1} from ${m.authorName} (${new Date(m.timestamp).toLocaleTimeString()}):\n${m.content}`,
     );
+    
+    // Store the queued block as a single DB entry
+    const queuedBlock = texts.join("\n\n");
+    this.db.prepare(`
+      INSERT INTO main_agent_messages (id, role, content, channel_id, token_estimate)
+      VALUES (?, 'user', ?, ?, ?)
+    `).run(
+      randomUUID(),
+      `[Queued messages while agent was busy]\n\n${queuedBlock}`,
+      this.messageQueue[0]?.channelId || "system",
+      Math.ceil(queuedBlock.length / 4),
+    );
+    
     this.messageQueue = [];
-    return texts.join("\n\n");
+    return queuedBlock;
   }
 
   private splitMessage(text: string, maxLen: number): string[] {
