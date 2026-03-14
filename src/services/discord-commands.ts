@@ -147,7 +147,7 @@ async function handleStatusCommand(interaction: ChatInputCommandInteraction): Pr
     memoryHealth = '❌ Down';
   }
   
-  const model = process.env.LOBS_MODEL || 'anthropic/claude-sonnet-4-20250514';
+  const model = process.env.LOBS_MODEL || getModelForTier('strong');
   
   const embed = new EmbedBuilder()
     .setTitle('🤖 lobs-core Status')
@@ -213,7 +213,7 @@ async function handleModelCommand(interaction: ChatInputCommandInteraction): Pro
     const session = db.prepare('SELECT model_override FROM channel_sessions WHERE channel_id = ?')
       .get(channelId) as { model_override: string | null } | undefined;
     
-    const currentModel = session?.model_override || process.env.LOBS_MODEL || 'anthropic/claude-sonnet-4-20250514';
+    const currentModel = session?.model_override || process.env.LOBS_MODEL || getModelForTier('strong');
     
     await interaction.reply({
       content: `**Current model for this channel:** \`${currentModel}\`\n\nTo change: \`/model name:<model>\``,
@@ -274,13 +274,25 @@ async function handleHelpCommand(interaction: ChatInputCommandInteraction): Prom
   await interaction.reply({ embeds: [embed], ephemeral: true });
 }
 
-/** Normalize short model names to full identifiers */
+/** Normalize short model names to tier names or full identifiers */
 function normalizeModelName(name: string): string {
-  const shortNames: Record<string, string> = {
-    'haiku': 'anthropic/claude-haiku-4-20250514',
-    'sonnet': 'anthropic/claude-sonnet-4-20250514',
-    'opus': 'anthropic/claude-opus-4-20250514',
+  const lower = name.toLowerCase();
+  // Map friendly names to tiers
+  const tierAliases: Record<string, string> = {
+    'haiku': 'small',
+    'sonnet': 'medium',
+    'opus': 'strong',
+    'micro': 'micro',
+    'small': 'small',
+    'medium': 'medium',
+    'standard': 'standard',
+    'strong': 'strong',
   };
   
-  return shortNames[name.toLowerCase()] || name;
+  // If it's a known alias or tier name, resolve to the actual model from config
+  if (tierAliases[lower]) {
+    return getModelForTier(tierAliases[lower]);
+  }
+  
+  return name;
 }

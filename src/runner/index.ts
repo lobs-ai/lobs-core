@@ -10,7 +10,7 @@
  *   const result = await runAgent({
  *     task: "Fix the auth bug in src/auth.ts",
  *     agent: "programmer",
- *     model: "claude-sonnet-4-5-20250514",
+ *     model: "claude-sonnet-4-6",
  *     cwd: "/path/to/repo",
  *     tools: ["exec", "read", "write", "edit"],
  *     timeout: 900,

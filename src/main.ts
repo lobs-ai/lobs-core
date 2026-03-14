@@ -257,11 +257,14 @@ async function main() {
 
       // Wire reply handler — agent replies go to Discord
       mainAgent.setReplyHandler(async (channelId, content) => {
+        // Nexus channels are handled via the API, not Discord
+        if (channelId.startsWith("nexus:")) return;
         await discordService.send(channelId, content);
       });
 
       // Wire typing handler
       mainAgent.setTypingHandler((channelId) => {
+        if (channelId.startsWith("nexus:")) return;
         discordService.sendTyping(channelId).catch(() => {});
       });
 

@@ -7,6 +7,7 @@ import { json, error, parseBody, parseQuery } from "./index.js";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "../util/logger.js";
+import { getModelForTier } from "../config/models.js";
 
 // ── Gateway helpers ───────────────────────────────────────────────────────────
 
@@ -156,7 +157,7 @@ ${rawText}`;
         await gatewayInvoke("sessions_spawn", {
           task: prompt,
           mode: "run",
-          model: "anthropic/claude-sonnet-4-6",
+          model: getModelForTier("standard"),
           runTimeoutSeconds: 300,
           cleanup: "keep",
         });

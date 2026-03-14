@@ -13,13 +13,14 @@ import { getToolDefinitions, executeTool } from "../runner/tools/index.js";
 import type { ToolName } from "../runner/types.js";
 import { getToolsForSession, getSessionType } from "../runner/tools/tool-sets.js";
 import { loadWorkspaceContext } from "./workspace-loader.js";
+import { resolveModelForTier, type ModelTier } from "../orchestrator/model-chooser.js";
 import Database from "better-sqlite3";
 import { compactMessages, pruneToolResults } from "./compaction.js";
 import { LoopDetector } from "../runner/loop-detector.js";
 
 const MAX_HISTORY = 50;
 const MAX_CONTEXT_CHARS = 150_000; // Rough char budget for history
-const DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514";
+const DEFAULT_MODEL = "strong";  // Chat defaults to strong tier (opus)
 const DEFAULT_CWD = process.env.HOME ?? "/tmp";
 const MAX_CONCURRENT_CHANNELS = 3; // Max simultaneous channel conversations
 
@@ -460,12 +461,21 @@ export class MainAgent {
         `SELECT model_override FROM channel_sessions WHERE channel_id = ?`
       ).get(replyChannelId) as { model_override: string | null } | undefined;
       
-      const effectiveModel = sessionRow?.model_override || this.model;
+      let effectiveModel = sessionRow?.model_override || this.model;
+      
+      // If the model is a tier name, resolve it to actual model
+      if (["micro", "small", "medium", "standard", "strong"].includes(effectiveModel)) {
+        const resolved = resolveModelForTier(effectiveModel as ModelTier, "main");
+        if (resolved) {
+          effectiveModel = resolved;
+        }
+      }
       
       // Resolve tools based on session type
       const sessionType = getSessionType(replyChannelId);
       const availableTools = getToolsForSession(sessionType);
       const tools = getToolDefinitions(availableTools);
+      console.log(`[main-agent] Using model: ${effectiveModel} (raw: ${this.model}, override: ${sessionRow?.model_override ?? 'none'})`);
       const config = parseModelString(effectiveModel);
       const client: LLMClient = createClient(config);
 

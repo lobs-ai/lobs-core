@@ -9,7 +9,7 @@ export interface AgentSpec {
   agent: string;
   /** System prompt override (otherwise built from agent template) */
   systemPrompt?: string;
-  /** Model to use (e.g. "claude-sonnet-4-5-20250514") */
+  /** Model to use (e.g. "claude-sonnet-4-6") */
   model: string;
   /** Provider (anthropic, openai) — defaults to anthropic */
   provider?: "anthropic" | "openai";

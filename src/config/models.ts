@@ -62,7 +62,7 @@ export interface ModelChain {
 const DEFAULT_CONFIG: ModelConfig = {
   tiers: {
     micro: "lmstudio/qwen3-4b",
-    small: "anthropic/claude-sonnet-4-6",
+    small: "anthropic/claude-haiku-4-5",
     medium: "anthropic/claude-sonnet-4-6",
     standard: "anthropic/claude-sonnet-4-6",
     strong: "anthropic/claude-opus-4-6",

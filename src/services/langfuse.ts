@@ -26,6 +26,7 @@ import { log } from "../util/logger.js";
 // ---------------------------------------------------------------------------
 const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   // Anthropic Claude
+  "anthropic/claude-opus-4-6": { input: 15.0, output: 75.0 },
   "anthropic/claude-opus-4": { input: 15.0, output: 75.0 },
   "anthropic/claude-sonnet-4-6": { input: 3.0, output: 15.0 },
   "anthropic/claude-sonnet-4-5": { input: 3.0, output: 15.0 },

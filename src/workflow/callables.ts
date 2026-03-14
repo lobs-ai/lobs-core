@@ -23,6 +23,7 @@ import { ReflectionService } from "../services/reflection.js";
 import { LearningService } from "../services/learning.js";
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { getModelForTier } from "../config/models.js";
 
 export interface CallableContext {
   workflowRunId?: string;
@@ -289,7 +290,7 @@ ${reflectionSummaries}`;
         args: {
           task: eventText + triageInstructions,
           agentId: "main",
-          model: "anthropic/claude-sonnet-4-6",
+          model: getModelForTier("standard"),
           mode: "run",
           cleanup: "keep",
           runTimeoutSeconds: 300,
@@ -386,7 +387,7 @@ function reflectionSpawnAll(args: Record<string, unknown>, _ctx: CallableContext
       args: {
         task: prompt,
         agentId: pick.agentType,
-        model: "anthropic/claude-sonnet-4-6",
+        model: getModelForTier("standard"),
         mode: "run",
         cleanup: "keep",
         runTimeoutSeconds: 300,
@@ -647,7 +648,7 @@ function inboxProcessThreads(_args: Record<string, unknown>, _ctx: CallableConte
       args: {
         task: prompt,
         agentId: "main",
-        model: "anthropic/claude-sonnet-4-6",
+        model: getModelForTier("standard"),
         mode: "run",
         cleanup: "keep",
         runTimeoutSeconds: 300,
