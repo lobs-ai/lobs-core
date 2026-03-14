@@ -2,25 +2,39 @@
 /**
  * lobs — CLI for managing lobs-core
  *
- * Usage:
- *   lobs status              System overview
- *   lobs tasks [list|create|view]  Manage tasks
- *   lobs workers             Show active/recent worker runs
- *   lobs config check        Validate all config files
- *   lobs config show         Dump current config
- *   lobs logs [--tail N]     Show recent logs
- *   lobs health              Detailed health check
- *   lobs init                Initialize config directory structure
+ * Process management:
+ *   lobs start                Start lobs-core (daemonized)
+ *   lobs stop                 Stop the running instance
+ *   lobs restart              Restart lobs-core
+ *   lobs status               System overview (server, tasks, workers)
+ *   lobs health               Detailed health check (DB, memory, LM Studio)
+ *
+ * Tasks & workers:
+ *   lobs tasks [list|view]    Manage tasks
+ *   lobs workers              Show active/recent worker runs
+ *
+ * Config:
+ *   lobs config check         Validate all config files
+ *   lobs config show          Dump current config file status
+ *   lobs init                 Initialize config directory structure
+ *
+ * Logs:
+ *   lobs logs [--tail N]      Show recent log output
  */
 
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { execSync, spawn } from "node:child_process";
 import { validateAllConfigs, printValidationResults } from "../config/validator.js";
 
 const HOME = process.env.HOME ?? "";
-const API_BASE = "http://localhost:9420/api";
+const LOBS_PORT = parseInt(process.env.LOBS_PORT ?? "9420", 10);
+const API_BASE = `http://localhost:${LOBS_PORT}/api`;
 const CONFIG_DIR = resolve(HOME, ".lobs/config");
 const SECRETS_DIR = resolve(CONFIG_DIR, "secrets");
+const PID_FILE = resolve(HOME, ".lobs/lobs.pid");
+const LOG_FILE = resolve(HOME, ".lobs/lobs.log");
+const LOBS_CORE_DIR = resolve(HOME, "lobs/lobs-core");
 
 // ── ANSI Colors ──────────────────────────────────────────────────────────────
 
@@ -39,6 +53,14 @@ const colors = {
 
 function colorize(text: string, color: keyof typeof colors): string {
   return `${colors[color]}${text}${colors.reset}`;
+}
+
+function formatUptime(seconds: number): string {
+  if (seconds < 60) return `${Math.floor(seconds)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
 // ── Fetch Helpers ────────────────────────────────────────────────────────────
@@ -75,16 +97,187 @@ async function postApi(endpoint: string, body: any): Promise<any> {
   }
 }
 
+// ── Process Management ───────────────────────────────────────────────────────
+
+/** Read PID from file and check if process is actually alive */
+function getRunningPid(): number | null {
+  if (!existsSync(PID_FILE)) return null;
+  try {
+    const pid = parseInt(readFileSync(PID_FILE, "utf-8").trim(), 10);
+    if (isNaN(pid)) return null;
+    // Check if process is alive (signal 0 = no signal, just check existence)
+    process.kill(pid, 0);
+    return pid;
+  } catch {
+    return null;
+  }
+}
+
+function isServerReachable(): Promise<boolean> {
+  return fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(2000) })
+    .then(r => r.ok)
+    .catch(() => false);
+}
+
+async function cmdStart() {
+  // Check if already running
+  const pid = getRunningPid();
+  if (pid) {
+    const reachable = await isServerReachable();
+    if (reachable) {
+      console.log(colorize(`lobs-core is already running (PID ${pid})`, "yellow"));
+      return;
+    }
+    // PID file exists but server not reachable — stale PID
+    console.log(colorize(`Stale PID file found (PID ${pid} not responding). Cleaning up...`, "yellow"));
+    try { unlinkSync(PID_FILE); } catch {}
+  }
+
+  // Check that dist/main.js exists
+  const mainJs = resolve(LOBS_CORE_DIR, "dist/main.js");
+  if (!existsSync(mainJs)) {
+    console.error(colorize("Error: dist/main.js not found. Run 'npm run build' first.", "red"));
+    console.log(colorize(`  cd ${LOBS_CORE_DIR} && npm run build`, "dim"));
+    process.exit(1);
+  }
+
+  console.log(colorize("Starting lobs-core...", "cyan"));
+
+  // Spawn detached process with output going to log file
+  const logFd = require("node:fs").openSync(LOG_FILE, "a");
+  const child = spawn("node", [mainJs], {
+    cwd: LOBS_CORE_DIR,
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+    env: { ...process.env, LOBS_PORT: String(LOBS_PORT) },
+  });
+
+  child.unref();
+  const childPid = child.pid;
+
+  if (!childPid) {
+    console.error(colorize("Failed to start lobs-core", "red"));
+    process.exit(1);
+  }
+
+  // Wait up to 5 seconds for server to become reachable
+  let started = false;
+  for (let i = 0; i < 10; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    if (await isServerReachable()) {
+      started = true;
+      break;
+    }
+  }
+
+  if (started) {
+    console.log(colorize(`✓ lobs-core started (PID ${childPid}, port ${LOBS_PORT})`, "green"));
+    console.log(colorize(`  Logs: ${LOG_FILE}`, "dim"));
+  } else {
+    console.log(colorize(`lobs-core spawned (PID ${childPid}) but not yet responding`, "yellow"));
+    console.log(colorize(`  Check logs: tail -f ${LOG_FILE}`, "dim"));
+  }
+}
+
+async function cmdStop() {
+  const pid = getRunningPid();
+  if (!pid) {
+    console.log(colorize("lobs-core is not running", "yellow"));
+    // Clean up stale PID file
+    if (existsSync(PID_FILE)) {
+      unlinkSync(PID_FILE);
+    }
+    return;
+  }
+
+  console.log(colorize(`Stopping lobs-core (PID ${pid})...`, "cyan"));
+
+  try {
+    // Send SIGTERM for graceful shutdown
+    process.kill(pid, "SIGTERM");
+  } catch (err) {
+    console.error(colorize(`Failed to send signal: ${err}`, "red"));
+    return;
+  }
+
+  // Wait up to 5 seconds for process to exit
+  let stopped = false;
+  for (let i = 0; i < 10; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    try {
+      process.kill(pid, 0); // Check if still alive
+    } catch {
+      stopped = true;
+      break;
+    }
+  }
+
+  if (stopped) {
+    console.log(colorize("✓ lobs-core stopped", "green"));
+  } else {
+    // Force kill
+    console.log(colorize("Graceful shutdown timed out, force killing...", "yellow"));
+    try {
+      process.kill(pid, "SIGKILL");
+      console.log(colorize("✓ lobs-core killed", "green"));
+    } catch {
+      console.error(colorize("Failed to kill process", "red"));
+    }
+  }
+
+  // Clean up PID file
+  if (existsSync(PID_FILE)) {
+    try { unlinkSync(PID_FILE); } catch {}
+  }
+}
+
+async function cmdRestart() {
+  const pid = getRunningPid();
+  if (pid) {
+    await cmdStop();
+    // Brief pause to let port release
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  await cmdStart();
+}
+
+async function cmdLogs(tail: number = 50) {
+  if (!existsSync(LOG_FILE)) {
+    console.log(colorize("No log file found.", "yellow"));
+    console.log(colorize(`  Expected at: ${LOG_FILE}`, "dim"));
+    return;
+  }
+
+  try {
+    const output = execSync(`tail -n ${tail} "${LOG_FILE}"`, { encoding: "utf-8" });
+    console.log(colorize(`\n=== Last ${tail} lines of ${LOG_FILE} ===\n`, "bright"));
+    console.log(output);
+  } catch (err) {
+    console.error(colorize(`Error reading logs: ${err}`, "red"));
+  }
+}
+
 // ── Commands ─────────────────────────────────────────────────────────────────
 
 async function cmdStatus() {
+  // Check if running first
+  const pid = getRunningPid();
+  if (!pid) {
+    console.log(colorize("\n=== Lobs Core Status ===\n", "bright"));
+    console.log(colorize("  ✗ Not running", "red"));
+    console.log(colorize("  Start with: lobs start\n", "dim"));
+    return;
+  }
+
   const data = await fetchApi("/status/overview");
   
   console.log(colorize("\n=== Lobs Core Status ===\n", "bright"));
   
   console.log(colorize("Server", "cyan"));
   console.log(`  Status:  ${data.server.status === "healthy" ? colorize("✓ healthy", "green") : colorize("✗ unhealthy", "red")}`);
-  console.log(`  Uptime:  ${Math.floor(data.server.uptime_seconds / 60)}m`);
+  console.log(`  PID:     ${pid}`);
+  console.log(`  Port:    ${LOBS_PORT}`);
+  console.log(`  Uptime:  ${formatUptime(data.server.uptime_seconds)}`);
   console.log(`  Version: ${data.server.version}`);
   console.log("");
   
@@ -186,12 +379,6 @@ async function cmdConfigShow() {
   console.log("");
 }
 
-async function cmdLogs(tail: number = 50) {
-  console.log(colorize(`\n=== Recent Logs (last ${tail}) ===\n`, "bright"));
-  console.log(colorize("(Log streaming not yet implemented)", "dim"));
-  console.log("");
-}
-
 async function cmdHealth() {
   const data = await fetchApi("/health");
   
@@ -199,7 +386,7 @@ async function cmdHealth() {
   
   const status = data.status === "healthy" ? colorize("✓ HEALTHY", "green") : colorize("✗ UNHEALTHY", "red");
   console.log(`Status:       ${status}`);
-  console.log(`Uptime:       ${Math.floor(data.uptime / 60)}m`);
+  console.log(`Uptime:       ${formatUptime(data.uptime)}`);
   console.log(`PID:          ${data.pid || "unknown"}`);
   console.log(`DB:           ${data.db === "ok" ? colorize("✓", "green") : colorize("✗", "red")}`);
   console.log(`Memory Server: ${data.memory_server === "ok" ? colorize("✓", "green") : colorize("✗ down", "yellow")}`);
@@ -324,6 +511,18 @@ const subcommand = args[1];
 
 (async () => {
   switch (command) {
+    case "start":
+      await cmdStart();
+      break;
+
+    case "stop":
+      await cmdStop();
+      break;
+
+    case "restart":
+      await cmdRestart();
+      break;
+
     case "status":
       await cmdStatus();
       break;
@@ -346,12 +545,12 @@ const subcommand = args[1];
       }
       break;
     
-    case "logs":
-      const tail = args.find(a => a.startsWith("--tail"))
-        ? parseInt(args[args.indexOf("--tail") + 1] || "50", 10)
-        : 50;
+    case "logs": {
+      const tailIdx = args.indexOf("--tail");
+      const tail = tailIdx !== -1 ? parseInt(args[tailIdx + 1] || "50", 10) : 50;
       await cmdLogs(tail);
       break;
+    }
     
     case "health":
       await cmdHealth();
@@ -360,18 +559,34 @@ const subcommand = args[1];
     case "init":
       cmdInit();
       break;
-    
+
+    case "--help":
+    case "-h":
+    case "help":
     default:
-      console.log(colorize("\nlobs — CLI for managing lobs-core\n", "bright"));
-      console.log("Usage:");
+      console.log(colorize("\nlobs", "bright") + " — CLI for managing lobs-core\n");
+      console.log(colorize("Process:", "cyan"));
+      console.log("  lobs start               Start lobs-core (daemonized)");
+      console.log("  lobs stop                Stop the running instance");
+      console.log("  lobs restart             Restart lobs-core");
       console.log("  lobs status              System overview");
+      console.log("  lobs health              Detailed health check");
+      console.log("");
+      console.log(colorize("Tasks & Workers:", "cyan"));
       console.log("  lobs tasks [list|view]   Manage tasks");
       console.log("  lobs workers             Show active/recent worker runs");
+      console.log("");
+      console.log(colorize("Config:", "cyan"));
       console.log("  lobs config check        Validate all config files");
-      console.log("  lobs config show         Dump current config");
-      console.log("  lobs logs [--tail N]     Show recent logs");
-      console.log("  lobs health              Detailed health check");
-      console.log("  lobs init                Initialize config directory structure");
+      console.log("  lobs config show         Show config file status");
+      console.log("  lobs init                Initialize config directory");
+      console.log("");
+      console.log(colorize("Logs:", "cyan"));
+      console.log("  lobs logs [--tail N]     Show recent log output");
+      console.log("");
+      console.log(colorize("Config dir:", "dim") + ` ${CONFIG_DIR}`);
+      console.log(colorize("Logs:", "dim") + `       ${LOG_FILE}`);
+      console.log(colorize("PID file:", "dim") + `   ${PID_FILE}`);
       console.log("");
   }
 })();

@@ -13,7 +13,7 @@ import { startControlLoop, stopControlLoop } from "./orchestrator/control-loop.j
 import { startServer } from "./server.js";
 import { setLogger, log } from "./util/logger.js";
 import { resolve } from "node:path";
-import { existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
 import { initToolGate } from "./runner/tool-gate.js";
 import { getCronManager } from "./orchestrator/cron.js";
 import { runHeartbeat } from "./orchestrator/heartbeat.js";
@@ -71,11 +71,19 @@ async function main() {
 
   // ── PID File Management ──────────────────────────────────────────────────
 
-  // Check if another instance is running
   if (existsSync(PID_FILE)) {
-    console.warn(`[WARN] PID file exists: ${PID_FILE}`);
-    console.warn("[WARN] Another instance may be running, or previous shutdown was unclean");
-    console.warn("[WARN] Proceeding anyway...");
+    const existingPid = parseInt(readFileSync(PID_FILE, "utf-8").trim(), 10);
+    let alive = false;
+    if (!isNaN(existingPid)) {
+      try { process.kill(existingPid, 0); alive = true; } catch {}
+    }
+    if (alive) {
+      console.error(`[FATAL] Another instance is already running (PID ${existingPid})`);
+      console.error(`  Stop it first: lobs stop`);
+      process.exit(1);
+    }
+    console.warn(`[WARN] Stale PID file found (PID ${existingPid}). Cleaning up.`);
+    unlinkSync(PID_FILE);
   }
 
   // Write PID file

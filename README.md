@@ -30,13 +30,78 @@ lobs-core/
 |------|---------|
 | [lobs-ai/lobs-memory-plugin](https://github.com/lobs-ai/lobs-memory-plugin) | OpenClaw plugin for memory tools (thin HTTP proxy) |
 
-## Running
+## Quick Start
+
+```bash
+# 1. Clone and install
+git clone https://github.com/lobs-ai/lobs-core.git
+cd lobs-core
+npm install
+npm run build
+
+# 2. Initialize config (creates ~/.lobs/config/ with templates)
+lobs init
+
+# 3. Add your API keys
+#    Edit ~/.lobs/config/secrets/keys.json
+#    Edit ~/.lobs/config/secrets/discord-token.json (optional)
+
+# 4. Validate config
+lobs config check
+
+# 5. Start
+lobs start
+```
+
+## CLI
+
+After `npm link`, the `lobs` command is available globally:
+
+```bash
+# Process management
+lobs start                  # Start lobs-core (daemonized, logs to ~/.lobs/lobs.log)
+lobs stop                   # Graceful shutdown (SIGTERM, falls back to SIGKILL)
+lobs restart                # Stop + start
+lobs status                 # System overview (tasks, workers, uptime)
+lobs health                 # Health check (DB, memory server, LM Studio)
+
+# Tasks & workers
+lobs tasks                  # List active tasks
+lobs workers                # Recent worker runs
+
+# Config
+lobs config check           # Validate all config files
+lobs config show            # Show config directory structure
+lobs init                   # Create config dirs + skeleton files
+
+# Logs
+lobs logs                   # Last 50 lines of log
+lobs logs --tail 200        # Last 200 lines
+```
+
+## Config
+
+Config lives in `~/.lobs/config/`. Secrets are separated into a gitignored subfolder so you can safely commit your config:
+
+```
+~/.lobs/config/                  ← committable
+  models.json                    ← model tiers, agent chains, costs
+  discord.json                   ← guild/channel config (no token)
+  .gitignore                     ← ignores secrets/
+  secrets/                       ← NEVER committed
+    keys.json                    ← API keys (anthropic, openrouter, etc.)
+    discord-token.json           ← { "botToken": "..." }
+```
+
+Run `lobs init` to create this structure with templates. Run `lobs config check` to validate.
+
+## Running (manual)
 
 ```bash
 # Build
 npm run build
 
-# Run standalone
+# Run in foreground (useful for debugging)
 node dist/main.js
 
 # Run tests
