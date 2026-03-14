@@ -56,7 +56,8 @@ export async function compactMessages(
 
   console.log(`[compaction] Context at ${totalChars} chars (threshold: ${cfg.threshold}), compacting...`);
 
-  const splitPoint = Math.floor(messages.length * cfg.summarizeRatio);
+  const rawSplit = Math.floor(messages.length * cfg.summarizeRatio);
+  const splitPoint = findSafeSplitPoint(messages, rawSplit);
   const toSummarize = messages.slice(0, splitPoint);
   const toKeep = messages.slice(splitPoint);
 
@@ -164,6 +165,44 @@ Output format:
       newCount: toKeep.length,
     };
   }
+}
+
+/**
+ * Find a safe split point that doesn't orphan tool_result blocks.
+ * 
+ * Claude's API requires every tool_result to have a matching tool_use in the
+ * immediately preceding assistant message. If we split between an assistant
+ * message with tool_use blocks and the following user message with tool_result
+ * blocks, the kept portion starts with orphaned tool_results → 400 error.
+ *
+ * Strategy: start from the target split point and walk backward until we find
+ * a point where the message at splitPoint is NOT a user message containing
+ * tool_result blocks (i.e., we don't split a tool_use/tool_result pair).
+ */
+export function findSafeSplitPoint(messages: LLMMessage[], targetSplit: number): number {
+  let split = targetSplit;
+  
+  // Walk backward from target to find a safe boundary
+  while (split > 0 && split < messages.length) {
+    const msg = messages[split];
+    
+    // Check if this message is a user message containing tool_result blocks
+    if (msg.role === "user" && Array.isArray(msg.content)) {
+      const hasToolResult = (msg.content as Array<Record<string, unknown>>).some(
+        (block) => block.type === "tool_result"
+      );
+      if (hasToolResult) {
+        // This would orphan tool_results — move split back to before the assistant tool_use
+        split--;
+        continue;
+      }
+    }
+    
+    break;
+  }
+
+  // Don't let split go below 2 (need at least something to summarize)
+  return Math.max(split, 2);
 }
 
 /**

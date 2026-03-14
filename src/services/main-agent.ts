@@ -17,7 +17,7 @@ import { getToolsForSession, getSessionType } from "../runner/tools/tool-sets.js
 import { loadWorkspaceContext, buildSystemPrompt } from "./workspace-loader.js";
 import { resolveModelForTier, type ModelTier } from "../orchestrator/model-chooser.js";
 import Database from "better-sqlite3";
-import { compactMessages, pruneToolResults } from "./compaction.js";
+import { compactMessages, pruneToolResults, findSafeSplitPoint } from "./compaction.js";
 import { LoopDetector } from "../runner/loop-detector.js";
 
 const MAX_HISTORY = 50;
@@ -53,6 +53,9 @@ export interface AgentStreamEvent {
   timestamp: number;
 }
 
+/** Discord tool visibility preferences */
+export type DiscordToolsMode = "on" | "off" | "compact";
+
 export class MainAgent {
   private db: Database.Database;
   private processingChannels = new Set<string>(); // Channels currently being processed
@@ -66,6 +69,8 @@ export class MainAgent {
   private onProgress: ((channelId: string, content: string) => Promise<void>) | null = null;
   // Track chat type per channel for step visibility
   private channelChatType = new Map<string, string>();
+  // Batched tool progress for Discord — accumulates until near 2000 chars or turn ends
+  private discordToolBatches = new Map<string, string[]>();
   
   /** EventEmitter for SSE streaming — Nexus subscribes to this */
   public readonly events = new EventEmitter();
@@ -121,6 +126,15 @@ export class MainAgent {
         ON message_queue(channel_id, processed, queued_at);
     `);
 
+    // Discord tool visibility prefs (per-channel, separate from Nexus)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS discord_tool_prefs (
+        channel_id TEXT PRIMARY KEY,
+        mode TEXT NOT NULL DEFAULT 'compact',  -- on | off | compact
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+
     // Safe migrations
     try {
       this.db.exec(`ALTER TABLE main_agent_messages ADD COLUMN platform_message_id TEXT`);
@@ -149,6 +163,46 @@ export class MainAgent {
     const chatType = this.channelChatType.get(channelId);
     // Show steps in DMs, Nexus, and system — NOT in group chats
     return chatType === "dm" || chatType === "nexus" || chatType === "system" || channelId.startsWith("nexus:");
+  }
+
+  /* ── Discord tool visibility preferences ──────────────────────── */
+
+  getDiscordToolsMode(channelId: string): DiscordToolsMode {
+    const row = this.db.prepare(
+      `SELECT mode FROM discord_tool_prefs WHERE channel_id = ?`
+    ).get(channelId) as { mode: string } | undefined;
+    return (row?.mode as DiscordToolsMode) || "compact";
+  }
+
+  setDiscordToolsMode(channelId: string, mode: DiscordToolsMode): void {
+    this.db.prepare(`
+      INSERT INTO discord_tool_prefs (channel_id, mode, updated_at)
+      VALUES (?, ?, datetime('now'))
+      ON CONFLICT(channel_id) DO UPDATE SET mode = excluded.mode, updated_at = excluded.updated_at
+    `).run(channelId, mode);
+  }
+
+  /** Accumulate a tool step line for a Discord channel, flush when near 2000 chars */
+  private async batchDiscordToolStep(channelId: string, line: string): Promise<void> {
+    if (!this.onProgress) return;
+    const batch = this.discordToolBatches.get(channelId) || [];
+    batch.push(line);
+    this.discordToolBatches.set(channelId, batch);
+
+    // Discord message limit is 2000 chars. Flush when we'd exceed ~1800 to leave room.
+    const combined = batch.join("\n");
+    if (combined.length >= 1800) {
+      await this.flushDiscordToolBatch(channelId);
+    }
+  }
+
+  /** Send accumulated tool steps as a single Discord message */
+  private async flushDiscordToolBatch(channelId: string): Promise<void> {
+    const batch = this.discordToolBatches.get(channelId);
+    if (!batch || batch.length === 0) return;
+    this.discordToolBatches.delete(channelId);
+    if (!this.onProgress) return;
+    await this.onProgress(channelId, batch.join("\n"));
   }
 
   setSystemPrompt(prompt: string) {
@@ -554,15 +608,26 @@ export class MainAgent {
 
             const inputPreview = JSON.stringify(block.input).substring(0, 300);
 
-            // Show tool step progress in DMs/Nexus (not group chats)
-            if (this.shouldShowSteps(replyChannelId) && this.onProgress) {
-              await this.onProgress(
-                replyChannelId,
-                `🔧 \`${block.name}\` ${inputPreview.substring(0, 150)}${inputPreview.length >= 150 ? "..." : ""}`,
-              );
+            // Discord channels: batch tool steps; Nexus: SSE events only
+            const isNexusChannel = replyChannelId.startsWith("nexus:");
+            if (this.shouldShowSteps(replyChannelId) && !isNexusChannel) {
+              // Discord batched tool steps
+              const discordMode = this.getDiscordToolsMode(replyChannelId);
+              if (discordMode === "on") {
+                await this.batchDiscordToolStep(
+                  replyChannelId,
+                  `🔧 \`${block.name}\` ${inputPreview.substring(0, 150)}${inputPreview.length >= 150 ? "..." : ""}`,
+                );
+              } else if (discordMode === "compact") {
+                await this.batchDiscordToolStep(
+                  replyChannelId,
+                  `\`${block.name}\``,
+                );
+              }
+              // "off" — no tool progress at all
             }
 
-            // Emit SSE event: tool starting
+            // Emit SSE event: tool starting (Nexus always gets these)
             this.events.emit("stream", {
               type: "tool_start",
               channelId: replyChannelId,
@@ -589,6 +654,18 @@ export class MainAgent {
               content: resultContent,
               is_error: result.is_error,
             });
+
+            // Discord: add result line to batch (on mode only)
+            if (this.shouldShowSteps(replyChannelId) && !isNexusChannel) {
+              const discordMode = this.getDiscordToolsMode(replyChannelId);
+              if (discordMode === "on") {
+                const shortResult = resultContent.substring(0, 120);
+                await this.batchDiscordToolStep(
+                  replyChannelId,
+                  `  ${result.is_error ? "❌" : "✓"} ${shortResult}${resultContent.length > 120 ? "..." : ""}`,
+                );
+              }
+            }
 
             // Emit SSE event: tool completed
             this.events.emit("stream", {
@@ -669,6 +746,9 @@ export class MainAgent {
             console.log(`[main-agent] Injected ${midLoopQueued.split("---").length - 1} queued message(s) mid-loop for channel ${replyChannelId.slice(0, 8)}`);
           }
 
+          // Flush any accumulated Discord tool step batch before looping back
+          await this.flushDiscordToolBatch(replyChannelId);
+
           continue;
         }
 
@@ -680,6 +760,9 @@ export class MainAgent {
         if (isNoReply && isDirectChat) {
           textResponse = "I'm here — what can I help with?";
         }
+
+        // Flush any remaining Discord tool batch before final reply
+        await this.flushDiscordToolBatch(replyChannelId);
 
         // Final text response
         if (
@@ -742,6 +825,8 @@ export class MainAgent {
       }
     } catch (err) {
       console.error("[main-agent] Error in conversation loop:", err);
+      // Flush any remaining Discord tool batch
+      await this.flushDiscordToolBatch(replyChannelId).catch(() => {});
       // Emit error event
       this.events.emit("stream", {
         type: "error",
@@ -944,7 +1029,9 @@ export class MainAgent {
     console.log(`[main-agent] Context at ${totalChars} chars, compacting...`);
 
     // Take the first 60% of messages and summarize them
-    const splitPoint = Math.floor(messages.length * 0.6);
+    // Use safe split to avoid orphaning tool_result blocks
+    const rawSplit = Math.floor(messages.length * 0.6);
+    const splitPoint = findSafeSplitPoint(messages, rawSplit);
     const toSummarize = messages.slice(0, splitPoint);
     const toKeep = messages.slice(splitPoint);
 
