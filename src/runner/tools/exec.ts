@@ -14,7 +14,7 @@ export const execToolDefinition: ToolDefinition = {
   name: "exec",
   description:
     "Execute a shell command. Returns stdout, stderr, and exit code. " +
-    "Output is capped to ~80 lines/3KB by default — use head/tail/grep for large outputs. " +
+    "Output is capped to ~200 lines/8KB by default — use head/tail/grep for large outputs. " +
     "Commands run in the agent's working directory by default. " +
     "Use workdir to change directory. Use timeout to limit execution time (default 30s, max 300s).",
   input_schema: {

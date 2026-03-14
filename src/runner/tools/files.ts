@@ -16,7 +16,7 @@ import type { ToolDefinition } from "../types.js";
 export const readToolDefinition: ToolDefinition = {
   name: "read",
   description:
-    "Read the contents of a file. For text files, output is truncated to 80 lines or 3KB by default " +
+    "Read the contents of a file. For text files, output is truncated to 200 lines or 8KB by default " +
     "(whichever is hit first). Use offset/limit for large files.",
   input_schema: {
     type: "object",
@@ -107,9 +107,9 @@ export const editToolDefinition: ToolDefinition = {
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_LINES = 2000;
-const DEFAULT_LINES = 80;    // Default when no limit specified — preview mode
+const DEFAULT_LINES = 200;   // Default when no limit specified — most source files fit in one read
 const MAX_BYTES = 50 * 1024; // 50KB
-const DEFAULT_BYTES = 3000;  // Default char budget in preview mode
+const DEFAULT_BYTES = 8000;  // Default char budget — enough for typical source files
 const BINARY_CHECK_BYTES = 8192;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

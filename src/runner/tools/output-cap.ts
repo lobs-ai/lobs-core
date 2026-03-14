@@ -11,10 +11,10 @@
  */
 
 /** Default max characters for tool output */
-export const DEFAULT_OUTPUT_CAP = 3000;
+export const DEFAULT_OUTPUT_CAP = 8000;
 
 /** Max lines to show in preview mode */
-export const DEFAULT_MAX_LINES = 80;
+export const DEFAULT_MAX_LINES = 200;
 
 /**
  * Cap a tool result string to a budget.
