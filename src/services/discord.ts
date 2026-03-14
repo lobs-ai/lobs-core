@@ -1,4 +1,5 @@
 import { Client, GatewayIntentBits, TextChannel, EmbedBuilder } from "discord.js";
+import { registerSlashCommands, handleSlashCommand } from "./discord-commands.js";
 
 export interface DiscordConfig {
   botToken: string;
@@ -27,13 +28,25 @@ class DiscordService {
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMessageReactions,
       ],
     });
 
     this.readyPromise = new Promise((resolve, reject) => {
-      this.client!.once("ready", () => {
+      this.client!.once("ready", async () => {
         console.log(`[discord] Bot connected as ${this.client!.user?.tag}`);
         this.ready = true;
+        
+        // Register slash commands
+        await registerSlashCommands(this.client!, config);
+        
+        // Set up interaction handler
+        this.client!.on("interactionCreate", async (interaction) => {
+          if (interaction.isChatInputCommand()) {
+            await handleSlashCommand(interaction);
+          }
+        });
+        
         resolve();
       });
       this.client!.once("error", reject);
@@ -122,7 +135,7 @@ class DiscordService {
   }
 
   /** Register event handler for messages */
-  onMessage(handler: (message: { content: string; channelId: string; authorId: string; authorTag: string }) => void): void {
+  onMessage(handler: (message: { messageId: string; content: string; channelId: string; authorId: string; authorTag: string; isDm: boolean; isMentioned: boolean }) => void): void {
     if (!this.client || !this.config) return;
     this.client.on("messageCreate", (msg) => {
       if (msg.author.bot) return; // Ignore bot messages
@@ -145,11 +158,17 @@ class DiscordService {
         }
       }
       
+      const isDm = !msg.guildId;
+      const isMentioned = msg.mentions.has(this.client!.user!);
+
       handler({
+        messageId: msg.id,
         content: msg.content,
         channelId: msg.channelId,
         authorId: msg.author.id,
         authorTag: msg.author.tag,
+        isDm,
+        isMentioned,
       });
     });
   }
@@ -179,6 +198,41 @@ class DiscordService {
     } catch {
       // Fall back to regular send
       await this.send(channelId, content);
+    }
+  }
+
+  /** Add a reaction emoji to a Discord message */
+  async react(channelId: string, messageId: string, emoji: string): Promise<void> {
+    if (!this.client || !this.ready) return;
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (channel && channel.isTextBased()) {
+        const msg = await (channel as TextChannel).messages.fetch(messageId);
+        await msg.react(emoji);
+      }
+    } catch (err) {
+      console.error(`[discord] Failed to react to ${messageId}:`, err);
+      throw err;
+    }
+  }
+
+  /** Remove a reaction from a Discord message */
+  async removeReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
+    if (!this.client || !this.ready) return;
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (channel && channel.isTextBased()) {
+        const msg = await (channel as TextChannel).messages.fetch(messageId);
+        const userReactions = msg.reactions.cache.filter(reaction => reaction.me);
+        for (const reaction of userReactions.values()) {
+          if (reaction.emoji.name === emoji || reaction.emoji.toString() === emoji) {
+            await reaction.users.remove(this.client.user!.id);
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`[discord] Failed to remove reaction from ${messageId}:`, err);
+      throw err;
     }
   }
 

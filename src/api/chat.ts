@@ -58,9 +58,33 @@ export async function handleChatRequest(
       const content = body?.content?.trim();
       if (!content) return error(res, "content is required", 400);
 
+      const mainAgent = (globalThis as any).__lobsMainAgent;
+      if (!mainAgent) return error(res, "Agent not initialized", 503);
+
+      const channelId = `nexus:${sessionKey}`;  // Nexus sessions use nexus: prefix
+
+      // Send to main agent (it will process and store reply in main_agent_messages)
+      await mainAgent.handleMessage({
+        id: randomUUID(),
+        content,
+        authorId: "nexus-user",
+        authorName: "Rafe",
+        channelId,
+        timestamp: Date.now(),
+      });
+
+      // Wait for processing to complete
+      try {
+        await mainAgent.waitForChannelIdle(channelId, 600_000);
+      } catch (err) {
+        log().warn(`[chat] Timeout waiting for channel ${channelId}: ${err}`);
+      }
+
+      // Read the reply from the DB (last assistant message for this channel)
+      const reply = mainAgent.getLastAssistantMessage(channelId);
+
+      // Also store in chat_messages for the Nexus UI
       const now = new Date().toISOString();
-      
-      // Store user message
       db.insert(chatMessages).values({
         id: randomUUID().replace(/-/g, ""),
         sessionKey,
@@ -68,85 +92,23 @@ export async function handleChatRequest(
         content,
         createdAt: now,
       }).run();
-
-      // Route to MainAgent for LLM processing
-      const mainAgent = (globalThis as any).__lobsMainAgent;
-      if (mainAgent) {
-        // Collect reply via a promise
-        let replyText = "";
-        const replyPromise = new Promise<string>((resolve) => {
-          const originalHandler = mainAgent.onReply;
-          const sessionChannelId = `nexus-chat:${sessionKey}`;
-          
-          // Temporarily set reply handler to capture response
-          mainAgent.setReplyHandler(async (channelId: string, content: string) => {
-            if (channelId === sessionChannelId) {
-              replyText += content;
-            }
-            // Also forward to Discord if original handler exists
-            if (originalHandler) {
-              await originalHandler(channelId, content);
-            }
-          });
-
-          // Send message to agent
-          mainAgent.handleMessage({
-            id: randomUUID(),
-            content,
-            authorId: "nexus-user",
-            authorName: "Rafe (Nexus)",
-            channelId: sessionChannelId,
-            timestamp: Date.now(),
-          }).then(() => {
-            // Wait a bit for processing to complete
-            const checkReply = () => {
-              if (!mainAgent.isProcessing()) {
-                // Restore original handler
-                mainAgent.setReplyHandler(originalHandler);
-                resolve(replyText || "Processing complete.");
-              } else {
-                setTimeout(checkReply, 500);
-              }
-            };
-            setTimeout(checkReply, 500);
-          });
-          
-          // Timeout after 10 minutes (agent may do many tool calls)
-          setTimeout(() => {
-            mainAgent.setReplyHandler(originalHandler);
-            resolve(replyText || "Response timed out.");
-          }, 600_000);
-        });
-
-        const reply = await replyPromise;
-        const replyNow = new Date().toISOString();
-        
-        // Store assistant response
+      
+      if (reply) {
         db.insert(chatMessages).values({
           id: randomUUID().replace(/-/g, ""),
           sessionKey,
           role: "assistant",
           content: reply,
-          createdAt: replyNow,
+          createdAt: now,
         }).run();
-
-        db.update(chatSessions)
-          .set({ lastMessageAt: replyNow })
-          .where(eq(chatSessions.sessionKey, sessionKey))
-          .run();
-
-        return json(res, { reply, timestamp: replyNow });
       }
-      
-      // Fallback if no main agent
-      const reply = "Main agent not initialized. Please check lobs-core configuration.";
 
       db.update(chatSessions)
         .set({ lastMessageAt: now })
         .where(eq(chatSessions.sessionKey, sessionKey))
         .run();
 
-      return json(res, { reply, timestamp: now });
+      return json(res, { reply: reply || "", timestamp: now });
     }
 
     // GET /api/chat/sessions/:key/messages — fetch message history (DB-backed)
@@ -260,49 +222,26 @@ export async function handleMainAgentChat(
     const content = body?.content?.trim();
     if (!content) return error(res, "content is required", 400);
     
-    // Collect reply
-    let replyText = "";
-    const channelId = "nexus-chat";
+    const channelId = "nexus:main";  // Direct Nexus agent chat
     
-    const replyPromise = new Promise<string>((resolve) => {
-      const originalHandler = (mainAgent as any).onReply;
-      
-      mainAgent.setReplyHandler(async (ch: string, text: string) => {
-        if (ch === channelId) {
-          replyText += (replyText ? "\n" : "") + text;
-        }
-        if (originalHandler && ch !== channelId) {
-          await originalHandler(ch, text);
-        }
-      });
-      
-      mainAgent.handleMessage({
-        id: randomUUID(),
-        content,
-        authorId: "nexus-user",
-        authorName: "Rafe",
-        channelId,
-        timestamp: Date.now(),
-      }).then(() => {
-        const check = () => {
-          if (!mainAgent.isProcessing()) {
-            mainAgent.setReplyHandler(originalHandler);
-            resolve(replyText || "");
-          } else {
-            setTimeout(check, 500);
-          }
-        };
-        setTimeout(check, 500);
-      });
-      
-      setTimeout(() => {
-        mainAgent.setReplyHandler(originalHandler);
-        resolve(replyText || "(timed out)");
-      }, 120000);
+    await mainAgent.handleMessage({
+      id: randomUUID(),
+      content,
+      authorId: "nexus-user",
+      authorName: "Rafe",
+      channelId,
+      timestamp: Date.now(),
     });
     
-    const reply = await replyPromise;
-    return json(res, { reply, timestamp: new Date().toISOString() });
+    // Wait for processing to complete
+    try {
+      await mainAgent.waitForChannelIdle(channelId, 120_000);
+    } catch (err) {
+      log().warn(`[agent] Timeout waiting for channel ${channelId}: ${err}`);
+    }
+    
+    const reply = mainAgent.getLastAssistantMessage(channelId);
+    return json(res, { reply: reply || "", timestamp: new Date().toISOString() });
   }
   
   // GET /api/agent/status — main agent status

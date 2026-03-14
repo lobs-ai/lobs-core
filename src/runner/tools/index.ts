@@ -10,6 +10,10 @@ import { memorySearchToolDefinition, memorySearchTool, memoryReadToolDefinition,
 import { AGENT_CONTROL_TOOLS, executeSpawnAgent, executeRunPipeline, executeListAgents } from "./agent-control.js";
 import { cronToolDefinition, executeCronTool } from "./cron.js";
 import { messageToolDefinition, executeMessageTool } from "./message.js";
+import { reactToolDefinition, executeReactTool, setDiscordService as setReactDiscord } from "./react.js";
+import { processToolDefinition, processTool } from "./process.js";
+
+export { setReactDiscord };
 
 export type ToolExecutor = (params: Record<string, unknown>, cwd: string) => Promise<string>;
 
@@ -74,6 +78,14 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   message: {
     definition: messageToolDefinition,
     execute: (params) => executeMessageTool(params),
+  },
+  react: {
+    definition: reactToolDefinition,
+    execute: (params) => executeReactTool(params),
+  },
+  process: {
+    definition: processToolDefinition,
+    execute: (params, cwd) => processTool(params, cwd),
   },
 };
 

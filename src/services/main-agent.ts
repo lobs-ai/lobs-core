@@ -11,49 +11,45 @@ import { parseModelString, createClient } from "../runner/providers.js";
 import type { LLMMessage, LLMClient } from "../runner/providers.js";
 import { getToolDefinitions, executeTool } from "../runner/tools/index.js";
 import type { ToolName } from "../runner/types.js";
+import { getToolsForSession, getSessionType } from "../runner/tools/tool-sets.js";
 import { loadWorkspaceContext } from "./workspace-loader.js";
 import Database from "better-sqlite3";
+import { compactMessages, pruneToolResults } from "./compaction.js";
+import { LoopDetector } from "../runner/loop-detector.js";
 
 const MAX_HISTORY = 50;
 const MAX_CONTEXT_CHARS = 150_000; // Rough char budget for history
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514";
 const DEFAULT_CWD = process.env.HOME ?? "/tmp";
-
-/** Tools available to the main agent */
-const MAIN_AGENT_TOOLS: ToolName[] = [
-  "exec",
-  "read",
-  "write",
-  "edit",
-  "web_search",
-  "web_fetch",
-  "memory_search",
-  "memory_read",
-  "memory_write",
-  "cron",
-  "message",
-  "spawn_agent",
-];
+const MAX_CONCURRENT_CHANNELS = 3; // Max simultaneous channel conversations
 
 interface PendingMessage {
   id: string;
+  messageId?: string;  // Platform message ID (Discord snowflake, etc.)
   content: string;
   authorId: string;
   authorName: string;
   channelId: string;
   timestamp: number;
+  // Group chat metadata
+  isDm?: boolean;         // true if DM, false if guild channel
+  isMentioned?: boolean;  // true if bot was @mentioned
+  chatType?: "dm" | "group" | "nexus" | "system";
 }
 
 export class MainAgent {
   private db: Database.Database;
-  private processing = false;
-  private messageQueue: PendingMessage[] = [];
+  private processingChannels = new Set<string>(); // Channels currently being processed
+  private channelQueues = new Map<string, PendingMessage[]>(); // Per-channel message queues
   private model: string;
   private systemPrompt = "";
   private workspaceContext = "";
   private cwd: string;
   private onReply: ((channelId: string, content: string) => Promise<void>) | null = null;
   private onTyping: ((channelId: string) => void) | null = null;
+  private onProgress: ((channelId: string, content: string) => Promise<void>) | null = null;
+  // Track chat type per channel for step visibility
+  private channelChatType = new Map<string, string>();
 
   constructor(db: Database.Database, model?: string) {
     this.db = db;
@@ -71,12 +67,48 @@ export class MainAgent {
         author_id TEXT,
         author_name TEXT,
         channel_id TEXT,
+        platform_message_id TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         token_estimate INTEGER DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS idx_main_messages_created
         ON main_agent_messages(created_at);
+      CREATE INDEX IF NOT EXISTS idx_main_messages_channel
+        ON main_agent_messages(channel_id, created_at);
+
+      -- Track active channel sessions for restart continuation
+      CREATE TABLE IF NOT EXISTS channel_sessions (
+        channel_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL DEFAULT 'idle',  -- idle | processing | queued
+        last_activity TEXT NOT NULL DEFAULT (datetime('now')),
+        last_author_id TEXT,
+        last_author_name TEXT,
+        context_summary TEXT,  -- brief summary of what was being worked on
+        model_override TEXT    -- per-channel model override
+      );
+
+      -- Persistent message queue — survives restarts
+      CREATE TABLE IF NOT EXISTS message_queue (
+        id TEXT PRIMARY KEY,
+        channel_id TEXT NOT NULL,
+        message_id TEXT,           -- platform message ID
+        content TEXT NOT NULL,
+        author_id TEXT,
+        author_name TEXT,
+        queued_at TEXT NOT NULL DEFAULT (datetime('now')),
+        processed INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_message_queue_channel
+        ON message_queue(channel_id, processed, queued_at);
     `);
+
+    // Safe migrations
+    try {
+      this.db.exec(`ALTER TABLE main_agent_messages ADD COLUMN platform_message_id TEXT`);
+    } catch { /* already exists */ }
+    try {
+      this.db.exec(`ALTER TABLE channel_sessions ADD COLUMN model_override TEXT`);
+    } catch { /* already exists */ }
   }
 
   /* ── Configuration ─────────────────────────────────────────────── */
@@ -89,6 +121,17 @@ export class MainAgent {
     this.onTyping = handler;
   }
 
+  setProgressHandler(handler: (channelId: string, content: string) => Promise<void>) {
+    this.onProgress = handler;
+  }
+
+  /** Check if a channel should see tool step progress (DMs + Nexus only, not group chats) */
+  private shouldShowSteps(channelId: string): boolean {
+    const chatType = this.channelChatType.get(channelId);
+    // Show steps in DMs, Nexus, and system — NOT in group chats
+    return chatType === "dm" || chatType === "nexus" || chatType === "system" || channelId.startsWith("nexus:");
+  }
+
   setSystemPrompt(prompt: string) {
     this.systemPrompt = prompt;
   }
@@ -97,25 +140,196 @@ export class MainAgent {
     this.workspaceContext = context;
   }
 
+  /* ── Persistence & Restart ───────────────────────────────────── */
+
+  /** Persist a message to the durable queue (survives restarts) */
+  private persistToQueue(msg: PendingMessage): void {
+    this.db.prepare(`
+      INSERT OR IGNORE INTO message_queue (id, channel_id, message_id, content, author_id, author_name)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(msg.id, msg.channelId, msg.messageId || null, msg.content, msg.authorId, msg.authorName);
+  }
+
+  /** Mark queued messages as processed */
+  private markQueueProcessed(channelId: string): void {
+    this.db.prepare(`UPDATE message_queue SET processed = 1 WHERE channel_id = ? AND processed = 0`).run(channelId);
+  }
+
+  /** Load unprocessed queued messages from DB (for restart recovery) */
+  private loadPersistedQueue(channelId: string): PendingMessage[] {
+    const rows = this.db.prepare(`
+      SELECT id, channel_id, message_id, content, author_id, author_name, queued_at
+      FROM message_queue WHERE channel_id = ? AND processed = 0 ORDER BY queued_at ASC
+    `).all(channelId) as Array<{
+      id: string; channel_id: string; message_id: string | null;
+      content: string; author_id: string; author_name: string; queued_at: string;
+    }>;
+
+    return rows.map(r => ({
+      id: r.id,
+      messageId: r.message_id || undefined,
+      content: r.content,
+      authorId: r.author_id,
+      authorName: r.author_name,
+      channelId: r.channel_id,
+      timestamp: new Date(r.queued_at).getTime(),
+    }));
+  }
+
+  /** Update channel session tracking */
+  private updateChannelSession(
+    channelId: string,
+    status: "idle" | "processing" | "queued",
+    authorId?: string | null,
+    authorName?: string | null,
+    contextSummary?: string | null,
+  ): void {
+    this.db.prepare(`
+      INSERT INTO channel_sessions (channel_id, status, last_activity, last_author_id, last_author_name, context_summary)
+      VALUES (?, ?, datetime('now'), ?, ?, ?)
+      ON CONFLICT(channel_id) DO UPDATE SET
+        status = excluded.status,
+        last_activity = excluded.last_activity,
+        last_author_id = COALESCE(excluded.last_author_id, channel_sessions.last_author_id),
+        last_author_name = COALESCE(excluded.last_author_name, channel_sessions.last_author_name),
+        context_summary = COALESCE(excluded.context_summary, channel_sessions.context_summary)
+    `).run(channelId, status, authorId || null, authorName || null, contextSummary || null);
+  }
+
+  /** Resume sessions that were active before a restart */
+  async resumeAfterRestart(): Promise<void> {
+    console.log("[main-agent] Checking for sessions to resume after restart...");
+
+    // 1. Find channels that were processing when we shut down
+    const activeSessions = this.db.prepare(`
+      SELECT channel_id, last_author_id, last_author_name, context_summary, last_activity
+      FROM channel_sessions WHERE status = 'processing'
+    `).all() as Array<{
+      channel_id: string; last_author_id: string | null;
+      last_author_name: string | null; context_summary: string | null;
+      last_activity: string;
+    }>;
+
+    // 2. Find channels with unprocessed queued messages
+    const queuedChannels = this.db.prepare(`
+      SELECT DISTINCT channel_id FROM message_queue WHERE processed = 0
+    `).all() as Array<{ channel_id: string }>;
+
+    // Collect all channels that need attention
+    const channelsToResume = new Set<string>();
+    for (const s of activeSessions) channelsToResume.add(s.channel_id);
+    for (const q of queuedChannels) channelsToResume.add(q.channel_id);
+
+    if (channelsToResume.size === 0) {
+      console.log("[main-agent] No sessions to resume");
+      // Reset any stale session states
+      this.db.prepare(`UPDATE channel_sessions SET status = 'idle' WHERE status != 'idle'`).run();
+      return;
+    }
+
+    console.log(`[main-agent] Resuming ${channelsToResume.size} session(s)...`);
+
+    for (const channelId of channelsToResume) {
+      // Load any persisted queue messages into memory
+      const persistedMsgs = this.loadPersistedQueue(channelId);
+      if (persistedMsgs.length > 0) {
+        this.channelQueues.set(channelId, persistedMsgs);
+        console.log(`[main-agent] Loaded ${persistedMsgs.length} queued message(s) for channel ${channelId.slice(0, 8)}`);
+      }
+
+      // Get the session info for context
+      const session = activeSessions.find(s => s.channel_id === channelId);
+      const lastActivity = session?.last_activity || "unknown";
+
+      // Inject a system event so the agent knows it restarted and should continue
+      const resumeText = [
+        `[System] lobs-core restarted. This session was active at ${lastActivity}.`,
+        session?.context_summary ? `Last context: ${session.context_summary}` : null,
+        persistedMsgs.length > 0 ? `${persistedMsgs.length} queued message(s) waiting.` : null,
+        `Review recent history and continue where you left off. If you were mid-task, resume it.`,
+      ].filter(Boolean).join(" ");
+
+      // Insert as a user message so it enters the conversation flow
+      this.db.prepare(`
+        INSERT INTO main_agent_messages (id, role, content, channel_id, token_estimate)
+        VALUES (?, 'user', ?, ?, ?)
+      `).run(randomUUID(), resumeText, channelId, Math.ceil(resumeText.length / 4));
+
+      // Process — but respect concurrency limits
+      if (this.processingChannels.size < MAX_CONCURRENT_CHANNELS) {
+        this.updateChannelSession(channelId, "processing");
+        // Don't await — let them run concurrently
+        this.processConversation(channelId).catch(err => {
+          console.error(`[main-agent] Resume failed for channel ${channelId.slice(0, 8)}:`, err);
+        });
+      } else {
+        this.updateChannelSession(channelId, "queued");
+        console.log(`[main-agent] Channel ${channelId.slice(0, 8)} queued for resume (concurrency limit)`);
+      }
+    }
+  }
+
+  /** Persist current state before shutdown */
+  async prepareForShutdown(): Promise<void> {
+    console.log("[main-agent] Persisting state before shutdown...");
+
+    // Persist any in-memory queue messages that weren't already persisted
+    for (const [channelId, queue] of this.channelQueues.entries()) {
+      for (const msg of queue) {
+        this.persistToQueue(msg);
+      }
+    }
+
+    // Save a context summary for each active channel
+    for (const channelId of this.processingChannels) {
+      // Get the last few messages to build a summary
+      const recent = this.db.prepare(`
+        SELECT content FROM main_agent_messages
+        WHERE channel_id = ? ORDER BY created_at DESC LIMIT 3
+      `).all(channelId) as Array<{ content: string }>;
+
+      const summary = recent
+        .reverse()
+        .map(r => r.content.substring(0, 100))
+        .join(" | ");
+
+      this.updateChannelSession(channelId, "processing", null, null, summary);
+    }
+
+    console.log(`[main-agent] State persisted (${this.processingChannels.size} active, ${this.channelQueues.size} queued channels)`);
+  }
+
   /* ── Public API ────────────────────────────────────────────────── */
 
-  /** Handle an incoming user message — queues if busy, processes if free */
+  /** Handle an incoming user message — queues if channel is busy or at concurrency limit */
   async handleMessage(msg: PendingMessage): Promise<void> {
-    if (this.processing) {
-      // Don't store in DB yet — will be stored as part of the queued block
-      this.messageQueue.push(msg);
+    const channelId = msg.channelId;
+
+    // Track chat type for step visibility
+    const chatType = msg.chatType || (channelId.startsWith("nexus:") ? "nexus" : "group");
+    this.channelChatType.set(channelId, chatType);
+
+    // Check if this specific channel is already being processed or at concurrency limit
+    if (this.processingChannels.has(channelId) || this.processingChannels.size >= MAX_CONCURRENT_CHANNELS) {
+      // Persist to DB queue (survives restarts)
+      this.persistToQueue(msg);
+      // Also keep in memory for fast mid-loop injection
+      if (!this.channelQueues.has(channelId)) {
+        this.channelQueues.set(channelId, []);
+      }
+      this.channelQueues.get(channelId)!.push(msg);
       console.log(
-        `[main-agent] Queued message (${this.messageQueue.length} pending)`,
+        `[main-agent] Queued message for channel ${channelId.slice(0, 8)} (${this.channelQueues.get(channelId)!.length} pending)`,
       );
       return;
     }
 
-    // Store in DB (only for non-queued messages)
+    // Store in DB message history
     this.db
       .prepare(
         `INSERT INTO main_agent_messages
-           (id, role, content, author_id, author_name, channel_id, token_estimate)
-         VALUES (?, 'user', ?, ?, ?, ?, ?)`,
+           (id, role, content, author_id, author_name, channel_id, platform_message_id, token_estimate)
+         VALUES (?, 'user', ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         msg.id,
@@ -123,8 +337,12 @@ export class MainAgent {
         msg.authorId,
         msg.authorName,
         msg.channelId,
+        msg.messageId || null,
         Math.ceil(msg.content.length / 4),
       );
+
+    // Update channel session state
+    this.updateChannelSession(channelId, "processing", msg.authorId, msg.authorName);
 
     await this.processConversation(msg.channelId);
   }
@@ -136,34 +354,43 @@ export class MainAgent {
     this.db
       .prepare(
         `INSERT INTO main_agent_messages
-           (id, role, content, channel_id, token_estimate)
-         VALUES (?, 'user', ?, ?, ?)`,
+           (id, role, content, channel_id, platform_message_id, token_estimate)
+         VALUES (?, 'user', ?, ?, ?, ?)`,
       )
-      .run(id, `[System Event] ${text}`, ch, Math.ceil(text.length / 4));
+      .run(id, `[System Event] ${text}`, ch, null, Math.ceil(text.length / 4));
 
-    if (!this.processing) {
+    if (!this.processingChannels.has(ch) && this.processingChannels.size < MAX_CONCURRENT_CHANNELS) {
       await this.processConversation(ch);
     }
   }
 
   isProcessing(): boolean {
-    return this.processing;
+    return this.processingChannels.size > 0;
   }
 
   getQueueDepth(): number {
-    return this.messageQueue.length;
+    let total = 0;
+    for (const queue of this.channelQueues.values()) {
+      total += queue.length;
+    }
+    return total;
+  }
+
+  getProcessingChannels(): string[] {
+    return Array.from(this.processingChannels);
   }
 
   /* ── Core conversation loop ────────────────────────────────────── */
 
   private async processConversation(replyChannelId: string): Promise<void> {
-    this.processing = true;
+    // Mark this channel as being processed
+    this.processingChannels.add(replyChannelId);
 
     try {
       if (this.onTyping) this.onTyping(replyChannelId);
 
-      // 1. Get history
-      let history = this.getRecentHistory();
+      // 1. Get history for this channel
+      let history = this.getRecentHistory(replyChannelId);
 
       // 2. Prune old tool outputs
       history = this.pruneHistory(history);
@@ -173,6 +400,11 @@ export class MainAgent {
 
       // Build system prompt — concise: identity + context + time
       // Tool descriptions come from the tool schemas (not hardcoded in prompt)
+      const channelChatType = this.channelChatType.get(replyChannelId) || "unknown";
+      const chatContextNote = channelChatType === "group"
+        ? `\n\nYou are in a GROUP CHAT. Responding is OPTIONAL. Reply with just "NO_REPLY" (nothing else) if the message isn't directed at you or doesn't need your input. Only respond when mentioned, directly addressed, or when you have something genuinely useful to add. Don't respond just to acknowledge.`
+        : "";
+
       const fullSystem = [
         this.systemPrompt,
         "",
@@ -183,6 +415,8 @@ export class MainAgent {
           dateStyle: "full",
           timeStyle: "long",
         })}`,
+        `Session type: ${channelChatType}`,
+        chatContextNote,
       ].join("\n");
 
       // 3. Build LLM messages
@@ -191,8 +425,8 @@ export class MainAgent {
         content: m.content,
       }));
 
-      // 4. Add queued messages
-      const queuedText = this.drainQueue();
+      // 4. Add queued messages for this channel
+      const queuedText = this.drainQueue(replyChannelId);
       if (queuedText) {
         messages.push({
           role: "user",
@@ -203,9 +437,18 @@ export class MainAgent {
       // 5. Compact if needed
       messages = await this.compactIfNeeded(messages);
 
-      // Resolve tools & model
-      const tools = getToolDefinitions(MAIN_AGENT_TOOLS);
-      const config = parseModelString(this.model);
+      // Check for per-channel model override
+      const sessionRow = this.db.prepare(
+        `SELECT model_override FROM channel_sessions WHERE channel_id = ?`
+      ).get(replyChannelId) as { model_override: string | null } | undefined;
+      
+      const effectiveModel = sessionRow?.model_override || this.model;
+      
+      // Resolve tools based on session type
+      const sessionType = getSessionType(replyChannelId);
+      const availableTools = getToolsForSession(sessionType);
+      const tools = getToolDefinitions(availableTools);
+      const config = parseModelString(effectiveModel);
       const client: LLMClient = createClient(config);
 
       // Agent loop — LLM ↔ tool execution
@@ -235,6 +478,16 @@ export class MainAgent {
             textResponse += block.text;
           } else if (block.type === "tool_use") {
             hasToolUse = true;
+
+            // Show tool step progress in DMs/Nexus (not group chats)
+            if (this.shouldShowSteps(replyChannelId) && this.onProgress) {
+              const inputPreview = JSON.stringify(block.input).substring(0, 150);
+              await this.onProgress(
+                replyChannelId,
+                `🔧 \`${block.name}\` ${inputPreview}${inputPreview.length >= 150 ? "..." : ""}`,
+              );
+            }
+
             const result = await executeTool(
               block.name,
               block.input as Record<string, unknown>,
@@ -284,8 +537,41 @@ export class MainAgent {
               Math.ceil(toolSummary.length / 4),
             );
 
-          // Feed tool results back as a user turn and continue
+          // Feed tool results back as a user turn
           messages.push({ role: "user", content: toolResults });
+
+          // Inject any queued messages that arrived while we were working
+          // This lets the agent see new context mid-loop instead of waiting
+          // until the entire conversation finishes — critical for group chats
+          const midLoopQueued = this.drainQueue(replyChannelId);
+          if (midLoopQueued) {
+            // Store in DB for continuity
+            const queuedContent = `[New messages received during processing]\n\n${midLoopQueued}`;
+            this.db
+              .prepare(
+                `INSERT INTO main_agent_messages
+                   (id, role, content, channel_id, token_estimate)
+                 VALUES (?, 'user', ?, ?, ?)`,
+              )
+              .run(
+                randomUUID(),
+                queuedContent,
+                replyChannelId,
+                Math.ceil(queuedContent.length / 4),
+              );
+
+            messages.push({
+              role: "assistant",
+              content: "I see new messages arrived. Let me incorporate them.",
+            });
+            messages.push({
+              role: "user",
+              content: queuedContent,
+            });
+
+            console.log(`[main-agent] Injected ${midLoopQueued.split("---").length - 1} queued message(s) mid-loop for channel ${replyChannelId.slice(0, 8)}`);
+          }
+
           continue;
         }
 
@@ -328,19 +614,82 @@ export class MainAgent {
         );
       }
     } finally {
-      this.processing = false;
+      // Mark this channel as no longer processing
+      this.processingChannels.delete(replyChannelId);
 
-      // Process queued messages that arrived while we were busy
-      if (this.messageQueue.length > 0) {
-        const nextChannel = this.messageQueue[0].channelId;
-        await this.processConversation(nextChannel);
+      // Mark persisted queue as processed for this channel
+      this.markQueueProcessed(replyChannelId);
+
+      // Process queued messages for this channel
+      const channelQueue = this.channelQueues.get(replyChannelId);
+      if (channelQueue && channelQueue.length > 0) {
+        const nextMsg = channelQueue.shift()!;
+        if (channelQueue.length === 0) {
+          this.channelQueues.delete(replyChannelId);
+        }
+        
+        // Store and process the queued message
+        this.db
+          .prepare(
+            `INSERT INTO main_agent_messages
+               (id, role, content, author_id, author_name, channel_id, platform_message_id, token_estimate)
+             VALUES (?, 'user', ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            nextMsg.id,
+            nextMsg.content,
+            nextMsg.authorId,
+            nextMsg.authorName,
+            nextMsg.channelId,
+            nextMsg.messageId || null,
+            Math.ceil(nextMsg.content.length / 4),
+          );
+        
+        this.updateChannelSession(replyChannelId, "processing", nextMsg.authorId, nextMsg.authorName);
+        await this.processConversation(replyChannelId);
+        return;
+      }
+
+      // No more queued messages — mark channel idle
+      this.updateChannelSession(replyChannelId, "idle");
+
+      // If under concurrency limit, try to start processing another queued channel
+      if (this.processingChannels.size < MAX_CONCURRENT_CHANNELS) {
+        for (const [channelId, queue] of this.channelQueues.entries()) {
+          if (queue.length > 0 && !this.processingChannels.has(channelId)) {
+            const nextMsg = queue.shift()!;
+            if (queue.length === 0) {
+              this.channelQueues.delete(channelId);
+            }
+            
+            this.db
+              .prepare(
+                `INSERT INTO main_agent_messages
+                   (id, role, content, author_id, author_name, channel_id, platform_message_id, token_estimate)
+                 VALUES (?, 'user', ?, ?, ?, ?, ?, ?)`,
+              )
+              .run(
+                nextMsg.id,
+                nextMsg.content,
+                nextMsg.authorId,
+                nextMsg.authorName,
+                nextMsg.channelId,
+                nextMsg.messageId || null,
+                Math.ceil(nextMsg.content.length / 4),
+              );
+            
+            this.updateChannelSession(channelId, "processing", nextMsg.authorId, nextMsg.authorName);
+            await this.processConversation(channelId);
+            break;
+          }
+        }
       }
     }
   }
 
   /* ── Helpers ───────────────────────────────────────────────────── */
 
-  private getRecentHistory(): Array<{
+  private getRecentHistory(channelId: string): Array<{
     role: string;
     content: string;
     created_at: string;
@@ -349,13 +698,14 @@ export class MainAgent {
     const CHARS_PER_TOKEN = 4;
     const MAX_CHARS = MAX_CONTEXT_TOKENS * CHARS_PER_TOKEN;
 
-    // Load more than we need, then trim
+    // Load more than we need, then trim — filter by channel
     const rows = this.db
       .prepare(
         `SELECT role, content, created_at FROM main_agent_messages
+         WHERE channel_id = ?
          ORDER BY created_at DESC LIMIT 200`,
       )
-      .all() as Array<{ role: string; content: string; created_at: string }>;
+      .all(channelId) as Array<{ role: string; content: string; created_at: string }>;
 
     rows.reverse(); // chronological
 
@@ -487,9 +837,11 @@ export class MainAgent {
     }
   }
 
-  private drainQueue(): string {
-    if (this.messageQueue.length === 0) return "";
-    const texts = this.messageQueue.map(
+  private drainQueue(channelId: string): string {
+    const queue = this.channelQueues.get(channelId);
+    if (!queue || queue.length === 0) return "";
+    
+    const texts = queue.map(
       (m, i) =>
         `---\nQueued #${i + 1} from ${m.authorName} (${new Date(m.timestamp).toLocaleTimeString()}):\n${m.content}`,
     );
@@ -497,16 +849,19 @@ export class MainAgent {
     // Store the queued block as a single DB entry
     const queuedBlock = texts.join("\n\n");
     this.db.prepare(`
-      INSERT INTO main_agent_messages (id, role, content, channel_id, token_estimate)
-      VALUES (?, 'user', ?, ?, ?)
+      INSERT INTO main_agent_messages (id, role, content, channel_id, platform_message_id, token_estimate)
+      VALUES (?, 'user', ?, ?, ?, ?)
     `).run(
       randomUUID(),
       `[Queued messages while agent was busy]\n\n${queuedBlock}`,
-      this.messageQueue[0]?.channelId || "system",
+      channelId,
+      null,
       Math.ceil(queuedBlock.length / 4),
     );
     
-    this.messageQueue = [];
+    // Clear this channel's in-memory queue and mark DB queue processed
+    this.channelQueues.delete(channelId);
+    this.markQueueProcessed(channelId);
     return queuedBlock;
   }
 
@@ -525,5 +880,36 @@ export class MainAgent {
       remaining = remaining.substring(splitAt).trimStart();
     }
     return chunks;
+  }
+
+  /* ── Nexus API Support ────────────────────────────────────────── */
+
+  /** Get the last assistant message for a channel (for Nexus chat API) */
+  getLastAssistantMessage(channelId: string): string | null {
+    const row = this.db.prepare(`
+      SELECT content FROM main_agent_messages
+      WHERE channel_id = ? AND role = 'assistant'
+      ORDER BY created_at DESC LIMIT 1
+    `).get(channelId) as { content: string } | undefined;
+    return row?.content ?? null;
+  }
+
+  /** Wait for a channel to finish processing */
+  async waitForChannelIdle(channelId: string, timeoutMs: number): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (!this.processingChannels.has(channelId)) return;
+      await new Promise(r => setTimeout(r, 500));
+    }
+    throw new Error(`Channel ${channelId.slice(0, 8)} did not become idle within ${timeoutMs}ms`);
+  }
+
+  /** Set model override for a specific channel */
+  setChannelModel(channelId: string, model: string | null): void {
+    this.db.prepare(`
+      INSERT INTO channel_sessions (channel_id, status, last_activity, model_override)
+      VALUES (?, 'idle', datetime('now'), ?)
+      ON CONFLICT(channel_id) DO UPDATE SET model_override = excluded.model_override
+    `).run(channelId, model);
   }
 }

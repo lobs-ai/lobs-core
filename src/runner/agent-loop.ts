@@ -19,49 +19,14 @@ import { createHash, randomBytes } from "node:crypto";
 import { SessionTranscript, type TurnRecord } from "./session-transcript.js";
 import { shouldCompact, compactMessages } from "./context-manager.js";
 import { getHookRegistry } from "./hooks.js";
+import { LoopDetector } from "./loop-detector.js";
 
 export type { AgentSpec, AgentResult };
 
 const DEFAULT_MAX_TURNS = 200;
 const DEFAULT_MAX_TOKENS = 16384;
 
-/** Track recent tool calls for loop detection */
-interface ToolCallRecord {
-  name: string;
-  argsHash: string;
-}
-
-/**
- * Hash tool arguments for comparison.
- * Normalizes JSON to detect functionally identical calls.
- */
-function hashToolArgs(args: Record<string, unknown>): string {
-  const normalized = JSON.stringify(args, Object.keys(args).sort());
-  return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
-}
-
-/**
- * Check for consecutive tool call loops.
- * Returns the repeat count of the most recent pattern.
- */
-function detectToolLoop(recentCalls: ToolCallRecord[]): number {
-  if (recentCalls.length < 3) return 0;
-
-  const latest = recentCalls[recentCalls.length - 1];
-  let consecutiveCount = 0;
-
-  // Count how many times the latest call appears consecutively from the end
-  for (let i = recentCalls.length - 1; i >= 0; i--) {
-    const call = recentCalls[i];
-    if (call.name === latest.name && call.argsHash === latest.argsHash) {
-      consecutiveCount++;
-    } else {
-      break;
-    }
-  }
-
-  return consecutiveCount;
-}
+// Loop detection now handled by LoopDetector class
 
 /**
  * Run an agent to completion.
@@ -163,9 +128,8 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
   let stopReason: AgentResult["stopReason"] = "end_turn";
   let thinkingContent = "";
 
-  // Tool loop detection — track last 10 tool calls
-  const recentCalls: ToolCallRecord[] = [];
-  const MAX_RECENT_CALLS = 10;
+  // Loop detection
+  const loopDetector = new LoopDetector();
 
   // Timeout
   const timeoutMs = spec.timeout * 1000;
@@ -388,80 +352,75 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
           })
         );
 
-        // Track tool calls for loop detection
+        // Check for tool loops with the new multi-pattern detector
         for (const call of toolCalls) {
-          const callRecord: ToolCallRecord = {
-            name: call.name,
-            argsHash: hashToolArgs(call.input),
-          };
-          recentCalls.push(callRecord);
-          if (recentCalls.length > MAX_RECENT_CALLS) {
-            recentCalls.shift();
-          }
-        }
-
-        // Check for tool loops
-        const loopCount = detectToolLoop(recentCalls);
-
-        if (loopCount >= 5) {
-          // Force-stop at 5 repeats
-          stopReason = "error";
-          const errorMsg = `Tool loop detected: ${recentCalls[recentCalls.length - 1].name} repeated ${loopCount} times with identical arguments. Breaking loop.`;
+          const resultContent = results.find(r => r.tool_use_id === call.id)?.content;
+          const outputStr = typeof resultContent === "string" 
+            ? resultContent 
+            : JSON.stringify(resultContent);
           
-          const durationSeconds = (Date.now() - startTime) / 1000;
-          const result: AgentResult = {
-            succeeded: false,
-            output: lastTextOutput,
-            usage,
-            costUsd: calculateCost(spec.model, usage),
-            durationSeconds,
-            turns,
-            stopReason,
-            error: errorMsg,
-            thinkingContent: thinkingContent || undefined,
-          };
-
-          // Emit on_error hook
-          await hookRegistry.emit({
-            hookName: "on_error",
-            agentType: spec.agent,
-            taskId: spec.context?.taskId,
-            data: { error: errorMsg, turns, durationSeconds },
-            timestamp: new Date(),
-          });
-
-          // Emit after_agent_end hook
-          await hookRegistry.emit({
-            hookName: "after_agent_end",
-            agentType: spec.agent,
-            taskId: spec.context?.taskId,
-            data: { result, durationSeconds, turns, error: errorMsg },
-            timestamp: new Date(),
-          });
+          const loopResult = loopDetector.record(call.name, call.input, outputStr);
           
-          return result;
-        }
+          if (loopResult.detected && loopResult.severity === "critical") {
+            // Force-stop on critical loop
+            stopReason = "error";
+            const errorMsg = loopResult.message || "Critical loop detected";
+            
+            const durationSeconds = (Date.now() - startTime) / 1000;
+            const result: AgentResult = {
+              succeeded: false,
+              output: lastTextOutput,
+              usage,
+              costUsd: calculateCost(spec.model, usage),
+              durationSeconds,
+              turns,
+              stopReason,
+              error: errorMsg,
+              thinkingContent: thinkingContent || undefined,
+            };
 
-        if (loopCount === 3) {
-          // Inject warning at 3 repeats
-          const warningMsg = `WARNING: You appear to be repeating the same action (${recentCalls[recentCalls.length - 1].name}). This approach isn't working. Try a different strategy or tool.`;
-          
-          messages.push({
-            role: "user",
-            content: [{ type: "text", text: warningMsg }],
-          });
-
-          // Progress callback for the warning
-          if (spec.onProgress) {
-            spec.onProgress({ 
-              turn: turns, 
-              type: "error", 
-              text: warningMsg,
-              usage 
+            // Emit on_error hook
+            await hookRegistry.emit({
+              hookName: "on_error",
+              agentType: spec.agent,
+              taskId: spec.context?.taskId,
+              data: { error: errorMsg, turns, durationSeconds },
+              timestamp: new Date(),
             });
-          }
 
-          continue;
+            // Emit after_agent_end hook
+            await hookRegistry.emit({
+              hookName: "after_agent_end",
+              agentType: spec.agent,
+              taskId: spec.context?.taskId,
+              data: { result, durationSeconds, turns, error: errorMsg },
+              timestamp: new Date(),
+            });
+            
+            return result;
+          }
+          
+          if (loopResult.detected && loopResult.severity === "warning") {
+            // Inject warning into context
+            const warningMsg = loopResult.message || "Loop pattern detected";
+            
+            messages.push({
+              role: "user",
+              content: [{ type: "text", text: warningMsg }],
+            });
+
+            // Progress callback for the warning
+            if (spec.onProgress) {
+              spec.onProgress({ 
+                turn: turns, 
+                type: "error", 
+                text: warningMsg,
+                usage 
+              });
+            }
+
+            break; // Only inject one warning per turn
+          }
         }
 
         // Add tool results to history

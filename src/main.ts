@@ -26,7 +26,9 @@ import { loadDiscordConfig } from "./config/discord.js";
 import { MainAgent } from "./services/main-agent.js";
 import { loadWorkspaceContext, buildMainAgentPrompt } from "./services/workspace-loader.js";
 import { setDiscordService as setMessageDiscord } from "./runner/tools/message.js";
+import { setReactDiscord } from "./runner/tools/index.js";
 import { validateAllConfigs } from "./config/validator.js";
+import { memoryServer } from "./services/memory-server.js";
 
 const HOME = process.env.HOME ?? "";
 const DB_PATH = resolve(HOME, ".lobs/lobs.db");
@@ -220,6 +222,9 @@ async function main() {
 
   // Start HTTP server (Nexus dashboard + API)
   startServer(HTTP_PORT);
+
+  // Start memory server (supervised child process)
+  await memoryServer.start();
   
   // Create and configure the main agent (always available — for Discord and/or Nexus chat)
   const rawDb = getRawDb();
@@ -229,6 +234,10 @@ async function main() {
   
   // Export main agent globally so API handlers can access it
   (globalThis as any).__lobsMainAgent = mainAgent;
+  
+  // Wire main agent into Discord slash commands
+  const { setMainAgentForCommands } = await import("./services/discord-commands.js");
+  setMainAgentForCommands(mainAgent);
 
   // Wire cron events to main agent
   cronService.setEventHandler(async (text: string) => {
@@ -242,8 +251,9 @@ async function main() {
     try {
       await discordService.connect(discordConfig);
 
-      // Wire Discord to message tool
+      // Wire Discord to message and react tools
       setMessageDiscord(discordService);
+      setReactDiscord(discordService);
 
       // Wire reply handler — agent replies go to Discord
       mainAgent.setReplyHandler(async (channelId, content) => {
@@ -255,15 +265,26 @@ async function main() {
         discordService.sendTyping(channelId).catch(() => {});
       });
 
+      // Wire progress handler — shows tool steps in DMs only
+      mainAgent.setProgressHandler(async (channelId, content) => {
+        // For Nexus channels, progress is delivered via the API (not Discord)
+        if (channelId.startsWith("nexus:")) return;
+        await discordService.send(channelId, content);
+      });
+
       // Wire incoming messages — Discord messages go to agent
       discordService.onMessage((msg) => {
         mainAgent.handleMessage({
           id: randomUUID(),
+          messageId: msg.messageId,
           content: msg.content,
           authorId: msg.authorId,
           authorName: msg.authorTag,
           channelId: msg.channelId,
           timestamp: Date.now(),
+          isDm: msg.isDm,
+          isMentioned: msg.isMentioned,
+          chatType: msg.isDm ? "dm" : "group",
         });
       });
 
@@ -274,12 +295,64 @@ async function main() {
   }
   
   console.log("[main-agent] Ready (Discord: " + (discordConfig ? "enabled" : "disabled") + ")");
+
+  // Resume any sessions that were active before restart
+  // Delay slightly to let Discord fully connect first
+  setTimeout(() => {
+    mainAgent.resumeAfterRestart().catch(err => {
+      console.error("[main-agent] Resume after restart failed:", err);
+    });
+    
+    // Resume workers that were running before restart
+    const rawDb = getRawDb();
+    const orphanedTasks = rawDb.prepare(`
+      SELECT id, title, agent, model_tier, notes, context_refs, project_id
+      FROM tasks WHERE status = 'running' OR (status = 'active' AND id IN (
+        SELECT DISTINCT task_id FROM worker_runs WHERE ended_at IS NULL AND task_id IS NOT NULL
+      ))
+    `).all();
+
+    if (orphanedTasks.length > 0) {
+      console.log(`[restart] Found ${orphanedTasks.length} task(s) to resume`);
+      
+      // Mark orphaned worker runs as failed (infra), reset tasks to 'active'
+      rawDb.prepare(`
+        UPDATE worker_runs SET ended_at = datetime('now'), succeeded = 0,
+        timeout_reason = 'orphaned on restart', failure_type = 'infra'
+        WHERE ended_at IS NULL
+      `).run();
+      
+      rawDb.prepare(`
+        UPDATE tasks SET status = 'active', updated_at = datetime('now')
+        WHERE status = 'running'
+      `).run();
+      
+      // Reset busy agents
+      rawDb.prepare(`
+        UPDATE agent_status SET status = 'idle', current_task_id = NULL
+        WHERE status = 'busy'
+      `).run();
+      
+      // Increment crash_count so auto-fail guard doesn't penalize
+      for (const task of orphanedTasks) {
+        rawDb.prepare(`
+          UPDATE tasks SET crash_count = COALESCE(crash_count, 0) + 1, updated_at = datetime('now')
+          WHERE id = ?
+        `).run((task as any).id);
+      }
+      
+      console.log(`[restart] Reset ${orphanedTasks.length} task(s) to active — orchestrator will re-dispatch`);
+    }
+  }, 3000);
   
   console.log("=== lobs-core ready ===");
 
   // Handle shutdown
   const shutdown = async () => {
     console.log("\nShutting down...");
+
+    // Persist session state before anything else
+    await mainAgent.prepareForShutdown();
     
     // Clean up PID file
     if (existsSync(PID_FILE)) {
@@ -287,6 +360,7 @@ async function main() {
       console.log("PID file removed");
     }
     
+    await memoryServer.shutdown();
     await browserService.shutdown();
     await discordService.shutdown();
     cronService.stop();

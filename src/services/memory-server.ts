@@ -1,0 +1,253 @@
+/**
+ * Memory server supervisor — manages the lobs-memory bun process as a child.
+ *
+ * Starts the memory server (bun run server/index.ts) as a supervised child process.
+ * Restarts automatically on crash with exponential backoff.
+ * Health checks via HTTP to detect silent failures.
+ */
+
+import { spawn, type ChildProcess } from "node:child_process";
+import { resolve } from "node:path";
+import { existsSync } from "node:fs";
+
+const HOME = process.env.HOME ?? "";
+const MEMORY_DIR = resolve(HOME, "lobs/lobs-core/memory");
+const MEMORY_PORT = 7420;
+const HEALTH_URL = `http://localhost:${MEMORY_PORT}/status`;
+const BUN_PATH = resolve(HOME, ".bun/bin/bun");
+
+// Restart policy
+const RESTART_DELAY_BASE_MS = 1000;   // 1s initial
+const RESTART_DELAY_MAX_MS = 60_000;  // 60s max
+const RESTART_BACKOFF_FACTOR = 2;
+const HEALTH_CHECK_INTERVAL_MS = 30_000; // check every 30s
+const STARTUP_GRACE_MS = 10_000; // wait before first health check
+
+class MemoryServerSupervisor {
+  private child: ChildProcess | null = null;
+  private running = false;
+  private restartCount = 0;
+  private restartTimer: NodeJS.Timeout | null = null;
+  private healthTimer: NodeJS.Timeout | null = null;
+  private lastHealthy = 0;
+  private shutdownRequested = false;
+
+  /** Start the memory server and begin supervision */
+  async start(): Promise<void> {
+    if (this.running) return;
+
+    // Verify memory server exists
+    const entrypoint = resolve(MEMORY_DIR, "server/index.ts");
+    if (!existsSync(entrypoint)) {
+      console.error(`[memory-supervisor] Entry point not found: ${entrypoint}`);
+      return;
+    }
+
+    // Verify bun is available
+    const bunPath = existsSync(BUN_PATH) ? BUN_PATH : "bun";
+
+    this.running = true;
+    this.shutdownRequested = false;
+    console.log("[memory-supervisor] Starting memory server supervision");
+
+    // Kill any orphaned bun memory processes first
+    await this.killOrphans();
+
+    // Start the process
+    this.spawnChild(bunPath);
+
+    // Start health checks after grace period
+    setTimeout(() => {
+      if (this.running && !this.shutdownRequested) {
+        this.startHealthChecks();
+      }
+    }, STARTUP_GRACE_MS);
+  }
+
+  /** Stop the memory server and supervision */
+  async shutdown(): Promise<void> {
+    this.shutdownRequested = true;
+    this.running = false;
+
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
+    if (this.healthTimer) {
+      clearInterval(this.healthTimer);
+      this.healthTimer = null;
+    }
+
+    if (this.child) {
+      console.log("[memory-supervisor] Stopping memory server...");
+      this.child.kill("SIGTERM");
+
+      // Give it 3s to exit gracefully, then force
+      await new Promise<void>((resolve) => {
+        const forceTimer = setTimeout(() => {
+          if (this.child) {
+            console.warn("[memory-supervisor] Force killing memory server");
+            this.child.kill("SIGKILL");
+          }
+          resolve();
+        }, 3000);
+
+        if (this.child) {
+          this.child.once("exit", () => {
+            clearTimeout(forceTimer);
+            resolve();
+          });
+        } else {
+          clearTimeout(forceTimer);
+          resolve();
+        }
+      });
+
+      this.child = null;
+      console.log("[memory-supervisor] Memory server stopped");
+    }
+  }
+
+  /** Check if the memory server is healthy */
+  async isHealthy(): Promise<boolean> {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      const res = await fetch(HEALTH_URL, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok) {
+        this.lastHealthy = Date.now();
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Get supervisor status */
+  getStatus(): {
+    running: boolean;
+    pid: number | null;
+    restartCount: number;
+    lastHealthy: number;
+    uptime: number | null;
+  } {
+    return {
+      running: this.running && this.child !== null,
+      pid: this.child?.pid ?? null,
+      restartCount: this.restartCount,
+      lastHealthy: this.lastHealthy,
+      uptime: this.child?.pid ? Date.now() - (this.lastHealthy || Date.now()) : null,
+    };
+  }
+
+  /* ── Private ─────────────────────────────────────────────── */
+
+  private spawnChild(bunPath: string): void {
+    if (this.shutdownRequested) return;
+
+    console.log(`[memory-supervisor] Spawning: ${bunPath} run server/index.ts (cwd: ${MEMORY_DIR})`);
+
+    this.child = spawn(bunPath, ["run", "server/index.ts"], {
+      cwd: MEMORY_DIR,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        // Ensure bun doesn't interfere with Node's port
+        PORT: String(MEMORY_PORT),
+      },
+    });
+
+    // Pipe stdout/stderr with prefix
+    this.child.stdout?.on("data", (data: Buffer) => {
+      const lines = data.toString().trim().split("\n");
+      for (const line of lines) {
+        if (line.trim()) console.log(`[memory] ${line}`);
+      }
+    });
+
+    this.child.stderr?.on("data", (data: Buffer) => {
+      const lines = data.toString().trim().split("\n");
+      for (const line of lines) {
+        if (line.trim()) console.error(`[memory] ${line}`);
+      }
+    });
+
+    this.child.on("exit", (code, signal) => {
+      console.warn(`[memory-supervisor] Memory server exited (code=${code}, signal=${signal})`);
+      this.child = null;
+
+      if (!this.shutdownRequested && this.running) {
+        this.scheduleRestart(bunPath);
+      }
+    });
+
+    this.child.on("error", (err) => {
+      console.error(`[memory-supervisor] Failed to spawn memory server:`, err);
+      this.child = null;
+
+      if (!this.shutdownRequested && this.running) {
+        this.scheduleRestart(bunPath);
+      }
+    });
+  }
+
+  private scheduleRestart(bunPath: string): void {
+    this.restartCount++;
+    const delay = Math.min(
+      RESTART_DELAY_BASE_MS * Math.pow(RESTART_BACKOFF_FACTOR, Math.min(this.restartCount - 1, 6)),
+      RESTART_DELAY_MAX_MS,
+    );
+
+    console.log(`[memory-supervisor] Scheduling restart #${this.restartCount} in ${delay}ms`);
+
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
+      if (!this.shutdownRequested && this.running) {
+        this.spawnChild(bunPath);
+      }
+    }, delay);
+  }
+
+  private startHealthChecks(): void {
+    this.healthTimer = setInterval(async () => {
+      if (!this.running || this.shutdownRequested) return;
+
+      const healthy = await this.isHealthy();
+      if (!healthy && this.child) {
+        console.warn("[memory-supervisor] Health check failed — restarting memory server");
+        this.child.kill("SIGTERM");
+        // The 'exit' handler will trigger scheduleRestart
+      } else if (healthy) {
+        // Reset backoff on successful health check
+        this.restartCount = 0;
+      }
+    }, HEALTH_CHECK_INTERVAL_MS);
+  }
+
+  /** Kill any orphaned bun processes running the memory server */
+  private async killOrphans(): Promise<void> {
+    try {
+      const { execSync } = await import("node:child_process");
+      const output = execSync("pgrep -f 'bun.*server/index.ts'", { encoding: "utf-8", timeout: 3000 }).trim();
+      if (output) {
+        const pids = output.split("\n").map(p => parseInt(p.trim(), 10)).filter(p => !isNaN(p));
+        for (const pid of pids) {
+          try {
+            process.kill(pid, "SIGTERM");
+            console.log(`[memory-supervisor] Killed orphaned memory server (PID ${pid})`);
+          } catch {
+            // Already dead
+          }
+        }
+        // Brief wait for cleanup
+        await new Promise(r => setTimeout(r, 500));
+      }
+    } catch {
+      // pgrep returns non-zero if no matches — that's fine
+    }
+  }
+}
+
+export const memoryServer = new MemoryServerSupervisor();

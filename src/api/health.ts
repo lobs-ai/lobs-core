@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { json } from "./index.js";
+import { memoryServer } from "../services/memory-server.js";
 
 const HOME = process.env.HOME ?? "";
 const PID_FILE = resolve(HOME, ".lobs/lobs.pid");
@@ -40,7 +41,7 @@ function getPid(): number | null {
 }
 
 export async function handleHealthRequest(_req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const [memoryServer, lmStudio] = await Promise.all([
+  const [memoryOk, lmStudio] = await Promise.all([
     checkMemoryServer(),
     checkLmStudio(),
   ]);
@@ -50,12 +51,19 @@ export async function handleHealthRequest(_req: IncomingMessage, res: ServerResp
 
   const status = db ? "healthy" : "unhealthy";
 
+  const memoryStatus = memoryServer.getStatus();
+
   json(res, {
     status,
     uptime: process.uptime(),
     pid: pid ?? process.pid,
     db: db ? "ok" : "error",
-    memory_server: memoryServer ? "ok" : "down",
+    memory_server: memoryOk ? "ok" : "down",
+    memory_supervisor: {
+      pid: memoryStatus.pid,
+      restarts: memoryStatus.restartCount,
+      running: memoryStatus.running,
+    },
     lm_studio: lmStudio ? "ok" : "down",
   });
 }
