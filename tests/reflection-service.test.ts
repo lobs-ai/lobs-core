@@ -109,11 +109,15 @@ describe("ReflectionService", () => {
       expect(row!.agentType).toBe(result.agentType);
     });
 
-    test("returns null when all agents have recent reflections", () => {
-      // Create reflections for all 5 agents
+    test("returns null when all agents have recent completed reflections", () => {
+      // Create reflections for all agents, then mark them completed
       svc.createReflectionBatch(3);
+      const db = getDb();
+      db.update(agentReflections)
+        .set({ status: "completed" })
+        .run();
 
-      // Now pickNextAgent should find nothing (all within window)
+      // Now pickNextAgent should find nothing (all completed within window)
       const result = svc.pickNextAgent(3);
       expect(result).toBeNull();
     });
@@ -126,9 +130,16 @@ describe("ReflectionService", () => {
       expect(result!.agentType).toBe("programmer");
     });
 
-    test("picks next agent after first is reflected", () => {
-      // Pick programmer (first)
-      svc.pickNextAgent();
+    test("picks next agent after first is completed", () => {
+      // Pick programmer (first) and mark it completed
+      const first = svc.pickNextAgent();
+      expect(first!.agentType).toBe("programmer");
+      const db = getDb();
+      db.update(agentReflections)
+        .set({ status: "completed" })
+        .where(eq(agentReflections.id, first!.reflectionId))
+        .run();
+      
       // Pick again — should get researcher (second in list)
       const second = svc.pickNextAgent();
       expect(second!.agentType).toBe("researcher");
@@ -496,8 +507,9 @@ describe("ReflectionService", () => {
 
     test("returns done=false when some reflections are active", () => {
       clearReflections();
+      // Compute windowStart BEFORE creating batch to avoid timing race
+      const windowStart = new Date(Date.now() - 4 * 3600_000).toISOString();
       svc.createReflectionBatch();
-      const windowStart = new Date(Date.now() - 3 * 3600_000).toISOString();
       const check = svc.checkComplete(windowStart);
       // All are 'active', not 'completed'
       expect(check.total).toBeGreaterThan(0);

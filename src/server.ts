@@ -26,9 +26,10 @@ const NEXUS_DIST = existsSync(resolve(HOME, "lobs/lobs-core/nexus/dist/index.htm
  */
 export function startServer(port: number): void {
   // sirv handles static files + SPA fallback
+  // dev: true so sirv reads from disk on each request (no stale cache after Nexus rebuild)
   const serve = sirv(NEXUS_DIST, {
     single: true,      // SPA mode: serve index.html for non-file routes
-    dev: false,         // Production mode: caching headers
+    dev: true,          // Dev mode: no directory caching, always reads from disk
     etag: true,
   });
 

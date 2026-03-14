@@ -143,6 +143,32 @@ async function cmdStart() {
 
   console.log(colorize("Starting lobs-core...", "cyan"));
 
+  // Re-load launchd service if plist exists (ensures auto-restart on crash)
+  const plistPathStart = resolve(HOME, "Library/LaunchAgents/com.lobs.core.plist");
+  if (existsSync(plistPathStart)) {
+    try {
+      execSync(`launchctl load "${plistPathStart}" 2>/dev/null`, { encoding: "utf-8" });
+      // launchd will start it for us — wait for it
+      let launchdStarted = false;
+      for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        if (await isServerReachable()) {
+          launchdStarted = true;
+          break;
+        }
+      }
+      if (launchdStarted) {
+        const newPid = getRunningPid();
+        console.log(colorize(`✓ lobs-core started via launchd (PID ${newPid ?? "?"}, port ${LOBS_PORT})`, "green"));
+        return;
+      }
+      // If launchd didn't start it, fall through to manual spawn
+      console.log(colorize("launchd loaded but server not responding, starting manually...", "yellow"));
+    } catch {
+      // Fall through to manual spawn
+    }
+  }
+
   // Spawn detached process with output going to log file
   const logFd = require("node:fs").openSync(LOG_FILE, "a");
   const child = spawn("node", [mainJs], {
@@ -180,10 +206,20 @@ async function cmdStart() {
 }
 
 async function cmdStop() {
+  // First, unload launchd service so it doesn't auto-restart
+  const plistPath = resolve(HOME, "Library/LaunchAgents/com.lobs.core.plist");
+  if (existsSync(plistPath)) {
+    try {
+      execSync(`launchctl unload "${plistPath}" 2>/dev/null`, { encoding: "utf-8" });
+      console.log(colorize("Unloaded launchd service (won't auto-restart)", "dim"));
+    } catch {
+      // May already be unloaded
+    }
+  }
+
   const pid = getRunningPid();
   if (!pid) {
     console.log(colorize("lobs-core is not running", "yellow"));
-    // Clean up stale PID file
     if (existsSync(PID_FILE)) {
       unlinkSync(PID_FILE);
     }
@@ -193,7 +229,6 @@ async function cmdStop() {
   console.log(colorize(`Stopping lobs-core (PID ${pid})...`, "cyan"));
 
   try {
-    // Send SIGTERM for graceful shutdown
     process.kill(pid, "SIGTERM");
   } catch (err) {
     console.error(colorize(`Failed to send signal: ${err}`, "red"));
@@ -205,7 +240,7 @@ async function cmdStop() {
   for (let i = 0; i < 10; i++) {
     await new Promise(r => setTimeout(r, 500));
     try {
-      process.kill(pid, 0); // Check if still alive
+      process.kill(pid, 0);
     } catch {
       stopped = true;
       break;
@@ -215,7 +250,6 @@ async function cmdStop() {
   if (stopped) {
     console.log(colorize("✓ lobs-core stopped", "green"));
   } else {
-    // Force kill
     console.log(colorize("Graceful shutdown timed out, force killing...", "yellow"));
     try {
       process.kill(pid, "SIGKILL");
@@ -225,17 +259,44 @@ async function cmdStop() {
     }
   }
 
-  // Clean up PID file
   if (existsSync(PID_FILE)) {
     try { unlinkSync(PID_FILE); } catch {}
   }
 }
 
-async function cmdRestart() {
+async function cmdBuild(): Promise<boolean> {
+  console.log(colorize("Building lobs-core...", "cyan"));
+  try {
+    execSync("npm run build", {
+      cwd: LOBS_CORE_DIR,
+      encoding: "utf-8",
+      stdio: ["inherit", "pipe", "pipe"],
+      timeout: 60_000,
+    });
+    console.log(colorize("✓ Build succeeded", "green"));
+    return true;
+  } catch (err: any) {
+    const stderr = err.stderr?.toString() || err.message;
+    console.error(colorize("✗ Build failed:", "red"));
+    console.error(colorize(stderr.slice(-500), "dim"));
+    return false;
+  }
+}
+
+async function cmdRestart(skipBuild = false) {
+  // Auto-build before restart unless --no-build
+  if (!skipBuild) {
+    const buildOk = await cmdBuild();
+    if (!buildOk) {
+      console.error(colorize("\nRestart aborted — fix build errors first.", "red"));
+      console.log(colorize("  Use 'lobs restart --no-build' to skip build check", "dim"));
+      return;
+    }
+  }
+
   const pid = getRunningPid();
   if (pid) {
     await cmdStop();
-    // Brief pause to let port release
     await new Promise(r => setTimeout(r, 1000));
   }
   await cmdStart();
@@ -520,7 +581,11 @@ const subcommand = args[1];
       break;
 
     case "restart":
-      await cmdRestart();
+      await cmdRestart(args.includes("--no-build"));
+      break;
+
+    case "build":
+      await cmdBuild();
       break;
 
     case "status":
@@ -566,9 +631,10 @@ const subcommand = args[1];
     default:
       console.log(colorize("\nlobs", "bright") + " — CLI for managing lobs-core\n");
       console.log(colorize("Process:", "cyan"));
-      console.log("  lobs start               Start lobs-core (daemonized)");
-      console.log("  lobs stop                Stop the running instance");
-      console.log("  lobs restart             Restart lobs-core");
+      console.log("  lobs start               Start lobs-core (re-enables auto-restart)");
+      console.log("  lobs stop                Stop and STAY stopped (disables auto-restart)");
+      console.log("  lobs restart             Build + restart (use --no-build to skip)");
+      console.log("  lobs build               Build without restarting");
       console.log("  lobs status              System overview");
       console.log("  lobs health              Detailed health check");
       console.log("");

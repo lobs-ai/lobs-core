@@ -306,7 +306,13 @@ export class MainAgent {
     const channelId = msg.channelId;
 
     // Track chat type for step visibility
-    const chatType = msg.chatType || (channelId.startsWith("nexus:") ? "nexus" : "group");
+    // Default chat type: nexus channels → nexus, system → system, everything else → dm
+    // Group chat must be explicitly set by the caller (e.g., Discord service for guild channels)
+    const chatType = msg.chatType || (
+      channelId.startsWith("nexus:") ? "nexus" :
+      channelId === "system" ? "system" :
+      "dm"  // Default to DM — group must be explicitly set
+    );
     this.channelChatType.set(channelId, chatType);
 
     // Check if this specific channel is already being processed or at concurrency limit
@@ -386,6 +392,15 @@ export class MainAgent {
     // Mark this channel as being processed
     this.processingChannels.add(replyChannelId);
 
+    // Total conversation timeout — 5 minutes max, prevents stuck channels
+    const conversationTimeout = setTimeout(() => {
+      console.error(`[main-agent] Conversation timeout (5min) for channel ${replyChannelId.slice(0, 12)} — force releasing`);
+      this.processingChannels.delete(replyChannelId);
+      this.channelQueues.delete(replyChannelId);  // Clear queued messages to prevent memory leak
+      this.channelChatType.delete(replyChannelId);  // Clean up session metadata
+      this.updateChannelSession(replyChannelId, "idle");
+    }, 5 * 60 * 1000);
+
     try {
       if (this.onTyping) this.onTyping(replyChannelId);
 
@@ -401,9 +416,12 @@ export class MainAgent {
       // Build system prompt — concise: identity + context + time
       // Tool descriptions come from the tool schemas (not hardcoded in prompt)
       const channelChatType = this.channelChatType.get(replyChannelId) || "unknown";
-      const chatContextNote = channelChatType === "group"
-        ? `\n\nYou are in a GROUP CHAT. Responding is OPTIONAL. Reply with just "NO_REPLY" (nothing else) if the message isn't directed at you or doesn't need your input. Only respond when mentioned, directly addressed, or when you have something genuinely useful to add. Don't respond just to acknowledge.`
-        : "";
+      let chatContextNote = "";
+      if (channelChatType === "group") {
+        chatContextNote = `\n\nYou are in a GROUP CHAT. Responding is OPTIONAL. Reply with just "NO_REPLY" (nothing else) if the message isn't directed at you or doesn't need your input. Only respond when mentioned, directly addressed, or when you have something genuinely useful to add. Don't respond just to acknowledge.`;
+      } else {
+        chatContextNote = `\n\nThis is a DIRECT conversation. You MUST always respond to every message. Never reply with "NO_REPLY" — the user is talking directly to you and expects a response.`;
+      }
 
       const fullSystem = [
         this.systemPrompt,
@@ -575,11 +593,20 @@ export class MainAgent {
           continue;
         }
 
+        // In DM/Nexus, never suppress a response — override NO_REPLY
+        const isDirectChat = channelChatType !== "group";
+        const isNoReply = textResponse?.trim() === "NO_REPLY";
+        const isRoutineHeartbeat = this.isRoutineHeartbeat(textResponse?.trim() || "");
+        
+        if (isNoReply && isDirectChat) {
+          textResponse = "I'm here — what can I help with?";
+        }
+
         // Final text response
         if (
           textResponse &&
-          textResponse.trim() !== "NO_REPLY" &&
-          textResponse.trim() !== "HEARTBEAT_OK"
+          !isRoutineHeartbeat &&
+          !(isNoReply && !isDirectChat)
         ) {
           // Persist
           this.db
@@ -601,21 +628,52 @@ export class MainAgent {
               await this.onReply(replyChannelId, chunk);
             }
           }
+        } else if (isRoutineHeartbeat) {
+          // Still persist routine heartbeats to DB for debugging, but don't send to Discord
+          this.db
+            .prepare(
+              `INSERT INTO main_agent_messages
+                 (id, role, content, channel_id, token_estimate)
+               VALUES (?, 'assistant', ?, ?, ?)`,
+            )
+            .run(
+              randomUUID(),
+              `[ROUTINE_HEARTBEAT] ${textResponse}`,
+              replyChannelId,
+              Math.ceil(textResponse.length / 4),
+            );
+          console.log(`[main-agent] Routine heartbeat logged but not sent to Discord: ${textResponse}`);
         }
 
         break; // Done
       }
     } catch (err) {
       console.error("[main-agent] Error in conversation loop:", err);
-      if (this.onReply) {
-        await this.onReply(
-          replyChannelId,
-          `❌ Error: ${String(err).substring(0, 200)}`,
-        );
+      try {
+        if (this.onReply) {
+          await this.onReply(
+            replyChannelId,
+            `❌ Error: ${String(err).substring(0, 200)}`,
+          );
+        }
+      } catch (replyErr) {
+        console.error("[main-agent] Failed to send error reply:", replyErr);
       }
     } finally {
+      clearTimeout(conversationTimeout);
       // Mark this channel as no longer processing
       this.processingChannels.delete(replyChannelId);
+      
+      // Cleanup idle channel metadata periodically (prevent memory leak of old channel info)
+      if (this.channelChatType.size > 100) {
+        // Keep only channels that still have queued messages or are in DB as active
+        const activeChannelIds = new Set(this.channelQueues.keys());
+        for (const [chId, _] of this.channelChatType) {
+          if (!activeChannelIds.has(chId)) {
+            this.channelChatType.delete(chId);
+          }
+        }
+      }
 
       // Mark persisted queue as processed for this channel
       this.markQueueProcessed(replyChannelId);
@@ -911,5 +969,40 @@ export class MainAgent {
       VALUES (?, 'idle', datetime('now'), ?)
       ON CONFLICT(channel_id) DO UPDATE SET model_override = excluded.model_override
     `).run(channelId, model);
+  }
+
+  /** 
+   * Smart heartbeat detection - suppress routine "all good" responses,
+   * but allow important findings/actions/problems through to Discord
+   */
+  private isRoutineHeartbeat(response: string): boolean {
+    if (!response) return false;
+    
+    // Exact "HEARTBEAT_OK" is routine - suppress
+    if (response === "HEARTBEAT_OK") return true;
+    
+    // Short responses with only routine indicators are likely routine
+    const routinePatterns = [
+      /^all systems? (are )?operational?$/i,
+      /^everything looks? good$/i,
+      /^no issues? (found|detected)$/i,
+      /^status: (ok|good|healthy)$/i,
+      /^lobs-core: running,? all good$/i,
+      /^nothing to report$/i,
+      /^all clear$/i,
+    ];
+    
+    // If it matches routine patterns and is short (< 100 chars), suppress
+    if (response.length < 100) {
+      for (const pattern of routinePatterns) {
+        if (pattern.test(response.trim())) {
+          console.log(`[main-agent] Suppressing routine heartbeat: "${response.slice(0, 50)}..."`);
+          return true;
+        }
+      }
+    }
+    
+    // Anything else (problems found, actions taken, longer explanations) - send to Discord
+    return false;
   }
 }

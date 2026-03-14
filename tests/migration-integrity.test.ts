@@ -297,7 +297,7 @@ describe("Migration integrity", () => {
     test("plugins are seeded with expected count", () => {
       const raw = getRawDb();
       const rows = raw.prepare("SELECT id FROM plugins").all() as { id: string }[];
-      expect(rows.length).toBe(10);
+      expect(rows.length).toBe(16);
     });
 
     test("ui_config default row is seeded", () => {

@@ -6,15 +6,14 @@
  * - memory_read: read specific lines from a file (for diving deeper into search results)
  * - memory_write: write learnings/decisions back to memory during agent runs
  *
- * memory_search and memory_read query http://localhost:7420 (lobs-memory server).
+ * memory_search uses the bridge service (HTTP fallback to grep).
  * memory_write appends to ~/lobs-shared-memory/learnings.md or a specified file.
  */
 
 import { readFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ToolDefinition } from "../types.js";
-
-const MEMORY_SERVER = "http://localhost:7420";
+import { memorySearch } from "../../services/memory-search.js";
 
 // ── memory_search ────────────────────────────────────────────────────────────
 
@@ -67,59 +66,33 @@ export async function memorySearchTool(
     20,
   );
 
-  const body: Record<string, unknown> = {
-    query,
-    maxResults,
-  };
-
-  if (Array.isArray(params.collections) && params.collections.length > 0) {
-    body.collections = params.collections;
-  }
-  if (typeof params.conversationContext === "string") {
-    body.conversationContext = params.conversationContext;
-  }
+  const collections = Array.isArray(params.collections) && params.collections.length > 0
+    ? params.collections as string[]
+    : undefined;
+  
+  const context = typeof params.conversationContext === "string"
+    ? params.conversationContext
+    : undefined;
 
   try {
-    const response = await fetch(`${MEMORY_SERVER}/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(15_000),
-    });
+    const { results, source, timeMs } = await memorySearch(
+      query,
+      maxResults,
+      collections,
+      context,
+    );
 
-    if (!response.ok) {
-      return `Memory search failed (HTTP ${response.status}): ${await response.text().catch(() => "unknown error")}`;
-    }
-
-    const data = (await response.json()) as {
-      results: Array<{
-        path: string;
-        startLine: number;
-        endLine: number;
-        score: number;
-        snippet: string;
-        source: string;
-        citation: string;
-      }>;
-      query: string;
-      expandedQueries?: string[];
-      timings: { totalMs: number };
-    };
-
-    if (!data.results || data.results.length === 0) {
+    if (!results || results.length === 0) {
       return `No results found for: "${query}"`;
     }
 
     // Format results for the agent
     const lines: string[] = [];
-    lines.push(`Found ${data.results.length} results (${data.timings.totalMs}ms):`);
-    if (data.expandedQueries?.length) {
-      lines.push(`Also searched: ${data.expandedQueries.join(", ")}`);
-    }
+    lines.push(`Found ${results.length} results (${timeMs}ms, source: ${source}):`);
     lines.push("");
 
-    for (let i = 0; i < data.results.length; i++) {
-      const r = data.results[i];
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
       const shortPath = r.path.replace(/^\/Users\/lobs\//, "~/");
       lines.push(`[${i + 1}] ${shortPath}#${r.startLine}-${r.endLine} (score: ${r.score.toFixed(2)})`);
       lines.push(r.snippet.trim());
@@ -128,9 +101,6 @@ export async function memorySearchTool(
 
     return lines.join("\n");
   } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      return "Memory search timed out (15s). The memory server may be busy or down.";
-    }
     return `Memory search error: ${error instanceof Error ? error.message : String(error)}`;
   }
 }

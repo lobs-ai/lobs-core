@@ -124,8 +124,9 @@ function startProcess(params: Record<string, unknown>, defaultCwd: string): stri
     throw new Error("command is required and must be a string");
   }
 
-  // Check process limit
-  if (processes.size >= MAX_PROCESSES) {
+  // Check process limit (only count running processes)
+  const runningCount = Array.from(processes.values()).filter(p => p.exitCode === null).length;
+  if (runningCount >= MAX_PROCESSES) {
     throw new Error(`Process limit reached (${MAX_PROCESSES}). Kill or wait for processes to complete.`);
   }
 
@@ -199,20 +200,23 @@ function startProcess(params: Record<string, unknown>, defaultCwd: string): stri
       }
     });
 
-    child.on("close", (code, signal) => {
-      // Flush remaining buffers
-      if (stdoutBuffer && bgProc.output.length < bgProc.maxOutputLines) {
-        bgProc.output.push(`[stdout] ${stdoutBuffer}`);
-      }
-      if (stderrBuffer && bgProc.output.length < bgProc.maxOutputLines) {
-        bgProc.output.push(`[stderr] ${stderrBuffer}`);
-      }
-
+    // exit fires immediately when process terminates (before stdio closes)
+    child.on("exit", (code, signal) => {
       bgProc.exitCode = code;
       bgProc.signal = signal;
       if (bgProc.timeoutTimer) {
         clearTimeout(bgProc.timeoutTimer);
         bgProc.timeoutTimer = null;
+      }
+    });
+
+    child.on("close", () => {
+      // Flush remaining buffers after stdio streams close
+      if (stdoutBuffer && bgProc.output.length < bgProc.maxOutputLines) {
+        bgProc.output.push(`[stdout] ${stdoutBuffer}`);
+      }
+      if (stderrBuffer && bgProc.output.length < bgProc.maxOutputLines) {
+        bgProc.output.push(`[stderr] ${stderrBuffer}`);
       }
     });
 

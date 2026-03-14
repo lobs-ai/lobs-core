@@ -52,7 +52,7 @@ export async function handleChatRequest(
       return json(res, { id, key: sessionKey, title, createdAt: now, compliance_required: complianceRequired }, 201);
     }
 
-    // POST /api/chat/sessions/:key/messages — send a message (DB-backed only)
+    // POST /api/chat/sessions/:key/messages — send a message (async with polling)
     if (sessionKey && action === "messages" && method === "POST") {
       const body = (await parseBody(req)) as { content?: string };
       const content = body?.content?.trim();
@@ -61,30 +61,11 @@ export async function handleChatRequest(
       const mainAgent = (globalThis as any).__lobsMainAgent;
       if (!mainAgent) return error(res, "Agent not initialized", 503);
 
-      const channelId = `nexus:${sessionKey}`;  // Nexus sessions use nexus: prefix
-
-      // Send to main agent (it will process and store reply in main_agent_messages)
-      await mainAgent.handleMessage({
-        id: randomUUID(),
-        content,
-        authorId: "nexus-user",
-        authorName: "Rafe",
-        channelId,
-        timestamp: Date.now(),
-      });
-
-      // Wait for processing to complete
-      try {
-        await mainAgent.waitForChannelIdle(channelId, 600_000);
-      } catch (err) {
-        log().warn(`[chat] Timeout waiting for channel ${channelId}: ${err}`);
-      }
-
-      // Read the reply from the DB (last assistant message for this channel)
-      const reply = mainAgent.getLastAssistantMessage(channelId);
-
-      // Also store in chat_messages for the Nexus UI
+      const channelId = `nexus:${sessionKey}`;
+      const messageId = randomUUID();
       const now = new Date().toISOString();
+
+      // Store user message immediately
       db.insert(chatMessages).values({
         id: randomUUID().replace(/-/g, ""),
         sessionKey,
@@ -92,23 +73,78 @@ export async function handleChatRequest(
         content,
         createdAt: now,
       }).run();
+
+      // Send to main agent (async, don't wait)
+      mainAgent.handleMessage({
+        id: messageId,
+        content,
+        authorId: "nexus-user",
+        authorName: "Rafe",
+        channelId,
+        timestamp: Date.now(),
+      }).then(async () => {
+        // Process completed, store the response
+        try {
+          await mainAgent.waitForChannelIdle(channelId, 600_000);
+          const reply = mainAgent.getLastAssistantMessage(channelId);
+          
+          if (reply) {
+            db.insert(chatMessages).values({
+              id: randomUUID().replace(/-/g, ""),
+              sessionKey,
+              role: "assistant",
+              content: reply,
+              createdAt: new Date().toISOString(),
+            }).run();
+          }
+          
+          db.update(chatSessions)
+            .set({ lastMessageAt: new Date().toISOString() })
+            .where(eq(chatSessions.sessionKey, sessionKey))
+            .run();
+        } catch (err) {
+          log().warn(`[chat] Processing failed for ${channelId}: ${err}`);
+        }
+      }).catch((err: unknown) => {
+        log().error(`[chat] Message handling failed: ${err}`);
+      });
+
+      // Return immediately with acceptance
+      return json(res, { accepted: true, messageId, timestamp: now });
+    }
+
+    // GET /api/chat/sessions/:key/poll — poll for new messages since timestamp
+    if (sessionKey && action === "poll" && method === "GET") {
+      const url = new URL(req.url ?? "", "http://localhost");
+      const since = url.searchParams.get("since");
       
-      if (reply) {
-        db.insert(chatMessages).values({
-          id: randomUUID().replace(/-/g, ""),
-          sessionKey,
-          role: "assistant",
-          content: reply,
-          createdAt: now,
-        }).run();
+      let messages;
+      if (since) {
+        messages = db.select()
+          .from(chatMessages)
+          .where(eq(chatMessages.sessionKey, sessionKey))
+          .orderBy(chatMessages.createdAt)
+          .all()
+          .filter(m => m.createdAt > since)
+          .map(m => ({
+            role: m.role,
+            content: m.content,
+            timestamp: m.createdAt,
+          }));
+      } else {
+        messages = db.select()
+          .from(chatMessages)
+          .where(eq(chatMessages.sessionKey, sessionKey))
+          .orderBy(chatMessages.createdAt)
+          .all()
+          .map(m => ({
+            role: m.role,
+            content: m.content,
+            timestamp: m.createdAt,
+          }));
       }
 
-      db.update(chatSessions)
-        .set({ lastMessageAt: now })
-        .where(eq(chatSessions.sessionKey, sessionKey))
-        .run();
-
-      return json(res, { reply: reply || "", timestamp: now });
+      return json(res, { messages });
     }
 
     // GET /api/chat/sessions/:key/messages — fetch message history (DB-backed)
@@ -125,6 +161,19 @@ export async function handleChatRequest(
         }));
 
       return json(res, { messages });
+    }
+
+    // GET /api/chat/sessions/:key/status — check processing status
+    if (sessionKey && action === "status" && method === "GET") {
+      const mainAgent = (globalThis as any).__lobsMainAgent;
+      const channelId = `nexus:${sessionKey}`;
+      
+      const status = {
+        processing: mainAgent?.isChannelProcessing?.(channelId) ?? false,
+        queueDepth: mainAgent?.getChannelQueueDepth?.(channelId) ?? 0,
+      };
+      
+      return json(res, status);
     }
 
     // GET /api/chat/sessions — list sessions

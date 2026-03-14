@@ -187,11 +187,12 @@ describe("Reviewer auto-followup", () => {
     const projectId = randomUUID();
     const sourceTaskId = randomUUID();
 
+    // Use /tmp as repoPath — must exist on disk or queueReviewerFollowup skips
     db.insert(projects).values({
       id: projectId,
       title: "PAW",
       type: "kanban",
-      repoPath: "/tmp/paw-output",
+      repoPath: "/tmp",
     }).run();
 
     db.insert(tasks).values({
@@ -213,8 +214,8 @@ describe("Reviewer auto-followup", () => {
     expect(reviewTask).toBeDefined();
     expect(reviewTask?.agent).toBe("reviewer");
     expect(reviewTask?.status).toBe("active");
-    expect(reviewTask?.artifactPath).toBe("/tmp/paw-output");
-    expect(reviewTask?.notes).toContain("Scope directory: /tmp/paw-output");
+    expect(reviewTask?.artifactPath).toBe("/tmp");
+    expect(reviewTask?.notes).toContain("Scope directory: /tmp");
   });
 
   it("does not create duplicate reviewer follow-up tasks", () => {

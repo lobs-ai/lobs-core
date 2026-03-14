@@ -183,7 +183,9 @@ export function pruneToolResults(
     if (messages[i].role === "assistant") {
       assistantCount++;
       if (assistantCount >= keepRecentTurns) {
-        cutoffIndex = i;
+        // Set cutoff to the user message before this assistant (if exists)
+        // This keeps the full turn (user + assistant) intact
+        cutoffIndex = i > 0 && messages[i - 1].role === "user" ? i - 1 : i;
         break;
       }
     }
