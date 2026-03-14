@@ -8,6 +8,8 @@ export interface DiscordConfig {
     agentWork?: string;   // Channel ID for agent work updates
     completions?: string; // Channel ID for task completions
   };
+  dmAllowFrom: string[];  // User IDs allowed to DM the bot
+  channelPolicies: Record<string, { allow: boolean; requireMention: boolean }>;
 }
 
 class DiscordService {
@@ -121,9 +123,28 @@ class DiscordService {
 
   /** Register event handler for messages */
   onMessage(handler: (message: { content: string; channelId: string; authorId: string; authorTag: string }) => void): void {
-    if (!this.client) return;
+    if (!this.client || !this.config) return;
     this.client.on("messageCreate", (msg) => {
       if (msg.author.bot) return; // Ignore bot messages
+      
+      // Filter DMs
+      if (!msg.guildId) {
+        if (!this.config!.dmAllowFrom.includes(msg.author.id)) {
+          return; // Silently drop unauthorized DMs
+        }
+      } else {
+        // Filter guild channels
+        const policy = this.config!.channelPolicies[msg.channelId];
+        if (!policy || !policy.allow) {
+          return; // Silently drop messages from disallowed channels
+        }
+        
+        // Check mention requirement
+        if (policy.requireMention && !msg.mentions.has(this.client!.user!)) {
+          return; // Silently drop if mention required but not present
+        }
+      }
+      
       handler({
         content: msg.content,
         channelId: msg.channelId,

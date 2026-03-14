@@ -27,6 +27,8 @@ export function loadDiscordConfig(): DiscordConfig | null {
         agentWork: process.env.DISCORD_CHANNEL_AGENT_WORK,
         completions: process.env.DISCORD_CHANNEL_COMPLETIONS,
       },
+      dmAllowFrom: [],
+      channelPolicies: {},
     };
   }
   

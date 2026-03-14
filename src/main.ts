@@ -25,6 +25,7 @@ import { discordService } from "./services/discord.js";
 import { loadDiscordConfig } from "./config/discord.js";
 import { MainAgent } from "./services/main-agent.js";
 import { loadWorkspaceContext, buildMainAgentPrompt } from "./services/workspace-loader.js";
+import { setDiscordService as setMessageDiscord } from "./runner/tools/message.js";
 
 const HOME = process.env.HOME ?? "";
 const DB_PATH = resolve(HOME, ".openclaw/plugins/lobs/lobs.db");
@@ -128,6 +129,9 @@ async function main() {
   if (discordConfig) {
     try {
       await discordService.connect(discordConfig);
+
+      // Wire Discord to message tool
+      setMessageDiscord(discordService);
 
       // Create and configure the main agent
       const rawDb = getRawDb();

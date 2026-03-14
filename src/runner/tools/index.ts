@@ -9,6 +9,7 @@ import { webSearchToolDefinition, webSearchTool, webFetchToolDefinition, webFetc
 import { memorySearchToolDefinition, memorySearchTool, memoryReadToolDefinition, memoryReadTool, memoryWriteToolDefinition, memoryWriteTool } from "./memory.js";
 import { AGENT_CONTROL_TOOLS, executeSpawnAgent, executeRunPipeline } from "./agent-control.js";
 import { cronToolDefinition, executeCronTool } from "./cron.js";
+import { messageToolDefinition, executeMessageTool } from "./message.js";
 
 export type ToolExecutor = (params: Record<string, unknown>, cwd: string) => Promise<string>;
 
@@ -65,6 +66,10 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   cron: {
     definition: cronToolDefinition,
     execute: (params) => executeCronTool(params),
+  },
+  message: {
+    definition: messageToolDefinition,
+    execute: (params) => executeMessageTool(params),
   },
 };
 

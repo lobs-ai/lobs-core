@@ -30,6 +30,8 @@ const MAIN_AGENT_TOOLS: ToolName[] = [
   "memory_read",
   "memory_write",
   "cron",
+  "message",
+  "spawn_agent",
 ];
 
 interface PendingMessage {
@@ -157,10 +159,13 @@ export class MainAgent {
     try {
       if (this.onTyping) this.onTyping(replyChannelId);
 
-      // Build context
-      const history = this.getRecentHistory();
-      const queuedText = this.drainQueue();
+      // 1. Get history
+      let history = this.getRecentHistory();
 
+      // 2. Prune old tool outputs
+      history = this.pruneHistory(history);
+
+      // Build system prompt
       const fullSystem = [
         this.systemPrompt,
         "",
@@ -175,18 +180,23 @@ export class MainAgent {
         }),
       ].join("\n");
 
-      // Build messages
-      const messages: LLMMessage[] = history.map((m) => ({
+      // 3. Build LLM messages
+      let messages: LLMMessage[] = history.map((m) => ({
         role: m.role as "user" | "assistant",
         content: m.content,
       }));
 
+      // 4. Add queued messages
+      const queuedText = this.drainQueue();
       if (queuedText) {
         messages.push({
           role: "user",
           content: `[Queued messages while agent was busy]\n\n${queuedText}`,
         });
       }
+
+      // 5. Compact if needed
+      messages = await this.compactIfNeeded(messages);
 
       // Resolve tools & model
       const tools = getToolDefinitions(MAIN_AGENT_TOOLS);
@@ -298,29 +308,151 @@ export class MainAgent {
 
   /* ── Helpers ───────────────────────────────────────────────────── */
 
-  private getRecentHistory(): Array<{ role: string; content: string }> {
+  private getRecentHistory(): Array<{
+    role: string;
+    content: string;
+    created_at: string;
+  }> {
+    const MAX_CONTEXT_TOKENS = 150000;
+    const CHARS_PER_TOKEN = 4;
+    const MAX_CHARS = MAX_CONTEXT_TOKENS * CHARS_PER_TOKEN;
+
+    // Load more than we need, then trim
     const rows = this.db
       .prepare(
-        `SELECT role, content, token_estimate FROM main_agent_messages
-         ORDER BY created_at DESC LIMIT ?`,
+        `SELECT role, content, created_at FROM main_agent_messages
+         ORDER BY created_at DESC LIMIT 200`,
       )
-      .all(MAX_HISTORY * 2) as Array<{
-      role: string;
-      content: string;
-      token_estimate: number;
-    }>;
+      .all() as Array<{ role: string; content: string; created_at: string }>;
 
-    rows.reverse();
+    rows.reverse(); // chronological
 
-    let charSum = 0;
+    // Calculate system prompt size (it's constant overhead)
+    const systemSize =
+      (this.systemPrompt.length + this.workspaceContext.length) /
+      CHARS_PER_TOKEN;
+    let budget = MAX_CHARS - systemSize * CHARS_PER_TOKEN;
+
+    // Trim from oldest until we fit
     const trimmed: typeof rows = [];
+    let totalChars = 0;
+
     for (let i = rows.length - 1; i >= 0; i--) {
-      charSum += rows[i].content.length;
-      if (charSum > MAX_CONTEXT_CHARS) break;
+      const msgChars = rows[i].content.length;
+      if (totalChars + msgChars > budget) break;
+      totalChars += msgChars;
       trimmed.unshift(rows[i]);
     }
 
     return trimmed;
+  }
+
+  private pruneHistory(
+    messages: Array<{ role: string; content: string; created_at: string }>,
+  ): Array<{ role: string; content: string; created_at: string }> {
+    const KEEP_RECENT = 8; // Keep last 8 assistant turns fully intact
+    const MAX_TOOL_OUTPUT = 500; // Truncate old tool outputs to this many chars
+    const PLACEHOLDER =
+      "[Earlier tool output removed to save context. Re-run the tool if needed.]";
+
+    // Count assistant turns from the end
+    let assistantCount = 0;
+    let keepFullFrom = 0; // index from which we keep full
+
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "assistant") {
+        assistantCount++;
+        if (assistantCount >= KEEP_RECENT) {
+          // Everything before this index gets pruned
+          keepFullFrom = i;
+          break;
+        }
+      }
+    }
+
+    return messages.map((m, i) => {
+      if (i >= keepFullFrom || assistantCount < KEEP_RECENT)
+        return { role: m.role, content: m.content, created_at: m.created_at };
+
+      // For old messages, truncate large content (likely tool outputs)
+      if (m.content.length > MAX_TOOL_OUTPUT * 3 && m.role === "user") {
+        // This is probably a tool result
+        return {
+          role: m.role,
+          content:
+            m.content.substring(0, MAX_TOOL_OUTPUT) + "\n\n" + PLACEHOLDER,
+          created_at: m.created_at,
+        };
+      }
+      return { role: m.role, content: m.content, created_at: m.created_at };
+    });
+  }
+
+  private async compactIfNeeded(messages: LLMMessage[]): Promise<LLMMessage[]> {
+    const COMPACT_THRESHOLD = 120000; // chars
+    const totalChars = messages.reduce(
+      (sum, m) =>
+        sum +
+        (typeof m.content === "string"
+          ? m.content.length
+          : JSON.stringify(m.content).length),
+      0,
+    );
+
+    if (totalChars < COMPACT_THRESHOLD) return messages;
+
+    console.log(`[main-agent] Context at ${totalChars} chars, compacting...`);
+
+    // Take the first 60% of messages and summarize them
+    const splitPoint = Math.floor(messages.length * 0.6);
+    const toSummarize = messages.slice(0, splitPoint);
+    const toKeep = messages.slice(splitPoint);
+
+    // Build summary using a quick LLM call
+    const summaryText = toSummarize
+      .map(
+        (m) =>
+          `${m.role}: ${typeof m.content === "string" ? m.content.substring(0, 200) : "[tool content]"}`,
+      )
+      .join("\n");
+
+    // Use a cheap model for summarization
+    const config = parseModelString("anthropic/claude-haiku-4-5");
+    const client = createClient(config);
+
+    try {
+      const response = await client.createMessage({
+        model: config.modelId,
+        system:
+          "Summarize this conversation history concisely. Preserve: goals, decisions, constraints, key identifiers, and open questions. Output as bullet points.",
+        messages: [
+          { role: "user", content: summaryText.substring(0, 50000) },
+        ],
+        tools: [],
+        maxTokens: 2000,
+      });
+
+      const summary = response.content
+        .filter((b: any) => b.type === "text")
+        .map((b: any) => b.text)
+        .join("");
+
+      return [
+        {
+          role: "user",
+          content: `[Conversation summary — earlier messages compacted]\n\n${summary}`,
+        },
+        {
+          role: "assistant",
+          content: "Understood, I have the context from the summary. Continuing.",
+        },
+        ...toKeep,
+      ];
+    } catch (err) {
+      console.error("[main-agent] Compaction failed:", err);
+      // Fall back to simple truncation
+      return toKeep;
+    }
   }
 
   private drainQueue(): string {
