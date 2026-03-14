@@ -13,7 +13,7 @@ import { getModelForTier } from "../config/models.js";
 import { getToolDefinitions, executeTool } from "../runner/tools/index.js";
 import type { ToolName } from "../runner/types.js";
 import { getToolsForSession, getSessionType } from "../runner/tools/tool-sets.js";
-import { loadWorkspaceContext } from "./workspace-loader.js";
+import { loadWorkspaceContext, buildSystemPrompt } from "./workspace-loader.js";
 import { resolveModelForTier, type ModelTier } from "../orchestrator/model-chooser.js";
 import Database from "better-sqlite3";
 import { compactMessages, pruneToolResults } from "./compaction.js";
@@ -414,7 +414,10 @@ export class MainAgent {
       // 2. Prune old tool outputs
       history = this.pruneHistory(history);
 
-      // Reload workspace context fresh each turn
+      // Reload system prompt AND workspace context fresh each turn
+      // This ensures edits to SYSTEM_PROMPT.md, SOUL.md, USER.md, MEMORY.md, TOOLS.md
+      // take effect immediately without restarting lobs-core
+      const freshSystemPrompt = buildSystemPrompt();
       const freshContext = loadWorkspaceContext();
 
       // Build system prompt — concise: identity + context + time
@@ -428,7 +431,7 @@ export class MainAgent {
       }
 
       const fullSystem = [
-        this.systemPrompt,
+        freshSystemPrompt,
         "",
         freshContext,
         "",
@@ -779,11 +782,11 @@ export class MainAgent {
 
     rows.reverse(); // chronological
 
-    // Calculate system prompt size (it's constant overhead)
-    const systemSize =
-      (this.systemPrompt.length + this.workspaceContext.length) /
-      CHARS_PER_TOKEN;
-    let budget = MAX_CHARS - systemSize * CHARS_PER_TOKEN;
+    // Calculate system prompt size — reload fresh to match what processConversation() will inject
+    const freshPrompt = buildSystemPrompt();
+    const freshCtx = loadWorkspaceContext();
+    const systemChars = freshPrompt.length + freshCtx.length;
+    let budget = MAX_CHARS - systemChars;
 
     // Trim from oldest until we fit
     const trimmed: typeof rows = [];

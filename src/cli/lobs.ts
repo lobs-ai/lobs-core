@@ -236,9 +236,10 @@ async function cmdStop() {
     return;
   }
 
-  // Wait up to 5 seconds for process to exit
+  // Wait up to 10 seconds for graceful shutdown
+  // (Discord disconnect, DB flush, browser cleanup, memory server shutdown can take time)
   let stopped = false;
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < 20; i++) {
     await new Promise(r => setTimeout(r, 500));
     try {
       process.kill(pid, 0);
@@ -298,7 +299,23 @@ async function cmdRestart(skipBuild = false) {
   const pid = getRunningPid();
   if (pid) {
     await cmdStop();
-    await new Promise(r => setTimeout(r, 1000));
+    
+    // Wait until the old process is fully dead + port is released
+    // 1s was too short — shutdown involves Discord disconnect, DB flush, browser cleanup, memory server
+    let dead = false;
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 250));
+      const stillAlive = getRunningPid();
+      const portFree = !(await isServerReachable());
+      if (!stillAlive && portFree) {
+        dead = true;
+        break;
+      }
+    }
+    if (!dead) {
+      console.log(colorize("Warning: old process may still be shutting down. Waiting 2s more...", "yellow"));
+      await new Promise(r => setTimeout(r, 2000));
+    }
   }
   await cmdStart();
 }
