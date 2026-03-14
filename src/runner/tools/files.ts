@@ -16,7 +16,7 @@ import type { ToolDefinition } from "../types.js";
 export const readToolDefinition: ToolDefinition = {
   name: "read",
   description:
-    "Read the contents of a file. For text files, output is truncated to 2000 lines or 50KB " +
+    "Read the contents of a file. For text files, output is truncated to 80 lines or 3KB by default " +
     "(whichever is hit first). Use offset/limit for large files.",
   input_schema: {
     type: "object",
@@ -107,7 +107,9 @@ export const editToolDefinition: ToolDefinition = {
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_LINES = 2000;
+const DEFAULT_LINES = 80;    // Default when no limit specified — preview mode
 const MAX_BYTES = 50 * 1024; // 50KB
+const DEFAULT_BYTES = 3000;  // Default char budget in preview mode
 const BINARY_CHECK_BYTES = 8192;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -158,8 +160,10 @@ export async function readTool(
   const content = buffer.toString("utf-8");
   const lines = content.split("\n");
 
+  const hasExplicitRange = typeof params.offset === "number" || typeof params.limit === "number";
   const offset = typeof params.offset === "number" ? Math.max(1, params.offset) : 1;
-  const limit = typeof params.limit === "number" ? Math.max(1, params.limit) : MAX_LINES;
+  const limit = typeof params.limit === "number" ? Math.max(1, params.limit) : (hasExplicitRange ? MAX_LINES : DEFAULT_LINES);
+  const byteBudget = hasExplicitRange ? MAX_BYTES : DEFAULT_BYTES;
 
   const startIdx = offset - 1;
   const endIdx = Math.min(startIdx + limit, lines.length);
@@ -168,9 +172,15 @@ export async function readTool(
   let result = sliced.join("\n");
 
   // Truncate by bytes if needed
-  if (Buffer.byteLength(result) > MAX_BYTES) {
-    result = result.slice(0, MAX_BYTES);
-    result += `\n\n(truncated at ${MAX_BYTES / 1024}KB)`;
+  if (Buffer.byteLength(result) > byteBudget) {
+    // Try to cut at a line boundary
+    const truncated = result.slice(0, byteBudget);
+    const lastNl = truncated.lastIndexOf("\n");
+    result = lastNl > byteBudget * 0.7 ? truncated.slice(0, lastNl) : truncated;
+    const shownLines = result.split("\n").length;
+    const from = offset + shownLines;
+    result += `\n\n[Truncated. ${lines.length - (startIdx + shownLines)} more lines. Use offset=${from} to continue.]`;
+    return result;
   }
 
   // Add metadata

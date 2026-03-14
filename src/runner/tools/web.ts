@@ -84,7 +84,7 @@ export const webFetchToolDefinition: ToolDefinition = {
       },
       maxChars: {
         type: "number",
-        description: "Maximum characters to return (default 50000)",
+        description: "Maximum characters to return (default 6000)",
       },
       mode: {
         type: "string",
@@ -116,7 +116,7 @@ export async function webFetchTool(
   }
 
   const maxChars =
-    typeof params.maxChars === "number" ? params.maxChars : 50000;
+    typeof params.maxChars === "number" ? params.maxChars : 6000;
 
   try {
     const result = await browserService.fetch(url, maxChars);

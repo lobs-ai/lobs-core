@@ -8,11 +8,13 @@
 
 import { spawn } from "node:child_process";
 import type { ToolDefinition } from "../types.js";
+import { capOutput } from "./output-cap.js";
 
 export const execToolDefinition: ToolDefinition = {
   name: "exec",
   description:
     "Execute a shell command. Returns stdout, stderr, and exit code. " +
+    "Output is capped to ~80 lines/3KB by default — use head/tail/grep for large outputs. " +
     "Commands run in the agent's working directory by default. " +
     "Use workdir to change directory. Use timeout to limit execution time (default 30s, max 300s).",
   input_schema: {
@@ -40,7 +42,9 @@ export const execToolDefinition: ToolDefinition = {
   },
 };
 
-const MAX_OUTPUT_CHARS = 100_000;
+const MAX_CAPTURE_CHARS = 100_000;  // Max to capture from the process (raw)
+const MAX_OUTPUT_CHARS = 3_000;     // Max to return to the model
+const MAX_OUTPUT_LINES = 80;        // Max lines to return to the model
 const DEFAULT_TIMEOUT = 30;
 const MAX_TIMEOUT = 300;
 
@@ -80,15 +84,15 @@ export async function execTool(
 
     child.stdout.on("data", (data: Buffer) => {
       const chunk = data.toString();
-      if (stdout.length < MAX_OUTPUT_CHARS) {
-        stdout += chunk.slice(0, MAX_OUTPUT_CHARS - stdout.length);
+      if (stdout.length < MAX_CAPTURE_CHARS) {
+        stdout += chunk.slice(0, MAX_CAPTURE_CHARS - stdout.length);
       }
     });
 
     child.stderr.on("data", (data: Buffer) => {
       const chunk = data.toString();
-      if (stderr.length < MAX_OUTPUT_CHARS) {
-        stderr += chunk.slice(0, MAX_OUTPUT_CHARS - stderr.length);
+      if (stderr.length < MAX_CAPTURE_CHARS) {
+        stderr += chunk.slice(0, MAX_CAPTURE_CHARS - stderr.length);
       }
     });
 
@@ -106,18 +110,16 @@ export async function execTool(
       }
 
       if (stdout.length > 0) parts.push(stdout);
-      if (stderr.length > 0) parts.push(stderr);
-
-      if (stdout.length >= MAX_OUTPUT_CHARS || stderr.length >= MAX_OUTPUT_CHARS) {
-        parts.push(`(output truncated at ${MAX_OUTPUT_CHARS} characters)`);
-      }
+      if (stderr.length > 0) parts.push(`STDERR:\n${stderr}`);
 
       const exitInfo = killed
         ? `Exit: killed (timeout)`
         : `Exit code: ${code ?? `signal ${signal}`}`;
-      parts.push(exitInfo);
 
-      resolve(parts.join("\n") || "(no output)");
+      const raw = parts.join("\n") || "(no output)";
+      const capped = capOutput(raw, MAX_OUTPUT_CHARS, MAX_OUTPUT_LINES,
+        "Re-run with more specific command (e.g. head/tail/grep) to see more.");
+      resolve(`${capped}\n\n${exitInfo}`);
     });
   });
 }
