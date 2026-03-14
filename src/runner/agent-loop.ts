@@ -126,6 +126,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
   let turns = 0;
   let lastTextOutput = "";
   let stopReason: AgentResult["stopReason"] = "end_turn";
+  let continuationCount = 0;
   let thinkingContent = "";
 
   // Loop detection
@@ -271,7 +272,18 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       }
 
       if (response.stopReason === "max_tokens") {
-        stopReason = "max_turns";
+        // Model hit output token limit mid-response — ask it to continue
+        // rather than silently truncating. Give it 2 continuation attempts.
+        continuationCount++;
+        if (continuationCount <= 2) {
+          console.log(`[agent-loop] max_tokens hit — requesting continuation (attempt ${continuationCount}/2)`);
+          messages.push({ role: "assistant", content: response.content as LLMMessage["content"] });
+          messages.push({ role: "user", content: [{ type: "text", text: "Continue from where you left off." }] });
+          continue;
+        }
+        // Exhausted continuation attempts — treat as complete
+        console.warn(`[agent-loop] max_tokens hit after ${continuationCount} continuations — treating as end_turn`);
+        stopReason = "end_turn";
         break;
       }
 
