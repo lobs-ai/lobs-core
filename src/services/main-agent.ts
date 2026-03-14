@@ -173,7 +173,7 @@ export class MainAgent {
         "",
         "## Workspace Paths",
         "- Your personal files (SOUL.md, MEMORY.md, etc.): ~/.lobs/agents/main/",
-        "- Your working directory: ~/.openclaw/workspace/",
+        "- Your working directory: ~/.lobs/agents/main/",
         "- Worker agent workspaces: ~/.lobs/agents/{type}/",
         "- When spawning agents, set cwd to the relevant project repo (e.g., ~/lobs/lobs-core/)",
         "",

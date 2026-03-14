@@ -487,7 +487,7 @@ class OpenAICompatibleClient implements LLMClient {
           ...this.headers,
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(120_000),
+        signal: AbortSignal.timeout(600_000), // 10 minutes — agent tool loops can be long
       });
     } catch (error) {
       // Network error — re-throw as-is

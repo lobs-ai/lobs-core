@@ -28,7 +28,7 @@ import { loadWorkspaceContext, buildMainAgentPrompt } from "./services/workspace
 import { setDiscordService as setMessageDiscord } from "./runner/tools/message.js";
 
 const HOME = process.env.HOME ?? "";
-const DB_PATH = resolve(HOME, ".openclaw/plugins/lobs/lobs.db");
+const DB_PATH = resolve(HOME, ".lobs/lobs.db");
 const SCAN_INTERVAL_MS = 10_000;
 const HTTP_PORT = parseInt(process.env.LOBS_PORT ?? "9420", 10);
 

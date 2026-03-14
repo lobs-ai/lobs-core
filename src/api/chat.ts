@@ -111,11 +111,11 @@ export async function handleChatRequest(
             setTimeout(checkReply, 500);
           });
           
-          // Timeout after 120s
+          // Timeout after 10 minutes (agent may do many tool calls)
           setTimeout(() => {
             mainAgent.setReplyHandler(originalHandler);
             resolve(replyText || "Response timed out.");
-          }, 120000);
+          }, 600_000);
         });
 
         const reply = await replyPromise;

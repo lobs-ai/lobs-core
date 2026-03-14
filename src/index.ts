@@ -28,7 +28,7 @@ import { startMemoryScanner, stopMemoryScanner } from "./services/memory-scanner
 import { setLogger, log } from "./util/logger.js";
 import type { PawConfig } from "./util/types.js";
 
-const DEFAULT_DB_PATH = "~/.openclaw/plugins/lobs/lobs.db";
+const DEFAULT_DB_PATH = "~/.lobs/lobs.db";
 const DEFAULT_SCAN_INTERVAL = 3_000;
 
 const pawPlugin = {
