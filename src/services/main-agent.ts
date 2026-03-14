@@ -11,6 +11,7 @@ import { parseModelString, createClient } from "../runner/providers.js";
 import type { LLMMessage, LLMClient } from "../runner/providers.js";
 import { getToolDefinitions, executeTool } from "../runner/tools/index.js";
 import type { ToolName } from "../runner/types.js";
+import { loadWorkspaceContext } from "./workspace-loader.js";
 import Database from "better-sqlite3";
 
 const MAX_HISTORY = 50;
@@ -167,25 +168,24 @@ export class MainAgent {
       // 2. Prune old tool outputs
       history = this.pruneHistory(history);
 
-      // Build system prompt
+      // Reload workspace context fresh each turn (memory files change during the day)
+      const isHeartbeat = history.some(m => 
+        m.role === "user" && m.content.includes("heartbeat") && m.content.includes("HEARTBEAT")
+      );
+      const freshContext = loadWorkspaceContext(isHeartbeat);
+
+      // Build system prompt — concise: identity + context + time
+      // Tool descriptions come from the tool schemas (not hardcoded in prompt)
       const fullSystem = [
         this.systemPrompt,
         "",
-        "## Workspace Paths",
-        "- Your personal files (SOUL.md, MEMORY.md, etc.): ~/.lobs/agents/main/",
-        "- Your working directory: ~/.lobs/agents/main/",
-        "- Worker agent workspaces: ~/.lobs/agents/{type}/",
-        "- When spawning agents, set cwd to the relevant project repo (e.g., ~/lobs/lobs-core/)",
+        freshContext,
         "",
-        "## Workspace Context",
-        this.workspaceContext,
-        "",
-        "## Current Time",
-        new Date().toLocaleString("en-US", {
+        `Current time: ${new Date().toLocaleString("en-US", {
           timeZone: "America/New_York",
           dateStyle: "full",
           timeStyle: "long",
-        }),
+        })}`,
       ].join("\n");
 
       // 3. Build LLM messages

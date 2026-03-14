@@ -1,77 +1,129 @@
 /**
  * Workspace context loader — reads the main agent workspace files.
- * Follows the same pattern as worker agents (~/.lobs/agents/{type}/).
+ * 
+ * Loads files from ~/.lobs/agents/main/ with fallback to ~/.openclaw/workspace/.
+ * Context is structured and concise — no dumping entire files verbatim.
  */
 
-import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { join, basename } from "node:path";
 import { homedir } from "node:os";
 
-const AGENT_DIR = join(homedir(), ".lobs", "agents", "main");
-const WORKSPACE_DIR = join(homedir(), ".openclaw", "workspace");
+const HOME = homedir();
+const AGENT_DIR = join(HOME, ".lobs", "agents", "main");
+const WORKSPACE_DIR = join(HOME, ".openclaw", "workspace");
 
-// Core files loaded in order (from agent workspace)
-const AGENT_FILES = [
-  "SYSTEM_PROMPT.md",
-  "SOUL.md",
-  "USER.md",
-  "IDENTITY.md",
-  "AGENTS.md",
-  "MEMORY.md",
-  "TOOLS.md",
-  "HEARTBEAT.md",
-];
+/**
+ * Read a file from agent dir, falling back to workspace dir.
+ */
+function readAgentFile(filename: string): string | null {
+  for (const dir of [AGENT_DIR, WORKSPACE_DIR]) {
+    const fp = join(dir, filename);
+    if (existsSync(fp)) {
+      try {
+        return readFileSync(fp, "utf-8");
+      } catch {}
+    }
+  }
+  return null;
+}
 
-/** Load workspace files into a single context string */
-export function loadWorkspaceContext(): string {
+/**
+ * Build the main agent system prompt from SYSTEM_PROMPT.md
+ */
+export function buildMainAgentPrompt(): string {
+  const content = readAgentFile("SYSTEM_PROMPT.md");
+  if (content) return content;
+
+  return `You are Lobs, a personal AI assistant running on lobs-core.
+Be direct, concise, and helpful.`;
+}
+
+/**
+ * Load workspace context — structured, concise, no bloat.
+ * 
+ * Priority order:
+ * 1. SOUL.md — personality (always loaded, core identity)
+ * 2. USER.md — about the human (always loaded)
+ * 3. MEMORY.md — lean index (always loaded)
+ * 4. TOOLS.md — tool notes and integrations (always loaded)
+ * 5. HEARTBEAT.md — only loaded if this is a heartbeat
+ * 6. Today's memory — recent context
+ * 7. Yesterday's memory — continuity
+ */
+export function loadWorkspaceContext(isHeartbeat: boolean = false): string {
   const sections: string[] = [];
 
-  for (const filename of AGENT_FILES) {
-    // Try agent workspace first, then fall back to openclaw workspace
-    let filepath = join(AGENT_DIR, filename);
-    if (!existsSync(filepath)) {
-      filepath = join(WORKSPACE_DIR, filename);
-    }
-    if (!existsSync(filepath)) continue;
+  // Core identity files — always loaded
+  const coreFiles = ["SOUL.md", "USER.md", "MEMORY.md", "TOOLS.md"];
+  if (isHeartbeat) coreFiles.push("HEARTBEAT.md");
 
-    try {
-      const content = readFileSync(filepath, "utf-8");
+  for (const filename of coreFiles) {
+    const content = readAgentFile(filename);
+    if (content) {
       sections.push(`## ${filename}\n${content}`);
-    } catch (err) {
-      console.warn(`[workspace] Failed to read ${filename}:`, err);
     }
   }
 
-  // Also load today's memory file
-  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" }); // YYYY-MM-DD
-  const memoryPaths = [
-    join(AGENT_DIR, "context", "memory", `${today}.md`),
-    join(WORKSPACE_DIR, "memory", `${today}.md`),
-  ];
-  for (const mp of memoryPaths) {
-    if (existsSync(mp)) {
-      try {
-        const content = readFileSync(mp, "utf-8");
-        sections.push(`## Today's Memory (${today})\n${content}`);
-      } catch {}
-      break;
+  // Today's memory file
+  const today = getDateString(0);
+  const yesterday = getDateString(-1);
+
+  for (const [label, date] of [["Today", today], ["Yesterday", yesterday]] as const) {
+    const content = findMemoryFile(date);
+    if (content) {
+      // Truncate to last 4000 chars if huge
+      const trimmed = content.length > 4000
+        ? `...(earlier entries truncated)\n\n${content.slice(-4000)}`
+        : content;
+      sections.push(`## ${label}'s Memory (${date})\n${trimmed}`);
     }
   }
 
   return sections.join("\n\n");
 }
 
-/** Build the main agent system prompt from SYSTEM_PROMPT.md */
-export function buildMainAgentPrompt(): string {
-  const promptPath = join(AGENT_DIR, "SYSTEM_PROMPT.md");
-  if (existsSync(promptPath)) {
+/**
+ * Get date string in YYYY-MM-DD format, offset by days from today.
+ */
+function getDateString(offsetDays: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + offsetDays);
+  return d.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+}
+
+/**
+ * Find and read a memory file for a given date.
+ */
+function findMemoryFile(date: string): string | null {
+  const paths = [
+    join(AGENT_DIR, "context", "memory", `${date}.md`),
+    join(WORKSPACE_DIR, "memory", `${date}.md`),
+  ];
+  for (const p of paths) {
+    if (existsSync(p)) {
+      try {
+        return readFileSync(p, "utf-8");
+      } catch {}
+    }
+  }
+  return null;
+}
+
+/**
+ * List available project context files.
+ */
+export function listProjectFiles(): string[] {
+  const files: string[] = [];
+  for (const dir of [join(AGENT_DIR, "context"), WORKSPACE_DIR]) {
+    if (!existsSync(dir)) continue;
     try {
-      return readFileSync(promptPath, "utf-8");
+      for (const f of readdirSync(dir)) {
+        if (f.startsWith("PROJECT-") && f.endsWith(".md")) {
+          files.push(f);
+        }
+      }
     } catch {}
   }
-
-  // Fallback if no SYSTEM_PROMPT.md exists
-  return `You are Lobs, a personal AI assistant running on lobs-core.
-You have access to tools for file operations, shell commands, web search, memory, and communication.
-Be direct, concise, and helpful. Follow SOUL.md for personality.`;
+  return [...new Set(files)];
 }
