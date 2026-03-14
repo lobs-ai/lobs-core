@@ -27,6 +27,13 @@ const DEFAULT_MODEL = "strong";  // Chat defaults to strong tier (opus)
 const DEFAULT_CWD = process.env.HOME ?? "/tmp";
 const MAX_CONCURRENT_CHANNELS = 3; // Max simultaneous channel conversations
 
+/** Image attachment data (base64-encoded) */
+export interface ImageAttachment {
+  data: string;          // base64-encoded image data
+  mediaType: string;     // e.g. "image/png", "image/jpeg", "image/gif", "image/webp"
+  filename?: string;     // original filename
+}
+
 interface PendingMessage {
   id: string;
   messageId?: string;  // Platform message ID (Discord snowflake, etc.)
@@ -39,6 +46,8 @@ interface PendingMessage {
   isDm?: boolean;         // true if DM, false if guild channel
   isMentioned?: boolean;  // true if bot was @mentioned
   chatType?: "dm" | "group" | "nexus" | "system";
+  // Attachments
+  images?: ImageAttachment[];  // Image attachments to include in the message
 }
 
 /** SSE event types emitted during agent processing */
@@ -141,6 +150,9 @@ export class MainAgent {
     } catch { /* already exists */ }
     try {
       this.db.exec(`ALTER TABLE channel_sessions ADD COLUMN model_override TEXT`);
+    } catch { /* already exists */ }
+    try {
+      this.db.exec(`ALTER TABLE main_agent_messages ADD COLUMN metadata TEXT`);
     } catch { /* already exists */ }
   }
 
@@ -403,12 +415,15 @@ export class MainAgent {
       return;
     }
 
-    // Store in DB message history
+    // Store in DB message history (with image metadata if present)
+    const metadata = msg.images?.length
+      ? JSON.stringify({ images: msg.images })
+      : null;
     this.db
       .prepare(
         `INSERT INTO main_agent_messages
-           (id, role, content, author_id, author_name, channel_id, platform_message_id, token_estimate)
-         VALUES (?, 'user', ?, ?, ?, ?, ?, ?)`,
+           (id, role, content, author_id, author_name, channel_id, platform_message_id, token_estimate, metadata)
+         VALUES (?, 'user', ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         msg.id,
@@ -418,6 +433,7 @@ export class MainAgent {
         msg.channelId,
         msg.messageId || null,
         Math.ceil(msg.content.length / 4),
+        metadata,
       );
 
     // Update channel session state
@@ -525,11 +541,38 @@ export class MainAgent {
         chatContextNote,
       ].join("\n");
 
-      // 3. Build LLM messages
-      let messages: LLMMessage[] = history.map((m) => ({
-        role: m.role as "user" | "assistant",
-        content: m.content,
-      }));
+      // 3. Build LLM messages (with image content blocks when present)
+      let messages: LLMMessage[] = history.map((m) => {
+        const role = m.role as "user" | "assistant";
+
+        // Check for image metadata on user messages
+        if (role === "user" && m.metadata) {
+          try {
+            const meta = JSON.parse(m.metadata);
+            if (meta.images?.length) {
+              const contentBlocks: Array<Record<string, unknown>> = [];
+              // Add images first
+              for (const img of meta.images) {
+                contentBlocks.push({
+                  type: "image",
+                  source: {
+                    type: "base64",
+                    media_type: img.mediaType,
+                    data: img.data,
+                  },
+                });
+              }
+              // Add text content if any
+              if (m.content) {
+                contentBlocks.push({ type: "text", text: m.content });
+              }
+              return { role, content: contentBlocks };
+            }
+          } catch { /* invalid metadata, fall through */ }
+        }
+
+        return { role, content: m.content };
+      });
 
       // 4. Add queued messages for this channel
       const queuedText = this.drainQueue(replyChannelId);
@@ -936,6 +979,7 @@ export class MainAgent {
     role: string;
     content: string;
     created_at: string;
+    metadata?: string | null;
   }> {
     const MAX_CONTEXT_TOKENS = 150000;
     const CHARS_PER_TOKEN = 4;
@@ -944,11 +988,11 @@ export class MainAgent {
     // Load more than we need, then trim — filter by channel
     const rows = this.db
       .prepare(
-        `SELECT role, content, created_at FROM main_agent_messages
+        `SELECT role, content, created_at, metadata FROM main_agent_messages
          WHERE channel_id = ?
          ORDER BY created_at DESC LIMIT 200`,
       )
-      .all(channelId) as Array<{ role: string; content: string; created_at: string }>;
+      .all(channelId) as Array<{ role: string; content: string; created_at: string; metadata: string | null }>;
 
     rows.reverse(); // chronological
 
@@ -973,8 +1017,8 @@ export class MainAgent {
   }
 
   private pruneHistory(
-    messages: Array<{ role: string; content: string; created_at: string }>,
-  ): Array<{ role: string; content: string; created_at: string }> {
+    messages: Array<{ role: string; content: string; created_at: string; metadata?: string | null }>,
+  ): Array<{ role: string; content: string; created_at: string; metadata?: string | null }> {
     const KEEP_RECENT = 8; // Keep last 8 assistant turns fully intact
     const MAX_TOOL_OUTPUT = 500; // Truncate old tool outputs to this many chars
     const PLACEHOLDER =

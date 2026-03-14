@@ -75,10 +75,9 @@ export async function handleChatRequest(
         createdAt: now,
       }).run();
 
-      // Get the current assistant message count so we can detect new ones
-      const beforeCount = mainAgent.getAssistantMessageCount?.(channelId) ?? 0;
-
-      // Listen for tool events and persist them as chat messages
+      // Listen for agent events and persist them as chat messages.
+      // Crucially, assistant_reply is handled HERE so the message is in the DB
+      // BEFORE the frontend's SSE-triggered reloadMessages() query hits.
       const toolListener = (event: AgentStreamEvent) => {
         if (event.channelId !== channelId) return;
         if (event.type === "tool_start") {
@@ -122,6 +121,23 @@ export async function handleChatRequest(
               .where(eq(chatMessages.id, existing.id))
               .run();
           }
+        } else if (event.type === "assistant_reply") {
+          // Persist assistant message SYNCHRONOUSLY so it's in the DB before
+          // the frontend's SSE-triggered reloadMessages() fires.
+          if (event.result) {
+            db.insert(chatMessages).values({
+              id: randomUUID().replace(/-/g, ""),
+              sessionKey,
+              role: "assistant",
+              content: event.result,
+              createdAt: new Date(event.timestamp).toISOString(),
+            }).run();
+
+            db.update(chatSessions)
+              .set({ lastMessageAt: new Date(event.timestamp).toISOString() })
+              .where(eq(chatSessions.sessionKey, sessionKey))
+              .run();
+          }
         } else if (event.type === "done" || event.type === "error") {
           // Cleanup listener when done
           mainAgent.events.off("stream", toolListener);
@@ -130,7 +146,8 @@ export async function handleChatRequest(
 
       mainAgent.events.on("stream", toolListener);
 
-      // Send to main agent (async, don't wait)
+      // Send to main agent (async, don't wait for completion).
+      // The toolListener above handles persisting all messages (tools + assistant replies).
       mainAgent.handleMessage({
         id: messageId,
         content,
@@ -138,45 +155,6 @@ export async function handleChatRequest(
         authorName: "Rafe",
         channelId,
         timestamp: Date.now(),
-      }).then(async () => {
-        // handleMessage resolved — but if the message was queued (channel busy),
-        // it returns immediately without processing. We need to wait for our
-        // specific message to be processed, not just for the channel to go idle once.
-        try {
-          // Wait for the channel to finish processing AND have a new assistant message
-          const deadline = Date.now() + 600_000;
-          while (Date.now() < deadline) {
-            const currentCount = mainAgent.getAssistantMessageCount?.(channelId) ?? 0;
-            const isIdle = !mainAgent.isChannelProcessing(channelId);
-            
-            // Channel is idle AND we have a new assistant message → done
-            if (isIdle && currentCount > beforeCount) break;
-            
-            // Channel is idle, no queue, but no new message → agent chose not to reply (e.g. NO_REPLY)
-            if (isIdle && (mainAgent.getChannelQueueDepth(channelId) ?? 0) === 0) break;
-            
-            await new Promise(r => setTimeout(r, 500));
-          }
-          
-          const reply = mainAgent.getAssistantMessageSince?.(channelId, beforeCount);
-          
-          if (reply) {
-            db.insert(chatMessages).values({
-              id: randomUUID().replace(/-/g, ""),
-              sessionKey,
-              role: "assistant",
-              content: reply,
-              createdAt: new Date().toISOString(),
-            }).run();
-          }
-          
-          db.update(chatSessions)
-            .set({ lastMessageAt: new Date().toISOString() })
-            .where(eq(chatSessions.sessionKey, sessionKey))
-            .run();
-        } catch (err) {
-          log().warn(`[chat] Processing failed for ${channelId}: ${err}`);
-        }
       }).catch((err: unknown) => {
         log().error(`[chat] Message handling failed: ${err}`);
       });
@@ -202,6 +180,7 @@ export async function handleChatRequest(
             role: m.role,
             content: m.content,
             timestamp: m.createdAt,
+            metadata: m.messageMetadata,
           }));
       } else {
         messages = db.select()
@@ -213,6 +192,7 @@ export async function handleChatRequest(
             role: m.role,
             content: m.content,
             timestamp: m.createdAt,
+            metadata: m.messageMetadata,
           }));
       }
 
@@ -230,6 +210,7 @@ export async function handleChatRequest(
           role: m.role,
           content: m.content,
           timestamp: m.createdAt,
+          metadata: m.messageMetadata,
         }));
 
       return json(res, { messages });

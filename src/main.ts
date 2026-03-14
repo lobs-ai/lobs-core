@@ -288,6 +288,7 @@ async function main() {
           isDm: msg.isDm,
           isMentioned: msg.isMentioned,
           chatType: msg.isDm ? "dm" : "group",
+          images: msg.images,
         });
       });
 

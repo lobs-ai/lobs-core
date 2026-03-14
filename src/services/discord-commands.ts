@@ -49,6 +49,20 @@ export async function registerSlashCommands(client: Client, config: DiscordConfi
     new SlashCommandBuilder()
       .setName('help')
       .setDescription('Show available commands'),
+    
+    new SlashCommandBuilder()
+      .setName('toolsteps')
+      .setDescription('Control tool step visibility in this channel')
+      .addStringOption(opt =>
+        opt.setName('mode')
+          .setDescription('on = full details, compact = tool names only, off = hide all')
+          .setRequired(false)
+          .addChoices(
+            { name: 'on — show tool names + inputs + results', value: 'on' },
+            { name: 'compact — show tool names only', value: 'compact' },
+            { name: 'off — hide all tool steps', value: 'off' },
+          )
+      ),
   ];
 
   const rest = new REST({ version: '10' }).setToken(config.botToken);
@@ -90,6 +104,9 @@ export async function handleSlashCommand(interaction: ChatInputCommandInteractio
         break;
       case 'help':
         await handleHelpCommand(interaction);
+        break;
+      case 'toolsteps':
+        await handleToolStepsCommand(interaction);
         break;
       default:
         await interaction.reply({ content: 'Unknown command', ephemeral: true });
@@ -267,12 +284,49 @@ async function handleHelpCommand(interaction: ChatInputCommandInteraction): Prom
       { name: '/status', value: 'Show bot and system status', inline: false },
       { name: '/tasks', value: 'List active and recent tasks', inline: false },
       { name: '/model [name]', value: 'Show or set the AI model for this channel', inline: false },
+      { name: '/toolsteps [mode]', value: 'Control tool step visibility (on/compact/off)', inline: false },
       { name: '/clear', value: 'Clear conversation history', inline: false },
       { name: '/help', value: 'Show this help message', inline: false },
     )
     .setTimestamp();
   
   await interaction.reply({ embeds: [embed], ephemeral: true });
+}
+
+/** /toolsteps - Control tool step visibility for this Discord channel */
+async function handleToolStepsCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const channelId = interaction.channelId;
+  const mode = interaction.options.get('mode')?.value as string | undefined;
+
+  if (!mainAgentRef) {
+    await interaction.reply({ content: 'Main agent not available', ephemeral: true });
+    return;
+  }
+
+  if (!mode) {
+    // Show current setting
+    const current = mainAgentRef.getDiscordToolsMode(channelId);
+    const descriptions: Record<string, string> = {
+      on: '**on** — tool names, inputs, and results',
+      compact: '**compact** — tool names only',
+      off: '**off** — no tool steps shown',
+    };
+    await interaction.reply({
+      content: `🔧 Tool steps in this channel: ${descriptions[current]}\n\nChange with \`/toolsteps mode:<on|compact|off>\``,
+      ephemeral: true,
+    });
+    return;
+  }
+
+  mainAgentRef.setDiscordToolsMode(channelId, mode as any);
+
+  const labels: Record<string, string> = {
+    on: '🔧 Tool steps: **on** — showing tool names, inputs, and results',
+    compact: '🔧 Tool steps: **compact** — showing tool names only',
+    off: '🔧 Tool steps: **off** — hiding all tool steps',
+  };
+
+  await interaction.reply({ content: labels[mode] || `Tool steps set to: ${mode}`, ephemeral: true });
 }
 
 /** Normalize short model names to tier names or full identifiers */

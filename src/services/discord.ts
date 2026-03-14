@@ -145,9 +145,9 @@ class DiscordService {
   }
 
   /** Register event handler for messages */
-  onMessage(handler: (message: { messageId: string; content: string; channelId: string; authorId: string; authorTag: string; isDm: boolean; isMentioned: boolean }) => void): void {
+  onMessage(handler: (message: { messageId: string; content: string; channelId: string; authorId: string; authorTag: string; isDm: boolean; isMentioned: boolean; images?: Array<{ data: string; mediaType: string; filename?: string }> }) => void): void {
     if (!this.client || !this.config) return;
-    this.client.on("messageCreate", (msg) => {
+    this.client.on("messageCreate", async (msg) => {
       if (msg.author.bot) return; // Ignore bot messages
       
       // Filter DMs
@@ -171,16 +171,126 @@ class DiscordService {
       const isDm = !msg.guildId;
       const isMentioned = msg.mentions.has(this.client!.user!);
 
+      // Build content: message text + any text file attachments
+      let content = msg.content;
+      let images: Array<{ data: string; mediaType: string; filename?: string }> | undefined;
+
+      if (msg.attachments.size > 0) {
+        const textAttachments = await this.fetchTextAttachments(msg.attachments);
+        if (textAttachments) {
+          content = content ? `${content}\n\n${textAttachments}` : textAttachments;
+        }
+        // Also fetch image attachments
+        images = await this.fetchImageAttachments(msg.attachments);
+      }
+
       handler({
         messageId: msg.id,
-        content: msg.content,
+        content,
         channelId: msg.channelId,
         authorId: msg.author.id,
         authorTag: msg.author.tag,
         isDm,
         isMentioned,
+        images: images?.length ? images : undefined,
       });
     });
+  }
+
+  /** Fetch text content from Discord message attachments */
+  private async fetchTextAttachments(attachments: import("discord.js").Collection<string, import("discord.js").Attachment>): Promise<string | null> {
+    // File extensions and MIME types we consider readable as text
+    const TEXT_EXTENSIONS = new Set([
+      ".txt", ".md", ".json", ".yaml", ".yml", ".toml", ".xml", ".csv", ".tsv",
+      ".js", ".ts", ".jsx", ".tsx", ".py", ".rb", ".rs", ".go", ".java", ".c", ".cpp", ".h", ".hpp",
+      ".cs", ".swift", ".kt", ".scala", ".sh", ".bash", ".zsh", ".fish", ".ps1",
+      ".html", ".css", ".scss", ".less", ".sass",
+      ".sql", ".graphql", ".gql",
+      ".env", ".ini", ".cfg", ".conf", ".properties",
+      ".dockerfile", ".makefile", ".cmake",
+      ".r", ".m", ".lua", ".pl", ".pm", ".php",
+      ".log", ".diff", ".patch",
+      ".tex", ".bib", ".rst", ".adoc", ".org",
+      ".gitignore", ".gitattributes", ".editorconfig",
+      ".eslintrc", ".prettierrc", ".babelrc",
+      ".svelte", ".vue", ".astro",
+    ]);
+    const TEXT_MIME_PREFIXES = ["text/", "application/json", "application/xml", "application/yaml", "application/toml", "application/javascript", "application/typescript"];
+    const MAX_FILE_SIZE = 512 * 1024; // 512KB limit per file
+
+    const parts: string[] = [];
+
+    for (const [, attachment] of attachments) {
+      const ext = attachment.name ? "." + attachment.name.split(".").pop()?.toLowerCase() : "";
+      const isTextByExt = TEXT_EXTENSIONS.has(ext) || attachment.name?.toLowerCase() === "dockerfile" || attachment.name?.toLowerCase() === "makefile";
+      const isTextByMime = attachment.contentType ? TEXT_MIME_PREFIXES.some(p => attachment.contentType!.startsWith(p)) : false;
+
+      if (!isTextByExt && !isTextByMime) continue;
+      if (attachment.size > MAX_FILE_SIZE) {
+        parts.push(`[Attachment: ${attachment.name} — skipped, too large (${(attachment.size / 1024).toFixed(0)}KB)]`);
+        continue;
+      }
+
+      try {
+        const response = await fetch(attachment.url);
+        if (!response.ok) {
+          parts.push(`[Attachment: ${attachment.name} — failed to download]`);
+          continue;
+        }
+        const text = await response.text();
+        parts.push(`--- File: ${attachment.name} ---\n${text}\n--- End: ${attachment.name} ---`);
+      } catch (err) {
+        parts.push(`[Attachment: ${attachment.name} — error: ${err instanceof Error ? err.message : "unknown"}]`);
+      }
+    }
+
+    return parts.length > 0 ? parts.join("\n\n") : null;
+  }
+
+  /** Fetch image attachments as base64 data for vision */
+  private async fetchImageAttachments(
+    attachments: import("discord.js").Collection<string, import("discord.js").Attachment>,
+  ): Promise<Array<{ data: string; mediaType: string; filename?: string }>> {
+    const IMAGE_TYPES: Record<string, string> = {
+      "image/png": "image/png",
+      "image/jpeg": "image/jpeg",
+      "image/gif": "image/gif",
+      "image/webp": "image/webp",
+    };
+    const MAX_IMAGE_SIZE = 20 * 1024 * 1024; // 20MB limit (Anthropic's limit)
+    const results: Array<{ data: string; mediaType: string; filename?: string }> = [];
+
+    for (const [, attachment] of attachments) {
+      // Check if it's an image by content type or extension
+      const contentType = attachment.contentType?.toLowerCase() || "";
+      const ext = attachment.name ? "." + attachment.name.split(".").pop()?.toLowerCase() : "";
+      const extToMime: Record<string, string> = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+      };
+
+      const mediaType = IMAGE_TYPES[contentType] || extToMime[ext];
+      if (!mediaType) continue; // Not an image we can handle
+      if (attachment.size > MAX_IMAGE_SIZE) continue; // Too large
+
+      try {
+        const response = await fetch(attachment.url);
+        if (!response.ok) continue;
+        const buffer = Buffer.from(await response.arrayBuffer());
+        results.push({
+          data: buffer.toString("base64"),
+          mediaType,
+          filename: attachment.name || undefined,
+        });
+      } catch (err) {
+        console.error(`[discord] Failed to fetch image ${attachment.name}:`, err);
+      }
+    }
+
+    return results;
   }
 
   /** Send a typing indicator to a channel */
