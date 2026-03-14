@@ -394,14 +394,16 @@ export class MainAgent {
     // Mark this channel as being processed
     this.processingChannels.add(replyChannelId);
 
-    // Total conversation timeout — 5 minutes max, prevents stuck channels
+    // Total conversation timeout — prevents stuck channels
+    // 30 minutes for all session types — allow big work between messages
+    const timeoutMinutes = 30;
     const conversationTimeout = setTimeout(() => {
-      console.error(`[main-agent] Conversation timeout (5min) for channel ${replyChannelId.slice(0, 12)} — force releasing`);
+      console.error(`[main-agent] Conversation timeout (${timeoutMinutes}min) for channel ${replyChannelId.slice(0, 12)} — force releasing`);
       this.processingChannels.delete(replyChannelId);
       this.channelQueues.delete(replyChannelId);  // Clear queued messages to prevent memory leak
       this.channelChatType.delete(replyChannelId);  // Clean up session metadata
       this.updateChannelSession(replyChannelId, "idle");
-    }, 5 * 60 * 1000);
+    }, timeoutMinutes * 60 * 1000);
 
     try {
       if (this.onTyping) this.onTyping(replyChannelId);
@@ -480,9 +482,8 @@ export class MainAgent {
       const config = parseModelString(effectiveModel);
       const client: LLMClient = createClient(config);
 
-      // Agent loop — LLM ↔ tool execution
-      let maxTurns = 50;
-      while (maxTurns-- > 0) {
+      // Agent loop — LLM ↔ tool execution (no turn limit, timeout handles runaway)
+      while (true) {
         if (this.onTyping) this.onTyping(replyChannelId);
 
         const response = await client.createMessage({

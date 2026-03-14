@@ -62,6 +62,11 @@ class DiscordService {
       console.warn("[discord] Bot not connected, dropping message");
       return;
     }
+    // Guard: only Discord snowflake IDs (numeric strings) should reach here
+    if (!/^\d+$/.test(channelId)) {
+      console.warn(`[discord] Ignoring non-snowflake channel ID: ${channelId.slice(0, 40)}`);
+      return;
+    }
     try {
       const channel = await this.client.channels.fetch(channelId);
       if (channel && channel.isTextBased()) {
@@ -81,6 +86,7 @@ class DiscordService {
     footer?: string;
   }): Promise<void> {
     if (!this.client || !this.ready) return;
+    if (!/^\d+$/.test(channelId)) return;
     try {
       const channel = await this.client.channels.fetch(channelId);
       if (channel && channel.isTextBased()) {
@@ -176,6 +182,7 @@ class DiscordService {
   /** Send a typing indicator to a channel */
   async sendTyping(channelId: string): Promise<void> {
     if (!this.client || !this.ready) return;
+    if (!/^\d+$/.test(channelId)) return;
     try {
       const channel = await this.client.channels.fetch(channelId);
       if (channel && channel.isTextBased()) {
@@ -189,6 +196,7 @@ class DiscordService {
   /** Reply to a specific message in a channel */
   async reply(channelId: string, messageId: string, content: string): Promise<void> {
     if (!this.client || !this.ready) return;
+    if (!/^\d+$/.test(channelId)) return;
     try {
       const channel = await this.client.channels.fetch(channelId);
       if (channel && channel.isTextBased()) {
@@ -204,6 +212,7 @@ class DiscordService {
   /** Add a reaction emoji to a Discord message */
   async react(channelId: string, messageId: string, emoji: string): Promise<void> {
     if (!this.client || !this.ready) return;
+    if (!/^\d+$/.test(channelId)) return;
     try {
       const channel = await this.client.channels.fetch(channelId);
       if (channel && channel.isTextBased()) {
@@ -219,6 +228,7 @@ class DiscordService {
   /** Remove a reaction from a Discord message */
   async removeReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
     if (!this.client || !this.ready) return;
+    if (!/^\d+$/.test(channelId)) return;
     try {
       const channel = await this.client.channels.fetch(channelId);
       if (channel && channel.isTextBased()) {
