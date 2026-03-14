@@ -9,7 +9,7 @@ import { handleWorkerRequest } from "./worker.js";
 import { handleWorkflowRequest } from "./workflows.js";
 import { handleCalendarRequest } from "./calendar.js";
 import { handleOrchestratorRequest } from "./orchestrator.js";
-import { handleChatRequest } from "./chat.js";
+import { handleChatRequest, handleMainAgentChat } from "./chat.js";
 import { handleMemoriesRequest } from "./memories.js";
 import { handleUsageRequest } from "./usage.js";
 import { handleResearchRequest } from "./research.js";
@@ -67,6 +67,7 @@ export function registerPawRouter(api: OpenClawPluginApi): void {
         case "calendar":        await handleCalendarRequest(req, res, parts[1], parts); return true;
         case "orchestrator":    await handleOrchestratorRequest(req, res, parts.slice(1)); return true;
         case "chat":            await handleChatRequest(req, res, parts[1], parts); return true;
+        case "agent":           await handleMainAgentChat(req, res, parts[1]); return true;
         case "memories":        await handleMemoriesRequest(req, res, parts[1], parts); return true;
         case "usage":           await handleUsageRequest(req, res, parts[1]); return true;
         case "research":        await handleResearchRequest(req, res, parts[1], parts); return true;
@@ -139,6 +140,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       case "workflow-runs":   await handleWorkflowRunsRequest(req, res, parts[1], parts); return;
       case "orchestrator":    await handleOrchestratorRequest(req, res, parts.slice(1)); return;
       case "chat":            await handleChatRequest(req, res, parts[1], parts); return;
+      case "agent":           await handleMainAgentChat(req, res, parts[1]); return;
       case "memories":        await handleMemoriesRequest(req, res, parts[1], parts); return;
       case "usage":           await handleUsageRequest(req, res, parts[1]); return;
       case "reflections":     await handleReflectionsRequest(req, res, parts[1], parts); return;

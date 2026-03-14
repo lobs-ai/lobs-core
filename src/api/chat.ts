@@ -223,3 +223,96 @@ export async function handleChatRequest(
 
   return error(res, "Unknown chat endpoint", 404);
 }
+
+// ─── Main Agent Direct Chat ────────────────────────────────────────────
+
+export async function handleMainAgentChat(
+  req: IncomingMessage,
+  res: ServerResponse,
+  sub?: string,
+): Promise<void> {
+  const method = req.method?.toUpperCase() ?? "GET";
+  const mainAgent = (globalThis as any).__lobsMainAgent;
+  
+  // GET /api/agent/messages — get main agent conversation history
+  if (sub === "messages" && method === "GET") {
+    if (!mainAgent) return json(res, { messages: [] });
+    
+    const db = getDb();
+    // Read from main_agent_messages table directly
+    const rawDb = (globalThis as any).__lobsMainAgent?.db;
+    if (!rawDb) return json(res, { messages: [] });
+    
+    const messages = rawDb.prepare(`
+      SELECT role, content, author_name, channel_id, created_at 
+      FROM main_agent_messages 
+      ORDER BY created_at DESC LIMIT 100
+    `).all().reverse();
+    
+    return json(res, { messages });
+  }
+  
+  // POST /api/agent/send — send message to main agent
+  if (sub === "send" && method === "POST") {
+    if (!mainAgent) return error(res, "Main agent not initialized", 503);
+    
+    const body = (await parseBody(req)) as { content?: string };
+    const content = body?.content?.trim();
+    if (!content) return error(res, "content is required", 400);
+    
+    // Collect reply
+    let replyText = "";
+    const channelId = "nexus-chat";
+    
+    const replyPromise = new Promise<string>((resolve) => {
+      const originalHandler = (mainAgent as any).onReply;
+      
+      mainAgent.setReplyHandler(async (ch: string, text: string) => {
+        if (ch === channelId) {
+          replyText += (replyText ? "\n" : "") + text;
+        }
+        if (originalHandler && ch !== channelId) {
+          await originalHandler(ch, text);
+        }
+      });
+      
+      mainAgent.handleMessage({
+        id: randomUUID(),
+        content,
+        authorId: "nexus-user",
+        authorName: "Rafe",
+        channelId,
+        timestamp: Date.now(),
+      }).then(() => {
+        const check = () => {
+          if (!mainAgent.isProcessing()) {
+            mainAgent.setReplyHandler(originalHandler);
+            resolve(replyText || "");
+          } else {
+            setTimeout(check, 500);
+          }
+        };
+        setTimeout(check, 500);
+      });
+      
+      setTimeout(() => {
+        mainAgent.setReplyHandler(originalHandler);
+        resolve(replyText || "(timed out)");
+      }, 120000);
+    });
+    
+    const reply = await replyPromise;
+    return json(res, { reply, timestamp: new Date().toISOString() });
+  }
+  
+  // GET /api/agent/status — main agent status
+  if (sub === "status" && method === "GET") {
+    return json(res, {
+      ready: !!mainAgent,
+      processing: mainAgent?.isProcessing() ?? false,
+      queueDepth: mainAgent?.getQueueDepth() ?? 0,
+    });
+  }
+  
+  return error(res, "Unknown agent endpoint", 404);
+}
