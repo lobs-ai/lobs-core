@@ -66,16 +66,18 @@ export async function registerSlashCommands(client: Client, config: DiscordConfi
   ];
 
   const rest = new REST({ version: '10' }).setToken(config.botToken);
+  const commandData = commands.map(c => c.toJSON());
   
   try {
-    console.log('[discord-commands] Registering slash commands...');
+    console.log('[discord-commands] Registering global slash commands...');
+    // Register globally so commands work in DMs + all guilds
     await rest.put(
-      Routes.applicationGuildCommands(client.user!.id, config.guildId),
-      { body: commands.map(c => c.toJSON()) },
+      Routes.applicationCommands(client.user!.id),
+      { body: commandData },
     );
-    console.log('[discord-commands] Slash commands registered successfully');
+    console.log('[discord-commands] Global slash commands registered successfully');
   } catch (err) {
-    console.error('[discord-commands] Failed to register slash commands:', err);
+    console.error('[discord-commands] Failed to register global slash commands:', err);
   }
 }
 

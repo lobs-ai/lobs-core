@@ -375,7 +375,7 @@ class OpenAICompatibleClient implements LLMClient {
 
     for (const msg of params.messages) {
       if (msg.role === "user") {
-        // Check if this is tool results
+        // Check if this is an array content (tool results, images, etc.)
         if (Array.isArray(msg.content)) {
           const toolResults = msg.content.filter(
             (c: Record<string, unknown>) => c.type === "tool_result"
@@ -390,6 +390,31 @@ class OpenAICompatibleClient implements LLMClient {
                   : JSON.stringify((tr as Record<string, unknown>).content),
               });
             }
+            continue;
+          }
+
+          // Convert Anthropic-style content blocks to OpenAI multimodal format
+          // Handles image blocks and text blocks
+          const hasImages = msg.content.some((c: Record<string, unknown>) => c.type === "image");
+          if (hasImages) {
+            const openaiParts: Array<Record<string, unknown>> = [];
+            for (const block of msg.content) {
+              const b = block as Record<string, unknown>;
+              if (b.type === "text") {
+                openaiParts.push({ type: "text", text: b.text });
+              } else if (b.type === "image") {
+                const source = b.source as Record<string, unknown>;
+                if (source?.type === "base64") {
+                  openaiParts.push({
+                    type: "image_url",
+                    image_url: {
+                      url: `data:${source.media_type};base64,${source.data}`,
+                    },
+                  });
+                }
+              }
+            }
+            messages.push({ role: "user", content: openaiParts });
             continue;
           }
         }
