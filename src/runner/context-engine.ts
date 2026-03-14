@@ -451,14 +451,51 @@ export async function assembleContext(params: {
     queries.push(classification.topic);
   }
 
-  // Memory layer — decisions, learnings, preferences
-  const memoryResults = await searchMemory(
-    queries[0],
-    ["workspace", "knowledge"],
-    8,
-    memoryUrl,
-  );
+  // Batch all memory searches into a single HTTP round-trip
+  const batchSearches = [
+    { id: "memory", query: queries[0], collections: ["workspace", "knowledge"], maxResults: 8 },
+    { id: "project", query: queries[0], collections: projectCollections ?? ["projects", "knowledge"], maxResults: 8 },
+    { id: "session", query: queries[0], collections: ["sessions"], maxResults: 5 },
+  ];
 
+  let memoryResults: MemorySearchResult[] = [];
+  let projectResults: MemorySearchResult[] = [];
+  let sessionResults: MemorySearchResult[] = [];
+
+  try {
+    // Try batch endpoint first (single HTTP round-trip instead of 3)
+    const batchResponse = await fetch(`${memoryUrl}/search/batch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ searches: batchSearches }),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (batchResponse.ok) {
+      const batchData = await batchResponse.json() as {
+        results: Record<string, { results: MemorySearchResult[] }>;
+      };
+      memoryResults = batchData.results?.memory?.results ?? [];
+      projectResults = batchData.results?.project?.results ?? [];
+      sessionResults = batchData.results?.session?.results ?? [];
+    } else {
+      // Batch endpoint not available — fall back to parallel individual requests
+      [memoryResults, projectResults, sessionResults] = await Promise.all([
+        searchMemory(queries[0], ["workspace", "knowledge"], 8, memoryUrl),
+        searchMemory(queries[0], projectCollections ?? ["projects", "knowledge"], 8, memoryUrl),
+        searchMemory(queries[0], ["sessions"], 5, memoryUrl),
+      ]);
+    }
+  } catch {
+    // Server down — fall back to parallel individual requests (which have their own grep fallback)
+    [memoryResults, projectResults, sessionResults] = await Promise.all([
+      searchMemory(queries[0], ["workspace", "knowledge"], 8, memoryUrl),
+      searchMemory(queries[0], projectCollections ?? ["projects", "knowledge"], 8, memoryUrl),
+      searchMemory(queries[0], ["sessions"], 5, memoryUrl),
+    ]);
+  }
+
+  // Memory layer — decisions, learnings, preferences
   const memoryChunks: ContextChunk[] = memoryResults
     .filter(r => categorizeResult(r) === "memory")
     .map(r => ({
@@ -472,13 +509,6 @@ export async function assembleContext(params: {
   layers.push(fillLayer("memory", memoryChunks, budget.allocations.memory));
 
   // Project layer — docs, READMEs, ADRs
-  const projectResults = await searchMemory(
-    queries[0],
-    projectCollections ?? ["projects", "knowledge"],
-    8,
-    memoryUrl,
-  );
-
   const projectChunks: ContextChunk[] = projectResults
     .filter(r => {
       const cat = categorizeResult(r);
@@ -500,13 +530,6 @@ export async function assembleContext(params: {
   layers.push(fillLayer("code", codeChunks, budget.allocations.code));
 
   // Session layer — recent conversation context
-  const sessionResults = await searchMemory(
-    queries[0],
-    ["sessions"],
-    5,
-    memoryUrl,
-  );
-
   const sessionChunks: ContextChunk[] = sessionResults.map(r => ({
     source: r.path,
     content: r.snippet,

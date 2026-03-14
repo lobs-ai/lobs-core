@@ -72,6 +72,60 @@ export async function memorySearch(
 }
 
 /**
+ * Batch search — multiple queries in one HTTP round-trip.
+ * Falls back to sequential memorySearch calls if server is down.
+ */
+export interface BatchSearchItem {
+  id: string;
+  query: string;
+  maxResults?: number;
+  collections?: string[];
+  conversationContext?: string;
+}
+
+export async function memorySearchBatch(
+  searches: BatchSearchItem[],
+): Promise<{
+  results: Record<string, SearchResult[]>;
+  source: "server" | "grep";
+  timeMs: number;
+}> {
+  const start = Date.now();
+
+  // Try batch HTTP endpoint
+  try {
+    const response = await fetch(`${MEMORY_SERVER}/search/batch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ searches }),
+      signal: AbortSignal.timeout(10_000), // 10s for batch
+    });
+
+    if (response.ok) {
+      const data = await response.json() as {
+        results: Record<string, { results: SearchResult[] }>;
+      };
+      // Flatten: extract .results from each SearchResponse
+      const flat: Record<string, SearchResult[]> = {};
+      for (const [id, sr] of Object.entries(data.results)) {
+        flat[id] = sr.results || [];
+      }
+      return { results: flat, source: "server", timeMs: Date.now() - start };
+    }
+  } catch {
+    // Server not available, fall through
+  }
+
+  // Fallback: sequential grep searches
+  const results: Record<string, SearchResult[]> = {};
+  for (const item of searches) {
+    const { results: r } = await memorySearch(item.query, item.maxResults ?? 8, item.collections, item.conversationContext);
+    results[item.id] = r;
+  }
+  return { results, source: "grep", timeMs: Date.now() - start };
+}
+
+/**
  * Simple but effective grep fallback
  */
 function grepSearch(query: string, maxResults: number): SearchResult[] {
