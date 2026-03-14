@@ -45,7 +45,7 @@ export interface DailyCostTracker {
   taskCount: number;
 }
 
-const COST_TRACKER_PATH = join(process.env.HOME ?? "", ".lobs/daily-cost.json");
+const COST_TRACKER_PATH = join(process.env.HOME ?? "", ".lobs/config/daily-cost.json");
 
 /**
  * Get the next batch of tasks to execute, ordered by priority score.

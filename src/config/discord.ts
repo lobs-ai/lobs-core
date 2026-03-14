@@ -5,7 +5,7 @@ import type { DiscordConfig } from "../services/discord.js";
 
 export function loadDiscordConfig(): DiscordConfig | null {
   // Try config file first
-  const configPath = join(homedir(), ".lobs", "discord.json");
+  const configPath = join(homedir(), ".lobs", "config", "discord.json");
   if (existsSync(configPath)) {
     try {
       const raw = readFileSync(configPath, "utf-8");

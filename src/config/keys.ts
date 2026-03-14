@@ -26,10 +26,10 @@ export interface KeyConfig {
 
 // ── Config Loading ───────────────────────────────────────────────────────────
 
-const CONFIG_PATH = resolve(process.env.HOME ?? "~", ".lobs", "keys.json");
+const CONFIG_PATH = resolve(process.env.HOME ?? "~", ".lobs", "config", "keys.json");
 
 /**
- * Load key config from ~/.lobs/keys.json if it exists.
+ * Load key config from ~/.lobs/config/keys.json if it exists.
  */
 function loadConfigFile(): KeyConfig | undefined {
   if (!existsSync(CONFIG_PATH)) return undefined;

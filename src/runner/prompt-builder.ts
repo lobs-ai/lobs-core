@@ -12,6 +12,7 @@ import { readFileSync, existsSync } from "node:fs";
 import type { AgentSpec } from "./types.js";
 import { assembleContext, type AssembledContext } from "./context-engine.js";
 import { getAgentFiles, getRecentHistory, type AgentType } from "./workspace-manager.js";
+import { loadWorkspaceContext } from "../services/workspace-loader.js";
 import { skillsService } from "../services/skills.js";
 
 // ── Agent Templates ──────────────────────────────────────────────────────────
@@ -136,38 +137,25 @@ export async function buildSmartSystemPrompt(spec: AgentSpec): Promise<{
 }> {
   const parts: string[] = [];
 
-  // 1. Load agent workspace files (AGENTS.md + SOUL.md)
-  //    These replace the static templates
+  // 1. Load workspace context (AGENTS.md, SOUL.md, etc.) via the universal loader
+  //    This handles all agent types consistently — same pattern as OpenClaw
   const agentType = spec.agent as AgentType;
   const validAgentTypes: AgentType[] = ["programmer", "writer", "researcher", "reviewer", "architect"];
   
-  if (validAgentTypes.includes(agentType)) {
-    try {
-      const files = getAgentFiles(agentType);
-      
-      // Use AGENTS.md as the primary instructions
-      parts.push(files.agents);
-      
-      // Add SOUL.md for personality/behavior guidance
-      parts.push(`\n---\n${files.soul}\n---`);
-    } catch {
-      // Fall back to static template if workspace files unavailable
-      const template = AGENT_TEMPLATES[spec.agent] ?? DEFAULT_TEMPLATE;
-      parts.push(template);
-    }
+  const workspaceCtx = loadWorkspaceContext(spec.agent);
+  if (workspaceCtx) {
+    parts.push(workspaceCtx);
   } else {
-    // Unknown agent type — use static template
+    // Fallback if no workspace files exist
     const template = AGENT_TEMPLATES[spec.agent] ?? DEFAULT_TEMPLATE;
     parts.push(template);
   }
 
-  // 2. Add workspace paths and working directory
-  parts.push(`\n## Workspace Paths`);
-  parts.push(`- Your personal files (AGENTS.md, SOUL.md): ~/.lobs/agents/${spec.agent}/`);
-  parts.push(`- Your working directory: ${spec.cwd}`);
+  // 2. Add working directory and date
+  parts.push(`\n## Working Directory\n${spec.cwd}`);
   parts.push(`\nCurrent date: ${new Date().toISOString().split("T")[0]}`);
 
-  // 3. Load recent run history (last 3 summaries) for this agent type
+  // 3. Load recent run history (last 3 summaries) for worker agents
   if (validAgentTypes.includes(agentType)) {
     try {
       const history = getRecentHistory(agentType, 3);
