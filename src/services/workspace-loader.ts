@@ -1,14 +1,18 @@
 /**
- * Workspace context loader — reads workspace files for the main agent's system prompt.
+ * Workspace context loader — reads the main agent workspace files.
+ * Follows the same pattern as worker agents (~/.lobs/agents/{type}/).
  */
 
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
+const AGENT_DIR = join(homedir(), ".lobs", "agents", "main");
 const WORKSPACE_DIR = join(homedir(), ".openclaw", "workspace");
 
-const CORE_FILES = [
+// Core files loaded in order (from agent workspace)
+const AGENT_FILES = [
+  "SYSTEM_PROMPT.md",
   "SOUL.md",
   "USER.md",
   "IDENTITY.md",
@@ -22,9 +26,14 @@ const CORE_FILES = [
 export function loadWorkspaceContext(): string {
   const sections: string[] = [];
 
-  for (const filename of CORE_FILES) {
-    const filepath = join(WORKSPACE_DIR, filename);
+  for (const filename of AGENT_FILES) {
+    // Try agent workspace first, then fall back to openclaw workspace
+    let filepath = join(AGENT_DIR, filename);
+    if (!existsSync(filepath)) {
+      filepath = join(WORKSPACE_DIR, filename);
+    }
     if (!existsSync(filepath)) continue;
+
     try {
       const content = readFileSync(filepath, "utf-8");
       sections.push(`## ${filename}\n${content}`);
@@ -33,36 +42,36 @@ export function loadWorkspaceContext(): string {
     }
   }
 
+  // Also load today's memory file
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" }); // YYYY-MM-DD
+  const memoryPaths = [
+    join(AGENT_DIR, "context", "memory", `${today}.md`),
+    join(WORKSPACE_DIR, "memory", `${today}.md`),
+  ];
+  for (const mp of memoryPaths) {
+    if (existsSync(mp)) {
+      try {
+        const content = readFileSync(mp, "utf-8");
+        sections.push(`## Today's Memory (${today})\n${content}`);
+      } catch {}
+      break;
+    }
+  }
+
   return sections.join("\n\n");
 }
 
-/** Build the main agent system prompt */
+/** Build the main agent system prompt from SYSTEM_PROMPT.md */
 export function buildMainAgentPrompt(): string {
+  const promptPath = join(AGENT_DIR, "SYSTEM_PROMPT.md");
+  if (existsSync(promptPath)) {
+    try {
+      return readFileSync(promptPath, "utf-8");
+    } catch {}
+  }
+
+  // Fallback if no SYSTEM_PROMPT.md exists
   return `You are Lobs, a personal AI assistant running on lobs-core.
-
-You have access to tools for file operations, shell commands, web search, and memory.
-You maintain a persistent conversation with your human (Rafe) via Discord.
-
-## Key behaviors
-- Be direct, concise, and helpful
-- Follow SOUL.md for personality and voice
-- Follow USER.md for preferences and context
-- Use MEMORY.md and daily memory files for continuity
-- Execute tasks proactively — don't ask for permission on obvious things
-- When you have nothing to say, respond with NO_REPLY
-- For heartbeat polls, follow HEARTBEAT.md strictly
-
-## Tools available
-- exec: Run shell commands
-- read / write / edit: File operations
-- memory_search / memory_read / memory_write: Memory vault
-- web_search: Search the web
-- web_fetch: Fetch and extract content from URLs
-
-## Communication
-- You're talking to Rafe on Discord
-- Keep messages concise (Discord has a 2000 char limit per message)
-- Use markdown formatting sparingly
-- Don't send empty or filler messages
-`;
+You have access to tools for file operations, shell commands, web search, memory, and communication.
+Be direct, concise, and helpful. Follow SOUL.md for personality.`;
 }
