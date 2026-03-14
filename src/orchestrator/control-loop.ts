@@ -1955,7 +1955,7 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
         model,
         mode: "run",
         cleanup: "keep",
-        runTimeoutSeconds: 1800,
+        runTimeoutSeconds: 7200,
         ...(repoPath ? { cwd: repoPath } : {}),
       },
     }),

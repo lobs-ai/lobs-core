@@ -72,7 +72,7 @@ Returns immediately with a run ID. The agent works in the background and announc
         },
         timeout: {
           type: "number",
-          description: "Timeout in seconds (default: 600, max: 900)",
+          description: "Timeout in seconds (default: 7200, max: 7200)",
         },
         extra_tools: {
           type: "array",
@@ -168,7 +168,7 @@ export async function executeSpawnAgent(input: Record<string, unknown>, parentCw
   // If no cwd specified, try to find the right repo for the task
   const defaultCwd = parentCwd ?? HOME;
   const cwd = (input.cwd as string) ?? defaultCwd;
-  const timeout = Math.min((input.timeout as number) ?? 600, 900);
+  const timeout = Math.min((input.timeout as number) ?? 7200, 7200);
   const extraTools = (input.extra_tools as string[]) ?? [];
 
   const model = getModelForTier(modelTier);
