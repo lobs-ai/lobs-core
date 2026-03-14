@@ -15,7 +15,7 @@
  * Priority: compliance enforcement > tier-based resolution > default model.
  */
 
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { LobsPluginApi } from "../types/lobs-plugin.js";
 import { resolveModelForTier, type ModelTier } from "../orchestrator/model-chooser.js";
 import { log } from "../util/logger.js";
 import { getRawDb } from "../db/connection.js";
@@ -65,7 +65,7 @@ function isChatSessionCompliant(sessionKey: string): boolean {
   }
 }
 
-export function registerModelResolveHook(api: OpenClawPluginApi): void {
+export function registerModelResolveHook(api: LobsPluginApi): void {
   api.on("before_model_resolve", async (_event: unknown, ctx: unknown): Promise<Record<string, unknown>> => {
     const sessionKey = (ctx as Record<string, unknown>).sessionKey as string | undefined;
     if (!sessionKey) return {};

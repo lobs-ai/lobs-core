@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { LobsPluginApi } from "../types/lobs-plugin.js";
 import { handleTaskRequest } from "./tasks.js";
 import { handleProjectRequest } from "./projects.js";
 import { handleAgentRequest } from "./agents.js";
@@ -42,7 +42,7 @@ import { error } from "./index.js";
 
 const PREFIXES = ["/paw/api/", "/api/"];
 
-export function registerPawRouter(api: OpenClawPluginApi): void {
+export function registerPawRouter(api: LobsPluginApi): void {
   const handler = async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const pathname = decodeURIComponent(url.pathname);
@@ -111,7 +111,7 @@ export function registerPawRouter(api: OpenClawPluginApi): void {
 }
 
 /**
- * Standalone API handler — for use without OpenClaw.
+ * Standalone API handler — for use without the plugin host.
  * Wire this into the HTTP server directly.
  */
 export async function handleApiRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {

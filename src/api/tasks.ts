@@ -13,6 +13,7 @@ import { readFileSync as _readFileSync } from "node:fs";
 import { LearningService } from "../services/learning.js";
 import { classifyAndLog } from "../services/task-sensitivity.js";
 import { getModelForTier } from "../config/models.js";
+import { getGatewayConfig } from "../config/lobs.js";
 
 const learningSvc = new LearningService();
 
@@ -87,11 +88,7 @@ function normalizeTaskBatch(rows: Record<string, unknown>[]): Record<string, unk
 // ── Brain Dump Gateway helpers ──────────────────────────────────────────
 
 function _brainDumpGatewayCfg(): { port: number; token: string } {
-  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-  try {
-    const cfg = JSON.parse(_readFileSync(cfgPath, "utf8"));
-    return { port: cfg?.gateway?.port ?? 18789, token: cfg?.gateway?.auth?.token ?? "" };
-  } catch { return { port: 18789, token: "" }; }
+  return getGatewayConfig();
 }
 
 async function _brainDumpInvoke(tool: string, args: Record<string, unknown>): Promise<any> {

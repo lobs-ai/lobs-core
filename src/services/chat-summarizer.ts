@@ -6,11 +6,11 @@
  */
 
 import { eq } from "drizzle-orm";
-import { readFileSync } from "node:fs";
 import { getDb } from "../db/connection.js";
 import { chatSessions } from "../db/schema.js";
 import { log } from "../util/logger.js";
 import { getModelForTier } from "../config/models.js";
+import { getGatewayConfig } from "../config/lobs.js";
 
 // ── Config ──────────────────────────────────────────────────────────────
 
@@ -24,19 +24,6 @@ const MIN_INTERVAL_SECONDS = 60;
 const SUMMARY_MODEL = getModelForTier("small");
 
 // ── Gateway helpers ─────────────────────────────────────────────────────
-
-function getGatewayConfig(): { port: number; token: string } {
-  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-  try {
-    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    return {
-      port: cfg?.gateway?.port ?? 18789,
-      token: cfg?.gateway?.auth?.token ?? "",
-    };
-  } catch {
-    return { port: 18789, token: "" };
-  }
-}
 
 const SINK_SESSION_KEY = "agent:sink:paw-orchestrator-v2";
 

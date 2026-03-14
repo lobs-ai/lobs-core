@@ -19,10 +19,10 @@
  *   3. Confirm with the user via formatConfirmationPrompt output
  *   4. Create or reuse the channel, then send the opening message
  *
- * See: ~/.openclaw/skills/group-messaging/SKILL.md for the full workflow.
+ * See: ~/.lobs/skills/group-messaging/SKILL.md for the full workflow.
  */
 
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { LobsPluginApi } from "../types/lobs-plugin.js";
 import {
   isGroupMessageCommand,
   parseGroupMessageCommand,
@@ -46,7 +46,7 @@ A group message command was detected. Follow the group-messaging skill:
 6. **Send** — tag all participants, include topic context
 7. **Touch** — update last_used_at in the registry
 
-Full skill reference: ~/.openclaw/skills/group-messaging/SKILL.md
+Full skill reference: ~/.lobs/skills/group-messaging/SKILL.md
 `.trim();
 
 /**
@@ -61,7 +61,7 @@ function buildSkillContext(cmd: GroupMessageCommand): string {
   return lines.join("\n");
 }
 
-export function registerGroupMessageHook(api: OpenClawPluginApi): void {
+export function registerGroupMessageHook(api: LobsPluginApi): void {
   // ── 1. Natural-language intercept via before_user_message ───────────────
   // Intercept user messages that look like group message commands and inject
   // skill context so the agent knows exactly what workflow to follow.
@@ -95,7 +95,7 @@ export function registerGroupMessageHook(api: OpenClawPluginApi): void {
     description: "Start a group chat. Usage: /group-message [name1] [name2] [about topic]",
     handler: async (ctx) => {
       // The slash command args arrive as the remainder after the command name.
-      // OpenClaw passes the full text including the command name for context.
+      // The host passes the full text including the command name for context.
       const raw = (ctx as Record<string, unknown>)?.args as string ?? "";
 
       // Synthesize a full command string the parser understands

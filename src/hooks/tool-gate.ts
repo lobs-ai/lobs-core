@@ -15,7 +15,7 @@
  */
 
 import { eq, and, isNull } from "drizzle-orm";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { LobsPluginApi } from "../types/lobs-plugin.js";
 import { getDb, getRawDb } from "../db/connection.js";
 import { workerRuns, tasks, inboxItems } from "../db/schema.js";
 import { randomUUID } from "node:crypto";
@@ -59,7 +59,7 @@ const HARD_BLOCK_FILE_PATTERNS = [
   /paw\.db$/,
 ];
 
-export function registerToolGateHook(api: OpenClawPluginApi): void {
+export function registerToolGateHook(api: LobsPluginApi): void {
   api.on("before_tool_call", async (event, ctx) => {
     const sessionKey = (ctx as Record<string, unknown>).sessionKey as string | undefined;
     if (!sessionKey) return;

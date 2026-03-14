@@ -12,7 +12,7 @@
 import { eq, and, isNull } from "drizzle-orm";
 import { writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { LobsPluginApi } from "../types/lobs-plugin.js";
 import { getDb } from "../db/connection.js";
 import { workerRuns, tasks, projects } from "../db/schema.js";
 import { log } from "../util/logger.js";
@@ -23,7 +23,7 @@ function sidecarPath(taskId: string): string {
   return join(SIDECAR_DIR, `task-context-${taskId}.json`);
 }
 
-export function registerCompactionHooks(api: OpenClawPluginApi): void {
+export function registerCompactionHooks(api: LobsPluginApi): void {
 
   api.on("before_compaction", async (_event, ctx) => {
     const sessionKey = (ctx as Record<string, unknown>).sessionKey as string | undefined;

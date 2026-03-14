@@ -2,7 +2,7 @@
  * Plugin-scoped logger wrapper.
  */
 
-import type { PluginLogger } from "openclaw/plugin-sdk";
+import type { PluginLogger } from "../types/lobs-plugin.js";
 
 let _logger: PluginLogger | null = null;
 

@@ -5,12 +5,13 @@
  * States: closed → open (after N failures) → half-open (after cooldown) → closed.
  *
  * Storage: JSON file model-health.json in the PAW state dir.
- * Config: circuitBreaker block in openclaw.json (optional).
+ * Config: circuitBreaker block in ~/.lobs/config/lobs.json (optional).
  */
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { log } from "../util/logger.js";
+import { getLobsRoot, loadLobsConfig } from "../config/lobs.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -54,8 +55,7 @@ export function loadConfig(): CircuitBreakerConfig {
     enabled: true,
   };
   try {
-    const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-    const raw = JSON.parse(readFileSync(cfgPath, "utf8"));
+    const raw = loadLobsConfig();
     const cb = raw?.circuitBreaker ?? {};
     _cfg = {
       failureThreshold: Number(cb.failureThreshold) || defaults.failureThreshold,
@@ -76,8 +76,7 @@ export function invalidateCircuitBreakerConfig(): void {
 // ── Storage ───────────────────────────────────────────────────────────────────
 
 export function resolveStorePath(): string {
-  const base = process.env.HOME ?? "/tmp";
-  return join(base, ".openclaw", "plugins", "paw", "model-health.json");
+  return join(getLobsRoot(), "plugins", "paw", "model-health.json");
 }
 
 export function loadStore(): ModelHealthStore {

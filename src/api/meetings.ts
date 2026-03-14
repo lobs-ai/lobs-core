@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { log } from "../util/logger.js";
+import { getGatewayConfig } from "../config/lobs.js";
 
 const svc = new MeetingsService();
 
@@ -139,11 +140,7 @@ ${meeting.summary}
 
     // Send via gateway message tool
     try {
-      const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-      const { readFileSync } = await import("node:fs");
-      const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-      const port = cfg?.gateway?.port ?? 18789;
-      const token = cfg?.gateway?.auth?.token ?? "";
+      const { port, token } = getGatewayConfig();
 
       const r = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
         method: "POST",

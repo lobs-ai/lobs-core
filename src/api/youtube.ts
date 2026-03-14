@@ -6,6 +6,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { json, error, parseBody, parseQuery } from "./index.js";
 import { YouTubeService } from "../services/youtube.js";
 import { getModelForTier } from "../config/models.js";
+import { getGatewayConfig } from "../config/lobs.js";
 
 const svc = new YouTubeService();
 
@@ -62,11 +63,7 @@ export async function handleYouTubeRequest(
     if (!video) return error(res, "Video not found", 404);
 
     try {
-      const { readFileSync } = await import("node:fs");
-      const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-      const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-      const port = cfg?.gateway?.port ?? 18789;
-      const token = cfg?.gateway?.auth?.token ?? "";
+      const { port, token } = getGatewayConfig();
 
       const context = body.context || "";
       const prompt = `You are discussing a YouTube video with the user. Answer based on the video content provided.

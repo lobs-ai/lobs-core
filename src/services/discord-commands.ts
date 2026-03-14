@@ -122,7 +122,7 @@ async function handleNewCommand(interaction: ChatInputCommandInteraction): Promi
       context_summary = NULL
   `).run(channelId);
   
-  await interaction.reply('✨ Fresh session started. What\'s up?');
+  await interaction.reply({ content: '✨ Fresh session started. What\'s up?', ephemeral: true });
 }
 
 /** /status - Show bot status */
@@ -162,7 +162,7 @@ async function handleStatusCommand(interaction: ChatInputCommandInteraction): Pr
     )
     .setTimestamp();
   
-  await interaction.reply({ embeds: [embed] });
+  await interaction.reply({ embeds: [embed], ephemeral: true });
 }
 
 /** /tasks - List active/recent tasks */
@@ -184,7 +184,7 @@ async function handleTasksCommand(interaction: ChatInputCommandInteraction): Pro
   }>;
   
   if (tasks.length === 0) {
-    await interaction.reply('No active tasks.');
+    await interaction.reply({ content: 'No active tasks.', ephemeral: true });
     return;
   }
   
@@ -200,7 +200,7 @@ async function handleTasksCommand(interaction: ChatInputCommandInteraction): Pro
     .addFields(fields)
     .setTimestamp();
   
-  await interaction.reply({ embeds: [embed] });
+  await interaction.reply({ embeds: [embed], ephemeral: true });
 }
 
 /** /model - Show or set model for this channel */
@@ -234,7 +234,7 @@ async function handleModelCommand(interaction: ChatInputCommandInteraction): Pro
   
   mainAgentRef.setChannelModel(channelId, normalizedModel);
   
-  await interaction.reply(`✅ Model for this channel set to: \`${normalizedModel}\``);
+  await interaction.reply({ content: `✅ Model for this channel set to: \`${normalizedModel}\``, ephemeral: true });
 }
 
 /** /clear - Clear conversation history */
@@ -253,7 +253,7 @@ async function handleClearCommand(interaction: ChatInputCommandInteraction): Pro
       context_summary = NULL
   `).run(channelId);
   
-  await interaction.reply('🧹 History cleared.');
+  await interaction.reply({ content: '🧹 History cleared.', ephemeral: true });
 }
 
 /** /help - Show available commands */

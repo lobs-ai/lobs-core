@@ -1,10 +1,10 @@
 /**
  * Nexus dashboard — static file handler.
- * Served under /nexus to avoid collisions with OpenClaw core web assets.
+ * Served under /nexus to avoid collisions with other web assets.
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { LobsPluginApi } from "../types/lobs-plugin.js";
 import { readFile } from "node:fs/promises";
 import { join, extname } from "node:path";
 import { log } from "../util/logger.js";
@@ -52,7 +52,7 @@ async function sendIndex(res: ServerResponse): Promise<boolean> {
   }
 }
 
-export function registerNexusHandler(api: OpenClawPluginApi): void {
+export function registerNexusHandler(api: LobsPluginApi): void {
   log().info(`paw: registering nexus routes (root=${WEB_ROOT})`);
 
   api.registerHttpRoute({

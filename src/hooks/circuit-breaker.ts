@@ -6,11 +6,11 @@
  * Hook 3: agent_end (extended) — called from subagent_ended with duration/reason
  *
  * These hooks feed the circuit breaker with signal without touching the
- * compiled OpenClaw core. The model-chooser integration lives in
+ * compiled host runtime. The model-chooser integration lives in
  * model-chooser.ts (chooseHealthyModel).
  */
 
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { LobsPluginApi } from "../types/lobs-plugin.js";
 import { onSuccess, onFailure, classifyOutcome } from "../services/circuit-breaker.js";
 import { log } from "../util/logger.js";
 
@@ -54,7 +54,7 @@ export function unregisterSessionFromCircuitBreaker(sessionKey: string): void {
   sessionMeta.delete(sessionKey);
 }
 
-export function registerCircuitBreakerHooks(api: OpenClawPluginApi): void {
+export function registerCircuitBreakerHooks(api: LobsPluginApi): void {
 
   // ── llm_input — track session start time ──────────────────────────────────
   api.on("llm_input", async (event: any, ctx: any) => {

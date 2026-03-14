@@ -9,7 +9,7 @@
  */
 
 import { eq, and, isNull } from "drizzle-orm";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { LobsPluginApi } from "../types/lobs-plugin.js";
 import { getDb } from "../db/connection.js";
 import { workerRuns, workflowEvents, tasks } from "../db/schema.js";
 import { randomUUID } from "node:crypto";
@@ -18,7 +18,7 @@ import { LearningService, inferTaskCategory } from "../services/learning.js";
 
 const learningService = new LearningService();
 
-export function registerAgentEndHook(api: OpenClawPluginApi): void {
+export function registerAgentEndHook(api: LobsPluginApi): void {
   api.on("agent_end", async (event) => {
     const sessionKey = (event as Record<string, unknown>).sessionKey as string | undefined;
     if (!sessionKey) return;

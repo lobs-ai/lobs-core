@@ -8,6 +8,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "../util/logger.js";
 import { getModelForTier } from "../config/models.js";
+import { getGatewayConfig } from "../config/lobs.js";
 
 // ── Gateway helpers ───────────────────────────────────────────────────────────
 
@@ -16,15 +17,9 @@ let _gwToken: string | null = null;
 
 function loadGatewayConfig(): { port: number; token: string } {
   if (_gwToken !== null) return { port: _gwPort!, token: _gwToken };
-  try {
-    const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    _gwPort = cfg?.gateway?.port ?? 18789;
-    _gwToken = cfg?.gateway?.auth?.token ?? "";
-  } catch {
-    _gwPort = 18789;
-    _gwToken = "";
-  }
+  const cfg = getGatewayConfig();
+  _gwPort = cfg.port;
+  _gwToken = cfg.token;
   return { port: _gwPort!, token: _gwToken! };
 }
 

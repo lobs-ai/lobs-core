@@ -16,7 +16,7 @@
  */
 
 import { readFileSync, existsSync, statSync } from "node:fs";
-import type { OpenClawPluginServiceContext } from "openclaw/plugin-sdk";
+import type { LobsPluginServiceContext } from "../types/lobs-plugin.js";
 import { eq, and, isNull, isNotNull, inArray } from "drizzle-orm";
 import { log } from "../util/logger.js";
 import { processPendingResumes } from "../index.js";
@@ -48,6 +48,7 @@ import { validatePostSuccessArtifacts } from "./post-success-validator.js";
 import { LearningService, inferTaskCategory } from "../services/learning.js";
 import { runAgent, assembleContext } from "../runner/index.js";
 import type { AgentResult } from "../runner/index.js";
+import { getAgentSessionsDir } from "../config/lobs.js";
 
 const learningSvc = new LearningService();
 
@@ -159,8 +160,8 @@ function tierName(tier: EscalationTier): string {
 
 // ── Native Runner Config ─────────────────────────────────────────────────────
 
-/** Use our custom agent runner instead of OpenClaw sessions_spawn */
-const USE_NATIVE_RUNNER = true; // Set to false to fall back to OpenClaw sessions_spawn
+/** Use our custom agent runner instead of the legacy host session API. */
+const USE_NATIVE_RUNNER = true; // Set to false to fall back to the host session API
 
 
 /** Session key for the sink agent — spawns route here to avoid polluting main */
@@ -185,7 +186,7 @@ async function checkSessionAlive(sessionKey: string): Promise<boolean> {
     const uuidMatch = sessionKey.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
 
     // Try to find the session in the agent's session store
-    const storePath = `${process.env.HOME}/.openclaw/agents/${agentId}/sessions/sessions.json`;
+    const storePath = `${getAgentSessionsDir(agentId)}/sessions.json`;
     try {
       const store = JSON.parse(readFileSync(storePath, "utf8"));
       const entry = store[sessionKey];
@@ -200,7 +201,7 @@ async function checkSessionAlive(sessionKey: string): Promise<boolean> {
 
     // Fallback: check if transcript file exists and was recently modified
     if (uuidMatch) {
-      const transcriptDir = `${process.env.HOME}/.openclaw/agents/${agentId}/sessions`;
+      const transcriptDir = getAgentSessionsDir(agentId);
       const transcriptPath = `${transcriptDir}/${uuidMatch[1]}.jsonl`;
       try {
         // statSync imported at top level
@@ -223,17 +224,16 @@ async function checkSessionAlive(sessionKey: string): Promise<boolean> {
   }
 }
 
-export function startControlLoop(ctx: OpenClawPluginServiceContext, intervalMs: number): void {
+export function startControlLoop(ctx: LobsPluginServiceContext, intervalMs: number): void {
   log().info(`orchestrator: starting control loop (interval=${intervalMs}ms)`);
 
   executor = new WorkflowExecutor();
 
   // Read gateway config for spawn API calls
   try {
-    const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    gatewayPort = cfg?.gateway?.port ?? 18789;
-    gatewayToken = cfg?.gateway?.auth?.token ?? "";
+    const cfg = getGatewayConfig();
+    gatewayPort = cfg.port;
+    gatewayToken = cfg.token;
     if (gatewayToken) {
       log().info(`orchestrator: gateway spawn API configured (port=${gatewayPort})`);
     } else {

@@ -24,6 +24,7 @@ import { LearningService } from "../services/learning.js";
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { getModelForTier } from "../config/models.js";
+import { getGatewayConfig } from "../config/lobs.js";
 
 export interface CallableContext {
   workflowRunId?: string;
@@ -270,14 +271,9 @@ ${existingTaskList}
 ${reflectionSummaries}`;
 
   // Spawn a sub-agent to triage reflections autonomously
-  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-  let gwPort = 18789;
-  let gwToken = "";
-  try {
-    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    gwPort = cfg?.gateway?.port ?? 18789;
-    gwToken = cfg?.gateway?.auth?.token ?? "";
-  } catch (_) {}
+  const gatewayCfg = getGatewayConfig();
+  let gwPort = gatewayCfg.port;
+  let gwToken = gatewayCfg.token;
 
   if (gwToken) {
     const triageInstructions = "\n\nYou have access to CLI tools for creating tasks and inbox items. Use these instead of raw SQL:\n\nTo create a task (medium/low impact — auto-assigned to agents):\npaw-task create --title \"TITLE\" --agent AGENT_TYPE --tier TIER --notes \"NOTES\"\n\nTo create an inbox item (high impact only — needs Rafe's review):\npaw-inbox create --title \"TITLE\" --content \"DETAILED CONTENT\" --summary \"ONE LINE SUMMARY\" --type suggestion --action --agent SOURCE_AGENT\n\nTo check existing tasks (avoid duplicates):\npaw-task list --status active\n\nAgent types: programmer, writer, researcher, reviewer, architect\nModel tiers: micro (trivial), small (simple), medium (moderate), standard (significant), strong (complex)\n\nAfter creating all items, print a summary of what you created.";
@@ -355,14 +351,9 @@ function reflectionSpawnAll(args: Record<string, unknown>, _ctx: CallableContext
   const hours = (args.window_hours as number) ?? 3;
 
   // Read gateway config
-  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-  let gatewayPort = 18789;
-  let gatewayToken = "";
-  try {
-    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    gatewayPort = cfg?.gateway?.port ?? 18789;
-    gatewayToken = cfg?.gateway?.auth?.token ?? "";
-  } catch (_) {}
+  const reflectionGatewayCfg = getGatewayConfig();
+  let gatewayPort = reflectionGatewayCfg.port;
+  let gatewayToken = reflectionGatewayCfg.token;
 
   if (!gatewayToken) {
     log().warn("[REFLECTION] No gateway token — cannot spawn reflection workers");
@@ -602,14 +593,9 @@ function inboxProcessThreads(_args: Record<string, unknown>, _ctx: CallableConte
     return { ok: true, processed: 0, note: "no items to process" };
   }
 
-  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-  let gwPort = 18789;
-  let gwToken = "";
-  try {
-    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    gwPort = cfg?.gateway?.port ?? 18789;
-    gwToken = cfg?.gateway?.auth?.token ?? "";
-  } catch (_) {}
+  const inboxGatewayCfg = getGatewayConfig();
+  let gwPort = inboxGatewayCfg.port;
+  let gwToken = inboxGatewayCfg.token;
 
   if (!gwToken) {
     return { ok: false, error: "no gateway token" };

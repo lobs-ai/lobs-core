@@ -4,6 +4,7 @@
  */
 import { readFileSync } from "node:fs";
 import { log } from "../util/logger.js";
+import { getGatewayConfig } from "../config/lobs.js";
 
 export function registerRestartContinuationHook(api: any): void {
   api.on("gateway_start", async () => {
@@ -56,10 +57,7 @@ export function registerRestartContinuationHook(api: any): void {
     // Delay 5s to let gateway fully initialize
     setTimeout(async () => {
       try {
-        const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-        const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-        const port = cfg?.gateway?.port ?? 18789;
-        const token = cfg?.gateway?.auth?.token ?? "";
+        const { port, token } = getGatewayConfig();
         if (!token) return;
 
         const res = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {

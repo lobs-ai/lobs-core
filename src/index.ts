@@ -1,13 +1,13 @@
 /**
  * PAW — Personal AI Workforce
  *
- * OpenClaw plugin that provides multi-agent orchestration, task management,
+ * Lobs plugin entry point for multi-agent orchestration, task management,
  * workflow engine, and intelligent model routing.
  *
  * Replaces: lobs-server (FastAPI + orchestrator daemon)
  */
 
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { LobsPluginApi } from "./types/lobs-plugin.js";
 import { initDb, closeDb, getRawDb } from "./db/connection.js";
 import { runMigrations } from "./db/migrate.js";
 import { seedDefaultWorkflows } from "./workflow/seeds.js";
@@ -27,6 +27,7 @@ import { ensureCompliantMemoryDirs } from "./api/memories-fs.js";
 import { startMemoryScanner, stopMemoryScanner } from "./services/memory-scanner.js";
 import { setLogger, log } from "./util/logger.js";
 import type { PawConfig } from "./util/types.js";
+import { getGatewayConfig, getSubagentRunsPath } from "./config/lobs.js";
 
 const DEFAULT_DB_PATH = "~/.lobs/lobs.db";
 const DEFAULT_SCAN_INTERVAL = 3_000;
@@ -37,7 +38,7 @@ const pawPlugin = {
   description: "Multi-agent orchestration, task management, and workflow engine",
   version: "0.1.0",
 
-  register(api: OpenClawPluginApi) {
+  register(api: LobsPluginApi) {
     setLogger(api.logger);
     const cfg = (api.pluginConfig ?? {}) as PawConfig;
 
@@ -126,7 +127,7 @@ const pawPlugin = {
 
     // Clean stale subagent runs from disk registry to prevent children count buildup
     try {
-      const registryPath = `${process.env.HOME}/.openclaw/subagents/runs.json`;
+      const registryPath = getSubagentRunsPath();
       const readFs = require("node:fs").readFileSync; const writeFs = require("node:fs").writeFileSync;
       const data = JSON.parse(readFs(registryPath, "utf8"));
       const runs = data?.runs ?? {};

@@ -16,6 +16,7 @@ import { log } from "../util/logger.js";
 import { readFileSync, existsSync, unlinkSync, readdirSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { excludeSessionFromCircuitBreaker } from "../hooks/circuit-breaker.js";
+import { getGatewayConfig } from "../config/lobs.js";
 
 const INGESTER_PATH = `${process.env.HOME}/lobs-youtube-ingester/ingest.py`;
 const PYTHON = `${process.env.HOME}/lobs-meeting-transcriber/.venv/bin/python3`;
@@ -26,11 +27,7 @@ function resultTmpPath(id: string) { return `/tmp/yt-ingest-${id}.json.tmp`; }
 function errPath(id: string) { return `/tmp/yt-ingest-${id}.err`; }
 
 function gatewayCfg(): { port: number; token: string } {
-  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-  try {
-    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    return { port: cfg?.gateway?.port ?? 18789, token: cfg?.gateway?.auth?.token ?? "" };
-  } catch { return { port: 18789, token: "" }; }
+  return getGatewayConfig();
 }
 
 async function gatewayInvoke(tool: string, args: Record<string, unknown>, timeoutMs = 900000): Promise<any> {

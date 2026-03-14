@@ -388,6 +388,16 @@ export class MainAgent {
     return Array.from(this.processingChannels);
   }
 
+  /** Check if a specific channel is currently being processed */
+  isChannelProcessing(channelId: string): boolean {
+    return this.processingChannels.has(channelId);
+  }
+
+  /** Get number of queued messages for a specific channel */
+  getChannelQueueDepth(channelId: string): number {
+    return this.channelQueues.get(channelId)?.length ?? 0;
+  }
+
   /* ── Core conversation loop ────────────────────────────────────── */
 
   private async processConversation(replyChannelId: string): Promise<void> {

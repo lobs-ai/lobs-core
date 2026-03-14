@@ -3,7 +3,7 @@
  */
 
 import { eq, and, inArray, isNull, desc } from "drizzle-orm";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { LobsPluginApi } from "../types/lobs-plugin.js";
 import { getDb } from "../db/connection.js";
 import { workerRuns, tasks, workflowRuns, agentReflections, projects, modelUsageEvents } from "../db/schema.js";
 import { recordWorkerStart, recordWorkerEnd, hasCapacity, countActiveWorkers, DEFAULT_MAX_WORKERS } from "../orchestrator/worker-manager.js";
@@ -16,10 +16,11 @@ import { randomUUID } from "node:crypto";
 import { shouldTriggerReview, type ReviewTriggerResult } from "../orchestrator/review-triggers.js";
 import { emitWorkerRunTrace } from "../services/langfuse.js";
 import { cleanupTaskSidecar } from "./compaction.js";
+import { getGatewayConfig } from "../config/lobs.js";
 
 const SINK_SESSION_KEY = "agent:sink:paw-orchestrator-v2";
 
-export function registerSubagentHooks(api: OpenClawPluginApi): void {
+export function registerSubagentHooks(api: LobsPluginApi): void {
 
   // ── Pre-spawn capacity gate ─────────────────────────────────────────────
   // Fires BEFORE the spawn happens. If PAW is at capacity, reject the spawn
@@ -348,14 +349,9 @@ function insertModelUsageEvent(opts: {
 }
 
 async function invokeGatewayTool(tool: string, args: Record<string, unknown>): Promise<unknown> {
-  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-  let gatewayPort = 18789;
-  let gatewayToken = "";
-  try {
-    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    gatewayPort = cfg?.gateway?.port ?? 18789;
-    gatewayToken = cfg?.gateway?.auth?.token ?? "";
-  } catch {}
+  const cfg = getGatewayConfig();
+  let gatewayPort = cfg.port;
+  let gatewayToken = cfg.token;
   if (!gatewayToken) throw new Error("No gateway token configured");
 
   const resp = await fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
@@ -438,14 +434,9 @@ function collectReflectionResult(event: Record<string, unknown>): void {
   if (!pending) return;
   log().info(`[PAW] collectReflectionResult: found pending ${pending.id.slice(0, 8)} for ${agentType}`);
 
-  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-  let gatewayPort = 18789;
-  let gatewayToken = "";
-  try {
-    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    gatewayPort = cfg?.gateway?.port ?? 18789;
-    gatewayToken = cfg?.gateway?.auth?.token ?? "";
-  } catch (_) {}
+  const cfg = getGatewayConfig();
+  let gatewayPort = cfg.port;
+  let gatewayToken = cfg.token;
 
   if (!gatewayToken) return;
 

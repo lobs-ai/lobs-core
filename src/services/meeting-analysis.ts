@@ -12,13 +12,10 @@ import { meetings, meetingActionItems, tasks, inboxItems } from "../db/schema.js
 import { log } from "../util/logger.js";
 import { classifyApprovalTier } from "../util/approval-tier.js";
 import { getModelForTier } from "../config/models.js";
+import { getGatewayConfig } from "../config/lobs.js";
 
 function gatewayCfg(): { port: number; token: string } {
-  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-  try {
-    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    return { port: cfg?.gateway?.port ?? 18789, token: cfg?.gateway?.auth?.token ?? "" };
-  } catch { return { port: 18789, token: "" }; }
+  return getGatewayConfig();
 }
 
 async function gatewayInvoke(tool: string, args: Record<string, unknown>): Promise<any> {

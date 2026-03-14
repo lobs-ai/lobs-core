@@ -3,11 +3,11 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { LobsPluginApi } from "../types/lobs-plugin.js";
 import { registerPawRouter } from "./router.js";
 import { registerNexusHandler } from "./nexus.js";
 
-export function registerAllRoutes(api: OpenClawPluginApi): void {
+export function registerAllRoutes(api: LobsPluginApi): void {
   registerPawRouter(api);
   registerNexusHandler(api);
 }
