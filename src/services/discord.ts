@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, TextChannel, EmbedBuilder } from "discord.js";
+import { Client, GatewayIntentBits, Partials, TextChannel, EmbedBuilder } from "discord.js";
 import { registerSlashCommands, handleSlashCommand } from "./discord-commands.js";
 
 export interface DiscordConfig {
@@ -27,8 +27,12 @@ class DiscordService {
       intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.DirectMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMessageReactions,
+      ],
+      partials: [
+        Partials.Channel,  // Required for DM messageCreate events
       ],
     });
 
