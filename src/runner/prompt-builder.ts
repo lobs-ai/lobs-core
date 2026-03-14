@@ -161,9 +161,11 @@ export async function buildSmartSystemPrompt(spec: AgentSpec): Promise<{
     parts.push(template);
   }
 
-  // 2. Add working directory and date
-  parts.push(`\nWorking directory: ${spec.cwd}`);
-  parts.push(`Current date: ${new Date().toISOString().split("T")[0]}`);
+  // 2. Add workspace paths and working directory
+  parts.push(`\n## Workspace Paths`);
+  parts.push(`- Your personal files (AGENTS.md, SOUL.md): ~/.lobs/agents/${spec.agent}/`);
+  parts.push(`- Your working directory: ${spec.cwd}`);
+  parts.push(`\nCurrent date: ${new Date().toISOString().split("T")[0]}`);
 
   // 3. Load recent run history (last 3 summaries) for this agent type
   if (validAgentTypes.includes(agentType)) {

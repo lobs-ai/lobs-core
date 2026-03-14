@@ -8,12 +8,16 @@
 
 import { appendFileSync, mkdirSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
+import { randomUUID } from "node:crypto";
 import { log } from "../../util/logger.js";
 import { runAgent, type AgentSpec } from "../agent-loop.js";
 import { parseModelString } from "../providers.js";
 import type { ToolDefinition, ToolName } from "../types.js";
 
 const HOME = process.env.HOME ?? "";
+
+// In-memory tracking for active spawned agents
+const activeAgents = new Map<string, { type: string; task: string; startedAt: number }>();
 
 // Default tools each agent type gets
 const AGENT_DEFAULT_TOOLS: Record<string, ToolName[]> = {
@@ -30,7 +34,7 @@ import { getModelForTier } from "../../config/models.js";
 export const AGENT_CONTROL_TOOLS: ToolDefinition[] = [
   {
     name: "spawn_agent",
-    description: `Spawn another agent to perform a subtask. The agent runs to completion and returns its output.
+    description: `Spawn another agent to perform a subtask. The agent runs in the background and you'll receive a notification when it completes.
 
 Use this when:
 - You need a code review (spawn reviewer)
@@ -42,7 +46,9 @@ Agent types: programmer, reviewer, researcher, writer, architect
 Model tiers: micro (local/free), small, medium, standard, strong (opus)
 
 The spawned agent gets its own workspace context, tools, and memory access.
-It does NOT see your conversation — only the task you give it.`,
+It does NOT see your conversation — only the task you give it.
+
+Returns immediately with a run ID. The agent works in the background and announces completion automatically.`,
     input_schema: {
       type: "object" as const,
       properties: {
@@ -75,6 +81,17 @@ It does NOT see your conversation — only the task you give it.`,
         },
       },
       required: ["agent_type", "task"],
+    },
+  },
+  {
+    name: "list_agents",
+    description: `List all currently running spawned agents.
+
+Returns information about active background agents including their run IDs, types, tasks, and how long they've been running.`,
+    input_schema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
     },
   },
   {
@@ -148,7 +165,9 @@ export async function executeSpawnAgent(input: Record<string, unknown>, parentCw
   const agentType = input.agent_type as string;
   const task = input.task as string;
   const modelTier = (input.model_tier as string) ?? "small";
-  const cwd = (input.cwd as string) ?? parentCwd ?? `${HOME}/lobs/lobs-core`;
+  // If no cwd specified, try to find the right repo for the task
+  const defaultCwd = parentCwd ?? HOME;
+  const cwd = (input.cwd as string) ?? defaultCwd;
   const timeout = Math.min((input.timeout as number) ?? 600, 900);
   const extraTools = (input.extra_tools as string[]) ?? [];
 
@@ -162,7 +181,9 @@ export async function executeSpawnAgent(input: Record<string, unknown>, parentCw
     }
   }
 
-  log().info(`[AGENT_TOOL] Spawning ${agentType} (model=${modelTier}, timeout=${timeout}s)`);
+  const runId = randomUUID().slice(0, 8);
+  
+  log().info(`[AGENT_TOOL] Spawning ${agentType} (id=${runId}, model=${modelTier}, timeout=${timeout}s)`);
 
   const spec: AgentSpec = {
     agent: agentType,
@@ -173,8 +194,17 @@ export async function executeSpawnAgent(input: Record<string, unknown>, parentCw
     timeout,
   };
 
-  try {
-    const result = await runAgent(spec);
+  // Track the spawned agent
+  activeAgents.set(runId, {
+    type: agentType,
+    task: task.slice(0, 200),
+    startedAt: Date.now(),
+  });
+
+  // Fire-and-forget: run in background
+  runAgent(spec).then(result => {
+    // Remove from active tracking
+    activeAgents.delete(runId);
 
     // Log the result
     const logDir = resolve(HOME, ".lobs/agents", agentType, "sessions");
@@ -182,6 +212,7 @@ export async function executeSpawnAgent(input: Record<string, unknown>, parentCw
     const logFile = resolve(logDir, `spawned-${Date.now()}.jsonl`);
     appendFileSync(logFile, JSON.stringify({
       timestamp: new Date().toISOString(),
+      runId,
       task: task.slice(0, 200),
       model,
       succeeded: result.succeeded,
@@ -190,29 +221,65 @@ export async function executeSpawnAgent(input: Record<string, unknown>, parentCw
       durationSeconds: result.durationSeconds,
     }) + "\n");
 
-    if (result.succeeded) {
-      return [
-        `✅ ${agentType} completed successfully`,
+    // Announce completion back to main agent
+    const mainAgent = (globalThis as any).__lobsMainAgent;
+    if (mainAgent) {
+      const status = result.succeeded ? "✅ completed" : "❌ failed";
+      const announcement = [
+        `[Subagent ${status}] ${agentType} (${runId})`,
+        `Task: ${task.slice(0, 200)}`,
         `Turns: ${result.turns} | Cost: $${result.costUsd.toFixed(4)} | Duration: ${result.durationSeconds.toFixed(1)}s`,
         "",
-        "Output:",
-        result.output,
+        result.succeeded ? "Output:" : `Error: ${result.error || result.stopReason}`,
+        result.output.slice(0, 3000),
       ].join("\n");
-    } else {
-      return [
-        `❌ ${agentType} failed (${result.stopReason})`,
-        result.error ? `Error: ${result.error}` : "",
-        `Turns: ${result.turns} | Cost: $${result.costUsd.toFixed(4)}`,
-        "",
-        "Last output:",
-        result.output,
-      ].join("\n");
+      
+      mainAgent.handleSystemEvent(announcement).catch((err: any) => {
+        console.error("[spawn_agent] Failed to announce completion:", err);
+      });
     }
-  } catch (err) {
+  }).catch(err => {
+    // Remove from active tracking on crash
+    activeAgents.delete(runId);
+
     const msg = err instanceof Error ? err.message : String(err);
-    log().error(`[AGENT_TOOL] spawn_agent failed: ${msg}`);
-    return `❌ Failed to spawn ${agentType}: ${msg}`;
+    log().error(`[AGENT_TOOL] spawn_agent ${runId} crashed: ${msg}`);
+
+    // Announce crash to main agent
+    const mainAgent = (globalThis as any).__lobsMainAgent;
+    if (mainAgent) {
+      mainAgent.handleSystemEvent(
+        `[Subagent ❌ crashed] ${agentType} (${runId}): ${String(err).slice(0, 500)}`
+      ).catch(() => {});
+    }
+  });
+
+  // Return immediately
+  return `🚀 Spawned ${agentType} agent (id: ${runId})\nTask: ${task.slice(0, 200)}\nModel: ${modelTier}\nThe agent is working in the background. You'll receive a completion notification when it finishes.`;
+}
+
+/**
+ * Execute the list_agents tool.
+ */
+export async function executeListAgents(): Promise<string> {
+  if (activeAgents.size === 0) {
+    return "No agents currently running.";
   }
+
+  const lines: string[] = [`Active agents (${activeAgents.size}):\n`];
+  const now = Date.now();
+
+  for (const [runId, info] of activeAgents.entries()) {
+    const elapsedSeconds = Math.floor((now - info.startedAt) / 1000);
+    const elapsedMin = Math.floor(elapsedSeconds / 60);
+    const elapsedSec = elapsedSeconds % 60;
+    const elapsed = elapsedMin > 0 ? `${elapsedMin}m ${elapsedSec}s` : `${elapsedSec}s`;
+
+    lines.push(`• ${runId} — ${info.type} (running ${elapsed})`);
+    lines.push(`  Task: ${info.task}`);
+  }
+
+  return lines.join("\n");
 }
 
 /**
@@ -221,7 +288,8 @@ export async function executeSpawnAgent(input: Record<string, unknown>, parentCw
 export async function executeRunPipeline(input: Record<string, unknown>, parentCwd?: string): Promise<string> {
   const pipelineName = input.pipeline as string;
   const task = input.task as string;
-  const cwd = (input.cwd as string) ?? parentCwd ?? `${HOME}/lobs/lobs-core`;
+  const defaultCwd = parentCwd ?? HOME;
+  const cwd = (input.cwd as string) ?? defaultCwd;
 
   let stages: Array<{ agentType: string; modelTier: string; taskPrefix: string }>;
 

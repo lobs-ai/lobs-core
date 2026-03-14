@@ -7,7 +7,7 @@ import { execToolDefinition, execTool } from "./exec.js";
 import { readToolDefinition, readTool, writeToolDefinition, writeTool, editToolDefinition, editTool } from "./files.js";
 import { webSearchToolDefinition, webSearchTool, webFetchToolDefinition, webFetchTool } from "./web.js";
 import { memorySearchToolDefinition, memorySearchTool, memoryReadToolDefinition, memoryReadTool, memoryWriteToolDefinition, memoryWriteTool } from "./memory.js";
-import { AGENT_CONTROL_TOOLS, executeSpawnAgent, executeRunPipeline } from "./agent-control.js";
+import { AGENT_CONTROL_TOOLS, executeSpawnAgent, executeRunPipeline, executeListAgents } from "./agent-control.js";
 import { cronToolDefinition, executeCronTool } from "./cron.js";
 import { messageToolDefinition, executeMessageTool } from "./message.js";
 
@@ -62,6 +62,10 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   run_pipeline: {
     definition: AGENT_CONTROL_TOOLS[1],
     execute: (params, cwd) => executeRunPipeline(params, cwd),
+  },
+  list_agents: {
+    definition: AGENT_CONTROL_TOOLS[2],
+    execute: (params) => executeListAgents(),
   },
   cron: {
     definition: cronToolDefinition,

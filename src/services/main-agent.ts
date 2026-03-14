@@ -169,6 +169,12 @@ export class MainAgent {
       const fullSystem = [
         this.systemPrompt,
         "",
+        "## Workspace Paths",
+        "- Your personal files (SOUL.md, MEMORY.md, etc.): ~/.lobs/agents/main/",
+        "- Your working directory: ~/.openclaw/workspace/",
+        "- Worker agent workspaces: ~/.lobs/agents/{type}/",
+        "- When spawning agents, set cwd to the relevant project repo (e.g., ~/lobs/lobs-core/)",
+        "",
         "## Workspace Context",
         this.workspaceContext,
         "",
@@ -252,6 +258,33 @@ export class MainAgent {
         messages.push({ role: "assistant", content: response.content });
 
         if (hasToolUse) {
+          // Store tool call summary in DB for continuity across restarts
+          const toolSummary = toolResults.map((tr) => {
+            const toolBlock = response.content.find(
+              (b): b is { type: "tool_use"; id: string; name: string; input: Record<string, unknown> } =>
+                b.type === "tool_use" && b.id === tr.tool_use_id,
+            );
+            const toolName = toolBlock?.name || "unknown";
+            const resultPreview =
+              tr.content.length > 500
+                ? tr.content.slice(0, 500) + "..."
+                : tr.content;
+            return `[${toolName}] ${resultPreview}`;
+          }).join("\n");
+
+          this.db
+            .prepare(
+              `INSERT INTO main_agent_messages
+                 (id, role, content, channel_id, token_estimate)
+               VALUES (?, 'assistant', ?, ?, ?)`,
+            )
+            .run(
+              randomUUID(),
+              `[Tool calls]\n${toolSummary}`,
+              replyChannelId,
+              Math.ceil(toolSummary.length / 4),
+            );
+
           // Feed tool results back as a user turn and continue
           messages.push({ role: "user", content: toolResults });
           continue;

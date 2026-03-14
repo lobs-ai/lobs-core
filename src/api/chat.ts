@@ -316,3 +316,12 @@ export async function handleMainAgentChat(
   
   return error(res, "Unknown agent endpoint", 404);
 }
+
+// Helper: get recent agent activity (for polling during processing)
+function getAgentActivity(): { processing: boolean; lastTool?: string; queueDepth: number } {
+  const mainAgent = (globalThis as any).__lobsMainAgent;
+  return {
+    processing: mainAgent?.isProcessing() ?? false,
+    queueDepth: mainAgent?.getQueueDepth() ?? 0,
+  };
+}
