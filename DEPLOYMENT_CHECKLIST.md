@@ -126,7 +126,7 @@ The column is nullable, so old code will work fine. No rollback needed.
 
 If you need to remove it:
 ```sql
-sqlite3 ~/.openclaw/plugins/lobs/lobs.db "ALTER TABLE main_agent_messages DROP COLUMN platform_message_id;"
+sqlite3 ~/.lobs/plugins/lobs/lobs.db "ALTER TABLE main_agent_messages DROP COLUMN platform_message_id;"
 ```
 (Note: SQLite doesn't support DROP COLUMN in older versions — may need to recreate table)
 

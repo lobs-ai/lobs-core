@@ -44,7 +44,10 @@ export function shouldCompact(
  * Strategy:
  * - Keep first user message (task prompt)
  * - Keep last N turns (preserve recent context)
- * - Summarize tool outputs in older turns
+ * - For older turns: truncate tool outputs but PRESERVE tool_use/tool_result pairing
+ *
+ * CRITICAL: Anthropic API requires every tool_use block to have a matching
+ * tool_result block immediately after. We must never break this pairing.
  */
 export function compactMessages(
   messages: LLMMessage[],
@@ -69,52 +72,66 @@ export function compactMessages(
       continue;
     }
 
-    // For older messages, compact tool results
+    // For older user messages with tool results, truncate output but keep structure
     if (msg.role === "user" && Array.isArray(msg.content)) {
       const hasToolResults = msg.content.some(
         (block: Record<string, unknown>) => block.type === "tool_result"
       );
 
       if (hasToolResults) {
-        // Summarize tool results
-        const toolCount = msg.content.filter(
-          (block: Record<string, unknown>) => block.type === "tool_result"
-        ).length;
+        // Truncate each tool_result's content but keep the tool_use_id pairing intact
+        const compactedBlocks = msg.content.map((block: Record<string, unknown>) => {
+          if (block.type === "tool_result") {
+            const content = block.content;
+            let summary: string;
+            if (typeof content === "string") {
+              summary = content.length > 200
+                ? content.slice(0, 200) + "... [truncated]"
+                : content;
+            } else if (Array.isArray(content)) {
+              summary = "[tool output truncated to save context]";
+            } else {
+              summary = "[tool output truncated]";
+            }
+            return {
+              type: "tool_result" as const,
+              tool_use_id: block.tool_use_id,
+              content: summary,
+              ...(block.is_error ? { is_error: true } : {}),
+            };
+          }
+          return block;
+        });
 
         compacted.push({
           role: "user",
-          content: `[${toolCount} tool outputs summarized to save context]`,
+          content: compactedBlocks,
         });
         continue;
       }
     }
 
-    // For assistant messages, keep as-is (or truncate text if needed)
+    // For older assistant messages, truncate text but keep tool_use blocks intact
     if (msg.role === "assistant") {
       if (Array.isArray(msg.content)) {
-        const textBlocks = msg.content.filter(
-          (block: Record<string, unknown>) => block.type === "text"
-        );
-        const toolUseBlocks = msg.content.filter(
-          (block: Record<string, unknown>) => block.type === "tool_use"
-        );
-
-        // Keep tool use blocks, truncate text
         const compactedContent: Array<Record<string, unknown>> = [];
 
-        for (const block of textBlocks) {
-          const text = (block as { text: string }).text;
-          if (text.length > 500) {
-            compactedContent.push({
-              type: "text",
-              text: text.slice(0, 500) + "... [truncated]",
-            });
+        for (const block of msg.content as Array<Record<string, unknown>>) {
+          if (block.type === "text") {
+            const text = block.text as string;
+            if (text.length > 500) {
+              compactedContent.push({
+                type: "text",
+                text: text.slice(0, 500) + "... [truncated]",
+              });
+            } else {
+              compactedContent.push(block);
+            }
           } else {
+            // Keep tool_use and other blocks exactly as-is (IDs must be preserved)
             compactedContent.push(block);
           }
         }
-
-        compactedContent.push(...toolUseBlocks);
 
         compacted.push({
           role: "assistant",

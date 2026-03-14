@@ -44,7 +44,7 @@ Each agent type has a **default tier** used when the task's `model_tier` field i
 Tasks carry a `model_tier` column in the DB. Set it at insert time:
 
 ```bash
-sqlite3 ~/.openclaw/plugins/paw/paw.db \
+sqlite3 ~/.lobs/plugins/paw/paw.db \
   "INSERT INTO tasks (id, title, status, agent, model_tier, ...) \
    VALUES (lower(hex(randomblob(16))), 'My task', 'active', 'programmer', 'standard', ...);"
 ```
@@ -57,7 +57,7 @@ Valid values: `micro` | `small` | `medium` | `standard` | `strong`. If absent or
 
 The orchestrator calls `chooseModel(tier, agentType)` just before spawning a worker. Priority:
 
-1. **OpenClaw agent config** (`~/.openclaw/openclaw.json` → `agents.list[agentType].model.primary`) — used for all tiers except `micro`.
+1. **lobs agent config** (`~/.lobs/lobs.json` → `agents.list[agentType].model.primary`) — used for all tiers except `micro`.
 2. **Tier chain** (`TIER_MODELS[tier][0]`) — used when no agent config entry exists or tier is `micro`.
 
 If the task has been **escalated** (retry count > 0), `escalationModel()` bumps the tier one step up the ladder: `micro → small → medium → standard → strong`.
@@ -68,7 +68,7 @@ If the task has been **escalated** (retry count > 0), `escalationModel()` bumps 
 
 After resolving the primary model, `buildFallbackChain()` constructs an ordered list:
 
-1. **Agent config fallbacks** (`model.fallbacks[]` from `openclaw.json`) — preferred.
+1. **Agent config fallbacks** (`model.fallbacks[]` from `lobs.json`) — preferred.
 2. **Hardcoded `AGENT_FALLBACK_CHAINS[agentType]`** — cross-tier defaults per role.
 3. **Tier-level `TIER_MODELS[tier]`** — last resort.
 

@@ -120,17 +120,17 @@ interface AnthropicAuth {
   isOAuth: boolean;
 }
 
+const DEFAULT_KEYPOOL_SESSION_ID = "__default__";
+
 function isOAuthToken(key: string): boolean {
   return key.includes("sk-ant-oat");
 }
 
 function resolveAnthropicAuth(sessionId?: string): AnthropicAuth | undefined {
-  // Try KeyPool first if sessionId provided
-  if (sessionId) {
-    const keyPool = getKeyPool();
-    const auth = keyPool.getAuth("anthropic", sessionId);
-    if (auth) return auth as AnthropicAuth;
-  }
+  // Try KeyPool first, even for callers without a session-scoped ID.
+  const keyPool = getKeyPool();
+  const auth = keyPool.getAuth("anthropic", sessionId ?? DEFAULT_KEYPOOL_SESSION_ID);
+  if (auth) return auth as AnthropicAuth;
 
   // Fallback to single-key environment variables
   if (process.env.ANTHROPIC_API_KEY) {
@@ -291,11 +291,9 @@ class AnthropicClient implements LLMClient {
  * Resolve OpenAI API key from KeyPool or environment.
  */
 function resolveOpenAIKey(sessionId?: string): string | undefined {
-  if (sessionId) {
-    const keyPool = getKeyPool();
-    const auth = keyPool.getAuth("openai", sessionId);
-    if (auth?.apiKey) return auth.apiKey;
-  }
+  const keyPool = getKeyPool();
+  const auth = keyPool.getAuth("openai", sessionId ?? DEFAULT_KEYPOOL_SESSION_ID);
+  if (auth?.apiKey) return auth.apiKey;
   return process.env.OPENAI_API_KEY;
 }
 
@@ -303,11 +301,9 @@ function resolveOpenAIKey(sessionId?: string): string | undefined {
  * Resolve OpenRouter API key from KeyPool or environment.
  */
 function resolveOpenRouterKey(sessionId?: string): string | undefined {
-  if (sessionId) {
-    const keyPool = getKeyPool();
-    const auth = keyPool.getAuth("openrouter", sessionId);
-    if (auth?.apiKey) return auth.apiKey;
-  }
+  const keyPool = getKeyPool();
+  const auth = keyPool.getAuth("openrouter", sessionId ?? DEFAULT_KEYPOOL_SESSION_ID);
+  if (auth?.apiKey) return auth.apiKey;
   return process.env.OPENROUTER_API_KEY;
 }
 

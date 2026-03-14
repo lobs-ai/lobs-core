@@ -151,12 +151,12 @@ Confirmation: `Rename #alice-bob to #launch-planning?` → yes to proceed.
 
 | User says | Agent action |
 |---|---|
-| `@openclaw pause` (in-channel) | Set `agent_active = false` for that room |
-| `@openclaw go quiet` (in-channel) | Set `agent_passive = true` — listens but never interjects |
-| `@openclaw resume` (in-channel) | Set `agent_active = true`, `agent_passive = false` |
-| `@openclaw no tasks` (in-channel) | Disable task creation for this channel |
-| `@openclaw no memory` (in-channel) | Disable action item logging for this channel |
-| `@openclaw don't track me` (in-channel) | Opt out individual participant from detection |
+| `@lobs pause` (in-channel) | Set `agent_active = false` for that room |
+| `@lobs go quiet` (in-channel) | Set `agent_passive = true` — listens but never interjects |
+| `@lobs resume` (in-channel) | Set `agent_active = true`, `agent_passive = false` |
+| `@lobs no tasks` (in-channel) | Disable task creation for this channel |
+| `@lobs no memory` (in-channel) | Disable action item logging for this channel |
+| `@lobs don't track me` (in-channel) | Opt out individual participant from detection |
 
 Settings persist in PAW DB (see `group_chat_rooms` schema in `group-chat-agent-behavior.md`).
 
@@ -307,7 +307,7 @@ group creates a new Matrix room.
 For admin use only:
 
 ```
-@openclaw admin: purge archived channels older than 90 days
+@lobs admin: purge archived channels older than 90 days
 ```
 
 This hard-deletes `group_channels` rows (not Discord channels) for archived entries older than the

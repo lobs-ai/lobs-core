@@ -1,7 +1,7 @@
 # PAW Add-on Catalog
 
 This folder is the **source of truth** for all PAW add-ons. Each subfolder is a self-contained
-add-on that extends OpenClaw with new agent capabilities.
+add-on that extends lobs with new agent capabilities.
 
 Add-ons are the secondary bootstrapping mechanism: optional, modular config files that
 permanently extend the agent system when ingested.
@@ -37,9 +37,9 @@ From any agent session:
 
 Or directly:
 ```bash
-python3 ~/.openclaw/addons/ingest.py tasks
-python3 ~/.openclaw/addons/ingest.py --list
-python3 ~/.openclaw/addons/ingest.py --dry-run tasks
+python3 ~/.lobs/addons/ingest.py tasks
+python3 ~/.lobs/addons/ingest.py --list
+python3 ~/.lobs/addons/ingest.py --dry-run tasks
 ```
 
 ## Structure
@@ -56,7 +56,7 @@ Each add-on follows this layout:
 
 ## Syncing to Runtime
 
-The runtime location for add-ons is `~/.openclaw/addons/`. To sync from this folder:
+The runtime location for add-ons is `~/.lobs/addons/`. To sync from this folder:
 
 ```bash
 npm run sync-addons

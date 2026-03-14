@@ -1,13 +1,13 @@
 # Tasks Add-on
 
-Adds task management capabilities to OpenClaw agents — create, update, query, and manage
+Adds task management capabilities to lobs agents — create, update, query, and manage
 PAW tasks via natural language commands.
 
 **Status:** ✅ stable
 
 ## What It Installs
 
-- `~/.openclaw/skills/tasks/SKILL.md` — skill teaching agents how to manage tasks
+- `~/.lobs/skills/tasks/SKILL.md` — skill teaching agents how to manage tasks
 - Appends task-management behaviors to `~/apps/AGENTS.md`
 
 ## What You Can Do After Installing
@@ -21,8 +21,8 @@ PAW tasks via natural language commands.
 ## Install
 
 ```bash
-python3 ~/.openclaw/addons/ingest.py --dry-run tasks
-python3 ~/.openclaw/addons/ingest.py tasks
+python3 ~/.lobs/addons/ingest.py --dry-run tasks
+python3 ~/.lobs/addons/ingest.py tasks
 ```
 
 ## Files
@@ -32,5 +32,5 @@ tasks/
   README.md         ← this file
   addon.md          ← add-on definition
   tasks/
-    SKILL.md        ← skill installed to ~/.openclaw/skills/tasks/
+    SKILL.md        ← skill installed to ~/.lobs/skills/tasks/
 ```

@@ -16,7 +16,7 @@ import {
   type ModelTier,
 } from "../src/orchestrator/model-chooser.js";
 
-// Invalidate cache before each test so openclaw.json config doesn't bleed in
+// Invalidate cache before each test so lobs.json config doesn't bleed in
 beforeEach(() => {
   invalidateModelCache();
 });
@@ -103,7 +103,7 @@ describe("Model Chooser", () => {
     });
 
     test("source is tier-default when agent config is not available", () => {
-      // Using a fake agent type that won't be in openclaw.json
+      // Using a fake agent type that won't be in lobs.json
       const result = chooseModel("standard", "nonexistent-agent-xyz");
       expect(result.source).toBe("tier-default");
     });

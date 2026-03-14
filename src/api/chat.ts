@@ -5,6 +5,7 @@ import { chatSessions, chatMessages } from "../db/schema.js";
 import { json, error, parseBody } from "./index.js";
 import { log } from "../util/logger.js";
 import { randomUUID } from "node:crypto";
+import type { AgentStreamEvent } from "../services/main-agent.js";
 
 // ─── Simple DB-backed chat (no gateway dependency) ─────────────────────
 
@@ -74,6 +75,61 @@ export async function handleChatRequest(
         createdAt: now,
       }).run();
 
+      // Get the current assistant message count so we can detect new ones
+      const beforeCount = mainAgent.getAssistantMessageCount?.(channelId) ?? 0;
+
+      // Listen for tool events and persist them as chat messages
+      const toolListener = (event: AgentStreamEvent) => {
+        if (event.channelId !== channelId) return;
+        if (event.type === "tool_start") {
+          db.insert(chatMessages).values({
+            id: randomUUID().replace(/-/g, ""),
+            sessionKey,
+            role: "tool",
+            content: `🔧 ${event.toolName}`,
+            createdAt: new Date(event.timestamp).toISOString(),
+            messageMetadata: JSON.stringify({
+              toolName: event.toolName,
+              toolInput: event.toolInput,
+              toolUseId: event.toolUseId,
+              status: "running",
+            }),
+          }).run();
+        } else if (event.type === "tool_result") {
+          // Update the tool message with the result
+          const existing = db.select().from(chatMessages)
+            .where(eq(chatMessages.sessionKey, sessionKey))
+            .all()
+            .filter((m: any) => {
+              if (m.role !== "tool") return false;
+              try {
+                const meta = typeof m.messageMetadata === "string" ? JSON.parse(m.messageMetadata) : m.messageMetadata;
+                return meta?.toolUseId === event.toolUseId;
+              } catch { return false; }
+            })
+            .pop();
+          if (existing) {
+            db.update(chatMessages)
+              .set({
+                messageMetadata: JSON.stringify({
+                  toolName: event.toolName,
+                  toolUseId: event.toolUseId,
+                  result: event.result,
+                  isError: event.isError,
+                  status: "complete",
+                }),
+              })
+              .where(eq(chatMessages.id, existing.id))
+              .run();
+          }
+        } else if (event.type === "done" || event.type === "error") {
+          // Cleanup listener when done
+          mainAgent.events.off("stream", toolListener);
+        }
+      };
+
+      mainAgent.events.on("stream", toolListener);
+
       // Send to main agent (async, don't wait)
       mainAgent.handleMessage({
         id: messageId,
@@ -83,10 +139,26 @@ export async function handleChatRequest(
         channelId,
         timestamp: Date.now(),
       }).then(async () => {
-        // Process completed, store the response
+        // handleMessage resolved — but if the message was queued (channel busy),
+        // it returns immediately without processing. We need to wait for our
+        // specific message to be processed, not just for the channel to go idle once.
         try {
-          await mainAgent.waitForChannelIdle(channelId, 600_000);
-          const reply = mainAgent.getLastAssistantMessage(channelId);
+          // Wait for the channel to finish processing AND have a new assistant message
+          const deadline = Date.now() + 600_000;
+          while (Date.now() < deadline) {
+            const currentCount = mainAgent.getAssistantMessageCount?.(channelId) ?? 0;
+            const isIdle = !mainAgent.isChannelProcessing(channelId);
+            
+            // Channel is idle AND we have a new assistant message → done
+            if (isIdle && currentCount > beforeCount) break;
+            
+            // Channel is idle, no queue, but no new message → agent chose not to reply (e.g. NO_REPLY)
+            if (isIdle && (mainAgent.getChannelQueueDepth(channelId) ?? 0) === 0) break;
+            
+            await new Promise(r => setTimeout(r, 500));
+          }
+          
+          const reply = mainAgent.getAssistantMessageSince?.(channelId, beforeCount);
           
           if (reply) {
             db.insert(chatMessages).values({
@@ -161,6 +233,62 @@ export async function handleChatRequest(
         }));
 
       return json(res, { messages });
+    }
+
+    // GET /api/chat/sessions/:key/stream — SSE stream of agent events
+    if (sessionKey && action === "stream" && method === "GET") {
+      const mainAgent = (globalThis as any).__lobsMainAgent;
+      if (!mainAgent) return error(res, "Agent not initialized", 503);
+
+      const channelId = `nexus:${sessionKey}`;
+
+      // Set up SSE headers
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "Access-Control-Allow-Origin": "*",
+      });
+
+      // Send initial connected event
+      res.write(`data: ${JSON.stringify({ type: "connected", channelId, timestamp: Date.now() })}\n\n`);
+
+      // If agent is currently processing, send a thinking event immediately
+      if (mainAgent.isChannelProcessing?.(channelId)) {
+        res.write(`data: ${JSON.stringify({ type: "thinking", channelId, timestamp: Date.now() })}\n\n`);
+      }
+
+      // Listen for stream events from the main agent
+      const listener = (event: AgentStreamEvent) => {
+        if (event.channelId !== channelId) return;
+        try {
+          res.write(`data: ${JSON.stringify(event)}\n\n`);
+        } catch {
+          // Client disconnected
+        }
+      };
+
+      mainAgent.events.on("stream", listener);
+
+      // Keep alive every 15s
+      const keepAlive = setInterval(() => {
+        try {
+          res.write(`: keepalive\n\n`);
+        } catch {
+          cleanup();
+        }
+      }, 15_000);
+
+      const cleanup = () => {
+        mainAgent.events.off("stream", listener);
+        clearInterval(keepAlive);
+        try { res.end(); } catch { /* already closed */ }
+      };
+
+      req.on("close", cleanup);
+      req.on("error", cleanup);
+
+      return; // Don't close the response — SSE stays open
     }
 
     // GET /api/chat/sessions/:key/status — check processing status

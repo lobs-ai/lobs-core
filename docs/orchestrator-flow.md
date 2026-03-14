@@ -1,13 +1,13 @@
 # Orchestrator Control Loop — Architecture Reference
 
-**Source:** `~/openclaw-plugin-lobs/src/orchestrator/`
+**Source:** `~/lobs-plugin-lobs/src/orchestrator/`
 **Last Updated:** 2026-03-09
 
 ---
 
 ## Overview
 
-The PAW plugin orchestrator is a TypeScript Node.js control loop that runs inside the OpenClaw Gateway process. It scans for work every 10 seconds and dispatches tasks to specialized sub-agents via the Gateway `sessions_spawn` API.
+The PAW plugin orchestrator is a TypeScript Node.js control loop that runs inside the lobs Gateway process. It scans for work every 10 seconds and dispatches tasks to specialized sub-agents via the Gateway `sessions_spawn` API.
 
 ---
 

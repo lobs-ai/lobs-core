@@ -308,7 +308,7 @@ Add Step 2 (institution type) and Steps 3–4 (local model setup, compliance def
 - Depends on: existing onboarding wizard task (blocked)
 
 **Task 2: Model health check — startup ping + error surfacing**  
-On PAW startup (or OpenClaw plugin init), if `compliance_model` is set, ping the local model endpoint.  
+On PAW startup (or lobs plugin init), if `compliance_model` is set, ping the local model endpoint.  
 - If unavailable: set a `compliance_model_status` flag in DB  
 - Surface as a banner in the dashboard: "⚠️ Local model offline — compliance sessions will fail"  
 - No cloud fallback on failure (fail hard)

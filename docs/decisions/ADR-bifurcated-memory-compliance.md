@@ -8,7 +8,7 @@
 
 ## Problem Statement
 
-PAW agents store memory files in `~/.openclaw/workspace-{agent}/memory/`. These files may contain summaries of sensitive data — FERPA student records, HIPAA health information, or other compliance-restricted content. When an agent is spawned on a cloud AI session (Anthropic, OpenAI, etc.), OpenClaw core auto-injects these memory files into the system prompt, potentially leaking sensitive data to third-party cloud providers.
+PAW agents store memory files in `~/.lobs/workspace-{agent}/memory/`. These files may contain summaries of sensitive data — FERPA student records, HIPAA health information, or other compliance-restricted content. When an agent is spawned on a cloud AI session (Anthropic, OpenAI, etc.), lobs core auto-injects these memory files into the system prompt, potentially leaking sensitive data to third-party cloud providers.
 
 The existing compliance system enforces local-model-only execution for tasks and projects with `compliance_required=true`, but this only prevents sensitive **task prompts** from going to cloud AI. It does **not** protect sensitive **memories** from being injected during cloud sessions.
 
@@ -21,12 +21,12 @@ The existing compliance system enforces local-model-only execution for tasks and
 Two memory directories per agent workspace:
 
 ```
-~/.openclaw/workspace-{agent}/
-  memory/             ← non-compliant (cloud-safe), auto-injected by OpenClaw core
-  memory-compliant/   ← compliant (local-only), NOT scanned by OpenClaw core
+~/.lobs/workspace-{agent}/
+  memory/             ← non-compliant (cloud-safe), auto-injected by lobs core
+  memory-compliant/   ← compliant (local-only), NOT scanned by lobs core
 ```
 
-OpenClaw core only scans `memory/`, so compliant memories are structurally isolated — they **cannot** reach cloud AI through the core injection path.
+lobs core only scans `memory/`, so compliant memories are structurally isolated — they **cannot** reach cloud AI through the core injection path.
 
 The plugin's `before_prompt_build` hook explicitly reads `memory-compliant/` files and appends them to the prompt **only when the session is in compliance mode** (i.e., the task or project has `compliance_required=true`).
 
@@ -152,18 +152,18 @@ export function isComplianceModel(model: string, configuredComplianceModel?: str
 Parse every memory file's frontmatter and filter based on tags. 
 
 - **Pro**: Single directory, simpler mental model
-- **Con**: OpenClaw core injects files before the plugin hook runs, making filtering impossible at the plugin layer. Also fragile — easy to forget the frontmatter.
+- **Con**: lobs core injects files before the plugin hook runs, making filtering impossible at the plugin layer. Also fragile — easy to forget the frontmatter.
 
 ### Option B: DB-backed memory store (rejected for now)
 Move all memories out of files and into the DB, with a `compliance_required` column.
 
 - **Pro**: Clean enforcement, easy querying
-- **Con**: Massive change to existing agent workflow. Agents write memory files directly. Would require rewriting OpenClaw's memory system.
+- **Con**: Massive change to existing agent workflow. Agents write memory files directly. Would require rewriting lobs's memory system.
 
 ### Option C: Directory separation (chosen)
 Structural enforcement via two directories.
 
-- **Pro**: Enforced by file system structure — impossible to accidentally bypass. Compatible with OpenClaw core. No changes to agent memory-writing workflow except the location.
+- **Pro**: Enforced by file system structure — impossible to accidentally bypass. Compatible with lobs core. No changes to agent memory-writing workflow except the location.
 - **Con**: Agents need to know which directory to write to. Migration needed for any existing sensitive memories.
 
 **Decision**: Option C with frontmatter as the metadata/validation layer.

@@ -7,7 +7,8 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { parseModelString, createClient } from "../runner/providers.js";
+import { EventEmitter } from "node:events";
+import { parseModelString, createResilientClient } from "../runner/providers.js";
 import type { LLMMessage, LLMClient } from "../runner/providers.js";
 import { getModelForTier } from "../config/models.js";
 import { getToolDefinitions, executeTool } from "../runner/tools/index.js";
@@ -21,6 +22,7 @@ import { LoopDetector } from "../runner/loop-detector.js";
 
 const MAX_HISTORY = 50;
 const MAX_CONTEXT_CHARS = 150_000; // Rough char budget for history
+const MAX_LIVE_TOOL_RESULT_CHARS = 12_000;
 const DEFAULT_MODEL = "strong";  // Chat defaults to strong tier (opus)
 const DEFAULT_CWD = process.env.HOME ?? "/tmp";
 const MAX_CONCURRENT_CHANNELS = 3; // Max simultaneous channel conversations
@@ -39,6 +41,18 @@ interface PendingMessage {
   chatType?: "dm" | "group" | "nexus" | "system";
 }
 
+/** SSE event types emitted during agent processing */
+export interface AgentStreamEvent {
+  type: "tool_start" | "tool_result" | "text_delta" | "assistant_reply" | "thinking" | "error" | "done";
+  channelId: string;
+  toolName?: string;
+  toolInput?: string;    // JSON string preview of tool input
+  toolUseId?: string;
+  result?: string;       // tool result or final text
+  isError?: boolean;
+  timestamp: number;
+}
+
 export class MainAgent {
   private db: Database.Database;
   private processingChannels = new Set<string>(); // Channels currently being processed
@@ -52,6 +66,9 @@ export class MainAgent {
   private onProgress: ((channelId: string, content: string) => Promise<void>) | null = null;
   // Track chat type per channel for step visibility
   private channelChatType = new Map<string, string>();
+  
+  /** EventEmitter for SSE streaming — Nexus subscribes to this */
+  public readonly events = new EventEmitter();
 
   constructor(db: Database.Database, model?: string) {
     this.db = db;
@@ -493,11 +510,24 @@ export class MainAgent {
       const tools = getToolDefinitions(availableTools);
       console.log(`[main-agent] Using model: ${effectiveModel} (raw: ${this.model}, override: ${sessionRow?.model_override ?? 'none'})`);
       const config = parseModelString(effectiveModel);
-      const client: LLMClient = createClient(config);
+      const client: LLMClient = createResilientClient(effectiveModel, {
+        sessionId: `main-agent:${replyChannelId}`,
+        maxRetries: 3,
+      });
 
       // Agent loop — LLM ↔ tool execution (no turn limit, timeout handles runaway)
       while (true) {
         if (this.onTyping) this.onTyping(replyChannelId);
+
+        // Emit SSE event: thinking (about to call LLM)
+        this.events.emit("stream", {
+          type: "thinking",
+          channelId: replyChannelId,
+          timestamp: Date.now(),
+        } satisfies AgentStreamEvent);
+
+        messages = pruneToolResults(messages, 6, 400);
+        messages = await this.compactIfNeeded(messages);
 
         const response = await client.createMessage({
           model: config.modelId,
@@ -522,14 +552,25 @@ export class MainAgent {
           } else if (block.type === "tool_use") {
             hasToolUse = true;
 
+            const inputPreview = JSON.stringify(block.input).substring(0, 300);
+
             // Show tool step progress in DMs/Nexus (not group chats)
             if (this.shouldShowSteps(replyChannelId) && this.onProgress) {
-              const inputPreview = JSON.stringify(block.input).substring(0, 150);
               await this.onProgress(
                 replyChannelId,
-                `🔧 \`${block.name}\` ${inputPreview}${inputPreview.length >= 150 ? "..." : ""}`,
+                `🔧 \`${block.name}\` ${inputPreview.substring(0, 150)}${inputPreview.length >= 150 ? "..." : ""}`,
               );
             }
+
+            // Emit SSE event: tool starting
+            this.events.emit("stream", {
+              type: "tool_start",
+              channelId: replyChannelId,
+              toolName: block.name,
+              toolInput: inputPreview,
+              toolUseId: block.id,
+              timestamp: Date.now(),
+            } satisfies AgentStreamEvent);
 
             const result = await executeTool(
               block.name,
@@ -537,15 +578,28 @@ export class MainAgent {
               block.id,
               this.cwd,
             );
+            const resultContent = this.truncateLiveToolResult(
+              typeof result.content === "string"
+                ? result.content
+                : JSON.stringify(result.content),
+            );
             toolResults.push({
               type: "tool_result",
               tool_use_id: result.tool_use_id,
-              content:
-                typeof result.content === "string"
-                  ? result.content
-                  : JSON.stringify(result.content),
+              content: resultContent,
               is_error: result.is_error,
             });
+
+            // Emit SSE event: tool completed
+            this.events.emit("stream", {
+              type: "tool_result",
+              channelId: replyChannelId,
+              toolName: block.name,
+              toolUseId: block.id,
+              result: resultContent.substring(0, 500),
+              isError: result.is_error,
+              timestamp: Date.now(),
+            } satisfies AgentStreamEvent);
           }
         }
 
@@ -653,6 +707,14 @@ export class MainAgent {
               await this.onReply(replyChannelId, chunk);
             }
           }
+
+          // Emit SSE event: assistant reply
+          this.events.emit("stream", {
+            type: "assistant_reply",
+            channelId: replyChannelId,
+            result: textResponse,
+            timestamp: Date.now(),
+          } satisfies AgentStreamEvent);
         } else if (isRoutineHeartbeat) {
           // Still persist routine heartbeats to DB for debugging, but don't send to Discord
           this.db
@@ -670,10 +732,23 @@ export class MainAgent {
           console.log(`[main-agent] Routine heartbeat logged but not sent to Discord: ${textResponse}`);
         }
 
+        // Emit done event
+        this.events.emit("stream", {
+          type: "done",
+          channelId: replyChannelId,
+          timestamp: Date.now(),
+        } satisfies AgentStreamEvent);
         break; // Done
       }
     } catch (err) {
       console.error("[main-agent] Error in conversation loop:", err);
+      // Emit error event
+      this.events.emit("stream", {
+        type: "error",
+        channelId: replyChannelId,
+        result: String(err).substring(0, 500),
+        timestamp: Date.now(),
+      } satisfies AgentStreamEvent);
       try {
         if (this.onReply) {
           await this.onReply(
@@ -882,8 +957,12 @@ export class MainAgent {
       .join("\n");
 
     // Use a cheap model for summarization
-    const config = parseModelString(getModelForTier("small"));
-    const client = createClient(config);
+    const compactModel = getModelForTier("small");
+    const config = parseModelString(compactModel);
+    const client = createResilientClient(compactModel, {
+      sessionId: "main-agent:compaction",
+      maxRetries: 3,
+    });
 
     try {
       const response = await client.createMessage({
@@ -948,6 +1027,15 @@ export class MainAgent {
     return queuedBlock;
   }
 
+  private truncateLiveToolResult(content: string): string {
+    if (content.length <= MAX_LIVE_TOOL_RESULT_CHARS) return content;
+
+    return (
+      content.slice(0, MAX_LIVE_TOOL_RESULT_CHARS) +
+      "\n\n[Tool output truncated before model call. Re-run the tool with narrower scope if needed.]"
+    );
+  }
+
   private splitMessage(text: string, maxLen: number): string[] {
     if (text.length <= maxLen) return [text];
     const chunks: string[] = [];
@@ -975,6 +1063,22 @@ export class MainAgent {
       ORDER BY created_at DESC LIMIT 1
     `).get(channelId) as { content: string } | undefined;
     return row?.content ?? null;
+  }
+
+  /** Get the count of assistant messages for a channel (for tracking new responses) */
+  getAssistantMessageCount(channelId: string): number {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) as count FROM main_agent_messages
+      WHERE channel_id = ? AND role = 'assistant'
+    `).get(channelId) as { count: number } | undefined;
+    return row?.count ?? 0;
+  }
+
+  /** Get the latest assistant message added after a known count (for detecting new responses) */
+  getAssistantMessageSince(channelId: string, previousCount: number): string | null {
+    const currentCount = this.getAssistantMessageCount(channelId);
+    if (currentCount <= previousCount) return null;
+    return this.getLastAssistantMessage(channelId);
   }
 
   /** Wait for a channel to finish processing */

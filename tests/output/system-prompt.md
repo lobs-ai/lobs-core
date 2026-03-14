@@ -71,19 +71,19 @@ REMINDER — Learnings from prior runs:
 - **[2026-03-12] lobs** — No forks for PAW repos. Always branch directly on paw-engineering repos. Submodule pointers only move forward on main. Rafe deleted all lobs-ai fork repos. Local repos now have origin=paw-engineering, no fork remote.
 - **[2026-03-12] lobs** — Submodule PR chain: always bottom-up (paw-portal → paw-hub → LSS). Use HTTPS URLs in .gitmodules for CI compat, local git config insteadOf handles SSH.
 
-[/Users/lobs/lobs-shared-memory/openclaw-docs/providers/claude-max-api-proxy.md]
+[/Users/lobs/lobs-shared-memory/lobs-docs/providers/claude-max-api-proxy.md]
 ### Test it ```bash # Health check curl http://localhost:3456/health
 
-[/Users/lobs/lobs-shared-memory/openclaw-docs/install/docker.md]
+[/Users/lobs/lobs-shared-memory/lobs-docs/install/docker.md]
 ### Health checks Container probe endpoints (no auth required): ```bash curl -fsS http://127.0.0.1:18789/healthz curl -fsS http://127.0.0.1:18789/readyz ``` Aliases: `/health` and `/ready`. `/healt...
 
-[/Users/lobs/lobs-shared-memory/openclaw-docs/platforms/mac/health.md]
-## How the probe works - App runs `openclaw health --json` via `ShellExecutor` every ~60s and on demand. The probe loads creds and reports status without sending messages. - Cache the last good sna...
+[/Users/lobs/lobs-shared-memory/lobs-docs/platforms/mac/health.md]
+## How the probe works - App runs `lobs health --json` via `ShellExecutor` every ~60s and on demand. The probe loads creds and reports status without sending messages. - Cache the last good sna...
 
-[/Users/lobs/.openclaw/workspace/memory/reviewer-lobs-server-error-handling.md]
+[/Users/lobs/.lobs/workspace/memory/reviewer-lobs-server-error-handling.md]
 ## Project Context lobs-server is a FastAPI backend with 27 API routers. SQLite database, async SQLAlchemy, Pydantic schemas. ## Current State
 
-[/Users/lobs/lobs-shared-memory/openclaw-docs/concepts/typebox.md]
+[/Users/lobs/lobs-shared-memory/lobs-docs/concepts/typebox.md]
 ## Minimal client (Node.js) Smallest useful flow: connect + health. ```ts import { WebSocket } from "ws"; const ws = new WebSocket("ws://127.0.0.1:18789"); ws.on("open", () => { ws.send( JSON.strin...
 
 # Context: Project Documentation
@@ -106,7 +106,7 @@ REMINDER — Learnings from prior runs:
 ### `bin/lss-health` Check healthcheck endpoints for all services + sails: ```bash ./bin/lss-health ``` - Exits 0 if all healthy - Exits 1 if any unhealthy (usable in cron) - Checks ship-api, paw-h...
 
 # Context: Recent Session History
-## You... **Assistant:** NO_REPLY **User:** [Fri 2026-03-13 17:25 EDT] OpenClaw runtime context (internal): This context is runtime-generated, not user-authored. Keep internal details private. [Int...
+## You... **Assistant:** NO_REPLY **User:** [Fri 2026-03-13 17:25 EDT] lobs runtime context (internal): This context is runtime-generated, not user-authored. Keep internal details private. [Int...
 
 ---
 

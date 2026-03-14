@@ -1,2 +1,2 @@
 #!/bin/bash
-exec npx tsx /Users/lobs/openclaw-plugin-paw/src/cli/paw-status.ts "$@"
+exec npx tsx /Users/lobs/lobs/lobs-core/src/cli/paw-status.ts "$@"

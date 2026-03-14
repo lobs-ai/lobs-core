@@ -1,7 +1,7 @@
 # lobs-core v2 Roadmap — Self-Contained Agent System
 
 ## Vision
-lobs-core becomes a fully self-contained, production-grade agent system with zero dependency on OpenClaw for any functionality. OpenClaw remains the chat interface layer only.
+lobs-core becomes a fully self-contained, production-grade agent system with zero dependency on lobs for any functionality. lobs remains the chat interface layer only.
 
 ## Priority 1: OAuth Key Management (Sticky + Failover)
 **Why first:** Directly affects reliability and cost of every worker run.
@@ -58,9 +58,9 @@ Current files to evaluate:
 Target: ~8-10 files, ~3,000 lines. Same functionality, less indirection.
 
 ## Priority 4: Discord Bot
-**Why:** Self-contained communication, not dependent on OpenClaw.
+**Why:** Self-contained communication, not dependent on lobs.
 
-- Study OpenClaw's Discord implementation for patterns
+- Study lobs's Discord implementation for patterns
 - Implement in lobs-core directly
 - Support: message send/receive, reactions, threads, embeds
 - Route worker completions, alerts, etc. through own bot
@@ -72,7 +72,7 @@ Target: ~8-10 files, ~3,000 lines. Same functionality, less indirection.
 - Skill = directory with SKILL.md + scripts/templates
 - Skills loaded at runtime, injected into worker context
 - Examples: git workflow, PR creation, test runner, deploy
-- Similar to OpenClaw's skill system but simplified
+- Similar to lobs's skill system but simplified
 
 ## Implementation Order
 1. OAuth key management (1-2 days)
@@ -82,6 +82,6 @@ Target: ~8-10 files, ~3,000 lines. Same functionality, less indirection.
 5. Skills system (2-3 days)
 
 ## Non-Goals (for now)
-- Replacing OpenClaw for main chat (keep using it)
+- Replacing lobs for main chat (keep using it)
 - Multi-user support
 - Web UI auth

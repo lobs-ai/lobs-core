@@ -9,7 +9,7 @@
 
 ## Context
 
-The add-on ingestion system (`~/.openclaw/addons/ingest.py`) applies patches to core system
+The add-on ingestion system (`~/.lobs/addons/ingest.py`) applies patches to core system
 files when a user installs an add-on. Currently those patches are permanent — there's no way
 to undo them without manual editing.
 
@@ -48,7 +48,7 @@ registry entry with `removal_hints`:
     "version": "1.0.0",
     "ops_applied": 2,
     "removal_hints": [
-      { "type": "skill-dir", "path": "~/.openclaw/skills/tasks" },
+      { "type": "skill-dir", "path": "~/.lobs/skills/tasks" },
       { "type": "marked-section", "file": "~/apps/AGENTS.md", "marker": "tasks" }
     ]
   }
@@ -66,8 +66,8 @@ Hint types:
 Add `--remove` as a CLI command:
 
 ```
-python3 ~/.openclaw/addons/ingest.py --remove tasks
-python3 ~/.openclaw/addons/ingest.py --dry-run --remove tasks
+python3 ~/.lobs/addons/ingest.py --remove tasks
+python3 ~/.lobs/addons/ingest.py --dry-run --remove tasks
 ```
 
 Logic:
@@ -119,13 +119,13 @@ Dry-run mode: print what would be removed without doing it.
 
 ## Files to Edit
 
-- `~/.openclaw/addons/ingest.py` — primary implementation
-- `~/.openclaw/addons/addon-spec.md` — document marker format and `--remove` usage
+- `~/.lobs/addons/ingest.py` — primary implementation
+- `~/.lobs/addons/addon-spec.md` — document marker format and `--remove` usage
 
-After making changes, run `bin/sync-addons` in `openclaw-plugin-paw` to propagate the updated
+After making changes, run `bin/sync-addons` in `lobs-plugin-paw` to propagate the updated
 `ingest.py` to the plugin repo source (or update it in the plugin and let sync-addons push out).
 
-**Note:** `ingest.py` lives in `~/.openclaw/addons/` at runtime. The plugin repo (`openclaw-plugin-paw`)
+**Note:** `ingest.py` lives in `~/.lobs/addons/` at runtime. The plugin repo (`lobs-plugin-paw`)
 may or may not vendor a copy — confirm where the source-of-truth copy lives before editing.
 
 ---
@@ -134,18 +134,18 @@ may or may not vendor a copy — confirm where the source-of-truth copy lives be
 
 ```bash
 # Install example add-on
-python3 ~/.openclaw/addons/ingest.py example
+python3 ~/.lobs/addons/ingest.py example
 
 # Verify markers in AGENTS.md
 grep "addon:example:begin" ~/apps/AGENTS.md
 
 # Dry-run removal
-python3 ~/.openclaw/addons/ingest.py --dry-run --remove example
+python3 ~/.lobs/addons/ingest.py --dry-run --remove example
 
 # Actual removal
-python3 ~/.openclaw/addons/ingest.py --remove example
+python3 ~/.lobs/addons/ingest.py --remove example
 
 # Verify markers gone, registry entry removed
 grep "addon:example" ~/apps/AGENTS.md  # should return nothing
-cat ~/.openclaw/addons/installed.json | python3 -m json.tool | grep example  # should return nothing
+cat ~/.lobs/addons/installed.json | python3 -m json.tool | grep example  # should return nothing
 ```

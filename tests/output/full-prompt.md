@@ -170,7 +170,7 @@ async function startup() {
             uptime: Math.floor((Date.now() - startTime) / 
 
 # Context: Recent Session History
-## You... **Assistant:** NO_REPLY **User:** [Fri 2026-03-13 17:25 EDT] OpenClaw runtime context (internal): This context is runtime-generated, not user-authored. Keep internal details private. [Int...
+## You... **Assistant:** NO_REPLY **User:** [Fri 2026-03-13 17:25 EDT] lobs runtime context (internal): This context is runtime-generated, not user-authored. Keep internal details private. [Int...
 
 ---
 

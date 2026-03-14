@@ -6,14 +6,14 @@
 
 ## Context
 
-lobs-core currently depends on OpenClaw for several critical capabilities:
+lobs-core currently depends on lobs for several critical capabilities:
 - Chat sessions (tried to call gateway `sessions_spawn`)
-- Discord communication (all messages route through OpenClaw)
+- Discord communication (all messages route through lobs)
 - Web search (requires Brave API key we don't have)
 - Single API key per provider (no redundancy, no failover)
 - Orchestrator is overengineered (22 files, 7,145 lines) and fragile
 
-The goal: make lobs-core a fully self-contained, production-grade agent system. OpenClaw remains only as the chat interface layer for Rafe.
+The goal: make lobs-core a fully self-contained, production-grade agent system. lobs remains only as the chat interface layer for Rafe.
 
 ## Decision
 
@@ -115,12 +115,12 @@ class BrowserService {
 
 ### 4. Discord Bot (Self-Contained)
 
-**Problem:** All Discord messages route through OpenClaw. lobs-core can't send messages independently.
+**Problem:** All Discord messages route through lobs. lobs-core can't send messages independently.
 
 **Design:**
-- Use `discord.js` library (same as OpenClaw)
+- Use `discord.js` library (same as lobs)
 - Minimal bot: connect, listen for messages in configured channels, send messages
-- NOT a full chat interface (OpenClaw handles that) — this is for:
+- NOT a full chat interface (lobs handles that) — this is for:
   - Worker completion notifications
   - Alert/error notifications  
   - Slash commands for task management (`/task create`, `/status`)

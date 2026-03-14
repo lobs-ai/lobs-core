@@ -1,14 +1,14 @@
 # Projects Add-on
 
-Adds project management capabilities to OpenClaw agents — sync projects from GitHub, add tasks to projects,
+Adds project management capabilities to lobs agents — sync projects from GitHub, add tasks to projects,
 publish project status updates, and archive completed work.
 
 **Status:** ✅ stable
 
 ## What It Installs
 
-- `~/.openclaw/skills/projects-skill/SKILL.md` — primary skill for syncing, adding tasks, publishing, and archiving
-- `~/.openclaw/skills/project-manager/SKILL.md` — CLI reference skill for all `paw-project` operations
+- `~/.lobs/skills/projects-skill/SKILL.md` — primary skill for syncing, adding tasks, publishing, and archiving
+- `~/.lobs/skills/project-manager/SKILL.md` — CLI reference skill for all `paw-project` operations
 - Appends project-management behaviors to `~/apps/AGENTS.md`
 
 ## What You Can Do After Installing
@@ -23,8 +23,8 @@ publish project status updates, and archive completed work.
 ## Install
 
 ```bash
-python3 ~/.openclaw/addons/ingest.py --dry-run projects
-python3 ~/.openclaw/addons/ingest.py projects
+python3 ~/.lobs/addons/ingest.py --dry-run projects
+python3 ~/.lobs/addons/ingest.py projects
 ```
 
 ## Files
@@ -34,10 +34,10 @@ projects/
   README.md              ← this file
   addon.md               ← add-on definition (installs skills + patches AGENTS.md)
   projects-skill/
-    SKILL.md             ← skill installed to ~/.openclaw/skills/projects-skill/
+    SKILL.md             ← skill installed to ~/.lobs/skills/projects-skill/
                             covers: sync, add-task, publish, archive, list, get, create
   project-manager/
-    SKILL.md             ← skill installed to ~/.openclaw/skills/project-manager/
+    SKILL.md             ← skill installed to ~/.lobs/skills/project-manager/
                             covers: full paw-project CLI reference with workflows
 ```
 

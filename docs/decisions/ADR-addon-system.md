@@ -8,7 +8,7 @@
 
 ## Problem
 
-OpenClaw bootstraps its agent configuration from a single install. But different users need
+lobs bootstraps its agent configuration from a single install. But different users need
 different capabilities — task management, project tracking, meeting ingestion, compliance tools,
 etc. Bundling everything into the base install creates bloat and overwhelm. Doing nothing
 leaves users with a generic, unconfigured assistant.
@@ -22,11 +22,11 @@ developer involvement.
 ## Solution: The Add-on System
 
 Add-ons are **markdown files that define patches to core system files**. Ingesting an add-on
-permanently extends skills, AGENTS.md, openclaw.json, and other config files. The result is
+permanently extends skills, AGENTS.md, lobs.json, and other config files. The result is
 a system that behaves differently — new agent capabilities, new CLI tools, new behaviors.
 
 This is distinct from:
-- **Primary bootstrapping** — openclaw.json, initial plugin install (one-time system setup)
+- **Primary bootstrapping** — lobs.json, initial plugin install (one-time system setup)
 - **Skills** — passive how-to documents loaded at runtime (no system modification)
 - **Plugin config** — runtime settings (no permanent agent behavior change)
 
@@ -39,15 +39,15 @@ Add-ons sit between these: they are **config-level, on-demand, and permanent**.
 ```
 Primary Bootstrap
 ────────────────
-openclaw.json → PAW plugin loaded → orchestrator starts
+lobs.json → PAW plugin loaded → orchestrator starts
 
 Secondary Bootstrap (Add-on System)
 ────────────────────────────────────
 User: "install add-on tasks"
-  → addon-manager skill reads ~/.openclaw/addons/tasks/addon.md
+  → addon-manager skill reads ~/.lobs/addons/tasks/addon.md
   → ingest.py parses @target sections
-  → patches applied to ~/.openclaw/skills/, ~/apps/AGENTS.md, etc.
-  → registered in ~/.openclaw/addons/installed.json
+  → patches applied to ~/.lobs/skills/, ~/apps/AGENTS.md, etc.
+  → registered in ~/.lobs/addons/installed.json
   → agent now has new capabilities on next session
 
 Source of Truth
@@ -62,7 +62,7 @@ PAW Plugin (this repo)
 
 Runtime Location
 ────────────────
-~/.openclaw/addons/
+~/.lobs/addons/
   tasks/           ← copied from PAW plugin; operated by ingest.py
   projects/
   ...
@@ -79,7 +79,7 @@ Runtime Location
 ### PAW Plugin (source of truth)
 
 ```
-openclaw-plugin-paw/addons/
+lobs-plugin-paw/addons/
   README.md                  ← catalog TOC with all PAW add-ons
   <addon-name>/
     README.md                ← human-readable description (shows in catalog)
@@ -88,12 +88,12 @@ openclaw-plugin-paw/addons/
       SKILL.md               ← bundled skill (installed via skill-install action)
 ```
 
-### Runtime (~/.openclaw/addons/)
+### Runtime (~/.lobs/addons/)
 
 Same structure, copied from PAW plugin. The runtime location is what `ingest.py` operates on.
 
-**Key invariant:** `~/.openclaw/addons/<name>/` is always a verbatim copy of
-`openclaw-plugin-paw/addons/<name>/`. Updates to the plugin update the source; `sync-addons`
+**Key invariant:** `~/.lobs/addons/<name>/` is always a verbatim copy of
+`lobs-plugin-paw/addons/<name>/`. Updates to the plugin update the source; `sync-addons`
 propagates to the runtime.
 
 ---
@@ -136,7 +136,7 @@ Use the `tasks` skill for all task CRUD operations...
 
 ## Reversibility Design
 
-**Constraint:** Many operations mutate shared files (AGENTS.md, openclaw.json). True reversal
+**Constraint:** Many operations mutate shared files (AGENTS.md, lobs.json). True reversal
 requires knowing exactly what was inserted so it can be removed.
 
 **Approach: Marker-based reversal for text insertions**
@@ -170,7 +170,7 @@ For `skill-install`: reversal removes the skill directory (restoring backup if p
     "version": "1.0.0",
     "ops_applied": 2,
     "removal_hints": [
-      { "type": "skill-dir", "path": "~/.openclaw/skills/tasks" },
+      { "type": "skill-dir", "path": "~/.lobs/skills/tasks" },
       { "type": "marked-section", "file": "~/apps/AGENTS.md", "marker": "tasks" }
     ]
   }
@@ -191,18 +191,18 @@ all PAW-specific capabilities.
 
 ```
 1. Developer writes/updates addons/<name>/addon.md in this repo
-2. npm run sync-addons  ← copies addons/ → ~/.openclaw/addons/
+2. npm run sync-addons  ← copies addons/ → ~/.lobs/addons/
 3. ingest.py <name>     ← user installs when ready
 ```
 
 The `sync-addons` step happens:
 - During PAW plugin install/update (future automation)
 - Manually by the developer during development
-- Optionally during OpenClaw gateway start (future plugin hook)
+- Optionally during lobs gateway start (future plugin hook)
 
 ### Add-on Catalog
 
-`~/.openclaw/addons/README.md` is the **catalog** — a human-readable TOC that lists all
+`~/.lobs/addons/README.md` is the **catalog** — a human-readable TOC that lists all
 available add-ons with status, description, and install command. PAW maintains this file.
 When new add-ons are added to the plugin, the catalog is updated.
 
@@ -212,7 +212,7 @@ When new add-ons are added to the plugin, the catalog is updated.
 
 ```
 Planned    → add-on is documented in README.md catalog as "planned"
-Available  → addon.md exists in ~/.openclaw/addons/<name>/
+Available  → addon.md exists in ~/.lobs/addons/<name>/
 Installed  → ingest.py has applied patches; entry in installed.json
 Removed    → ingest.py --remove applied; entry removed from installed.json
 ```
@@ -225,7 +225,7 @@ Removed    → ingest.py --remove applied; entry removed from installed.json
 - **Single `ingest.py` engine** — one parser, all action types, no per-add-on code
 - **Permanent mutations** — add-ons change system files; no runtime loading/unloading
 - **Marker-based reversal** — text markers enable un-ingest without a separate state store
-- **PAW as source** — the plugin repo owns add-on definitions; `~/.openclaw/addons/` is a copy
+- **PAW as source** — the plugin repo owns add-on definitions; `~/.lobs/addons/` is a copy
 
 ### What We Didn't Choose
 - **Runtime loading** — would require plugin system changes; adds complexity
@@ -245,7 +245,7 @@ Removed    → ingest.py --remove applied; entry removed from installed.json
 |-----------|--------|
 | `ingest.py` — ingestion engine | ✅ complete |
 | `addon-spec.md` — spec | ✅ complete |
-| `~/.openclaw/addons/README.md` — catalog | ✅ complete |
+| `~/.lobs/addons/README.md` — catalog | ✅ complete |
 | `addon-manager` skill | ✅ complete |
 | `tasks` add-on | ✅ complete |
 | `projects` add-on | ✅ complete |
@@ -269,7 +269,7 @@ Until this is implemented, un-ingesting requires manual editing of modified file
 - Note: already-installed add-ons without markers will need manual cleanup or re-install
 
 ### Milestone 2: Remaining Add-ons (Programmer tasks, in progress)
-- Implement planned add-ons in priority order per `~/.openclaw/addons/README.md`
+- Implement planned add-ons in priority order per `~/.lobs/addons/README.md`
 - High: inbox, meetings
 - Medium: memory, chat, knowledge, reflections, research
 - Low: calendar, workflows, youtube, documents, status

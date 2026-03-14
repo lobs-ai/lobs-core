@@ -11,7 +11,7 @@
 
 ## Problem
 
-When the OpenClaw agent is a participant in an active group chat, it needs to:
+When the lobs agent is a participant in an active group chat, it needs to:
 
 1. Continuously ingest conversation without disrupting it
 2. Detect action items and intent autonomously
@@ -38,7 +38,7 @@ The agent defaults to **silent observation**. It reads everything, acts on almos
 │                                                          │
 │  [Agent: listening, building context, detecting items]  │
 │                                                          │
-│  Alice: @openclaw what did we decide?                   │
+│  Alice: @lobs what did we decide?                   │
 │  Agent: You've assigned Bob: billing PR review (by      │
 │         Thursday) and staging env update. Want me to    │
 │         create tasks for these?                         │
@@ -86,7 +86,7 @@ Chat Server → Room Event Stream
 The agent keeps a **rolling 50-message window** per room in memory. This is not stored in the compliance memory partition — it's ephemeral working context used for:
 - Action item detection across multiple messages
 - Summarization when asked
-- Disambiguation of "@openclaw" commands
+- Disambiguation of "@lobs" commands
 
 Buffer is cleared on restart. Persistent conversation history lives only in the chat server's message store (not the agent's memory system). The agent can query back-history from the Matrix API on demand.
 
@@ -98,9 +98,9 @@ Buffer is cleared on restart. Persistent conversation history lives only in the 
 
 | Trigger | Response type |
 |---------|--------------|
-| `@openclaw [anything]` in room | Direct reply |
+| `@lobs [anything]` in room | Direct reply |
 | DM to agent directly | Direct reply |
-| Name invoked: "openclaw, can you..." | Direct reply |
+| Name invoked: "lobs, can you..." | Direct reply |
 | Explicit question directed at agent | Direct reply |
 
 These are unambiguous invocations. The agent must respond within ~3 seconds.
@@ -237,7 +237,7 @@ Create tasks? React ✅ to confirm all, or reply with adjustments.
 Agent: ✅ Created 2 tasks for @bob.
 ```
 
-5. On no response for 5 minutes: items saved to **pending log** (not tasks), available via `@openclaw what's pending?`
+5. On no response for 5 minutes: items saved to **pending log** (not tasks), available via `@lobs what's pending?`
 
 ### Immediate Task Creation (Explicit Commands)
 
@@ -245,10 +245,10 @@ The agent creates tasks immediately — no confirmation needed — when:
 
 | Command | Behavior |
 |---------|----------|
-| `@openclaw create task: [description]` | Task created instantly |
-| `@openclaw assign [name]: [task]` | Task created with owner |
-| `@openclaw remind [name] on [date]: [thing]` | Reminder task created |
-| `@openclaw track this` (reply to a message) | Creates task from that message |
+| `@lobs create task: [description]` | Task created instantly |
+| `@lobs assign [name]: [task]` | Task created with owner |
+| `@lobs remind [name] on [date]: [thing]` | Reminder task created |
+| `@lobs track this` (reply to a message) | Creates task from that message |
 
 ### Mid-Conversation Execution
 
@@ -256,10 +256,10 @@ For tasks that can be executed immediately (not requiring human effort), the age
 
 | Request | Agent behavior |
 |---------|---------------|
-| `@openclaw look up [thing]` | Executes search, replies in-thread |
-| `@openclaw summarize this conversation` | Summarizes last N messages, replies |
-| `@openclaw schedule [event]` | Creates calendar event, confirms |
-| `@openclaw send [person] the notes` | Sends DM with conversation notes |
+| `@lobs look up [thing]` | Executes search, replies in-thread |
+| `@lobs summarize this conversation` | Summarizes last N messages, replies |
+| `@lobs schedule [event]` | Creates calendar event, confirms |
+| `@lobs send [person] the notes` | Sends DM with conversation notes |
 
 These execute **immediately**, no confirmation needed. They're information-retrieval or communication tasks, not data-mutating PAW tasks.
 
@@ -287,10 +287,10 @@ Consent is opt-out, not opt-in — matching the design of the address book (priv
 
 | Setting | Default | How to change |
 |---------|---------|---------------|
-| `agent_active` | `true` | `@openclaw pause` to suspend |
-| `agent_passive` | `false` | `@openclaw go quiet` — reads but never interjects |
-| `task_creation` | `true` | `@openclaw no tasks` — disables auto-task-offer |
-| `memory_logging` | `true` | `@openclaw no memory` — disables action item log |
+| `agent_active` | `true` | `@lobs pause` to suspend |
+| `agent_passive` | `false` | `@lobs go quiet` — reads but never interjects |
+| `task_creation` | `true` | `@lobs no tasks` — disables auto-task-offer |
+| `memory_logging` | `true` | `@lobs no memory` — disables action item log |
 
 Settings are stored per-room in PAW DB (not in the Matrix server). They persist across sessions.
 
@@ -298,10 +298,10 @@ Settings are stored per-room in PAW DB (not in the Matrix server). They persist 
 
 Any participant can say:
 ```
-@openclaw don't track me
+@lobs don't track me
 ```
 
-The agent will exclude that participant's messages from action item detection. It will still respond to direct `@openclaw` invocations from them.
+The agent will exclude that participant's messages from action item detection. It will still respond to direct `@lobs` invocations from them.
 
 Individual opt-outs are stored as participant flags in PAW DB. They apply room-wide (opting out in one room doesn't opt out of all rooms).
 
@@ -385,7 +385,7 @@ To prevent the agent from becoming annoying:
 | Room has been quiet for > 4 hours | Reset back-off counters |
 | 5+ action items accumulating over > 30 min | Single summary (not individual alerts) |
 
-The agent tracks `consecutiveIgnored` counter per room. At 2 ignored interjections, it goes quiet and waits for direct `@openclaw` invocation. It resets when someone engages.
+The agent tracks `consecutiveIgnored` counter per room. At 2 ignored interjections, it goes quiet and waits for direct `@lobs` invocation. It resets when someone engages.
 
 ---
 
@@ -393,11 +393,11 @@ The agent tracks `consecutiveIgnored` counter per room. At 2 ignored interjectio
 
 ### Phase 1 — Core Ingestion + Mention Detection (small)
 - Matrix/Discord event listener with rolling message buffer
-- Mention detection (`@openclaw`, direct name reference)
+- Mention detection (`@lobs`, direct name reference)
 - Room settings table + participant opt-out table
 - Sensitive content keyword screen
 
-**Acceptance:** Agent responds to `@openclaw` mentions in < 3s; stays silent otherwise.
+**Acceptance:** Agent responds to `@lobs` mentions in < 3s; stays silent otherwise.
 
 ### Phase 2 — Pattern-Based Action Item Detection (medium)
 - Pattern scanner on message buffer
@@ -411,22 +411,22 @@ The agent tracks `consecutiveIgnored` counter per room. At 2 ignored interjectio
 - Confirmation message with reaction-based approval
 - Task creation from pending items → PAW task system
 - Pending item expiry (24h)
-- `@openclaw what's pending?` query
+- `@lobs what's pending?` query
 
 **Acceptance:** Confirmed items become PAW tasks with correct owner/deadline. No tasks created without confirmation.
 
 ### Phase 4 — Mid-Conversation Execution (small, incremental)
-- `@openclaw track this` (reply handler)
-- `@openclaw summarize` 
-- `@openclaw look up [thing]`
+- `@lobs track this` (reply handler)
+- `@lobs summarize` 
+- `@lobs look up [thing]`
 - These extend existing skill invocation patterns
 
 **Acceptance:** Each command executes within conversation context without leaving room.
 
 ### Phase 5 — Room Controls + Back-Off (small)
-- `@openclaw pause/go quiet/no tasks/no memory` commands
+- `@lobs pause/go quiet/no tasks/no memory` commands
 - Throttle and back-off counters
-- `@openclaw don't track me` individual opt-out
+- `@lobs don't track me` individual opt-out
 
 **Acceptance:** All room control commands take effect immediately and persist across agent restarts.
 
@@ -449,7 +449,7 @@ fixtures/
 
 ### Behavioral Tests
 
-- `@openclaw` mention → response within 3s (integration test, needs running bot)
+- `@lobs` mention → response within 3s (integration test, needs running bot)
 - 2 ignored interjections → passive mode activated (state machine test)
 - Expired pending items → status = 'expired' after 24h (DB test with mocked clock)
 - Opt-out participant → messages excluded from detection (unit test)

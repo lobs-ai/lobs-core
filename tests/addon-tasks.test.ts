@@ -171,10 +171,10 @@ describe("Tasks add-on — SKILL.md content", () => {
 
 describe("Tasks add-on — ingest.py compatibility", () => {
   it("passes dry-run without errors", () => {
-    const ingestScript = resolve(process.env.HOME!, ".openclaw/addons/ingest.py");
+    const ingestScript = resolve(process.env.HOME!, ".lobs/addons/ingest.py");
 
     if (!existsSync(ingestScript)) {
-      // Skip if ingest.py is not installed (CI without OpenClaw)
+      // Skip if ingest.py is not installed (CI without lobs)
       console.warn("Skipping ingest dry-run — ingest.py not found at", ingestScript);
       return;
     }

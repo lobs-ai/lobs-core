@@ -1,7 +1,7 @@
 {
   "id": "paw",
   "name": "PAW — Personal AI Workforce",
-  "description": "Multi-agent orchestration, task management, and workflow engine for OpenClaw",
+  "description": "Multi-agent orchestration, task management, and workflow engine for lobs",
   "version": "0.1.0",
   "configSchema": {
     "type": "object",
@@ -31,7 +31,7 @@
   "uiHints": {
     "dbPath": {
       "label": "Database Path",
-      "placeholder": "~/.openclaw/plugins/paw/paw.db",
+      "placeholder": "~/.lobs/lobs.db",
       "advanced": true
     },
     "scanIntervalMs": {

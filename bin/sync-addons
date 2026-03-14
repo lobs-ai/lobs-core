@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# sync-addons — Sync PAW add-ons from plugin source to ~/.openclaw/addons/
+# sync-addons — Sync PAW add-ons from plugin source to ~/.lobs/addons/
 #
 # Usage:
 #   bin/sync-addons              # sync all add-ons
 #   bin/sync-addons tasks        # sync specific add-on
 #   bin/sync-addons --dry-run    # preview without copying
 #
-# This copies openclaw-plugin-paw/addons/<name>/ → ~/.openclaw/addons/<name>/
+# This copies lobs-plugin-paw/addons/<name>/ → ~/.lobs/addons/<name>/
 # making the runtime catalog match the plugin source.
 #
 # Run this after updating add-ons in the plugin repo.
@@ -16,7 +16,7 @@ set -euo pipefail
 
 PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_DIR="$PLUGIN_DIR/addons"
-DEST_DIR="$HOME/.openclaw/addons"
+DEST_DIR="$HOME/.lobs/addons"
 DRY_RUN=false
 FILTER=""
 
@@ -40,7 +40,7 @@ fi
 
 if [ ! -d "$DEST_DIR" ]; then
   echo "Error: Destination directory not found: $DEST_DIR"
-  echo "Is OpenClaw installed? Expected: $DEST_DIR"
+  echo "Is lobs installed? Expected: $DEST_DIR"
   exit 1
 fi
 

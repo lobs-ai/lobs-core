@@ -12,7 +12,7 @@ Integrated lobs-memory search directly into lobs-core with HTTP + grep fallback 
 - **Fallback mode**: Simple grep-based search across markdown files
 - **Timeout**: 5 seconds for HTTP (prevents blocking)
 - **Search directories**:
-  - `~/.openclaw/workspace`
+  - `~/.lobs/agents`
   - `~/lobs/lobs-shared-memory`
   - `~/lobs/lobs-core`
   - `~/paw/bot-shared`

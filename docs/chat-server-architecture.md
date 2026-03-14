@@ -18,7 +18,7 @@ If everyone who can receive a message is already a registered user on a shared c
 This document covers:
 1. Architecture of the self-hosted chat server as identity + messaging layer
 2. User discovery and connection flow
-3. Integration with the OpenClaw agent
+3. Integration with the lobs agent
 4. Comparison with Discord and Telegram
 
 ---
@@ -42,8 +42,8 @@ The chat server is the single source of truth for user identity and reachability
           ┌────────────────┼─────────────────┐
           ▼                ▼                  ▼
   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-  │ Element      │  │ OpenClaw Bot │  │ Other clients │
-  │ (user client)│  │ @openclaw:   │  │ (mobile, web) │
+  │ Element      │  │ lobs Bot │  │ Other clients │
+  │ (user client)│  │ @lobs:   │  │ (mobile, web) │
   │              │  │ server.local  │  │               │
   └──────────────┘  └──────────────┘  └──────────────┘
 ```
@@ -97,11 +97,11 @@ When a new person joins the chat server, they are automatically in the "address 
 Admin generates invite link / registration token
   → New user registers account on Conduit homeserver
   → System adds them to #general room
-  → Bot sends welcome DM from @openclaw:server.local:
+  → Bot sends welcome DM from @lobs:server.local:
       "Hi [name], welcome!
        Here's who's here: [member list with handles]
        DM anyone by searching their name in Element.
-       Type @openclaw in any room for AI help."
+       Type @lobs in any room for AI help."
   → User opens Element → People panel shows server members
   → User can DM immediately
 ```
@@ -135,12 +135,12 @@ Conduit config: `search_all_users = true`
 |---------|---------------|-------------|
 | Element sidebar → People | Native Element UI | Passive |
 | Element search bar | `user_directory/search` | Type a name |
-| Agent directory query | `@openclaw who's here?` | Natural language |
+| Agent directory query | `@lobs who's here?` | Natural language |
 | Admin-sent welcome DM | Bot DMs new user on join | Automated |
 
 ---
 
-## Integration with OpenClaw Agent
+## Integration with lobs Agent
 
 ### What the Agent Needs
 
@@ -176,7 +176,7 @@ When the user says `group message Alice Bob about the budget`:
 1. Parse: ["Alice", "Bob"], message = "about the budget"
 2. userDirectory.search("Alice") → @alice:server.local
 3. userDirectory.search("Bob") → @bob:server.local
-4. room.getOrCreate([@alice, @bob, @openclaw]) → roomId
+4. room.getOrCreate([@alice, @bob, @lobs]) → roomId
 5. room.send(roomId, "about the budget")
 ```
 
@@ -186,9 +186,9 @@ The agent **never queries a local contacts table.** All identity resolution goes
 
 | Command pattern | Behavior |
 |----------------|----------|
-| `@openclaw who's here?` | Returns list of server members (name + handle) |
-| `@openclaw find [name]` | Searches user directory, returns matches |
-| `@openclaw DM [name] [message]` | Creates private room, sends message |
+| `@lobs who's here?` | Returns list of server members (name + handle) |
+| `@lobs find [name]` | Searches user directory, returns matches |
+| `@lobs DM [name] [message]` | Creates private room, sends message |
 | `group message [name1] [name2] ...` | Group message flow (see above) |
 | (join event trigger) | Auto-DM new members on join |
 
@@ -199,14 +199,14 @@ The agent **never queries a local contacts table.** All identity resolution goes
   "chatServer": {
     "url": "https://matrix.server.local",
     "botToken": "...",
-    "botUserId": "@openclaw:server.local"
+    "botUserId": "@lobs:server.local"
   }
 }
 ```
 
 ### Integration with Existing Group Messaging Skill
 
-The existing `group-messaging` skill in OpenClaw currently routes through Discord using `GroupChannelManager`. For Matrix, the same group-combination-to-room model applies:
+The existing `group-messaging` skill in lobs currently routes through Discord using `GroupChannelManager`. For Matrix, the same group-combination-to-room model applies:
 
 ```
 group_channels table (existing):
@@ -282,7 +282,7 @@ The `group_channels` table already supports a `platform` column. The `chat-serve
 ### Phase 1 — Matrix Server Setup (infrastructure task)
 
 - [ ] Deploy Conduit on Mac mini, configure domain + TLS
-- [ ] Create bot account `@openclaw:server.local` with admin privileges
+- [ ] Create bot account `@lobs:server.local` with admin privileges
 - [ ] Set `search_all_users = true` in Conduit config
 - [ ] Validate: 10–20 concurrent users, resource usage acceptable
 
@@ -291,7 +291,7 @@ The `group_channels` table already supports a `platform` column. The `chat-serve
 - [ ] Write `chat-server-client.ts` with `userDirectory.search()`, `room.getOrCreate()`, `room.send()`
 - [ ] Wire into existing group-message skill (replace Discord-only path with platform dispatch)
 - [ ] Add Matrix platform support to `GroupChannelManager`
-- [ ] Add config keys (`CHAT_SERVER_URL`, `CHAT_BOT_TOKEN`) to OpenClaw config schema
+- [ ] Add config keys (`CHAT_SERVER_URL`, `CHAT_BOT_TOKEN`) to lobs config schema
 
 ### Phase 3 — Agent Commands (programmer task)
 
@@ -325,4 +325,4 @@ No contacts table. No sync job. No separate identity store. We're done.
 - Matrix Client-Server API: https://spec.matrix.org/v1.8/client-server-api/
 - Matrix user directory spec: https://spec.matrix.org/v1.8/client-server-api/#user-directory
 - Conduit homeserver: https://conduit.rs/
-- Existing group-message skill: `~/.openclaw/skills/group-messaging/SKILL.md`
+- Existing group-message skill: `~/.lobs/skills/group-messaging/SKILL.md`

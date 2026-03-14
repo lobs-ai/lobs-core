@@ -33,12 +33,68 @@ const LEGACY_KEYS_PATH = resolve(CONFIG_DIR, "keys.json");
 /**
  * Load key config from secrets/keys.json (new layout) or keys.json (legacy).
  */
+function normalizeKeyEntries(entries: unknown): KeyEntry[] {
+  if (!Array.isArray(entries)) return [];
+
+  const normalized: Array<KeyEntry | undefined> = entries.map((entry, idx) => {
+      if (typeof entry === "string") {
+        const key = entry.trim();
+        return key ? { key, label: `key-${idx + 1}` } : undefined;
+      }
+
+      if (entry && typeof entry === "object" && typeof (entry as { key?: unknown }).key === "string") {
+        const key = (entry as { key: string }).key.trim();
+        if (!key) return undefined;
+        const label = typeof (entry as { label?: unknown }).label === "string"
+          ? (entry as { label?: string }).label
+          : undefined;
+        return { key, label };
+      }
+
+      return undefined;
+    });
+
+  return normalized.filter((entry): entry is KeyEntry => entry !== undefined);
+}
+
+function normalizePool(pool: unknown): KeyPool | undefined {
+  // Current format: { keys: [...], strategy: "sticky-failover" }
+  if (pool && typeof pool === "object" && Array.isArray((pool as { keys?: unknown }).keys)) {
+    const keys = normalizeKeyEntries((pool as { keys: unknown }).keys);
+    if (keys.length === 0) return undefined;
+    return { keys, strategy: "sticky-failover" };
+  }
+
+  // Legacy/init format: [ { key, label } ] or [ "sk-..." ]
+  const keys = normalizeKeyEntries(pool);
+  if (keys.length === 0) return undefined;
+  return { keys, strategy: "sticky-failover" };
+}
+
+export function normalizeKeyConfig(data: unknown): KeyConfig {
+  if (!data || typeof data !== "object") return {};
+
+  const raw = data as Record<string, unknown>;
+  const config: KeyConfig = {};
+
+  const anthropic = normalizePool(raw.anthropic);
+  if (anthropic) config.anthropic = anthropic;
+
+  const openai = normalizePool(raw.openai);
+  if (openai) config.openai = openai;
+
+  const openrouter = normalizePool(raw.openrouter);
+  if (openrouter) config.openrouter = openrouter;
+
+  return config;
+}
+
 function loadConfigFile(): KeyConfig | undefined {
   // Try new layout first
   if (existsSync(NEW_KEYS_PATH)) {
     try {
       const data = JSON.parse(readFileSync(NEW_KEYS_PATH, "utf-8"));
-      return data as KeyConfig;
+      return normalizeKeyConfig(data);
     } catch (error) {
       console.warn(`Failed to load keys config from ${NEW_KEYS_PATH}:`, error);
       return undefined;
@@ -50,7 +106,7 @@ function loadConfigFile(): KeyConfig | undefined {
     console.warn("[keys] DEPRECATED: keys.json in config root — migrate to secrets/keys.json");
     try {
       const data = JSON.parse(readFileSync(LEGACY_KEYS_PATH, "utf-8"));
-      return data as KeyConfig;
+      return normalizeKeyConfig(data);
     } catch (error) {
       console.warn(`Failed to load keys config from ${LEGACY_KEYS_PATH}:`, error);
       return undefined;

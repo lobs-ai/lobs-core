@@ -30,9 +30,6 @@
     "typescript": "^5.7.0",
     "vitest": "^3.2.4"
   },
-  "peerDependencies": {
-    "openclaw": ">=1.0.0"
-  },
   "bin": {
     "lobs": "./dist/cli/lobs.js",
     "paw-task": "./src/cli/paw-task.ts",

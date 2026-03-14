@@ -28,7 +28,7 @@ lobs-core/
 
 | Repo | Purpose |
 |------|---------|
-| [lobs-ai/lobs-memory-plugin](https://github.com/lobs-ai/lobs-memory-plugin) | OpenClaw plugin for memory tools (thin HTTP proxy) |
+| [lobs-ai/lobs-memory-plugin](https://github.com/lobs-ai/lobs-memory-plugin) | lobs plugin for memory tools (thin HTTP proxy) |
 
 ## Quick Start
 
@@ -131,4 +131,4 @@ Before each agent run, the context engine:
 
 ## Legacy
 
-`src/hooks/`, `src/api/`, `src/services/`, `src/integrations/`, `src/index.ts` — OpenClaw plugin infrastructure, kept for reference. The standalone entry point is `src/main.ts`.
+`src/hooks/`, `src/api/`, `src/services/`, `src/integrations/`, `src/index.ts` — lobs plugin infrastructure. The standalone entry point is `src/main.ts`.

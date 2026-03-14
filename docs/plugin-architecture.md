@@ -4,7 +4,7 @@
 
 ## What Is a Plugin?
 
-OpenClaw plugins are Node/TypeScript modules that extend the Gateway daemon at runtime. Each plugin exports a single object with `id`, `name`, `version`, and a `register(api)` method. The Gateway calls `register` on startup, passing a plugin API surface that provides: path resolution, config access, logger, route registration, and lifecycle hook registration.
+lobs plugins are Node/TypeScript modules that extend the Gateway daemon at runtime. Each plugin exports a single object with `id`, `name`, `version`, and a `register(api)` method. The Gateway calls `register` on startup, passing a plugin API surface that provides: path resolution, config access, logger, route registration, and lifecycle hook registration.
 
 **Plugin contract (simplified):**
 ```ts
@@ -20,8 +20,8 @@ export default myPlugin;
 ## File/Directory Structure
 
 ```
-openclaw-plugin-lobs/
-├── openclaw.plugin.json    # Plugin manifest (id, name, configSchema)
+lobs-plugin-lobs/
+├── lobs.plugin.json    # Plugin manifest (id, name, configSchema)
 ├── package.json
 ├── dist/                   # Compiled output loaded by Gateway
 │   ├── index.js            # Plugin entry point — exports pawPlugin
@@ -36,11 +36,11 @@ openclaw-plugin-lobs/
 └── docs/                   # Architecture docs
 ```
 
-**`openclaw.plugin.json`** declares the plugin ID and `configSchema` (JSON Schema). Config values are set in the Gateway UI and passed to `register` as `api.pluginConfig`.
+**`lobs.plugin.json`** declares the plugin ID and `configSchema` (JSON Schema). Config values are set in the Gateway UI and passed to `register` as `api.pluginConfig`.
 
 ## How Plugins Register
 
-On Gateway start, OpenClaw discovers plugins by scanning configured plugin paths. For each found plugin it:
+On Gateway start, lobs discovers plugins by scanning configured plugin paths. For each found plugin it:
 
 1. Loads the JS module at `dist/index.js`
 2. Calls `plugin.register(api)` synchronously
