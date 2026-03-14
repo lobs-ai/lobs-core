@@ -115,6 +115,7 @@ async function main() {
   console.log("Setting up cron service...");
   const cronService = initCronService(getRawDb());
   cronService.seedDefaults();
+  // Event handler wired after mainAgent is created (see below)
   cronService.start();
 
   // Start the control loop
@@ -132,6 +133,12 @@ async function main() {
   
   // Export main agent globally so API handlers can access it
   (globalThis as any).__lobsMainAgent = mainAgent;
+
+  // Wire cron events to main agent
+  cronService.setEventHandler(async (text: string) => {
+    console.log(`[cron] Firing event to main agent: ${text.slice(0, 80)}...`);
+    await mainAgent.handleSystemEvent(text);
+  });
 
   // Connect Discord bot (optional)
   const discordConfig = loadDiscordConfig();
