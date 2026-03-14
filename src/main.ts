@@ -17,10 +17,13 @@ import { existsSync, mkdirSync } from "node:fs";
 import { initToolGate } from "./runner/tool-gate.js";
 import { getCronManager } from "./orchestrator/cron.js";
 import { runHeartbeat } from "./orchestrator/heartbeat.js";
+import { randomUUID } from "node:crypto";
 import { browserService } from "./services/browser.js";
 import { skillsService } from "./services/skills.js";
 import { discordService } from "./services/discord.js";
 import { loadDiscordConfig } from "./config/discord.js";
+import { MainAgent } from "./services/main-agent.js";
+import { loadWorkspaceContext, buildMainAgentPrompt } from "./services/workspace-loader.js";
 
 const HOME = process.env.HOME ?? "";
 const DB_PATH = resolve(HOME, ".openclaw/plugins/lobs/lobs.db");
@@ -113,12 +116,44 @@ async function main() {
   // Start HTTP server (Nexus dashboard + API)
   startServer(HTTP_PORT);
   
-  // Connect Discord bot if configured
+  // Connect Discord bot and wire up main agent
   const discordConfig = loadDiscordConfig();
   if (discordConfig) {
-    discordService.connect(discordConfig).catch(err => {
+    try {
+      await discordService.connect(discordConfig);
+
+      // Create and configure the main agent
+      const rawDb = getRawDb();
+      const mainAgent = new MainAgent(rawDb);
+      mainAgent.setSystemPrompt(buildMainAgentPrompt());
+      mainAgent.setWorkspaceContext(loadWorkspaceContext());
+
+      // Wire reply handler — agent replies go to Discord
+      mainAgent.setReplyHandler(async (channelId, content) => {
+        await discordService.send(channelId, content);
+      });
+
+      // Wire typing handler
+      mainAgent.setTypingHandler((channelId) => {
+        discordService.sendTyping(channelId).catch(() => {});
+      });
+
+      // Wire incoming messages — Discord messages go to agent
+      discordService.onMessage((msg) => {
+        mainAgent.handleMessage({
+          id: randomUUID(),
+          content: msg.content,
+          authorId: msg.authorId,
+          authorName: msg.authorTag,
+          channelId: msg.channelId,
+          timestamp: Date.now(),
+        });
+      });
+
+      console.log("[main-agent] Connected to Discord, ready for messages");
+    } catch (err) {
       console.error("[discord] Failed to connect:", err);
-    });
+    }
   }
   
   console.log("=== lobs-core ready ===");

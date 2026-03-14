@@ -133,6 +133,34 @@ class DiscordService {
     });
   }
 
+  /** Send a typing indicator to a channel */
+  async sendTyping(channelId: string): Promise<void> {
+    if (!this.client || !this.ready) return;
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (channel && channel.isTextBased()) {
+        await (channel as TextChannel).sendTyping();
+      }
+    } catch {
+      // Ignore typing errors
+    }
+  }
+
+  /** Reply to a specific message in a channel */
+  async reply(channelId: string, messageId: string, content: string): Promise<void> {
+    if (!this.client || !this.ready) return;
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (channel && channel.isTextBased()) {
+        const msg = await (channel as TextChannel).messages.fetch(messageId);
+        await msg.reply(content);
+      }
+    } catch {
+      // Fall back to regular send
+      await this.send(channelId, content);
+    }
+  }
+
   async shutdown(): Promise<void> {
     if (this.client) {
       this.client.destroy();
