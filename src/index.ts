@@ -291,10 +291,9 @@ async function failStaleSpawnRuns(): Promise<void> {
     let port = 18789;
     let token = "";
     try {
-      const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-      const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-      port = cfg?.gateway?.port ?? 18789;
-      token = cfg?.gateway?.auth?.token ?? "";
+      const cfg = getGatewayConfig();
+      port = cfg.port;
+      token = cfg.token;
     } catch {}
 
     /**
@@ -385,14 +384,12 @@ export async function processPendingResumes(): Promise<void> {
   if (pendingResumes.length === 0) return;
 
   // Read gateway config
-  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
   let port = 18789;
   let token = "";
   try {
-    const { readFileSync } = await import("node:fs");
-    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    port = cfg?.gateway?.port ?? 18789;
-    token = cfg?.gateway?.auth?.token ?? "";
+    const cfg = getGatewayConfig();
+    port = cfg.port;
+    token = cfg.token;
   } catch {}
 
   if (!token) {

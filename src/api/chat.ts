@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 
 /**
  * NOTE: This is a simplified chat implementation that stores messages in the DB.
- * It does NOT integrate with OpenClaw gateway or spawn subagents.
+ * It does NOT integrate with the gateway host or spawn subagents.
  * For production chat, use the full gateway-backed implementation.
  */
 

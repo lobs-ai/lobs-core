@@ -7,7 +7,7 @@
  *
  * Model location (resolved in order):
  *   1. SAIL_BERT_MODEL_PATH env variable
- *   2. ~/.openclaw/models/bert-small-pii/model.onnx
+ *   2. ~/.lobs/models/bert-small-pii/model.onnx
  *   3. /opt/sail/models/bert-small-pii/model.onnx  (Docker path)
  *
  * If the model file is missing, the worker sends { sensitive: false, error }
@@ -73,7 +73,7 @@ const CONFIDENCE_THRESHOLD = 0.75;
 function resolveModelPath(): string | null {
   const candidates = [
     process.env.SAIL_BERT_MODEL_PATH,
-    join(process.env.HOME ?? "/root", ".openclaw", "models", "bert-small-pii", "model.onnx"),
+    join(process.env.HOME ?? "/root", ".lobs", "models", "bert-small-pii", "model.onnx"),
     "/opt/sail/models/bert-small-pii/model.onnx",
   ].filter(Boolean) as string[];
 
@@ -258,7 +258,7 @@ async function main(): Promise<void> {
       sensitive: false,
       entities: [],
       confidence: 1.0,
-      error: "BERT model not found — set SAIL_BERT_MODEL_PATH or download to ~/.openclaw/models/bert-small-pii/model.onnx",
+      error: "BERT model not found — set SAIL_BERT_MODEL_PATH or download to ~/.lobs/models/bert-small-pii/model.onnx",
     } satisfies WorkerOutput);
     return;
   }

@@ -5,17 +5,16 @@
  *   Always injected: AGENTS.md, SOUL.md (+ USER.md, MEMORY.md, TOOLS.md for main)
  *   On demand: everything else (HEARTBEAT.md, memory/*.md, PROJECT-*.md, etc.)
  *
- * Follows OpenClaw's pattern: small essential files always loaded,
+ * Follows the small-essential-files pattern: a compact always-loaded set,
  * everything else the agent reads when it needs it.
  */
 
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { getAgentContextDir, getAgentDir } from "../config/lobs.js";
 
 const HOME = homedir();
-const AGENTS_BASE = join(HOME, ".lobs", "agents");
-const WORKSPACE_DIR = join(HOME, ".openclaw", "workspace");
 
 // ── Per-Agent Config ─────────────────────────────────────────────────────────
 
@@ -41,19 +40,18 @@ const DEFAULT_ALWAYS_LOADED = ["AGENTS.md", "SOUL.md"];
  * Get the base directory for an agent type.
  */
 function agentDir(agentType: string): string {
-  return join(AGENTS_BASE, agentType);
+  return getAgentDir(agentType);
 }
 
 /**
- * Read a file from agent dir, optionally falling back to workspace dir.
- * Main agent falls back to OpenClaw workspace for compatibility.
+ * Read a file from the agent dir, optionally falling back to the main context dir.
  */
 function readFile(agentType: string, filename: string): string | null {
   const dirs = [agentDir(agentType)];
 
-  // Main agent also checks OpenClaw workspace (backwards compat)
+  // Main agent also checks its context dir for shared files.
   if (agentType === "main") {
-    dirs.push(WORKSPACE_DIR);
+    dirs.push(getAgentContextDir(agentType));
   }
 
   for (const dir of dirs) {
@@ -127,7 +125,7 @@ export function loadWorkspaceContext(agentType: string = "main"): string {
   const projectFiles = new Set<string>();
   const contextDir = join(baseDir, "context");
   const searchDirs = [contextDir];
-  if (agentType === "main") searchDirs.push(WORKSPACE_DIR);
+  if (agentType === "main") searchDirs.push(getAgentContextDir(agentType));
 
   for (const dir of searchDirs) {
     if (!existsSync(dir)) continue;
@@ -191,7 +189,7 @@ function findMemoryPath(agentType: string, date: string): string | null {
     join(agentDir(agentType), "context", "memory", `${date}.md`),
   ];
   if (agentType === "main") {
-    paths.push(join(WORKSPACE_DIR, "memory", `${date}.md`));
+    paths.push(join(getAgentContextDir(agentType), "memory", `${date}.md`));
   }
   for (const p of paths) {
     if (existsSync(p)) return p;

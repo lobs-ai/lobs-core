@@ -17,7 +17,7 @@ const HOME = process.env.HOME ?? "";
 
 // Collections to search (mirrors memory/config.json)
 const SEARCH_DIRS = [
-  resolve(HOME, ".openclaw/workspace"),
+  resolve(HOME, ".lobs/agents"),
   resolve(HOME, "lobs/lobs-shared-memory"),
   resolve(HOME, "lobs/lobs-core"),
   resolve(HOME, "paw/bot-shared"),

@@ -138,7 +138,7 @@ export async function buildSmartSystemPrompt(spec: AgentSpec): Promise<{
   const parts: string[] = [];
 
   // 1. Load workspace context (AGENTS.md, SOUL.md, etc.) via the universal loader
-  //    This handles all agent types consistently — same pattern as OpenClaw
+  //    This handles all agent types consistently — same pattern across lobs agents
   const agentType = spec.agent as AgentType;
   const validAgentTypes: AgentType[] = ["programmer", "writer", "researcher", "reviewer", "architect"];
   

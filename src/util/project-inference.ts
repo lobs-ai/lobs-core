@@ -43,7 +43,7 @@ const KEYWORD_OVERRIDES: Record<string, string[]> = {
   ],
   "proj-flock": ["flock"],
   "paw-sail": [
-    "sail", "lobs-sail", "sail container", "sail docker", "openclaw container",
+    "sail", "lobs-sail", "sail container", "sail docker",
     "paw container", "single-tenant", "sail frontend",
   ],
   "paw-ship": [
@@ -56,7 +56,7 @@ const KEYWORD_OVERRIDES: Record<string, string[]> = {
     "blog", "activation", "signup", "marketing site",
   ],
   "paw-lite": [
-    "paw lite", "paw-lite", "openclaw-plugin-paw-lite",
+    "paw lite", "paw-lite",
   ],
 };
 

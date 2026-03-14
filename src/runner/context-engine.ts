@@ -177,7 +177,7 @@ const TASK_TYPE_PATTERNS: Array<{ type: TaskType; patterns: RegExp[]; weight: nu
 
 /** File extension patterns */
 const CODE_FILE_PATTERN = /\b[\w-]+\.(ts|tsx|js|jsx|py|swift|go|rs|java|rb|css|html|sql|yaml|yml|json|toml)\b/gi;
-const PROJECT_KEYWORDS_PATTERN = /\b(paw|lobs|nexus|flock|openclaw|ship-?api|sail)\b/gi;
+const PROJECT_KEYWORDS_PATTERN = /\b(paw|lobs|nexus|flock|ship-?api|sail)\b/gi;
 
 /** Direct mapping from agent type to task type */
 const AGENT_TYPE_MAP: Record<string, TaskType> = {

@@ -5,7 +5,7 @@
  * maintains the `memory_compliance_index` table.
  *
  * ## What it does
- * - Scans `~/.openclaw/workspace-{agent}/memory/` and `memory-compliant/` for all agents
+ * - Scans `~/.lobs/agents/{agent}/context/memory/` and `memory-compliant/` for all agents
  * - Computes a SHA-1 hash of each file for change detection
  * - Upserts rows in `memory_compliance_index` with compliance status + anomaly flag
  * - Detects anomalies: files in `memory/` whose frontmatter declares `compliance_required: true`
@@ -25,8 +25,8 @@ import { createHash } from "node:crypto";
 import { parseMemoryFrontmatter } from "../util/memory-frontmatter.js";
 import { getDb, getRawDb } from "../db/connection.js";
 import { log } from "../util/logger.js";
+import { getAgentCompliantMemoryDir, getAgentMemoryDir } from "../config/lobs.js";
 
-const WORKSPACE_BASE = join(process.env.HOME || "/Users/lobs", ".openclaw");
 const AGENT_TYPES = ["programmer", "writer", "researcher", "reviewer", "architect"];
 const SCAN_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -53,7 +53,7 @@ function sha1(content: string): string {
  * Scan a single directory for memory files and return structured metadata.
  */
 async function scanDirectory(agentType: string, dir: Directory): Promise<ScannedFile[]> {
-  const dirPath = join(WORKSPACE_BASE, `workspace-${agentType}`, dir);
+  const dirPath = dir === "memory" ? getAgentMemoryDir(agentType) : getAgentCompliantMemoryDir(agentType);
   const results: ScannedFile[] = [];
 
   let files: string[];

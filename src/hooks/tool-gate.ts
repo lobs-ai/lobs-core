@@ -3,7 +3,7 @@
  *
  * Hard blocks (ALL tiers, always blocked):
  * - Workers mutating the PAW DB (UPDATE/INSERT/DELETE on tasks, worker_runs, agent_status)
- * - Workers editing openclaw.json or openclaw.yaml
+ * - Workers editing lobs config files
  * - Workers running gateway restart/config commands
  *
  * Tier-based (soft) enforcement:
@@ -38,11 +38,11 @@ const HARD_BLOCK_EXEC_PATTERNS = [
   // Block sqlite3 mutations against the PAW DB
   /sqlite3\s+.*paw\.db\s+.*\b(UPDATE|INSERT|DELETE|ALTER|DROP)\b/i,
   /sqlite3\s+.*paw\.db\s+["'].*\b(UPDATE|INSERT|DELETE|ALTER|DROP)\b/i,
-  // Block editing openclaw config files
-  /\bopenclaw\.json\b/,
-  /\bopenclaw\.yaml\b/,
+  // Block editing lobs config files
+  /\blobs\.json\b/,
+  /\blobs\.ya?ml\b/,
   // Block gateway commands
-  /\bopenclaw\s+gateway\b/i,
+  /\blobs\s+gateway\b/i,
 ];
 
 /**
@@ -54,8 +54,8 @@ const HARD_BLOCK_TOOLS = new Set(["gateway"]);
  * Hard-blocked file path patterns for write/edit tools.
  */
 const HARD_BLOCK_FILE_PATTERNS = [
-  /openclaw\.json$/,
-  /openclaw\.yaml$/,
+  /lobs\.json$/,
+  /lobs\.ya?ml$/,
   /paw\.db$/,
 ];
 
@@ -104,7 +104,7 @@ export function registerToolGateHook(api: LobsPluginApi): void {
       for (const pattern of HARD_BLOCK_EXEC_PATTERNS) {
         if (pattern.test(command)) {
           log().warn(`[PAW] HARD BLOCK: exec pattern "${pattern}" matched for worker on task ${task.id.slice(0, 8)}: ${command.slice(0, 200)}`);
-          return { block: true, blockReason: "Workers cannot modify openclaw.json, lobs.db, or gateway config. Only the orchestrator or Lobs can do this." };
+          return { block: true, blockReason: "Workers cannot modify lobs.json, lobs.db, or gateway config. Only the orchestrator or Lobs can do this." };
         }
       }
     }

@@ -9,6 +9,7 @@ import { plugins, uiConfig } from "../db/schema.js";
 import { json, error, parseBody } from "./index.js";
 import type { PawPlugin, UIAffordance } from "../types/plugin.js";
 import { getModelForTier } from "../config/models.js";
+import { getGatewayConfig } from "../config/lobs.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -170,17 +171,10 @@ function buildPrompt(aiAction: string, context: string): string | null {
 }
 
 async function callModel(prompt: string): Promise<string> {
-  // Fast path: call the OpenClaw gateway API directly via HTTP instead of shelling out.
-  // Reads gateway port + auth token from the OpenClaw config file.
-  const cfgPath = process.env.OPENCLAW_CONFIG ?? `${process.env.HOME}/.openclaw/openclaw.json`;
-  let gatewayPort = 18789;
-  let gatewayToken = "";
-  try {
-    const { readFileSync } = await import("node:fs");
-    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-    gatewayPort = cfg?.gateway?.port ?? 18789;
-    gatewayToken = cfg?.gateway?.auth?.token ?? "";
-  } catch (_) { /* use defaults */ }
+  // Fast path: call the local gateway API directly via HTTP.
+  const cfg = getGatewayConfig();
+  let gatewayPort = cfg.port;
+  let gatewayToken = cfg.token;
 
   try {
     const response = await fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
@@ -216,17 +210,7 @@ async function callModel(prompt: string): Promise<string> {
     }
     return "[AI processing...]";
   } catch {
-    // Fallback: shell out to the CLI (slower but reliable)
-    try {
-      const { execSync } = await import("node:child_process");
-      const escaped = prompt.replace(/'/g, "'\\''");
-      return execSync(
-        `openclaw run --model ${getModelForTier("small")} --print '${escaped}'`,
-        { timeout: 30_000, encoding: "utf8" },
-      ).trim();
-    } catch {
-      return "[AI unavailable]";
-    }
+    return "[AI unavailable]";
   }
 }
 

@@ -1,7 +1,7 @@
 /**
  * Local model classifier — uses LM Studio for fast, free categorization tasks.
  *
- * This is one of our biggest advantages over OpenClaw: we can use a local model
+ * This is one of our biggest advantages: we can use a local model
  * for classification, routing, summarization, and other lightweight intelligence
  * without burning API tokens.
  *

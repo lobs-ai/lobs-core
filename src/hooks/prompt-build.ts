@@ -23,17 +23,16 @@ import { log } from "../util/logger.js";
 import { scanMessage } from "../util/compliance-scanner.js";
 import { isCloudModel } from "../util/compliance-model.js";
 import { LearningService, inferTaskCategory } from "../services/learning.js";
+import { getAgentCompliantMemoryDir } from "../config/lobs.js";
 
 const learningService = new LearningService();
-
-const WORKSPACE_BASE = join(process.env.HOME || "/Users/lobs", ".openclaw");
 
 /**
  * Read compliant memory files for a given agent type from memory-compliant/.
  * Only called when the session is compliance-mode (task/project has complianceRequired=true).
  */
 async function readCompliantMemories(agentType: string): Promise<string[]> {
-  const compliantDir = join(WORKSPACE_BASE, `workspace-${agentType}`, "memory-compliant");
+  const compliantDir = getAgentCompliantMemoryDir(agentType);
   const contents: string[] = [];
   try {
     const files = await readdir(compliantDir);

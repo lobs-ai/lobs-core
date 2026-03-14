@@ -3,7 +3,7 @@
  * 
  * Read: supports offset/limit for large files, binary detection, image support.
  * Write: creates parent directories automatically.
- * Edit: exact string find-and-replace (matches OpenClaw's approach).
+ * Edit: exact string find-and-replace.
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "node:fs";

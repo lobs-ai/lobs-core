@@ -1,7 +1,7 @@
 /**
  * Exec tool — run shell commands.
  * 
- * Modeled after OpenClaw's exec: supports command, workdir, timeout, env.
+ * Exec tool with support for command, workdir, timeout, and env.
  * Simplified: no PTY, no background processes, no sandboxing.
  * Workers are one-shot — they don't need persistent sessions.
  */

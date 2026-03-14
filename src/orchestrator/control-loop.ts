@@ -324,7 +324,7 @@ function runTick(): void {
 
       incrementPendingSpawns(spawnProjectId, req.agentType);
       
-      // Route through native runner or OpenClaw sessions_spawn
+      // Route through native runner or the legacy host session API
       const spawnHandler = USE_NATIVE_RUNNER ? processSpawnWithRunner : processSpawnRequest;
       
       spawnHandler(req).catch((err) => {
@@ -1205,7 +1205,7 @@ function mapModelForRunner(orchestratorModel: string): string {
 
 /**
  * Process a spawn request using our native agent runner.
- * Calls the Anthropic API directly instead of routing through OpenClaw sessions_spawn.
+ * Calls the Anthropic API directly instead of routing through the host session API.
  */
 async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
   const taskCtx = (req.context?.task ?? {}) as Record<string, unknown>;

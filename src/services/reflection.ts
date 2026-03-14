@@ -229,7 +229,7 @@ ${taskList}
 ${projectList}
 
 ## Your Workspace
-Your workspace is at: ~/.openclaw/workspace-${agentType}/
+Your workspace is at: ~/.lobs/agents/${agentType}/
 Shared memory is at: ~/lobs-shared-memory/
 
 ## Recent Failures & Issues

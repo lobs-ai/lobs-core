@@ -2,7 +2,7 @@
  * Agent runner — public API.
  *
  * This is the entry point for running agents through our own execution engine.
- * No OpenClaw dependency — calls the Anthropic API directly, executes tools in-process.
+ * No external host dependency — calls the Anthropic API directly, executes tools in-process.
  *
  * Usage:
  *   import { runAgent } from "./runner/index.js";

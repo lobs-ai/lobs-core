@@ -1,10 +1,10 @@
 /**
- * langfuse.ts — Lightweight fire-and-forget Langfuse trace emitter for openclaw-plugin-paw.
+ * langfuse.ts — Lightweight fire-and-forget Langfuse trace emitter for lobs-core.
  *
  * Uses the Langfuse HTTP ingestion API directly (no npm SDK) to avoid adding
  * a new dependency. All network calls are async and never block the critical path.
  *
- * Configuration (read from env or ~/.openclaw/.env):
+ * Configuration (read from env or ~/.lobs/.env):
  *   LANGFUSE_HOST        http://localhost:3000
  *   LANGFUSE_PUBLIC_KEY  pk-lf-...
  *   LANGFUSE_SECRET_KEY  sk-lf-...
@@ -64,13 +64,13 @@ function estimateCost(model: string, inputTokens: number, outputTokens: number):
 }
 
 // ---------------------------------------------------------------------------
-// Env loading (reads ~/.openclaw/.env once at module load)
+// Env loading (reads ~/.lobs/.env once at module load)
 // ---------------------------------------------------------------------------
 let _envLoaded = false;
 function loadEnvOnce(): void {
   if (_envLoaded) return;
   _envLoaded = true;
-  const envPath = `${process.env.HOME}/.openclaw/.env`;
+  const envPath = `${process.env.HOME}/.lobs/.env`;
   try {
     const lines = readFileSync(envPath, "utf8").split("\n");
     for (const line of lines) {

@@ -1,5 +1,5 @@
 /**
- * Memories API — reads from agent workspaces (~/.openclaw/workspace-{agent}/memory/).
+ * Memories API — reads from agent workspaces (~/.lobs/agents/{agent}/context/memory/).
  *
  * ## Bifurcated Memory System
  *
@@ -22,8 +22,8 @@ import { readdir, readFile, stat, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { json, parseQuery } from "./index.js";
 import { isMemoryCompliant, parseMemoryFrontmatter } from "../util/memory-frontmatter.js";
+import { getAgentCompliantMemoryDir, getAgentDir, getAgentMemoryDir } from "../config/lobs.js";
 
-const WORKSPACE_BASE = join(process.env.HOME || "/Users/lobs", ".openclaw");
 const AGENTS = ["programmer", "writer", "researcher", "reviewer", "architect"];
 
 type ComplianceFilter = "cloud" | "local" | "all";
@@ -49,11 +49,11 @@ async function readAgentMemories(
   agent: string,
   filter: ComplianceFilter = "cloud",
 ): Promise<MemoryEntry[]> {
-  const workspaceDir = join(WORKSPACE_BASE, `workspace-${agent}`);
+  const workspaceDir = getAgentDir(agent);
   const results: MemoryEntry[] = [];
 
   // ── Non-compliant directory (always read) ─────────────────────────────
-  const memDir = join(workspaceDir, "memory");
+  const memDir = getAgentMemoryDir(agent);
   try {
     const files = await readdir(memDir);
     for (const f of files) {
@@ -80,7 +80,7 @@ async function readAgentMemories(
 
   // ── Compliant directory (only when filter allows) ─────────────────────
   if (filter === "local" || filter === "all") {
-    const compliantDir = join(workspaceDir, "memory-compliant");
+    const compliantDir = getAgentCompliantMemoryDir(agent);
     try {
       const files = await readdir(compliantDir);
       for (const f of files) {
@@ -118,7 +118,7 @@ async function readAgentMemories(
  */
 export async function ensureCompliantMemoryDirs(): Promise<void> {
   for (const agent of AGENTS) {
-    const dir = join(WORKSPACE_BASE, `workspace-${agent}`, "memory-compliant");
+    const dir = getAgentCompliantMemoryDir(agent);
     try {
       await mkdir(dir, { recursive: true });
     } catch {}

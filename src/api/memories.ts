@@ -17,8 +17,8 @@ import { json, error, parseBody, parseQuery } from "./index.js";
 import { parseMemoryFrontmatter, stripFrontmatter } from "../util/memory-frontmatter.js";
 import { scanNow } from "../services/memory-scanner.js";
 import { log } from "../util/logger.js";
+import { getAgentCompliantMemoryDir, getAgentMemoryDir } from "../config/lobs.js";
 
-const WORKSPACE_BASE = join(process.env.HOME || "/Users/lobs", ".openclaw");
 const VALID_AGENTS = new Set(["programmer", "writer", "researcher", "reviewer", "architect"]);
 type MemDir = "memory" | "memory-compliant";
 
@@ -57,7 +57,7 @@ async function handleTag(req: IncomingMessage, res: ServerResponse): Promise<voi
   if (!validateDir(directory)) return error(res, "Invalid directory (must be 'memory' or 'memory-compliant')", 400);
   if (typeof complianceRequired !== "boolean") return error(res, "complianceRequired must be boolean", 400);
 
-  const filePath = join(WORKSPACE_BASE, `workspace-${agent}`, directory as string, filename as string);
+  const filePath = (directory === "memory" ? getAgentMemoryDir(agent) : getAgentCompliantMemoryDir(agent)) + `/${filename}`;
 
   let content: string;
   try {
@@ -113,8 +113,8 @@ async function handleMove(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (!validateDir(toDir)) return error(res, "Invalid toDir", 400);
   if (fromDir === toDir) return error(res, "fromDir and toDir must be different", 400);
 
-  const srcPath = join(WORKSPACE_BASE, `workspace-${agent}`, fromDir as string, filename as string);
-  const dstPath = join(WORKSPACE_BASE, `workspace-${agent}`, toDir as string, filename as string);
+  const srcPath = (fromDir === "memory" ? getAgentMemoryDir(agent) : getAgentCompliantMemoryDir(agent)) + `/${filename}`;
+  const dstPath = (toDir === "memory" ? getAgentMemoryDir(agent) : getAgentCompliantMemoryDir(agent)) + `/${filename}`;
 
   // Verify source exists
   try {
@@ -169,7 +169,7 @@ async function handlePatchCompliance(
   let foundPath: string | null = null;
   let foundDir: MemDir | null = null;
   for (const dir of ["memory", "memory-compliant"] as MemDir[]) {
-    const p = join(WORKSPACE_BASE, `workspace-${agent}`, dir, filename);
+    const p = (dir === "memory" ? getAgentMemoryDir(agent) : getAgentCompliantMemoryDir(agent)) + `/${filename}`;
     try {
       await stat(p);
       foundPath = p;

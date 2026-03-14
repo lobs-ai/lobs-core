@@ -143,29 +143,6 @@ function resolveAnthropicAuth(sessionId?: string): AnthropicAuth | undefined {
     return { authToken: process.env.ANTHROPIC_AUTH_TOKEN, isOAuth: true };
   }
 
-  // Check OpenClaw auth profiles
-  const profilePaths = [
-    `${process.env.HOME}/.openclaw/agents/main/agent/auth-profiles.json`,
-    `${process.env.HOME}/.openclaw/agents/programmer/agent/auth-profiles.json`,
-  ];
-
-  for (const path of profilePaths) {
-    try {
-      const data = JSON.parse(readFileSync(path, "utf-8"));
-      const profiles = data.profiles ?? data;
-      for (const [key, profile] of Object.entries(profiles)) {
-        if (!key.startsWith("anthropic:")) continue;
-        const p = profile as Record<string, unknown>;
-        const token = (p.token ?? p.apiKey) as string | undefined;
-        if (token && typeof token === "string") {
-          return isOAuthToken(token)
-            ? { authToken: token, isOAuth: true }
-            : { apiKey: token, isOAuth: false };
-        }
-      }
-    } catch { /* skip */ }
-  }
-
   return undefined;
 }
 

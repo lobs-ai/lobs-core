@@ -16,9 +16,9 @@ import { eq, desc, gte, and, inArray } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { tasks, inboxItems, workerRuns, chatSessions } from "../db/schema.js";
 import { json } from "./index.js";
+import { getAgentMemoryDir } from "../config/lobs.js";
 
 const WORKSPACE = join(process.env.HOME || "/Users/lobs", "apps");
-const OPENCLAW_WORKSPACE = join(process.env.HOME || "/Users/lobs", ".openclaw");
 
 // ─── File helpers ─────────────────────────────────────────────────────────────
 
@@ -111,7 +111,7 @@ async function countMemoryFiles(): Promise<number> {
   let count = 0;
   const agents = ["programmer", "writer", "researcher", "reviewer"];
   for (const agent of agents) {
-    const memDir = join(OPENCLAW_WORKSPACE, `workspace-${agent}`, "memory");
+    const memDir = getAgentMemoryDir(agent);
     if (existsSync(memDir)) {
       try {
         count += readdirSync(memDir).filter(f => f.endsWith(".md") || f.endsWith(".txt")).length;

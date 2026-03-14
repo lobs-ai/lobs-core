@@ -1,8 +1,8 @@
 /**
  * lobs-core — standalone entry point
  *
- * Runs the orchestrator control loop independently of OpenClaw.
- * OpenClaw is only used for the main session (Lobs ↔ Rafe chat).
+ * Runs the orchestrator control loop independently of any external host.
+ * Lobs owns the main session and worker execution paths.
  * Worker agents run through our own agent runner.
  */
 
@@ -62,7 +62,7 @@ function rotateLogIfNeeded(): void {
   }
 }
 
-// Simple console logger matching the OpenClaw logger interface
+// Simple console logger matching the plugin logger interface
 const consoleLogger = {
   info: (msg: string) => console.log(`[lobs] ${msg}`),
   warn: (msg: string) => console.warn(`[lobs] WARN ${msg}`),
