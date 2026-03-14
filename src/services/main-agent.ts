@@ -331,7 +331,7 @@ export class MainAgent {
         `[System] lobs-core restarted. This session was active at ${lastActivity}.`,
         session?.context_summary ? `Last context: ${session.context_summary}` : null,
         persistedMsgs.length > 0 ? `${persistedMsgs.length} queued message(s) waiting.` : null,
-        `Review recent history and continue where you left off. If you were mid-task, resume it.`,
+        `Orient fast: check state (git status/log, build status) before re-reading files. Act on what you find — don't re-investigate from scratch.`,
       ].filter(Boolean).join(" ");
 
       // Insert as a user message so it enters the conversation flow
@@ -367,18 +367,26 @@ export class MainAgent {
 
     // Save a context summary for each active channel
     for (const channelId of this.processingChannels) {
-      // Get the last few messages to build a summary
+      // Get the last few messages — prioritize user messages and assistant text
+      // (tool outputs are noise for restart context)
       const recent = this.db.prepare(`
-        SELECT content FROM main_agent_messages
-        WHERE channel_id = ? ORDER BY created_at DESC LIMIT 3
-      `).all(channelId) as Array<{ content: string }>;
+        SELECT role, content FROM main_agent_messages
+        WHERE channel_id = ? ORDER BY created_at DESC LIMIT 10
+      `).all(channelId) as Array<{ role: string; content: string }>;
 
-      const summary = recent
-        .reverse()
-        .map(r => r.content.substring(0, 100))
-        .join(" | ");
+      // Find the last user message (the task) and last assistant text (progress)
+      const lastUser = recent.find(r => r.role === "user" && !r.content.startsWith("[System]"));
+      const lastAssistant = recent.find(r => r.role === "assistant" && !r.content.startsWith("["));
 
-      this.updateChannelSession(channelId, "processing", null, null, summary);
+      const parts: string[] = [];
+      if (lastUser) parts.push(`Task: ${lastUser.content.substring(0, 200)}`);
+      if (lastAssistant) parts.push(`Last response: ${lastAssistant.content.substring(0, 200)}`);
+      if (parts.length === 0) {
+        // Fallback to raw recent content
+        parts.push(recent.slice(0, 3).reverse().map(r => r.content.substring(0, 100)).join(" | "));
+      }
+
+      this.updateChannelSession(channelId, "processing", null, null, parts.join(" | "));
     }
 
     console.log(`[main-agent] State persisted (${this.processingChannels.size} active, ${this.channelQueues.size} queued channels)`);
@@ -1041,9 +1049,10 @@ export class MainAgent {
 
     return messages.map((m, i) => {
       if (i >= keepFullFrom || assistantCount < KEEP_RECENT)
-        return { role: m.role, content: m.content, created_at: m.created_at };
+        return { role: m.role, content: m.content, created_at: m.created_at, metadata: m.metadata };
 
-      // For old messages, truncate large content (likely tool outputs)
+      // For old messages, strip image metadata (don't resend multi-MB base64 for old turns)
+      // and truncate large content (likely tool outputs)
       if (m.content.length > MAX_TOOL_OUTPUT * 3 && m.role === "user") {
         // This is probably a tool result
         return {
