@@ -37,6 +37,7 @@ import { handleSchedulerRequest } from "./scheduler.js";
 import { handleGitHubRequest } from "./github.js";
 import { handleDailyBriefRequest } from "./daily-brief.js";
 import { handleSkillsRequest } from "./skills.js";
+import { handleHealthRequest } from "./health.js";
 import { error } from "./index.js";
 
 const PREFIXES = ["/paw/api/", "/api/"];
@@ -129,7 +130,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 
   try {
     switch (resource) {
-      case "health":          res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ status: "ok", version: "0.1.0", uptime: process.uptime() })); return;
+      case "health":          await handleHealthRequest(req, res); return;
       case "tasks":           await handleTaskRequest(req, res, parts[1], parts); return;
       case "projects":        await handleProjectRequest(req, res, parts[1], parts); return;
       case "agents":          await handleAgentRequest(req, res, parts[1]); return;

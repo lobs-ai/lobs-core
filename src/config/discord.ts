@@ -4,39 +4,66 @@ import { homedir } from "node:os";
 import type { DiscordConfig } from "../services/discord.js";
 
 export function loadDiscordConfig(): DiscordConfig | null {
-  // Try config file first
-  const configPath = join(homedir(), ".lobs", "config", "discord.json");
+  const configDir = join(homedir(), ".lobs", "config");
+  const configPath = join(configDir, "discord.json");
+  const newTokenPath = join(configDir, "secrets", "discord-token.json");
+
+  // Load main config (non-secret settings)
+  let config: any = null;
   if (existsSync(configPath)) {
     try {
       const raw = readFileSync(configPath, "utf-8");
-      const parsed = JSON.parse(raw);
-      if (parsed.enabled === false) {
+      config = JSON.parse(raw);
+      if (config.enabled === false) {
         console.log("[discord] Bot disabled in config");
         return null;
       }
-      return parsed;
     } catch (err) {
       console.error("[discord] Failed to parse config:", err);
     }
   }
-  
-  // Fall back to env vars
-  const token = process.env.DISCORD_BOT_TOKEN;
-  const guildId = process.env.DISCORD_GUILD_ID;
-  if (token && guildId) {
-    return {
-      botToken: token,
-      guildId,
-      channels: {
-        alerts: process.env.DISCORD_CHANNEL_ALERTS,
-        agentWork: process.env.DISCORD_CHANNEL_AGENT_WORK,
-        completions: process.env.DISCORD_CHANNEL_COMPLETIONS,
-      },
-      dmAllowFrom: [],
-      channelPolicies: {},
-    };
+
+  // Load botToken from secrets/ (new layout) or discord.json (legacy)
+  let botToken: string | undefined;
+
+  // Try new layout first
+  if (existsSync(newTokenPath)) {
+    try {
+      const tokenData = JSON.parse(readFileSync(newTokenPath, "utf-8"));
+      botToken = tokenData.botToken;
+    } catch (err) {
+      console.error("[discord] Failed to parse secrets/discord-token.json:", err);
+    }
   }
-  
-  console.log("[discord] No Discord config found — bot disabled");
-  return null;
+
+  // Fall back to legacy layout (botToken in discord.json)
+  if (!botToken && config?.botToken) {
+    console.warn("[discord] DEPRECATED: botToken in discord.json — migrate to secrets/discord-token.json");
+    botToken = config.botToken;
+  }
+
+  // Fall back to env var
+  if (!botToken) {
+    botToken = process.env.DISCORD_BOT_TOKEN;
+  }
+
+  if (!botToken) {
+    console.log("[discord] No botToken found — bot disabled");
+    return null;
+  }
+
+  // Merge config with token
+  const finalConfig: DiscordConfig = {
+    botToken,
+    guildId: config?.guildId ?? process.env.DISCORD_GUILD_ID,
+    channels: config?.channels ?? {
+      alerts: process.env.DISCORD_CHANNEL_ALERTS,
+      agentWork: process.env.DISCORD_CHANNEL_AGENT_WORK,
+      completions: process.env.DISCORD_CHANNEL_COMPLETIONS,
+    },
+    dmAllowFrom: config?.dmAllowFrom ?? [],
+    channelPolicies: config?.channelPolicies ?? {},
+  };
+
+  return finalConfig;
 }

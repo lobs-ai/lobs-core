@@ -13,7 +13,7 @@ import { startControlLoop, stopControlLoop } from "./orchestrator/control-loop.j
 import { startServer } from "./server.js";
 import { setLogger, log } from "./util/logger.js";
 import { resolve } from "node:path";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { initToolGate } from "./runner/tool-gate.js";
 import { getCronManager } from "./orchestrator/cron.js";
 import { runHeartbeat } from "./orchestrator/heartbeat.js";
@@ -26,9 +26,11 @@ import { loadDiscordConfig } from "./config/discord.js";
 import { MainAgent } from "./services/main-agent.js";
 import { loadWorkspaceContext, buildMainAgentPrompt } from "./services/workspace-loader.js";
 import { setDiscordService as setMessageDiscord } from "./runner/tools/message.js";
+import { validateAllConfigs } from "./config/validator.js";
 
 const HOME = process.env.HOME ?? "";
 const DB_PATH = resolve(HOME, ".lobs/lobs.db");
+const PID_FILE = resolve(HOME, ".lobs/lobs.pid");
 const SCAN_INTERVAL_MS = 10_000;
 const HTTP_PORT = parseInt(process.env.LOBS_PORT ?? "9420", 10);
 
@@ -48,10 +50,63 @@ async function main() {
   // Set up logger
   setLogger(consoleLogger as any);
 
+  // ── Runtime Failsafes ────────────────────────────────────────────────────
+
+  // Uncaught exception handler — log and continue for non-critical errors
+  process.on("uncaughtException", (err) => {
+    console.error("[FATAL] Uncaught exception:", err);
+    // Don't exit for non-critical errors (e.g., network timeouts, API errors)
+    // Only exit for truly fatal errors (DB corruption, OOM, etc.)
+    if (err.message?.includes("SQLITE_CORRUPT") || err.message?.includes("Cannot allocate memory")) {
+      console.error("[FATAL] Critical error — shutting down");
+      process.exit(1);
+    }
+  });
+
+  // Unhandled rejection handler — log and continue
+  process.on("unhandledRejection", (reason, promise) => {
+    console.error("[WARN] Unhandled rejection:", reason);
+    // Don't crash on unhandled rejections (e.g., failed API calls, network timeouts)
+  });
+
+  // ── PID File Management ──────────────────────────────────────────────────
+
+  // Check if another instance is running
+  if (existsSync(PID_FILE)) {
+    console.warn(`[WARN] PID file exists: ${PID_FILE}`);
+    console.warn("[WARN] Another instance may be running, or previous shutdown was unclean");
+    console.warn("[WARN] Proceeding anyway...");
+  }
+
+  // Write PID file
+  writeFileSync(PID_FILE, String(process.pid));
+  console.log(`[PID] ${process.pid} (written to ${PID_FILE})`);
+
+  // ── Startup Checks ───────────────────────────────────────────────────────
+
   // Ensure DB directory exists
   const dbDir = resolve(DB_PATH, "..");
   if (!existsSync(dbDir)) {
     mkdirSync(dbDir, { recursive: true });
+  }
+
+  // Validate config files
+  console.log("Validating config...");
+  const configValidation = validateAllConfigs();
+  if (!configValidation.valid) {
+    console.warn("[WARN] Config validation failed:");
+    for (const result of configValidation.results) {
+      if (!result.valid) {
+        console.warn(`  - ${result.file}: ${result.errors.join(", ")}`);
+      }
+    }
+    console.warn("[WARN] Continuing with degraded config...");
+  } else {
+    console.log("Config validation passed ✓");
+  }
+
+  if (configValidation.legacy_layout) {
+    console.warn("[WARN] Using legacy config layout — run 'lobs init' to migrate");
   }
 
   // Initialize database
@@ -184,6 +239,13 @@ async function main() {
   // Handle shutdown
   const shutdown = async () => {
     console.log("\nShutting down...");
+    
+    // Clean up PID file
+    if (existsSync(PID_FILE)) {
+      unlinkSync(PID_FILE);
+      console.log("PID file removed");
+    }
+    
     await browserService.shutdown();
     await discordService.shutdown();
     cronService.stop();

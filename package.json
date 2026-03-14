@@ -34,6 +34,7 @@
     "openclaw": ">=1.0.0"
   },
   "bin": {
+    "lobs": "./dist/cli/lobs.js",
     "paw-task": "./src/cli/paw-task.ts",
     "paw-inbox": "./src/cli/paw-inbox.ts",
     "paw-status": "./src/cli/paw-status.ts"

@@ -26,21 +26,38 @@ export interface KeyConfig {
 
 // ── Config Loading ───────────────────────────────────────────────────────────
 
-const CONFIG_PATH = resolve(process.env.HOME ?? "~", ".lobs", "config", "keys.json");
+const CONFIG_DIR = resolve(process.env.HOME ?? "~", ".lobs", "config");
+const NEW_KEYS_PATH = resolve(CONFIG_DIR, "secrets", "keys.json");
+const LEGACY_KEYS_PATH = resolve(CONFIG_DIR, "keys.json");
 
 /**
- * Load key config from ~/.lobs/config/keys.json if it exists.
+ * Load key config from secrets/keys.json (new layout) or keys.json (legacy).
  */
 function loadConfigFile(): KeyConfig | undefined {
-  if (!existsSync(CONFIG_PATH)) return undefined;
-
-  try {
-    const data = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
-    return data as KeyConfig;
-  } catch (error) {
-    console.warn(`Failed to load keys config from ${CONFIG_PATH}:`, error);
-    return undefined;
+  // Try new layout first
+  if (existsSync(NEW_KEYS_PATH)) {
+    try {
+      const data = JSON.parse(readFileSync(NEW_KEYS_PATH, "utf-8"));
+      return data as KeyConfig;
+    } catch (error) {
+      console.warn(`Failed to load keys config from ${NEW_KEYS_PATH}:`, error);
+      return undefined;
+    }
   }
+
+  // Fall back to legacy layout
+  if (existsSync(LEGACY_KEYS_PATH)) {
+    console.warn("[keys] DEPRECATED: keys.json in config root — migrate to secrets/keys.json");
+    try {
+      const data = JSON.parse(readFileSync(LEGACY_KEYS_PATH, "utf-8"));
+      return data as KeyConfig;
+    } catch (error) {
+      console.warn(`Failed to load keys config from ${LEGACY_KEYS_PATH}:`, error);
+      return undefined;
+    }
+  }
+
+  return undefined;
 }
 
 /**
