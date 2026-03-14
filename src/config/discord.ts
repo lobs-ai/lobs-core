@@ -9,7 +9,12 @@ export function loadDiscordConfig(): DiscordConfig | null {
   if (existsSync(configPath)) {
     try {
       const raw = readFileSync(configPath, "utf-8");
-      return JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      if (parsed.enabled === false) {
+        console.log("[discord] Bot disabled in config");
+        return null;
+      }
+      return parsed;
     } catch (err) {
       console.error("[discord] Failed to parse config:", err);
     }

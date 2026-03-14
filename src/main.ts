@@ -124,7 +124,16 @@ async function main() {
   // Start HTTP server (Nexus dashboard + API)
   startServer(HTTP_PORT);
   
-  // Connect Discord bot and wire up main agent
+  // Create and configure the main agent (always available — for Discord and/or Nexus chat)
+  const rawDb = getRawDb();
+  const mainAgent = new MainAgent(rawDb);
+  mainAgent.setSystemPrompt(buildMainAgentPrompt());
+  mainAgent.setWorkspaceContext(loadWorkspaceContext());
+  
+  // Export main agent globally so API handlers can access it
+  (globalThis as any).__lobsMainAgent = mainAgent;
+
+  // Connect Discord bot (optional)
   const discordConfig = loadDiscordConfig();
   if (discordConfig) {
     try {
@@ -132,12 +141,6 @@ async function main() {
 
       // Wire Discord to message tool
       setMessageDiscord(discordService);
-
-      // Create and configure the main agent
-      const rawDb = getRawDb();
-      const mainAgent = new MainAgent(rawDb);
-      mainAgent.setSystemPrompt(buildMainAgentPrompt());
-      mainAgent.setWorkspaceContext(loadWorkspaceContext());
 
       // Wire reply handler — agent replies go to Discord
       mainAgent.setReplyHandler(async (channelId, content) => {
@@ -166,6 +169,8 @@ async function main() {
       console.error("[discord] Failed to connect:", err);
     }
   }
+  
+  console.log("[main-agent] Ready (Discord: " + (discordConfig ? "enabled" : "disabled") + ")");
   
   console.log("=== lobs-core ready ===");
 

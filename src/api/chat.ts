@@ -69,26 +69,84 @@ export async function handleChatRequest(
         createdAt: now,
       }).run();
 
-      // Simple echo response (placeholder for actual LLM integration)
-      const reply = "Message received. (This is a simple DB-backed chat - connect to gateway for AI responses)";
+      // Route to MainAgent for LLM processing
+      const mainAgent = (globalThis as any).__lobsMainAgent;
+      if (mainAgent) {
+        // Collect reply via a promise
+        let replyText = "";
+        const replyPromise = new Promise<string>((resolve) => {
+          const originalHandler = mainAgent.onReply;
+          const sessionChannelId = `nexus-chat:${sessionKey}`;
+          
+          // Temporarily set reply handler to capture response
+          mainAgent.setReplyHandler(async (channelId: string, content: string) => {
+            if (channelId === sessionChannelId) {
+              replyText += content;
+            }
+            // Also forward to Discord if original handler exists
+            if (originalHandler) {
+              await originalHandler(channelId, content);
+            }
+          });
+
+          // Send message to agent
+          mainAgent.handleMessage({
+            id: randomUUID(),
+            content,
+            authorId: "nexus-user",
+            authorName: "Rafe (Nexus)",
+            channelId: sessionChannelId,
+            timestamp: Date.now(),
+          }).then(() => {
+            // Wait a bit for processing to complete
+            const checkReply = () => {
+              if (!mainAgent.isProcessing()) {
+                // Restore original handler
+                mainAgent.setReplyHandler(originalHandler);
+                resolve(replyText || "Processing complete.");
+              } else {
+                setTimeout(checkReply, 500);
+              }
+            };
+            setTimeout(checkReply, 500);
+          });
+          
+          // Timeout after 120s
+          setTimeout(() => {
+            mainAgent.setReplyHandler(originalHandler);
+            resolve(replyText || "Response timed out.");
+          }, 120000);
+        });
+
+        const reply = await replyPromise;
+        const replyNow = new Date().toISOString();
+        
+        // Store assistant response
+        db.insert(chatMessages).values({
+          id: randomUUID().replace(/-/g, ""),
+          sessionKey,
+          role: "assistant",
+          content: reply,
+          createdAt: replyNow,
+        }).run();
+
+        db.update(chatSessions)
+          .set({ lastMessageAt: replyNow })
+          .where(eq(chatSessions.sessionKey, sessionKey))
+          .run();
+
+        return json(res, { reply, timestamp: replyNow });
+      }
       
-      db.insert(chatMessages).values({
-        id: randomUUID().replace(/-/g, ""),
-        sessionKey,
-        role: "assistant",
-        content: reply,
-        createdAt: now,
-      }).run();
+      // Fallback if no main agent
+      const reply = "Main agent not initialized. Please check lobs-core configuration.";
 
       db.update(chatSessions)
         .set({ lastMessageAt: now })
         .where(eq(chatSessions.sessionKey, sessionKey))
         .run();
 
-      return json(res, {
-        reply,
-        timestamp: now,
-      });
+      return json(res, { reply, timestamp: now });
     }
 
     // GET /api/chat/sessions/:key/messages — fetch message history (DB-backed)
