@@ -13,7 +13,7 @@ import { startControlLoop, stopControlLoop } from "./orchestrator/control-loop.j
 import { startServer } from "./server.js";
 import { setLogger, log } from "./util/logger.js";
 import { resolve } from "node:path";
-import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, renameSync, statSync } from "node:fs";
 import { initToolGate } from "./runner/tool-gate.js";
 import { getCronManager } from "./orchestrator/cron.js";
 import { runHeartbeat } from "./orchestrator/heartbeat.js";
@@ -31,8 +31,34 @@ import { validateAllConfigs } from "./config/validator.js";
 const HOME = process.env.HOME ?? "";
 const DB_PATH = resolve(HOME, ".lobs/lobs.db");
 const PID_FILE = resolve(HOME, ".lobs/lobs.pid");
+const LOG_FILE = resolve(HOME, ".lobs/lobs.log");
+const LOG_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+const LOG_KEEP = 3; // keep lobs.log.1, .2, .3
 const SCAN_INTERVAL_MS = 10_000;
 const HTTP_PORT = parseInt(process.env.LOBS_PORT ?? "9420", 10);
+
+/** Rotate log file if it exceeds LOG_MAX_BYTES. Called once at startup. */
+function rotateLogIfNeeded(): void {
+  try {
+    if (!existsSync(LOG_FILE)) return;
+    const size = statSync(LOG_FILE).size;
+    if (size < LOG_MAX_BYTES) return;
+
+    // Shift existing rotated logs: .3 → delete, .2 → .3, .1 → .2
+    for (let i = LOG_KEEP; i >= 1; i--) {
+      const from = `${LOG_FILE}.${i}`;
+      const to = `${LOG_FILE}.${i + 1}`;
+      if (i === LOG_KEEP && existsSync(from)) unlinkSync(from);
+      else if (existsSync(from)) renameSync(from, to);
+    }
+
+    // Current → .1
+    renameSync(LOG_FILE, `${LOG_FILE}.1`);
+    console.log(`[log] Rotated log (was ${(size / 1024 / 1024).toFixed(1)} MB)`);
+  } catch (err) {
+    console.warn(`[log] Rotation failed: ${err}`);
+  }
+}
 
 // Simple console logger matching the OpenClaw logger interface
 const consoleLogger = {
@@ -45,6 +71,9 @@ const consoleLogger = {
 };
 
 async function main() {
+  // Rotate log before any output
+  rotateLogIfNeeded();
+
   console.log("=== lobs-core starting (standalone) ===");
 
   // Set up logger
@@ -53,12 +82,16 @@ async function main() {
   // ── Runtime Failsafes ────────────────────────────────────────────────────
 
   // Uncaught exception handler — log and continue for non-critical errors
-  process.on("uncaughtException", (err) => {
+  process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
     console.error("[FATAL] Uncaught exception:", err);
-    // Don't exit for non-critical errors (e.g., network timeouts, API errors)
-    // Only exit for truly fatal errors (DB corruption, OOM, etc.)
-    if (err.message?.includes("SQLITE_CORRUPT") || err.message?.includes("Cannot allocate memory")) {
+    // Exit for fatal errors: DB corruption, OOM, port conflicts, missing modules
+    const fatal = [
+      "SQLITE_CORRUPT", "Cannot allocate memory", "EADDRINUSE",
+      "MODULE_NOT_FOUND", "ERR_MODULE_NOT_FOUND",
+    ];
+    if (fatal.some(f => err.message?.includes(f) || err.code === f)) {
       console.error("[FATAL] Critical error — shutting down");
+      if (existsSync(PID_FILE)) try { unlinkSync(PID_FILE); } catch {}
       process.exit(1);
     }
   });
