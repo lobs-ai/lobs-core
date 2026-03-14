@@ -168,11 +168,8 @@ export class MainAgent {
       // 2. Prune old tool outputs
       history = this.pruneHistory(history);
 
-      // Reload workspace context fresh each turn (memory files change during the day)
-      const isHeartbeat = history.some(m => 
-        m.role === "user" && m.content.includes("heartbeat") && m.content.includes("HEARTBEAT")
-      );
-      const freshContext = loadWorkspaceContext(isHeartbeat);
+      // Reload workspace context fresh each turn
+      const freshContext = loadWorkspaceContext();
 
       // Build system prompt — concise: identity + context + time
       // Tool descriptions come from the tool schemas (not hardcoded in prompt)
