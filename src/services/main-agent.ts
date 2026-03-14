@@ -17,12 +17,12 @@ import { getToolsForSession, getSessionType } from "../runner/tools/tool-sets.js
 import { loadWorkspaceContext, buildSystemPrompt } from "./workspace-loader.js";
 import { resolveModelForTier, type ModelTier } from "../orchestrator/model-chooser.js";
 import Database from "better-sqlite3";
-import { compactMessages, pruneToolResults, findSafeSplitPoint } from "./compaction.js";
+import { compactMessages, pruneToolResults, findSafeSplitPoint, calculateContextSize } from "./compaction.js";
 import { LoopDetector } from "../runner/loop-detector.js";
 
 const MAX_HISTORY = 50;
 const MAX_CONTEXT_CHARS = 150_000; // Rough char budget for history
-const MAX_LIVE_TOOL_RESULT_CHARS = 12_000;
+const MAX_LIVE_TOOL_RESULT_CHARS = 6_000;
 const DEFAULT_MODEL = "strong";  // Chat defaults to strong tier (opus)
 const DEFAULT_CWD = process.env.HOME ?? "/tmp";
 const MAX_CONCURRENT_CHANNELS = 3; // Max simultaneous channel conversations
@@ -631,7 +631,8 @@ export class MainAgent {
           timestamp: Date.now(),
         } satisfies AgentStreamEvent);
 
-        messages = pruneToolResults(messages, 6, 400);
+        // Prune: keep last 3 turns' tool results intact, truncate older ones to 400 chars
+        messages = pruneToolResults(messages, 3, 400);
         messages = await this.compactIfNeeded(messages);
 
         const response = await client.createMessage({
@@ -1121,17 +1122,26 @@ export class MainAgent {
         .map((b: any) => b.text)
         .join("");
 
-      return [
+      let compacted: LLMMessage[] = [
         {
-          role: "user",
+          role: "user" as const,
           content: `[Conversation summary — earlier messages compacted]\n\n${summary}`,
         },
         {
-          role: "assistant",
+          role: "assistant" as const,
           content: "Understood, I have the context from the summary. Continuing.",
         },
         ...toKeep,
       ];
+
+      // Second pass: if still over budget, aggressively truncate tool results in kept portion
+      const afterSize = calculateContextSize(compacted as LLMMessage[]);
+      if (afterSize > COMPACT_THRESHOLD) {
+        console.log(`[main-agent] Post-compaction still ${afterSize} chars, truncating tool results...`);
+        compacted = pruneToolResults(compacted as LLMMessage[], 2, 200) as typeof compacted;
+      }
+
+      return compacted;
     } catch (err) {
       console.error("[main-agent] Compaction failed:", err);
       // Fall back to simple truncation
