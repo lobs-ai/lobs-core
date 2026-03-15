@@ -313,6 +313,33 @@ export class MainAgent {
       return;
     }
 
+    // Don't resume the system channel — heartbeat cron will re-trigger it naturally
+    if (channelsToResume.has("system")) {
+      channelsToResume.delete("system");
+      this.updateChannelSession("system", "idle");
+    }
+
+    // Don't resume stale sessions — if last activity was >10 minutes ago,
+    // the conversation context is cold and retrying will just waste API calls
+    const STALE_THRESHOLD_MS = 10 * 60 * 1000;
+    const now = Date.now();
+    for (const s of activeSessions) {
+      if (channelsToResume.has(s.channel_id)) {
+        const lastActive = new Date(s.last_activity).getTime();
+        if (now - lastActive > STALE_THRESHOLD_MS) {
+          console.log(`[main-agent] Skipping stale session ${s.channel_id.slice(0, 12)} (last active ${Math.round((now - lastActive) / 60000)}min ago)`);
+          channelsToResume.delete(s.channel_id);
+          this.updateChannelSession(s.channel_id, "idle");
+        }
+      }
+    }
+
+    if (channelsToResume.size === 0) {
+      console.log("[main-agent] No recent sessions to resume — all stale or system-only");
+      this.db.prepare(`UPDATE channel_sessions SET status = 'idle' WHERE status != 'idle'`).run();
+      return;
+    }
+
     console.log(`[main-agent] Resuming ${channelsToResume.size} session(s) with staggered startup...`);
 
     const channelArray = [...channelsToResume];
@@ -347,11 +374,13 @@ export class MainAgent {
       if (this.processingChannels.size < MAX_CONCURRENT_CHANNELS) {
         this.updateChannelSession(channelId, "processing");
         // Don't await — let them run concurrently, but stagger starts
-        // to avoid thundering herd on the API
-        const staggerDelay = i * 2000; // 2s between each session start
+        // to avoid thundering herd on the API (especially after rate limits)
+        const staggerDelay = 5000 + i * 5000; // 5s initial + 5s between each session
         setTimeout(() => {
           this.processConversation(channelId).catch(err => {
             console.error(`[main-agent] Resume failed for channel ${channelId.slice(0, 8)}:`, err);
+            this.processingChannels.delete(channelId);
+            this.updateChannelSession(channelId, "idle");
           });
         }, staggerDelay);
       } else {
@@ -372,8 +401,20 @@ export class MainAgent {
       }
     }
 
-    // Save a context summary for each active channel
+    // Find ALL channels that are still "processing" in DB (includes retry-pending ones
+    // that have been removed from the in-memory processingChannels set)
+    const allProcessing = this.db.prepare(`
+      SELECT channel_id FROM channel_sessions WHERE status = 'processing'
+    `).all() as Array<{ channel_id: string }>;
+    const allProcessingIds = new Set(allProcessing.map(s => s.channel_id));
+
+    // Also include in-memory set (should overlap, but be safe)
     for (const channelId of this.processingChannels) {
+      allProcessingIds.add(channelId);
+    }
+
+    // Save a context summary for each active channel
+    for (const channelId of allProcessingIds) {
       // Get the last few messages — prioritize user messages and assistant text
       // (tool outputs are noise for restart context)
       const recent = this.db.prepare(`
@@ -396,7 +437,7 @@ export class MainAgent {
       this.updateChannelSession(channelId, "processing", null, null, parts.join(" | "));
     }
 
-    console.log(`[main-agent] State persisted (${this.processingChannels.size} active, ${this.channelQueues.size} queued channels)`);
+    console.log(`[main-agent] State persisted (${allProcessingIds.size} active, ${this.channelQueues.size} queued channels)`);
   }
 
   /* ── Public API ────────────────────────────────────────────────── */
@@ -1003,16 +1044,19 @@ export class MainAgent {
             this.updateChannelSession(replyChannelId, "processing");
             this.processConversation(replyChannelId).catch(err => {
               console.error(`[main-agent] Conversation retry failed for ${replyChannelId.slice(0, 12)}:`, err);
-              // Clean up retry counter on final failure
+              // Clean up retry counter and release channel on final failure
               if ((this as any).__conversationRetryCount?.[replyChannelId]) {
                 delete (this as any).__conversationRetryCount[replyChannelId];
               }
+              this.processingChannels.delete(replyChannelId);
+              this.updateChannelSession(replyChannelId, "idle");
             });
           } else {
             console.log(`[main-agent] Retry skipped for ${replyChannelId.slice(0, 12)} — at capacity`);
             if ((this as any).__conversationRetryCount?.[replyChannelId]) {
               delete (this as any).__conversationRetryCount[replyChannelId];
             }
+            this.updateChannelSession(replyChannelId, "idle");
           }
         }, pendingRetryDelay);
         // Still do queue draining below so other channels can start
