@@ -643,7 +643,22 @@ export class MainAgent {
       
       // Resolve tools based on session type
       const sessionType = getSessionType(replyChannelId);
-      const availableTools = getToolsForSession(sessionType);
+      let availableTools = getToolsForSession(sessionType);
+
+      // Apply per-session tool overrides (nexus sessions store disabled tools in DB)
+      if (replyChannelId.startsWith("nexus:")) {
+        const sessionKey = replyChannelId.replace("nexus:", "");
+        const sessionRow2 = this.db.prepare(
+          `SELECT disabled_tools FROM chat_sessions WHERE session_key = ?`
+        ).get(sessionKey) as { disabled_tools: string | null } | undefined;
+        if (sessionRow2?.disabled_tools) {
+          try {
+            const disabled: string[] = JSON.parse(sessionRow2.disabled_tools);
+            availableTools = availableTools.filter(t => !disabled.includes(t));
+          } catch { /* ignore bad JSON */ }
+        }
+      }
+
       const tools = getToolDefinitions(availableTools);
       console.log(`[main-agent] Using model: ${effectiveModel} (raw: ${this.model}, override: ${sessionRow?.model_override ?? 'none'})`);
       const config = parseModelString(effectiveModel);

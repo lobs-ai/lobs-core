@@ -6,6 +6,8 @@ import { json, error, parseBody } from "./index.js";
 import { log } from "../util/logger.js";
 import { randomUUID } from "node:crypto";
 import type { AgentStreamEvent } from "../services/main-agent.js";
+import { getToolDefinitions } from "../runner/tools/index.js";
+import { getToolsForSession } from "../runner/tools/tool-sets.js";
 
 // ─── Simple DB-backed chat (no gateway dependency) ─────────────────────
 
@@ -320,6 +322,7 @@ export async function handleChatRequest(
           updatedAt: s.lastMessageAt ?? s.createdAt,
           isActive: s.isActive,
           compliance_required: s.complianceRequired ?? false,
+          disabled_tools: s.disabledTools ? JSON.parse(s.disabledTools) : [],
         })),
       });
     }
@@ -350,6 +353,52 @@ export async function handleChatRequest(
         key: sessionKey,
         compliance_required: body.compliance_required,
       });
+    }
+
+    // GET /api/chat/sessions/:key/tools — list available tools with enabled/disabled status
+    if (sessionKey && action === "tools" && method === "GET") {
+      const sessionRow = db.select()
+        .from(chatSessions)
+        .where(eq(chatSessions.sessionKey, sessionKey))
+        .get();
+      if (!sessionRow) return error(res, "Session not found", 404);
+
+      let disabledList: string[] = [];
+      if (sessionRow.disabledTools) {
+        try { disabledList = JSON.parse(sessionRow.disabledTools); } catch { /* ignore bad JSON */ }
+      }
+
+      const toolNames = getToolsForSession("nexus");
+      const definitions = getToolDefinitions(toolNames);
+      const tools = definitions.map(def => ({
+        name: def.name,
+        description: def.description,
+        enabled: !disabledList.includes(def.name),
+      }));
+
+      return json(res, { tools });
+    }
+
+    // PATCH /api/chat/sessions/:key/tools — update disabled tools list
+    if (sessionKey && action === "tools" && method === "PATCH") {
+      const body = (await parseBody(req)) as { disabled_tools?: string[] };
+      if (!Array.isArray(body?.disabled_tools)) {
+        return error(res, "disabled_tools must be an array", 400);
+      }
+
+      const sessionRow = db.select()
+        .from(chatSessions)
+        .where(eq(chatSessions.sessionKey, sessionKey))
+        .get();
+      if (!sessionRow) return error(res, "Session not found", 404);
+
+      const disabledJson = JSON.stringify(body.disabled_tools);
+      db.update(chatSessions)
+        .set({ disabledTools: disabledJson })
+        .where(eq(chatSessions.sessionKey, sessionKey))
+        .run();
+
+      return json(res, { key: sessionKey, disabled_tools: body.disabled_tools });
     }
 
     // DELETE /api/chat/sessions/:key — delete a session

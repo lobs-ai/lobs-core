@@ -545,6 +545,8 @@ export const chatSessions = sqliteTable("chat_sessions", {
   // local models only. Users can toggle this manually or it may be applied
   // automatically when sensitive data is detected.
   complianceRequired: integer("compliance_required", { mode: "boolean" }).notNull().default(false),
+  // Per-session tool overrides: JSON array of tool names to disable, e.g. '["exec","write"]'
+  disabledTools: text("disabled_tools"),
 });
 
 export const chatMessages = sqliteTable("chat_messages", {

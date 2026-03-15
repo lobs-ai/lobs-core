@@ -1411,6 +1411,12 @@ export function runMigrations(db: PawDB): void {
   } catch (e) {
     console.warn("[PLUGINS] Seed insert failed (non-fatal):", e);
   }
+
+  // ── Per-session disabled tools (idempotent) ───────────────────────────────
+  // Added: 2026-03-15 — JSON array of tool names to disable for a nexus session,
+  // e.g. '["exec","write"]'. null = no overrides (all tools enabled).
+  // Controlled via PATCH /api/chat/sessions/:key/tools.
+  try { db.run(sql`ALTER TABLE chat_sessions ADD COLUMN disabled_tools TEXT`); } catch {}
 }
 
 
