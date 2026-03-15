@@ -678,20 +678,22 @@ class ResilientLLMClient implements LLMClient {
             }
           }
 
-          // Server errors — retry up to 2 times with backoff
+          // Server errors — retry with exponential backoff + jitter
           if (status && status >= 500 && status < 600) {
             if (attempt < this.maxRetries && shouldRetry !== false) {
-              const waitTime = attempt === 1 ? 5000 : 15000;
-              console.warn(`[ResilientLLMClient] Server error ${status}, retrying in ${waitTime / 1000}s (attempt ${attempt}/${this.maxRetries})`);
+              const waitTime = this.exponentialBackoff(attempt) * 1000;
+              console.warn(`[ResilientLLMClient] Server error ${status}, retrying in ${(waitTime / 1000).toFixed(1)}s (attempt ${attempt}/${this.maxRetries})`);
               await this.sleep(waitTime);
               continue;
             }
           }
 
-          // Overloaded error — retry once after 30s
+          // Overloaded error — retry with backoff + jitter
           if (message.includes("overloaded_error")) {
-            if (attempt === 1) {
-              await this.sleep(30000);
+            if (attempt < this.maxRetries) {
+              const waitTime = (15 + Math.random() * 20) * 1000; // 15-35s with jitter
+              console.warn(`[ResilientLLMClient] API overloaded, retrying in ${(waitTime / 1000).toFixed(1)}s (attempt ${attempt}/${this.maxRetries})`);
+              await this.sleep(waitTime);
               continue;
             }
           }
@@ -711,7 +713,10 @@ class ResilientLLMClient implements LLMClient {
     throw new Error("All models and retries exhausted");
   }
   private exponentialBackoff(attempt: number): number {
-    return Math.min(5 * Math.pow(3, attempt - 1), 45); // 5s, 15s, 45s
+    const base = Math.min(5 * Math.pow(3, attempt - 1), 45); // 5s, 15s, 45s
+    // Add ±30% jitter to prevent thundering herd
+    const jitter = base * (0.7 + Math.random() * 0.6);
+    return jitter;
   }
 
   private sleep(ms: number): Promise<void> {

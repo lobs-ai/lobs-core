@@ -313,9 +313,11 @@ export class MainAgent {
       return;
     }
 
-    console.log(`[main-agent] Resuming ${channelsToResume.size} session(s)...`);
+    console.log(`[main-agent] Resuming ${channelsToResume.size} session(s) with staggered startup...`);
 
-    for (const channelId of channelsToResume) {
+    const channelArray = [...channelsToResume];
+    for (let i = 0; i < channelArray.length; i++) {
+      const channelId = channelArray[i];
       // Load any persisted queue messages into memory
       const persistedMsgs = this.loadPersistedQueue(channelId);
       if (persistedMsgs.length > 0) {
@@ -344,10 +346,14 @@ export class MainAgent {
       // Process — but respect concurrency limits
       if (this.processingChannels.size < MAX_CONCURRENT_CHANNELS) {
         this.updateChannelSession(channelId, "processing");
-        // Don't await — let them run concurrently
-        this.processConversation(channelId).catch(err => {
-          console.error(`[main-agent] Resume failed for channel ${channelId.slice(0, 8)}:`, err);
-        });
+        // Don't await — let them run concurrently, but stagger starts
+        // to avoid thundering herd on the API
+        const staggerDelay = i * 2000; // 2s between each session start
+        setTimeout(() => {
+          this.processConversation(channelId).catch(err => {
+            console.error(`[main-agent] Resume failed for channel ${channelId.slice(0, 8)}:`, err);
+          });
+        }, staggerDelay);
       } else {
         this.updateChannelSession(channelId, "queued");
         console.log(`[main-agent] Channel ${channelId.slice(0, 8)} queued for resume (concurrency limit)`);
@@ -909,35 +915,93 @@ export class MainAgent {
       console.error("[main-agent] Error in conversation loop:", err);
       // Flush any remaining Discord tool batch
       await this.flushDiscordToolBatch(replyChannelId).catch(() => {});
-      // Emit error event
-      this.events.emit("stream", {
-        type: "error",
-        channelId: replyChannelId,
-        result: String(err).substring(0, 500),
-        timestamp: Date.now(),
-      } satisfies AgentStreamEvent);
-      try {
-        if (this.onReply) {
-          const errStr = String(err);
-          let friendlyMsg: string;
-          if (errStr.includes("500") && errStr.includes("api_error")) {
-            friendlyMsg = "⚠️ The AI provider (Anthropic) is having issues — try again in a minute.";
-          } else if (errStr.includes("overloaded")) {
-            friendlyMsg = "⚠️ The AI provider is overloaded — try again in a minute.";
-          } else if (errStr.includes("rate_limit") || errStr.includes("429")) {
-            friendlyMsg = "⚠️ Rate limited — try again shortly.";
-          } else {
-            friendlyMsg = `❌ Error: ${errStr.substring(0, 200)}`;
-          }
-          await this.onReply(replyChannelId, friendlyMsg);
+
+      const errStr = String(err);
+      const isTransient = errStr.includes("500") || errStr.includes("api_error") ||
+        errStr.includes("overloaded") || errStr.includes("rate_limit") || errStr.includes("429") ||
+        errStr.includes("529");
+
+      // Mark for conversation-level retry (handled in finally block)
+      if (isTransient && !((this as any).__conversationRetryCount?.[replyChannelId] >= 2)) {
+        if (!(this as any).__conversationRetryCount) (this as any).__conversationRetryCount = {};
+        (this as any).__conversationRetryCount[replyChannelId] = ((this as any).__conversationRetryCount?.[replyChannelId] ?? 0) + 1;
+        const retryNum = (this as any).__conversationRetryCount[replyChannelId];
+        const retryDelay = (10 + Math.random() * 20) * 1000 * retryNum; // 10-30s * attempt
+        console.log(`[main-agent] Transient error, scheduling retry in ${(retryDelay / 1000).toFixed(0)}s (retry ${retryNum}/2) for channel ${replyChannelId.slice(0, 12)}`);
+
+        // Emit a temporary status so frontend knows we're retrying, not dead
+        this.events.emit("stream", {
+          type: "error",
+          channelId: replyChannelId,
+          result: `⏳ API error — retrying in ${Math.round(retryDelay / 1000)}s...`,
+          timestamp: Date.now(),
+        } satisfies AgentStreamEvent);
+
+        // Schedule retry — runs after finally block releases the channel
+        (this as any).__pendingRetry = (this as any).__pendingRetry || {};
+        (this as any).__pendingRetry[replyChannelId] = retryDelay;
+      } else {
+        // Clear retry counter — either not transient or retries exhausted
+        if ((this as any).__conversationRetryCount?.[replyChannelId]) {
+          delete (this as any).__conversationRetryCount[replyChannelId];
         }
-      } catch (replyErr) {
-        console.error("[main-agent] Failed to send error reply:", replyErr);
+
+        // Emit error event
+        this.events.emit("stream", {
+          type: "error",
+          channelId: replyChannelId,
+          result: errStr.substring(0, 500),
+          timestamp: Date.now(),
+        } satisfies AgentStreamEvent);
+        try {
+          if (this.onReply) {
+            let friendlyMsg: string;
+            if (errStr.includes("500") && errStr.includes("api_error")) {
+              friendlyMsg = "⚠️ The AI provider (Anthropic) is having issues — try again in a minute.";
+            } else if (errStr.includes("overloaded")) {
+              friendlyMsg = "⚠️ The AI provider is overloaded — try again in a minute.";
+            } else if (errStr.includes("rate_limit") || errStr.includes("429")) {
+              friendlyMsg = "⚠️ Rate limited — try again shortly.";
+            } else {
+              friendlyMsg = `❌ Error: ${errStr.substring(0, 200)}`;
+            }
+            await this.onReply(replyChannelId, friendlyMsg);
+          }
+        } catch (replyErr) {
+          console.error("[main-agent] Failed to send error reply:", replyErr);
+        }
       }
     } finally {
       clearTimeout(conversationTimeout);
       // Mark this channel as no longer processing
       this.processingChannels.delete(replyChannelId);
+
+      // Check for pending retry (transient API errors)
+      const pendingRetryDelay = (this as any).__pendingRetry?.[replyChannelId];
+      if (pendingRetryDelay) {
+        delete (this as any).__pendingRetry[replyChannelId];
+        // Schedule a retry — the channel is released now, so other channels can process
+        // After the delay, we re-acquire and retry
+        setTimeout(() => {
+          if (this.processingChannels.size < MAX_CONCURRENT_CHANNELS) {
+            this.processingChannels.add(replyChannelId);
+            this.updateChannelSession(replyChannelId, "processing");
+            this.processConversation(replyChannelId).catch(err => {
+              console.error(`[main-agent] Conversation retry failed for ${replyChannelId.slice(0, 12)}:`, err);
+              // Clean up retry counter on final failure
+              if ((this as any).__conversationRetryCount?.[replyChannelId]) {
+                delete (this as any).__conversationRetryCount[replyChannelId];
+              }
+            });
+          } else {
+            console.log(`[main-agent] Retry skipped for ${replyChannelId.slice(0, 12)} — at capacity`);
+            if ((this as any).__conversationRetryCount?.[replyChannelId]) {
+              delete (this as any).__conversationRetryCount[replyChannelId];
+            }
+          }
+        }, pendingRetryDelay);
+        // Still do queue draining below so other channels can start
+      }
       
       // Cleanup idle channel metadata periodically (prevent memory leak of old channel info)
       if (this.channelChatType.size > 100) {
@@ -950,11 +1014,13 @@ export class MainAgent {
         }
       }
 
-      // Mark persisted queue as processed for this channel
-      this.markQueueProcessed(replyChannelId);
+      // Mark persisted queue as processed for this channel (skip if retrying)
+      if (!pendingRetryDelay) {
+        this.markQueueProcessed(replyChannelId);
+      }
 
-      // Process queued messages for this channel
-      const channelQueue = this.channelQueues.get(replyChannelId);
+      // Process queued messages for this channel (skip if we have a pending retry)
+      const channelQueue = !pendingRetryDelay ? this.channelQueues.get(replyChannelId) : undefined;
       if (channelQueue && channelQueue.length > 0) {
         const nextMsg = channelQueue.shift()!;
         if (channelQueue.length === 0) {
@@ -983,8 +1049,10 @@ export class MainAgent {
         return;
       }
 
-      // No more queued messages — mark channel idle
-      this.updateChannelSession(replyChannelId, "idle");
+      // No more queued messages — mark channel idle (skip if pending retry)
+      if (!pendingRetryDelay) {
+        this.updateChannelSession(replyChannelId, "idle");
+      }
 
       // Fill all available concurrency slots from queued channels
       for (const [channelId, queue] of this.channelQueues.entries()) {
