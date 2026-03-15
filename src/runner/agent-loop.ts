@@ -14,7 +14,7 @@ import type {
 import { MODEL_COSTS as COSTS } from "./types.js";
 import { getToolDefinitions, executeTool } from "./tools/index.js";
 import { buildSystemPrompt, buildSmartSystemPrompt } from "./prompt-builder.js";
-import { parseModelString, createClient, type LLMMessage, type LLMResponse } from "./providers.js";
+import { parseModelString, createResilientClient, type LLMMessage, type LLMResponse } from "./providers.js";
 import { createHash, randomBytes } from "node:crypto";
 import { SessionTranscript, type TurnRecord } from "./session-transcript.js";
 import { shouldCompact, compactMessages } from "./context-manager.js";
@@ -78,7 +78,10 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
   try {
     // Use taskId or runId as sessionId for sticky key assignment (prompt caching benefit)
     const sessionId = spec.context?.taskId ?? runId;
-    client = createClient(providerConfig, sessionId);
+    client = createResilientClient(spec.model, {
+      sessionId,
+      maxRetries: 3,
+    });
   } catch (error) {
     return {
       succeeded: false,

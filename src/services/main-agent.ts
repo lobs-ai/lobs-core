@@ -15,7 +15,7 @@ import { getToolDefinitions, executeTool } from "../runner/tools/index.js";
 import type { ToolName } from "../runner/types.js";
 import { getToolsForSession, getSessionType } from "../runner/tools/tool-sets.js";
 import { loadWorkspaceContext, buildSystemPrompt } from "./workspace-loader.js";
-import { resolveModelForTier, type ModelTier } from "../orchestrator/model-chooser.js";
+import { buildFallbackChain, resolveModelForTier, type ModelTier } from "../orchestrator/model-chooser.js";
 import Database from "better-sqlite3";
 import { compactMessages, pruneToolResults, findSafeSplitPoint, calculateContextSize } from "./compaction.js";
 import { LoopDetector } from "../runner/loop-detector.js";
@@ -25,7 +25,7 @@ const MAX_CONTEXT_CHARS = 150_000; // Rough char budget for history
 const MAX_LIVE_TOOL_RESULT_CHARS = 6_000;
 const DEFAULT_MODEL = "strong";  // Chat defaults to strong tier (opus)
 const DEFAULT_CWD = process.env.HOME ?? "/tmp";
-const MAX_CONCURRENT_CHANNELS = 3; // Max simultaneous channel conversations
+const MAX_CONCURRENT_CHANNELS = 10; // Max simultaneous channel conversations
 
 /** Image attachment data (base64-encoded) */
 export interface ImageAttachment {
@@ -52,8 +52,9 @@ interface PendingMessage {
 
 /** SSE event types emitted during agent processing */
 export interface AgentStreamEvent {
-  type: "tool_start" | "tool_result" | "text_delta" | "assistant_reply" | "thinking" | "error" | "done";
+  type: "tool_start" | "tool_result" | "text_delta" | "assistant_reply" | "thinking" | "error" | "done" | "queued" | "processing_start";
   channelId: string;
+  queuePosition?: number; // For "queued" events — position in queue
   toolName?: string;
   toolInput?: string;    // JSON string preview of tool input
   toolUseId?: string;
@@ -417,9 +418,17 @@ export class MainAgent {
         this.channelQueues.set(channelId, []);
       }
       this.channelQueues.get(channelId)!.push(msg);
+      const queueDepth = this.channelQueues.get(channelId)!.length;
       console.log(
-        `[main-agent] Queued message for channel ${channelId.slice(0, 8)} (${this.channelQueues.get(channelId)!.length} pending)`,
+        `[main-agent] Queued message for channel ${channelId.slice(0, 8)} (${queueDepth} pending, ${this.processingChannels.size}/${MAX_CONCURRENT_CHANNELS} active)`,
       );
+      // Emit queued event so frontends can show queue status
+      this.events.emit("stream", {
+        type: "queued",
+        channelId,
+        queuePosition: queueDepth,
+        timestamp: Date.now(),
+      } satisfies AgentStreamEvent);
       return;
     }
 
@@ -493,11 +502,28 @@ export class MainAgent {
     return this.channelQueues.get(channelId)?.length ?? 0;
   }
 
+  /** Get number of currently active channels */
+  getActiveChannelCount(): number {
+    return this.processingChannels.size;
+  }
+
+  /** Get max concurrent channel limit */
+  getMaxConcurrent(): number {
+    return MAX_CONCURRENT_CHANNELS;
+  }
+
   /* ── Core conversation loop ────────────────────────────────────── */
 
   private async processConversation(replyChannelId: string): Promise<void> {
     // Mark this channel as being processed
     this.processingChannels.add(replyChannelId);
+
+    // Emit processing_start so frontends know a queued channel is now active
+    this.events.emit("stream", {
+      type: "processing_start",
+      channelId: replyChannelId,
+      timestamp: Date.now(),
+    } satisfies AgentStreamEvent);
 
     // Total conversation timeout — prevents stuck channels
     // 30 minutes for all session types — allow big work between messages
@@ -615,8 +641,12 @@ export class MainAgent {
       const tools = getToolDefinitions(availableTools);
       console.log(`[main-agent] Using model: ${effectiveModel} (raw: ${this.model}, override: ${sessionRow?.model_override ?? 'none'})`);
       const config = parseModelString(effectiveModel);
+      const fallbackModels = ["micro", "small", "medium", "standard", "strong"].includes(this.model)
+        ? buildFallbackChain(effectiveModel, this.model as ModelTier, "main").slice(1)
+        : [];
       const client: LLMClient = createResilientClient(effectiveModel, {
         sessionId: `main-agent:${replyChannelId}`,
+        fallbackModels,
         maxRetries: 3,
       });
 
@@ -888,10 +918,18 @@ export class MainAgent {
       } satisfies AgentStreamEvent);
       try {
         if (this.onReply) {
-          await this.onReply(
-            replyChannelId,
-            `❌ Error: ${String(err).substring(0, 200)}`,
-          );
+          const errStr = String(err);
+          let friendlyMsg: string;
+          if (errStr.includes("500") && errStr.includes("api_error")) {
+            friendlyMsg = "⚠️ The AI provider (Anthropic) is having issues — try again in a minute.";
+          } else if (errStr.includes("overloaded")) {
+            friendlyMsg = "⚠️ The AI provider is overloaded — try again in a minute.";
+          } else if (errStr.includes("rate_limit") || errStr.includes("429")) {
+            friendlyMsg = "⚠️ Rate limited — try again shortly.";
+          } else {
+            friendlyMsg = `❌ Error: ${errStr.substring(0, 200)}`;
+          }
+          await this.onReply(replyChannelId, friendlyMsg);
         }
       } catch (replyErr) {
         console.error("[main-agent] Failed to send error reply:", replyErr);
@@ -948,35 +986,36 @@ export class MainAgent {
       // No more queued messages — mark channel idle
       this.updateChannelSession(replyChannelId, "idle");
 
-      // If under concurrency limit, try to start processing another queued channel
-      if (this.processingChannels.size < MAX_CONCURRENT_CHANNELS) {
-        for (const [channelId, queue] of this.channelQueues.entries()) {
-          if (queue.length > 0 && !this.processingChannels.has(channelId)) {
-            const nextMsg = queue.shift()!;
-            if (queue.length === 0) {
-              this.channelQueues.delete(channelId);
-            }
-            
-            this.db
-              .prepare(
-                `INSERT INTO main_agent_messages
-                   (id, role, content, author_id, author_name, channel_id, platform_message_id, token_estimate)
-                 VALUES (?, 'user', ?, ?, ?, ?, ?, ?)`,
-              )
-              .run(
-                nextMsg.id,
-                nextMsg.content,
-                nextMsg.authorId,
-                nextMsg.authorName,
-                nextMsg.channelId,
-                nextMsg.messageId || null,
-                Math.ceil(nextMsg.content.length / 4),
-              );
-            
-            this.updateChannelSession(channelId, "processing", nextMsg.authorId, nextMsg.authorName);
-            await this.processConversation(channelId);
-            break;
+      // Fill all available concurrency slots from queued channels
+      for (const [channelId, queue] of this.channelQueues.entries()) {
+        if (this.processingChannels.size >= MAX_CONCURRENT_CHANNELS) break;
+        if (queue.length > 0 && !this.processingChannels.has(channelId)) {
+          const nextMsg = queue.shift()!;
+          if (queue.length === 0) {
+            this.channelQueues.delete(channelId);
           }
+          
+          this.db
+            .prepare(
+              `INSERT INTO main_agent_messages
+                 (id, role, content, author_id, author_name, channel_id, platform_message_id, token_estimate)
+               VALUES (?, 'user', ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              nextMsg.id,
+              nextMsg.content,
+              nextMsg.authorId,
+              nextMsg.authorName,
+              nextMsg.channelId,
+              nextMsg.messageId || null,
+              Math.ceil(nextMsg.content.length / 4),
+            );
+          
+          this.updateChannelSession(channelId, "processing", nextMsg.authorId, nextMsg.authorName);
+          // Don't await — fire concurrently so we fill all slots
+          this.processConversation(channelId).catch((err) =>
+            console.error(`[main-agent] Error processing queued channel ${channelId}:`, err),
+          );
         }
       }
     }
@@ -1102,6 +1141,7 @@ export class MainAgent {
     const config = parseModelString(compactModel);
     const client = createResilientClient(compactModel, {
       sessionId: "main-agent:compaction",
+      fallbackModels: buildFallbackChain(compactModel, "small", "main").slice(1),
       maxRetries: 3,
     });
 

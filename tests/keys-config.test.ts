@@ -40,4 +40,22 @@ describe("normalizeKeyConfig", () => {
     expect(config.openai).toBeUndefined();
     expect(config.openrouter).toBeUndefined();
   });
+
+  test("deduplicates identical keys in the same pool", () => {
+    const config = normalizeKeyConfig({
+      anthropic: {
+        keys: [
+          { key: "sk-ant-dup", label: "first" },
+          { key: "sk-ant-dup", label: "second" },
+          { key: "sk-ant-unique", label: "third" },
+        ],
+        strategy: "sticky-failover",
+      },
+    });
+
+    expect(config.anthropic?.keys).toEqual([
+      { key: "sk-ant-dup", label: "first" },
+      { key: "sk-ant-unique", label: "third" },
+    ]);
+  });
 });

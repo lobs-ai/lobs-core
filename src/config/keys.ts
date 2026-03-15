@@ -57,16 +57,33 @@ function normalizeKeyEntries(entries: unknown): KeyEntry[] {
   return normalized.filter((entry): entry is KeyEntry => entry !== undefined);
 }
 
+function dedupeKeyEntries(entries: KeyEntry[], provider?: string): KeyEntry[] {
+  const seen = new Set<string>();
+  const deduped: KeyEntry[] = [];
+
+  for (const entry of entries) {
+    if (seen.has(entry.key)) continue;
+    seen.add(entry.key);
+    deduped.push(entry);
+  }
+
+  if (provider && deduped.length !== entries.length) {
+    console.warn(`[keys] Removed ${entries.length - deduped.length} duplicate ${provider} key entr${entries.length - deduped.length === 1 ? "y" : "ies"}`);
+  }
+
+  return deduped;
+}
+
 function normalizePool(pool: unknown): KeyPool | undefined {
   // Current format: { keys: [...], strategy: "sticky-failover" }
   if (pool && typeof pool === "object" && Array.isArray((pool as { keys?: unknown }).keys)) {
-    const keys = normalizeKeyEntries((pool as { keys: unknown }).keys);
+    const keys = dedupeKeyEntries(normalizeKeyEntries((pool as { keys: unknown }).keys));
     if (keys.length === 0) return undefined;
     return { keys, strategy: "sticky-failover" };
   }
 
   // Legacy/init format: [ { key, label } ] or [ "sk-..." ]
-  const keys = normalizeKeyEntries(pool);
+  const keys = dedupeKeyEntries(normalizeKeyEntries(pool));
   if (keys.length === 0) return undefined;
   return { keys, strategy: "sticky-failover" };
 }
@@ -144,17 +161,17 @@ export function loadKeyConfig(): KeyConfig {
   // Environment variables (plural form) override config file
   const anthropicKeys = parseEnvKeys("ANTHROPIC_API_KEYS");
   if (anthropicKeys) {
-    config.anthropic = { keys: anthropicKeys, strategy: "sticky-failover" };
+    config.anthropic = { keys: dedupeKeyEntries(anthropicKeys, "anthropic"), strategy: "sticky-failover" };
   }
 
   const openaiKeys = parseEnvKeys("OPENAI_API_KEYS");
   if (openaiKeys) {
-    config.openai = { keys: openaiKeys, strategy: "sticky-failover" };
+    config.openai = { keys: dedupeKeyEntries(openaiKeys, "openai"), strategy: "sticky-failover" };
   }
 
   const openrouterKeys = parseEnvKeys("OPENROUTER_API_KEYS");
   if (openrouterKeys) {
-    config.openrouter = { keys: openrouterKeys, strategy: "sticky-failover" };
+    config.openrouter = { keys: dedupeKeyEntries(openrouterKeys, "openrouter"), strategy: "sticky-failover" };
   }
 
   return config;

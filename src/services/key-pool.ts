@@ -15,6 +15,11 @@ import { loadKeyConfig } from "../config/keys.js";
 
 type Provider = "anthropic" | "openai" | "openrouter";
 
+interface KeySelection {
+  key: string;
+  keyIndex: number;
+}
+
 interface KeyHealth {
   healthy: boolean;
   lastFailure?: Date;
@@ -55,6 +60,14 @@ export class KeyPoolService {
    * Returns undefined if no keys configured for this provider.
    */
   getKey(provider: Provider, sessionId: string): string | undefined {
+    const selection = this.getKeySelection(provider, sessionId);
+    return selection?.key;
+  }
+
+  /**
+   * Return the current session's selected key and index.
+   */
+  getKeySelection(provider: Provider, sessionId: string): KeySelection | undefined {
     const keys = this.pools.get(provider);
     if (!keys || keys.length === 0) return undefined;
 
@@ -64,7 +77,7 @@ export class KeyPoolService {
       if (!this.isHealthy(provider, keyIndex)) {
         return undefined; // Only key is unhealthy
       }
-      return keys[0].key;
+      return { key: keys[0].key, keyIndex };
     }
 
     // Multi-key — sticky assignment
@@ -79,7 +92,7 @@ export class KeyPoolService {
 
     // Check if current assignment is healthy
     if (this.isHealthy(provider, keyIndex)) {
-      return keys[keyIndex].key;
+      return { key: keys[keyIndex].key, keyIndex };
     }
 
     // Current key unhealthy — find next healthy key
@@ -90,7 +103,7 @@ export class KeyPoolService {
 
     // Reassign to healthy key
     this.assignments.set(assignmentKey, nextIndex);
-    return keys[nextIndex].key;
+    return { key: keys[nextIndex].key, keyIndex: nextIndex };
   }
 
   /**
@@ -118,16 +131,40 @@ export class KeyPoolService {
   getAuth(
     provider: Provider,
     sessionId: string
-  ): { apiKey?: string; authToken?: string; isOAuth: boolean } | undefined {
-    const key = this.getKey(provider, sessionId);
-    if (!key) return undefined;
+  ): { apiKey?: string; authToken?: string; isOAuth: boolean; keyIndex: number } | undefined {
+    const selection = this.getKeySelection(provider, sessionId);
+    if (!selection) return undefined;
+    const { key, keyIndex } = selection;
 
     // Detect OAuth token for Anthropic
     if (provider === "anthropic" && key.includes("sk-ant-oat")) {
-      return { authToken: key, isOAuth: true };
+      return { authToken: key, isOAuth: true, keyIndex };
     }
 
-    return { apiKey: key, isOAuth: false };
+    return { apiKey: key, isOAuth: false, keyIndex };
+  }
+
+  /**
+   * Mark the currently assigned key for a session as failed.
+   */
+  markSessionFailed(
+    provider: Provider,
+    sessionId: string,
+    error: string,
+    errorType: "auth" | "rate_limit" | "unknown"
+  ): boolean {
+    const assignmentKey = `${provider}:${sessionId}`;
+    const keys = this.pools.get(provider);
+    if (!keys || keys.length === 0) return false;
+
+    let keyIndex = this.assignments.get(assignmentKey);
+    if (keyIndex === undefined) {
+      keyIndex = keys.length === 1 ? 0 : this.hashSessionToKey(sessionId, keys.length);
+      this.assignments.set(assignmentKey, keyIndex);
+    }
+
+    this.markFailed(provider, keyIndex, error, errorType);
+    return true;
   }
 
   /**

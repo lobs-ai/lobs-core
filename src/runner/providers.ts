@@ -118,12 +118,54 @@ interface AnthropicAuth {
   apiKey?: string;
   authToken?: string;
   isOAuth: boolean;
+  keyIndex?: number;
 }
 
 const DEFAULT_KEYPOOL_SESSION_ID = "__default__";
 
 function isOAuthToken(key: string): boolean {
   return key.includes("sk-ant-oat");
+}
+
+function getHttpStatus(error: unknown): number | undefined {
+  if (error && typeof error === "object" && "status" in error) {
+    const status = (error as { status?: unknown }).status;
+    if (typeof status === "number") return status;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  const match = message.match(/\b(\d{3})\b/);
+  return match ? parseInt(match[1], 10) : undefined;
+}
+
+function getRetryAfterSeconds(error: unknown): number | undefined {
+  if (error && typeof error === "object" && "headers" in error) {
+    const headers = (error as { headers?: unknown }).headers;
+    if (headers && typeof headers === "object" && "get" in headers && typeof (headers as Headers).get === "function") {
+      const retryAfter = (headers as Headers).get("retry-after");
+      if (retryAfter) {
+        const parsed = parseInt(retryAfter, 10);
+        if (!Number.isNaN(parsed)) return parsed;
+      }
+    }
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  const match = message.match(/retry[_-]after[:\s]+(\d+)/i);
+  return match ? parseInt(match[1], 10) : undefined;
+}
+
+export function shouldRetryProviderError(error: unknown): boolean | undefined {
+  if (error && typeof error === "object" && "headers" in error) {
+    const headers = (error as { headers?: unknown }).headers;
+    if (headers && typeof headers === "object" && "get" in headers && typeof (headers as Headers).get === "function") {
+      const shouldRetry = (headers as Headers).get("x-should-retry");
+      if (shouldRetry === "true") return true;
+      if (shouldRetry === "false") return false;
+    }
+  }
+
+  return undefined;
 }
 
 function resolveAnthropicAuth(sessionId?: string): AnthropicAuth | undefined {
@@ -172,7 +214,6 @@ function createAnthropicNativeClient(auth: AnthropicAuth): Anthropic {
 class AnthropicClient implements LLMClient {
   private client: Anthropic;
   private sessionId?: string;
-  private keyIndex?: number;
 
   constructor(auth: AnthropicAuth, sessionId?: string) {
     this.client = createAnthropicNativeClient(auth);
@@ -258,26 +299,14 @@ class AnthropicClient implements LLMClient {
       if (this.sessionId) {
         const message = error instanceof Error ? error.message : String(error);
         const keyPool = getKeyPool();
-        
-        // Parse HTTP status from error message
-        const statusMatch = message.match(/\b(\d{3})\b/);
-        const status = statusMatch ? parseInt(statusMatch[1], 10) : undefined;
+        const status = getHttpStatus(error);
 
         if (status === 401 || status === 403) {
-          // Auth failure — mark key as permanently failed
-          if (keyPool.hasKeys("anthropic")) {
-            // Get current key index by finding which key matches
-            const sessionAuth = keyPool.getAuth("anthropic", this.sessionId);
-            if (sessionAuth) {
-              // Mark as auth failure (won't auto-recover)
-              console.warn(`[AnthropicClient] Auth failure detected, marking key as failed`);
-              // Note: We can't get the exact key index here, but the KeyPool will handle it
-              // when the next call tries to get a key and finds this one failed
-            }
-          }
+          keyPool.markSessionFailed("anthropic", this.sessionId, message, "auth");
+          console.warn("[AnthropicClient] Auth failure detected, rotating key");
         } else if (status === 429) {
-          // Rate limit — mark key as temporarily failed
-          console.warn(`[AnthropicClient] Rate limit detected, will retry with backoff`);
+          keyPool.markSessionFailed("anthropic", this.sessionId, message, "rate_limit");
+          console.warn("[AnthropicClient] Rate limit detected, rotating key");
         }
       }
 
@@ -502,11 +531,11 @@ class OpenAICompatibleClient implements LLMClient {
         const providerKey = this.provider as "openai" | "openrouter";
 
         if (response.status === 401 || response.status === 403) {
-          console.warn(`[${this.provider}Client] Auth failure detected`);
-          // Auth failures are handled by KeyPool on next getKey call
+          keyPool.markSessionFailed(providerKey, this.sessionId, error.message, "auth");
+          console.warn(`[${this.provider}Client] Auth failure detected, rotating key`);
         } else if (response.status === 429) {
-          console.warn(`[${this.provider}Client] Rate limit detected`);
-          // Rate limit handled by ResilientLLMClient retry logic
+          keyPool.markSessionFailed(providerKey, this.sessionId, error.message, "rate_limit");
+          console.warn(`[${this.provider}Client] Rate limit detected, rotating key`);
         }
       }
 
@@ -619,33 +648,42 @@ class ResilientLLMClient implements LLMClient {
       let attempt = 0;
       while (attempt < this.maxRetries) {
         attempt++;
+        const client = attempt === 1 && !isFallback
+          ? this.primaryClient
+          : createClient(parseModelString(model), this.sessionId);
 
         try {
           return await client.createMessage(modelParams);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          const status = this.extractHttpStatus(message);
+          const status = getHttpStatus(error);
+          const shouldRetry = shouldRetryProviderError(error);
 
-          // Auth errors — fail immediately
+          // Auth errors — retry to allow key rotation
           if (status === 401 || status === 403) {
+            if (attempt < this.maxRetries) {
+              continue;
+            }
             throw new Error(`Authentication failed for model ${model}: ${message}`);
           }
 
           // Rate limit — retry with backoff
           if (status === 429) {
-            const retryAfter = this.extractRetryAfter(message);
+            const retryAfter = getRetryAfterSeconds(error);
             const waitTime = retryAfter ?? this.exponentialBackoff(attempt);
 
-            if (attempt < this.maxRetries) {
+            if (attempt < this.maxRetries && shouldRetry !== false) {
               await this.sleep(waitTime * 1000);
               continue;
             }
           }
 
-          // Server errors — retry once after 5s
+          // Server errors — retry up to 2 times with backoff
           if (status && status >= 500 && status < 600) {
-            if (attempt === 1) {
-              await this.sleep(5000);
+            if (attempt < this.maxRetries && shouldRetry !== false) {
+              const waitTime = attempt === 1 ? 5000 : 15000;
+              console.warn(`[ResilientLLMClient] Server error ${status}, retrying in ${waitTime / 1000}s (attempt ${attempt}/${this.maxRetries})`);
+              await this.sleep(waitTime);
               continue;
             }
           }
@@ -672,17 +710,6 @@ class ResilientLLMClient implements LLMClient {
 
     throw new Error("All models and retries exhausted");
   }
-
-  private extractHttpStatus(message: string): number | undefined {
-    const match = message.match(/\b(\d{3})\b/);
-    return match ? parseInt(match[1], 10) : undefined;
-  }
-
-  private extractRetryAfter(message: string): number | undefined {
-    const match = message.match(/retry[_-]after[:\s]+(\d+)/i);
-    return match ? parseInt(match[1], 10) : undefined;
-  }
-
   private exponentialBackoff(attempt: number): number {
     return Math.min(5 * Math.pow(3, attempt - 1), 45); // 5s, 15s, 45s
   }

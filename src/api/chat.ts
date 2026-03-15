@@ -138,7 +138,21 @@ export async function handleChatRequest(
               .where(eq(chatSessions.sessionKey, sessionKey))
               .run();
           }
-        } else if (event.type === "done" || event.type === "error") {
+        } else if (event.type === "error") {
+          // Persist error message so the frontend can display it
+          if (event.result) {
+            db.insert(chatMessages).values({
+              id: randomUUID().replace(/-/g, ""),
+              sessionKey,
+              role: "assistant",
+              content: event.result,
+              createdAt: new Date(event.timestamp).toISOString(),
+              messageMetadata: JSON.stringify({ isError: true }),
+            }).run();
+          }
+          // Cleanup listener
+          mainAgent.events.off("stream", toolListener);
+        } else if (event.type === "done") {
           // Cleanup listener when done
           mainAgent.events.off("stream", toolListener);
         }
@@ -237,6 +251,9 @@ export async function handleChatRequest(
       // If agent is currently processing, send a thinking event immediately
       if (mainAgent.isChannelProcessing?.(channelId)) {
         res.write(`data: ${JSON.stringify({ type: "thinking", channelId, timestamp: Date.now() })}\n\n`);
+      } else if (mainAgent.getChannelQueueDepth?.(channelId) > 0) {
+        // Channel has queued messages — let client know
+        res.write(`data: ${JSON.stringify({ type: "queued", channelId, queuePosition: mainAgent.getChannelQueueDepth(channelId), timestamp: Date.now() })}\n\n`);
       }
 
       // Listen for stream events from the main agent
@@ -280,6 +297,8 @@ export async function handleChatRequest(
       const status = {
         processing: mainAgent?.isChannelProcessing?.(channelId) ?? false,
         queueDepth: mainAgent?.getChannelQueueDepth?.(channelId) ?? 0,
+        activeChannels: mainAgent?.getActiveChannelCount?.() ?? 0,
+        maxConcurrent: mainAgent?.getMaxConcurrent?.() ?? 10,
       };
       
       return json(res, status);
