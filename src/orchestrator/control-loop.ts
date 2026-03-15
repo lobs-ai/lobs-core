@@ -56,6 +56,7 @@ let timer: ReturnType<typeof setInterval> | null = null;
 let executor: WorkflowExecutor | null = null;
 let gatewayPort: number = 18789;
 let gatewayToken: string = "";
+let lastWorkflowSnapshotAt = 0;
 
 export function getGatewayConfig(): { port: number; token: string } {
   return { port: gatewayPort, token: gatewayToken };
@@ -280,6 +281,7 @@ function runTick(): void {
   // ── 1. Advance active runs ─────────────────────────────────────────────────
   try {
     const activeRuns = executor.getActiveRuns(20);
+    maybeLogWorkflowSnapshot(activeRuns);
     let advanced = 0;
     for (const run of activeRuns) {
       // Keep advancing until the run blocks (waiting for spawn, delay, etc.)
@@ -566,6 +568,29 @@ function runTick(): void {
   } catch (e) {
     log().error(`orchestrator: meeting analysis recovery error: ${e}`);
   }
+}
+
+function maybeLogWorkflowSnapshot(activeRuns: Array<{ id: string; taskId: string | null; currentNode: string | null; status: string; nodeStates: unknown }>): void {
+  if (activeRuns.length === 0) return;
+
+  const now = Date.now();
+  if (now - lastWorkflowSnapshotAt < 30_000) return;
+  lastWorkflowSnapshotAt = now;
+
+  const summary = activeRuns
+    .slice(0, 8)
+    .map((run) => {
+      const currentNode = run.currentNode ?? "none";
+      const nodeStates = (run.nodeStates as Record<string, Record<string, unknown>> | null) ?? {};
+      const currentState = nodeStates[currentNode] ?? {};
+      const status = String(currentState["status"] ?? run.status);
+      const attempts = Number(currentState["attempts"] ?? 0);
+      const suffix = attempts > 0 ? `#${attempts}` : "";
+      return `${run.id.slice(0, 8)}:${currentNode}:${status}${suffix}${run.taskId ? `:task=${run.taskId.slice(0, 8)}` : ""}`;
+    })
+    .join(" | ");
+
+  log().info(`[WORKFLOW] Active runs snapshot (${activeRuns.length}): ${summary}`);
 }
 
 // ── Meeting analysis recovery ─────────────────────────────────────────────────

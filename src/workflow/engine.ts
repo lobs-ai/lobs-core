@@ -80,6 +80,20 @@ export class WorkflowExecutor {
     this.nodeHandlers = new NodeHandlers();
   }
 
+  private summarizeNodeState(nodeState: Record<string, unknown> | undefined): string {
+    if (!nodeState) return "unknown";
+    const status = String(nodeState["status"] ?? "unknown");
+    const attempts = Number(nodeState["attempts"] ?? 0);
+    const sessionKey = nodeState["session_key"] ?? nodeState["childSessionKey"];
+    const error = nodeState["error"] as string | undefined;
+
+    const parts = [status];
+    if (attempts > 0) parts.push(`attempt=${attempts}`);
+    if (sessionKey && typeof sessionKey === "string") parts.push(`session=${sessionKey.slice(0, 24)}`);
+    if (error) parts.push(`error=${error.slice(0, 80)}`);
+    return parts.join(" ");
+  }
+
   // ── Public API ─────────────────────────────────────────────────────────────
 
   getActiveRuns(limit = 20): WorkflowRunRow[] {
@@ -125,6 +139,10 @@ export class WorkflowExecutor {
           startedAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         }).where(eq(workflowRuns.id, run.id)).run();
+        log().info(
+          `[WORKFLOW] Run ${run.id.slice(0, 8)} entered workflow '${workflow.name}' at node '${entryId}' ` +
+          `(task=${run.taskId?.slice(0, 8) ?? "none"})`
+        );
         return true;
       }
 
@@ -428,6 +446,9 @@ export class WorkflowExecutor {
     }
 
     nodeStates[nodeId] = ns;
+    log().info(
+      `[WORKFLOW] Run ${run.id.slice(0, 8)} node '${nodeId}' execute -> ${this.summarizeNodeState(ns)}`
+    );
 
     // Build updated context (merge node output)
     const updatedContext = { ...(run.context as Record<string, unknown> ?? {}) };
@@ -505,6 +526,9 @@ export class WorkflowExecutor {
     ns["finished_at"] = new Date().toISOString();
 
     nodeStates[nodeId] = ns;
+    log().info(
+      `[WORKFLOW] Run ${run.id.slice(0, 8)} node '${nodeId}' check -> ${this.summarizeNodeState(ns)}`
+    );
     const updatedContext = { ...(run.context as Record<string, unknown> ?? {}) };
     if (ns["output"]) updatedContext[nodeId] = ns["output"];
 
@@ -547,6 +571,9 @@ export class WorkflowExecutor {
 
     const db = getDb();
     if (goto) {
+      log().info(
+        `[WORKFLOW] Run ${run.id.slice(0, 8)} transition '${nodeId}' -> '${goto}'`
+      );
       db.update(workflowRuns).set({
         currentNode: goto,
         updatedAt: new Date().toISOString(),
@@ -574,7 +601,10 @@ export class WorkflowExecutor {
     // Abort conditions
     const abortOn = policy["abort_on"] as string[] ?? [];
     if (abortOn.includes(errorType)) {
-      log().warn(`[WORKFLOW] Node ${nodeId} abort condition '${errorType}'`);
+      log().warn(
+        `[WORKFLOW] Run ${run.id.slice(0, 8)} node '${nodeId}' abort condition '${errorType}' ` +
+        `(${this.summarizeNodeState(ns)})`
+      );
       this._finishRun(run, "failed", ns["error"] as string ?? "Abort condition met");
       return true;
     }
@@ -582,7 +612,10 @@ export class WorkflowExecutor {
     // Retry
     const maxRetries = policy["retry"] as number ?? 0;
     if (attempts <= maxRetries) {
-      log().info(`[WORKFLOW] Retrying node ${nodeId} (attempt ${attempts + 1}/${maxRetries + 1})`);
+      log().info(
+        `[WORKFLOW] Run ${run.id.slice(0, 8)} retrying node '${nodeId}' ` +
+        `(attempt ${attempts + 1}/${maxRetries + 1}, last_error=${String(ns["error"] ?? "").slice(0, 80)})`
+      );
       ns["status"] = "pending";
       nodeStates[nodeId] = ns;
       const db = getDb();
@@ -597,7 +630,10 @@ export class WorkflowExecutor {
     const fallback = policy["fallback"] as string | undefined;
     const escalateAfter = policy["escalate_after"] as number ?? 999;
     if (fallback && attempts <= escalateAfter) {
-      log().info(`[WORKFLOW] Falling back from ${nodeId} to ${fallback}`);
+      log().info(
+        `[WORKFLOW] Run ${run.id.slice(0, 8)} fallback '${nodeId}' -> '${fallback}' ` +
+        `(attempts=${attempts}, error=${String(ns["error"] ?? "").slice(0, 80)})`
+      );
       const db = getDb();
       db.update(workflowRuns).set({
         currentNode: fallback,
@@ -606,7 +642,10 @@ export class WorkflowExecutor {
       return true;
     }
 
-    log().warn(`[WORKFLOW] Node ${nodeId} exhausted retries`);
+    log().warn(
+      `[WORKFLOW] Run ${run.id.slice(0, 8)} node '${nodeId}' exhausted retries ` +
+      `(${this.summarizeNodeState(ns)})`
+    );
     this._finishRun(run, "failed", ns["error"] as string ?? "All retries exhausted");
     return true;
   }
@@ -687,7 +726,11 @@ export class WorkflowExecutor {
       processed: false,
     }).run();
 
-    log().info(`[WORKFLOW] Run ${run.id.slice(0, 8)} finished: ${status}${error ? ` (${error.slice(0, 80)})` : ""}`);
+    log().info(
+      `[WORKFLOW] Run ${run.id.slice(0, 8)} finished: ${status}` +
+      `${run.taskId ? ` task=${run.taskId.slice(0, 8)}` : ""}` +
+      `${error ? ` error=${error.slice(0, 80)}` : ""}`
+    );
   }
 
   private _matchSubscriptions(

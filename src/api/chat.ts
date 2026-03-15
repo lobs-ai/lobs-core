@@ -67,6 +67,7 @@ export async function handleChatRequest(
       const channelId = `nexus:${sessionKey}`;
       const messageId = randomUUID();
       const now = new Date().toISOString();
+      log().info(`[chat] inbound nexus message session=${sessionKey} channel=${channelId} len=${content.length}`);
 
       // Store user message immediately
       db.insert(chatMessages).values({
@@ -127,6 +128,7 @@ export async function handleChatRequest(
           // Persist assistant message SYNCHRONOUSLY so it's in the DB before
           // the frontend's SSE-triggered reloadMessages() fires.
           if (event.result) {
+            log().info(`[chat] assistant reply session=${sessionKey} channel=${channelId} len=${event.result.length}`);
             db.insert(chatMessages).values({
               id: randomUUID().replace(/-/g, ""),
               sessionKey,
@@ -143,6 +145,7 @@ export async function handleChatRequest(
         } else if (event.type === "error") {
           // Persist error message so the frontend can display it
           if (event.result) {
+            log().warn(`[chat] agent error session=${sessionKey} channel=${channelId}: ${event.result.slice(0, 160)}`);
             db.insert(chatMessages).values({
               id: randomUUID().replace(/-/g, ""),
               sessionKey,
@@ -155,6 +158,7 @@ export async function handleChatRequest(
           // Cleanup listener
           mainAgent.events.off("stream", toolListener);
         } else if (event.type === "done") {
+          log().info(`[chat] completed session=${sessionKey} channel=${channelId}`);
           // Cleanup listener when done
           mainAgent.events.off("stream", toolListener);
         }

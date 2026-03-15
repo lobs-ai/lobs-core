@@ -13,7 +13,7 @@ import { startControlLoop, stopControlLoop } from "./orchestrator/control-loop.j
 import { startServer } from "./server.js";
 import { setLogger, log } from "./util/logger.js";
 import { resolve } from "node:path";
-import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, renameSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, renameSync, statSync, appendFileSync } from "node:fs";
 import { initToolGate } from "./runner/tool-gate.js";
 import { getCronManager } from "./orchestrator/cron.js";
 import { runHeartbeat } from "./orchestrator/heartbeat.js";
@@ -29,6 +29,7 @@ import { setDiscordService as setMessageDiscord } from "./runner/tools/message.j
 import { setReactDiscord } from "./runner/tools/index.js";
 import { validateAllConfigs } from "./config/validator.js";
 import { memoryServer } from "./services/memory-server.js";
+import { countActiveWorkers, getActiveWorkers } from "./orchestrator/worker-manager.js";
 
 const HOME = process.env.HOME ?? "";
 const DB_PATH = resolve(HOME, ".lobs/lobs.db");
@@ -38,6 +39,7 @@ const LOG_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
 const LOG_KEEP = 3; // keep lobs.log.1, .2, .3
 const SCAN_INTERVAL_MS = 10_000;
 const HTTP_PORT = parseInt(process.env.LOBS_PORT ?? "9420", 10);
+const ACTIVITY_LOG_INTERVAL_MS = 30_000;
 
 /** Rotate log file if it exceeds LOG_MAX_BYTES. Called once at startup. */
 function rotateLogIfNeeded(): void {
@@ -62,6 +64,41 @@ function rotateLogIfNeeded(): void {
   }
 }
 
+function installRuntimeLogging(): void {
+  const stdout = process.stdout.write.bind(process.stdout);
+  const stderr = process.stderr.write.bind(process.stderr);
+
+  const stringifyArg = (arg: unknown): string => {
+    if (typeof arg === "string") return arg;
+    if (arg instanceof Error) return arg.stack || arg.message;
+    try {
+      return JSON.stringify(arg);
+    } catch {
+      return String(arg);
+    }
+  };
+
+  const writeLine = (stream: "stdout" | "stderr", level: string, args: unknown[]) => {
+    const timestamp = new Date().toISOString();
+    const message = args.map(stringifyArg).join(" ");
+    const line = `[${timestamp}] ${level} ${message}`;
+    (stream === "stderr" ? stderr : stdout)(`${line}\n`);
+    try {
+      appendFileSync(LOG_FILE, `${line}\n`);
+    } catch {
+      // Avoid recursive logging if file writes fail.
+    }
+  };
+
+  console.log = (...args: unknown[]) => writeLine("stdout", "INFO", args);
+  console.info = (...args: unknown[]) => writeLine("stdout", "INFO", args);
+  console.warn = (...args: unknown[]) => writeLine("stderr", "WARN", args);
+  console.error = (...args: unknown[]) => writeLine("stderr", "ERROR", args);
+  console.debug = (...args: unknown[]) => {
+    if (process.env.LOBS_DEBUG) writeLine("stdout", "DEBUG", args);
+  };
+}
+
 // Simple console logger matching the plugin logger interface
 const consoleLogger = {
   info: (msg: string) => console.log(`[lobs] ${msg}`),
@@ -75,6 +112,7 @@ const consoleLogger = {
 async function main() {
   // Rotate log before any output
   rotateLogIfNeeded();
+  installRuntimeLogging();
 
   console.log("=== lobs-core starting (standalone) ===");
 
@@ -234,6 +272,29 @@ async function main() {
   
   // Export main agent globally so API handlers can access it
   (globalThis as any).__lobsMainAgent = mainAgent;
+
+  const activityTimer = setInterval(() => {
+    const workers = getActiveWorkers();
+    const activeChannels = mainAgent.getProcessingChannels();
+    const queuedChannels = mainAgent.getQueueDepth();
+    const memoryStatus = memoryServer.getStatus();
+    const workerSummary = workers.length > 0
+      ? workers
+          .slice(0, 5)
+          .map((worker) => `${worker.agentType ?? "unknown"}:${worker.taskId?.slice(0, 8) ?? "none"}`)
+          .join(", ")
+      : "none";
+    const channelSummary = activeChannels.length > 0
+      ? activeChannels.slice(0, 5).map((channelId) => channelId.slice(0, 16)).join(", ")
+      : "none";
+
+    console.log(
+      `[runtime] workers=${countActiveWorkers()} [${workerSummary}] ` +
+      `main-agent active=${mainAgent.getActiveChannelCount()}/${mainAgent.getMaxConcurrent()} ` +
+      `queued=${queuedChannels} channels=[${channelSummary}] ` +
+      `memory=${memoryStatus.running ? `up(pid=${memoryStatus.pid ?? "?"})` : "down"}`,
+    );
+  }, ACTIVITY_LOG_INTERVAL_MS);
   
   // Wire main agent into Discord slash commands
   const { setMainAgentForCommands } = await import("./services/discord-commands.js");
@@ -354,6 +415,7 @@ async function main() {
   // Handle shutdown
   const shutdown = async () => {
     console.log("\nShutting down...");
+    clearInterval(activityTimer);
 
     // Persist session state before anything else
     await mainAgent.prepareForShutdown();

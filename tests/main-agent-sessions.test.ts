@@ -3,7 +3,7 @@
  * Uses in-memory SQLite database to test without LLM calls.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import { MainAgent } from "../src/services/main-agent.js";
 
@@ -15,6 +15,10 @@ describe("MainAgent Session Management", () => {
     // Create in-memory database for each test
     db = new Database(":memory:");
     agent = new MainAgent(db, "test-model");
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("should create required tables on initialization", () => {
@@ -272,6 +276,40 @@ describe("MainAgent Session Management", () => {
     // For now, we just verify the structure is set up correctly
     // Full behavior testing would require LLM mock
     expect(agent).toBeDefined();
+  });
+
+  it("should defer a conversation retry until capacity is available", async () => {
+    vi.useFakeTimers();
+
+    const maxConcurrent = agent.getMaxConcurrent();
+    const processingChannels = (agent as any).processingChannels as Set<string>;
+    for (let i = 0; i < maxConcurrent; i++) {
+      processingChannels.add(`busy-${i}`);
+    }
+
+    const processSpy = vi
+      .spyOn(agent as any, "processConversation")
+      .mockResolvedValue(undefined);
+
+    (agent as any).scheduleConversationRetry("channel-retry", 1000);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(processSpy).not.toHaveBeenCalled();
+
+    const queuedSession = db.prepare(`
+      SELECT status FROM channel_sessions WHERE channel_id = ?
+    `).get("channel-retry") as { status: string };
+    expect(queuedSession.status).toBe("queued");
+
+    processingChannels.clear();
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(processSpy).toHaveBeenCalledWith("channel-retry");
+
+    const resumedSession = db.prepare(`
+      SELECT status FROM channel_sessions WHERE channel_id = ?
+    `).get("channel-retry") as { status: string };
+    expect(resumedSession.status).toBe("processing");
   });
 
   it("should handle empty message history gracefully", () => {

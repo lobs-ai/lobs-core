@@ -31,6 +31,9 @@ class MemoryServerSupervisor {
   private healthTimer: NodeJS.Timeout | null = null;
   private lastHealthy = 0;
   private shutdownRequested = false;
+  private suppressedIndexLines = 0;
+  private suppressedEmbedErrors = 0;
+  private lastSuppressedLogAt = 0;
 
   /** Start the memory server and begin supervision */
   async start(): Promise<void> {
@@ -163,14 +166,14 @@ class MemoryServerSupervisor {
     this.child.stdout?.on("data", (data: Buffer) => {
       const lines = data.toString().trim().split("\n");
       for (const line of lines) {
-        if (line.trim()) console.log(`[memory] ${line}`);
+        this.handleChildLine(line, false);
       }
     });
 
     this.child.stderr?.on("data", (data: Buffer) => {
       const lines = data.toString().trim().split("\n");
       for (const line of lines) {
-        if (line.trim()) console.error(`[memory] ${line}`);
+        this.handleChildLine(line, true);
       }
     });
 
@@ -191,6 +194,65 @@ class MemoryServerSupervisor {
         this.scheduleRestart(bunPath);
       }
     });
+  }
+
+  private handleChildLine(rawLine: string, isError: boolean): void {
+    const line = rawLine.trim();
+    if (!line) return;
+
+    if (line.startsWith("Indexing:") || line.startsWith("→") || line.startsWith("  →")) {
+      this.suppressedIndexLines++;
+      this.maybeLogSuppressedSummary();
+      return;
+    }
+
+    if (
+      line.startsWith("path:") ||
+      line.startsWith("errno:") ||
+      line.startsWith("code:") ||
+      line.includes("HEALTH check") ||
+      line.includes("HEALTHZ check")
+    ) {
+      return;
+    }
+
+    if (
+      line.includes("Error indexing") &&
+      (line.includes("ConnectionRefused") ||
+       line.includes("Unable to connect") ||
+       line.includes("Could not connect to LM Studio"))
+    ) {
+      this.suppressedEmbedErrors++;
+      this.maybeLogSuppressedSummary();
+      return;
+    }
+
+    this.maybeLogSuppressedSummary(true);
+    if (isError) console.error(`[memory] ${line}`);
+    else console.log(`[memory] ${line}`);
+  }
+
+  private maybeLogSuppressedSummary(force = false): void {
+    const totalSuppressed = this.suppressedIndexLines + this.suppressedEmbedErrors;
+    if (totalSuppressed === 0) return;
+
+    const now = Date.now();
+    if (!force && now - this.lastSuppressedLogAt < 15_000) {
+      return;
+    }
+
+    const parts: string[] = [];
+    if (this.suppressedIndexLines > 0) {
+      parts.push(`${this.suppressedIndexLines} per-file index line(s)`);
+    }
+    if (this.suppressedEmbedErrors > 0) {
+      parts.push(`${this.suppressedEmbedErrors} LM Studio embed error(s)`);
+    }
+
+    this.lastSuppressedLogAt = now;
+    console.warn(`[memory] Suppressed noisy logs: ${parts.join(", ")}`);
+    this.suppressedIndexLines = 0;
+    this.suppressedEmbedErrors = 0;
   }
 
   private scheduleRestart(bunPath: string): void {

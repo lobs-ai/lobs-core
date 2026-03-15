@@ -319,9 +319,10 @@ export class MainAgent {
       this.updateChannelSession("system", "idle");
     }
 
-    // Don't resume stale sessions — if last activity was >10 minutes ago,
-    // the conversation context is cold and retrying will just waste API calls
-    const STALE_THRESHOLD_MS = 10 * 60 * 1000;
+    // Don't resume stale sessions — if last activity was >2 minutes ago,
+    // the conversation context is cold and retrying will just waste API calls.
+    // Quick restarts (crash loops) should still be caught.
+    const STALE_THRESHOLD_MS = 2 * 60 * 1000;
     const now = Date.now();
     for (const s of activeSessions) {
       if (channelsToResume.has(s.channel_id)) {
@@ -331,6 +332,19 @@ export class MainAgent {
           channelsToResume.delete(s.channel_id);
           this.updateChannelSession(s.channel_id, "idle");
         }
+      }
+    }
+
+    // Only resume channels that have actual unprocessed user messages in the queue.
+    // Sessions that were just "processing" with no queued messages were mid-response
+    // when they crashed — injecting a synthetic restart message creates wasteful loops.
+    const queuedChannelSet = new Set(queuedChannels.map(q => q.channel_id));
+    for (const channelId of [...channelsToResume]) {
+      if (!queuedChannelSet.has(channelId)) {
+        // No pending user messages — was mid-response, not mid-input
+        console.log(`[main-agent] Skipping ${channelId.slice(0, 12)} — no queued user messages, was mid-response`);
+        channelsToResume.delete(channelId);
+        this.updateChannelSession(channelId, "idle");
       }
     }
 
@@ -562,8 +576,13 @@ export class MainAgent {
   /* ── Core conversation loop ────────────────────────────────────── */
 
   private async processConversation(replyChannelId: string): Promise<void> {
+    const conversationStartedAt = Date.now();
     // Mark this channel as being processed
     this.processingChannels.add(replyChannelId);
+    console.log(
+      `[main-agent] Processing started for ${replyChannelId.slice(0, 16)} ` +
+      `(active=${this.processingChannels.size}/${MAX_CONCURRENT_CHANNELS}, queued=${this.getQueueDepth()})`,
+    );
 
     // Emit processing_start so frontends know a queued channel is now active
     this.events.emit("stream", {
@@ -965,6 +984,10 @@ export class MainAgent {
           channelId: replyChannelId,
           timestamp: Date.now(),
         } satisfies AgentStreamEvent);
+        console.log(
+          `[main-agent] Processing completed for ${replyChannelId.slice(0, 16)} ` +
+          `in ${Date.now() - conversationStartedAt}ms`,
+        );
         break; // Done
       }
     } catch (err) {
@@ -1031,34 +1054,16 @@ export class MainAgent {
       clearTimeout(conversationTimeout);
       // Mark this channel as no longer processing
       this.processingChannels.delete(replyChannelId);
+      console.log(
+        `[main-agent] Processing released for ${replyChannelId.slice(0, 16)} ` +
+        `(active=${this.processingChannels.size}/${MAX_CONCURRENT_CHANNELS}, queued=${this.getQueueDepth()})`,
+      );
 
       // Check for pending retry (transient API errors)
       const pendingRetryDelay = (this as any).__pendingRetry?.[replyChannelId];
       if (pendingRetryDelay) {
         delete (this as any).__pendingRetry[replyChannelId];
-        // Schedule a retry — the channel is released now, so other channels can process
-        // After the delay, we re-acquire and retry
-        setTimeout(() => {
-          if (this.processingChannels.size < MAX_CONCURRENT_CHANNELS) {
-            this.processingChannels.add(replyChannelId);
-            this.updateChannelSession(replyChannelId, "processing");
-            this.processConversation(replyChannelId).catch(err => {
-              console.error(`[main-agent] Conversation retry failed for ${replyChannelId.slice(0, 12)}:`, err);
-              // Clean up retry counter and release channel on final failure
-              if ((this as any).__conversationRetryCount?.[replyChannelId]) {
-                delete (this as any).__conversationRetryCount[replyChannelId];
-              }
-              this.processingChannels.delete(replyChannelId);
-              this.updateChannelSession(replyChannelId, "idle");
-            });
-          } else {
-            console.log(`[main-agent] Retry skipped for ${replyChannelId.slice(0, 12)} — at capacity`);
-            if ((this as any).__conversationRetryCount?.[replyChannelId]) {
-              delete (this as any).__conversationRetryCount[replyChannelId];
-            }
-            this.updateChannelSession(replyChannelId, "idle");
-          }
-        }, pendingRetryDelay);
+        this.scheduleConversationRetry(replyChannelId, pendingRetryDelay);
         // Still do queue draining below so other channels can start
       }
       
@@ -1146,6 +1151,31 @@ export class MainAgent {
         }
       }
     }
+  }
+
+  private scheduleConversationRetry(channelId: string, delayMs: number): void {
+    setTimeout(() => {
+      if (this.processingChannels.has(channelId)) {
+        return;
+      }
+
+      if (this.processingChannels.size >= MAX_CONCURRENT_CHANNELS) {
+        console.log(`[main-agent] Retry deferred for ${channelId.slice(0, 12)} — at capacity`);
+        this.updateChannelSession(channelId, "queued");
+        this.scheduleConversationRetry(channelId, 5000);
+        return;
+      }
+
+      this.updateChannelSession(channelId, "processing");
+      this.processConversation(channelId).catch(err => {
+        console.error(`[main-agent] Conversation retry failed for ${channelId.slice(0, 12)}:`, err);
+        if ((this as any).__conversationRetryCount?.[channelId]) {
+          delete (this as any).__conversationRetryCount[channelId];
+        }
+        this.processingChannels.delete(channelId);
+        this.updateChannelSession(channelId, "idle");
+      });
+    }, delayMs);
   }
 
   /* ── Helpers ───────────────────────────────────────────────────── */

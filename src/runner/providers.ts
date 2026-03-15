@@ -174,6 +174,12 @@ function resolveAnthropicAuth(sessionId?: string): AnthropicAuth | undefined {
   const auth = keyPool.getAuth("anthropic", sessionId ?? DEFAULT_KEYPOOL_SESSION_ID);
   if (auth) return auth as AnthropicAuth;
 
+  // If a pool is configured but no healthy key is available, do not fall back to
+  // single-key env vars. That would silently reuse a key the pool just marked bad.
+  if (keyPool.hasKeys("anthropic")) {
+    return undefined;
+  }
+
   // Fallback to single-key environment variables
   if (process.env.ANTHROPIC_API_KEY) {
     const key = process.env.ANTHROPIC_API_KEY;
