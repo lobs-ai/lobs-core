@@ -26,8 +26,11 @@ const MAX_LIVE_TOOL_RESULT_CHARS = 6_000;
 const DEFAULT_MODEL = "strong";  // Chat defaults to strong tier (opus)
 const DEFAULT_CWD = process.env.HOME ?? "/tmp";
 const MAX_CONCURRENT_CHANNELS = 10; // Max simultaneous channel conversations
-const LLM_TURN_TIMEOUT_MS = 180_000;
+const LLM_TURN_TIMEOUT_MS = 120_000; // 2 minutes per LLM turn (was 3min — too generous)
 const QUEUE_RECOVERY_INTERVAL_MS = 5_000;
+
+/** Tools that mutate state and must run sequentially (not parallelizable) */
+const SEQUENTIAL_TOOLS = new Set(["exec", "process", "write", "edit", "memory_write", "spawn_agent"]);
 
 /** Image attachment data (base64-encoded) */
 export interface ImageAttachment {
@@ -84,6 +87,9 @@ export class MainAgent {
   // Batched tool progress for Discord — accumulates until near 2000 chars or turn ends
   private discordToolBatches = new Map<string, string[]>();
   private queueRecoveryTimer: NodeJS.Timeout;
+  // Retry state for transient errors (properly typed, no more `as any`)
+  private conversationRetryCount = new Map<string, number>();
+  private pendingRetryDelay = new Map<string, number>();
   
   /** EventEmitter for SSE streaming — Nexus subscribes to this */
   public readonly events = new EventEmitter();
@@ -325,10 +331,10 @@ export class MainAgent {
       this.updateChannelSession("system", "idle");
     }
 
-    // Don't resume stale sessions — if last activity was >2 minutes ago,
-    // the conversation context is cold and retrying will just waste API calls.
-    // Quick restarts (crash loops) should still be caught.
-    const STALE_THRESHOLD_MS = 2 * 60 * 1000;
+    // Skip sessions that are extremely stale (>30 minutes) — those are likely
+    // leftover from a previous crash where shutdown didn't clean up properly.
+    // Normal restarts (build, migration, etc.) take well under 30 minutes.
+    const STALE_THRESHOLD_MS = 30 * 60 * 1000;
     const now = Date.now();
     for (const s of activeSessions) {
       if (channelsToResume.has(s.channel_id)) {
@@ -341,18 +347,11 @@ export class MainAgent {
       }
     }
 
-    // Only resume channels that have actual unprocessed user messages in the queue.
-    // Sessions that were just "processing" with no queued messages were mid-response
-    // when they crashed — injecting a synthetic restart message creates wasteful loops.
+    // For sessions that were "processing" with no queued user messages,
+    // they were mid-response when the process died. We still want to resume
+    // these — the agent was actively doing work that got interrupted.
+    // We'll inject a synthetic resume message so the agent can pick up where it left off.
     const queuedChannelSet = new Set(queuedChannels.map(q => q.channel_id));
-    for (const channelId of [...channelsToResume]) {
-      if (!queuedChannelSet.has(channelId)) {
-        // No pending user messages — was mid-response, not mid-input
-        console.log(`[main-agent] Skipping ${channelId.slice(0, 12)} — no queued user messages, was mid-response`);
-        channelsToResume.delete(channelId);
-        this.updateChannelSession(channelId, "idle");
-      }
-    }
 
     if (channelsToResume.size === 0) {
       console.log("[main-agent] No recent sessions to resume — all stale or system-only");
@@ -377,10 +376,12 @@ export class MainAgent {
       const lastActivity = session?.last_activity || "unknown";
 
       // Inject a system event so the agent knows it restarted and should continue
+      const hasQueuedMessages = queuedChannelSet.has(channelId);
       const resumeText = [
         `[System] lobs-core restarted. This session was active at ${lastActivity}.`,
         session?.context_summary ? `Last context: ${session.context_summary}` : null,
         persistedMsgs.length > 0 ? `${persistedMsgs.length} queued message(s) waiting.` : null,
+        !hasQueuedMessages ? `You were mid-response when the process died. Continue where you left off.` : null,
         `Orient fast: check state (git status/log, build status) before re-reading files. Act on what you find — don't re-investigate from scratch.`,
       ].filter(Boolean).join(" ");
 
@@ -526,21 +527,43 @@ export class MainAgent {
     await this.processConversation(msg.channelId);
   }
 
-  /** Inject a system event (heartbeat, cron, etc.) */
+  /** Inject a system event (heartbeat, cron, subagent completion, etc.) */
   async handleSystemEvent(text: string, channelId?: string): Promise<void> {
     const id = randomUUID();
     const ch = channelId || "system";
-    this.db
-      .prepare(
-        `INSERT INTO main_agent_messages
-           (id, role, content, channel_id, platform_message_id, token_estimate)
-         VALUES (?, 'user', ?, ?, ?, ?)`,
-      )
-      .run(id, `[System Event] ${text}`, ch, null, Math.ceil(text.length / 4));
+    const content = `[System Event] ${text}`;
 
+    // If channel is idle and we have capacity, store + process immediately
     if (!this.processingChannels.has(ch) && this.processingChannels.size < MAX_CONCURRENT_CHANNELS) {
+      this.db
+        .prepare(
+          `INSERT INTO main_agent_messages
+             (id, role, content, channel_id, platform_message_id, token_estimate)
+           VALUES (?, 'user', ?, ?, ?, ?)`,
+        )
+        .run(id, content, ch, null, Math.ceil(text.length / 4));
       await this.processConversation(ch);
+      return;
     }
+
+    // Channel is busy or at capacity — queue so it gets picked up when the channel finishes.
+    // Don't insert into DB yet — the queue drain logic handles that.
+    // This prevents system events (e.g. subagent completions) from being silently dropped.
+    const pendingMsg: PendingMessage = {
+      id,
+      content,
+      authorId: "system",
+      authorName: "System",
+      channelId: ch,
+      timestamp: Date.now(),
+    };
+    if (!this.channelQueues.has(ch)) {
+      this.channelQueues.set(ch, []);
+    }
+    this.channelQueues.get(ch)!.push(pendingMsg);
+    console.log(
+      `[main-agent] System event queued for busy channel ${ch.slice(0, 12)} (${this.channelQueues.get(ch)!.length} pending)`,
+    );
   }
 
   isProcessing(): boolean {
@@ -680,6 +703,11 @@ export class MainAgent {
         return { role, content: m.content };
       });
 
+      // 3b. Merge consecutive same-role messages (DB can have runs of
+      //     assistant messages from multi-step tool use persisted separately).
+      //     The Anthropic API requires strictly alternating user/assistant roles.
+      messages = this.mergeConsecutiveRoles(messages);
+
       // 4. Add queued messages for this channel
       const queuedText = this.drainQueue(replyChannelId);
       if (queuedText) {
@@ -689,8 +717,8 @@ export class MainAgent {
         });
       }
 
-      // 5. Compact if needed
-      messages = await this.compactIfNeeded(messages);
+      // 5. Compact if needed (pass channelId to persist compaction to DB)
+      messages = await this.compactIfNeeded(messages, replyChannelId);
 
       // Check for per-channel model override
       const sessionRow = this.db.prepare(
@@ -756,11 +784,29 @@ export class MainAgent {
 
         // Prune: keep last 3 turns' tool results intact, truncate older ones to 400 chars
         messages = pruneToolResults(messages, 3, 400);
-        messages = await this.compactIfNeeded(messages);
+        messages = await this.compactIfNeeded(messages, replyChannelId);
+        const contextChars = messages.reduce((s, m) =>
+          s + (typeof m.content === "string" ? m.content.length : JSON.stringify(m.content).length), 0);
+        const systemChars = fullSystem.length;
         console.debug(
           `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
-          `calling_llm model=${config.modelId} compacted_history=${messages.length}`,
+          `calling_llm model=${config.modelId} msgs=${messages.length} ctx=${contextChars} sys=${systemChars} total_chars=${contextChars + systemChars}`,
         );
+
+        // Validate message structure before sending to API
+        const validation = this.validateMessages(messages);
+        if (validation) {
+          console.error(`[main-agent] Message validation failed for ${replyChannelId.slice(0, 12)}: ${validation}`);
+          // Log the roles sequence for debugging
+          console.error(`[main-agent] Roles sequence: ${messages.map(m => m.role).join(', ')}`);
+          // Log content types for tool_result detection
+          for (let vi = 0; vi < messages.length; vi++) {
+            const m = messages[vi];
+            if (typeof m.content !== 'string') {
+              console.error(`[main-agent] msg[${vi}] role=${m.role} content_type=array blocks=${Array.isArray(m.content) ? m.content.map((b: any) => b.type).join(',') : typeof m.content}`);
+            }
+          }
+        }
 
         const response = await this.createMessageWithTimeout(client, {
           model: config.modelId,
@@ -783,22 +829,30 @@ export class MainAgent {
           is_error?: boolean;
         }> = [];
 
+        // Separate text blocks from tool_use blocks
+        const toolUseBlocks: Array<{ type: "tool_use"; id: string; name: string; input: Record<string, unknown> }> = [];
         for (const block of response.content) {
           if (block.type === "text") {
             textResponse += block.text;
           } else if (block.type === "tool_use") {
             hasToolUse = true;
+            toolUseBlocks.push(block as typeof toolUseBlocks[0]);
+          }
+        }
+
+        // Execute tool calls — parallel when safe, sequential when side effects possible
+        // Read-only tools (read, grep, glob, ls, web_search, web_fetch, memory_search, memory_read) can run in parallel
+        const isNexusChannel = replyChannelId.startsWith("nexus:");
+
+        if (toolUseBlocks.length > 0) {
+          // Emit all tool_start events upfront
+          for (const block of toolUseBlocks) {
+            const inputPreview = JSON.stringify(block.input).substring(0, 300);
             console.debug(
               `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
               `tool_start name=${block.name} id=${block.id}`,
             );
-
-            const inputPreview = JSON.stringify(block.input).substring(0, 300);
-
-            // Discord channels: batch tool steps; Nexus: SSE events only
-            const isNexusChannel = replyChannelId.startsWith("nexus:");
             if (this.shouldShowSteps(replyChannelId) && !isNexusChannel) {
-              // Discord batched tool steps
               const discordMode = this.getDiscordToolsMode(replyChannelId);
               if (discordMode === "on") {
                 await this.batchDiscordToolStep(
@@ -811,10 +865,7 @@ export class MainAgent {
                   `\`${block.name}\``,
                 );
               }
-              // "off" — no tool progress at all
             }
-
-            // Emit SSE event: tool starting (Nexus always gets these)
             this.events.emit("stream", {
               type: "tool_start",
               channelId: replyChannelId,
@@ -823,40 +874,33 @@ export class MainAgent {
               toolUseId: block.id,
               timestamp: Date.now(),
             } satisfies AgentStreamEvent);
+          }
 
+          // Determine if we can parallelize: only if ALL tools in this batch are read-only
+          const allReadOnly = toolUseBlocks.every(b => !SEQUENTIAL_TOOLS.has(b.name));
+
+          const executeOneBlock = async (block: typeof toolUseBlocks[0]) => {
             const { result, sideEffects } = await executeTool(
               block.name,
               block.input as Record<string, unknown>,
               block.id,
               this.cwd,
             );
-            
-            // Apply side effects (e.g. cwd changes from cd/workdir)
             if (sideEffects?.newCwd) {
               this.cwd = sideEffects.newCwd;
-              console.debug(
-                `[main-agent.loop] cwd_changed to=${this.cwd}`,
-              );
+              console.debug(`[main-agent.loop] cwd_changed to=${this.cwd}`);
             }
-            
             const resultContent = this.truncateLiveToolResult(
               typeof result.content === "string"
                 ? result.content
                 : JSON.stringify(result.content),
             );
-            toolResults.push({
-              type: "tool_result",
-              tool_use_id: result.tool_use_id,
-              content: resultContent,
-              is_error: result.is_error,
-            });
             console.debug(
               `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
               `tool_done name=${block.name} id=${block.id} error=${Boolean(result.is_error)} ` +
               `result_len=${resultContent.length}`,
             );
-
-            // Discord: add result line to batch (on mode only)
+            // Discord result line (on mode only)
             if (this.shouldShowSteps(replyChannelId) && !isNexusChannel) {
               const discordMode = this.getDiscordToolsMode(replyChannelId);
               if (discordMode === "on") {
@@ -867,8 +911,6 @@ export class MainAgent {
                 );
               }
             }
-
-            // Emit SSE event: tool completed
             this.events.emit("stream", {
               type: "tool_result",
               channelId: replyChannelId,
@@ -878,6 +920,28 @@ export class MainAgent {
               isError: result.is_error,
               timestamp: Date.now(),
             } satisfies AgentStreamEvent);
+            return {
+              type: "tool_result" as const,
+              tool_use_id: result.tool_use_id,
+              content: resultContent,
+              is_error: result.is_error,
+            };
+          };
+
+          if (allReadOnly && toolUseBlocks.length > 1) {
+            // Parallel execution for read-only tools
+            console.debug(
+              `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
+              `parallel_tools count=${toolUseBlocks.length} tools=${toolUseBlocks.map(b => b.name).join(",")}`,
+            );
+            const results = await Promise.all(toolUseBlocks.map(executeOneBlock));
+            toolResults.push(...results);
+          } else {
+            // Sequential execution when any tool has side effects
+            for (const block of toolUseBlocks) {
+              const result = await executeOneBlock(block);
+              toolResults.push(result);
+            }
           }
         }
 
@@ -919,6 +983,27 @@ export class MainAgent {
           // Feed tool results back as a user turn
           messages.push({ role: "user", content: toolResults });
 
+          // Also persist the tool results as a user message so DB maintains alternation
+          const toolResultSummary = toolResults.map((tr) => {
+            const resultPreview =
+              tr.content.length > 500
+                ? tr.content.slice(0, 500) + "..."
+                : tr.content;
+            return `[${tr.tool_use_id}] ${tr.is_error ? "ERROR: " : ""}${resultPreview}`;
+          }).join("\n");
+          this.db
+            .prepare(
+              `INSERT INTO main_agent_messages
+                 (id, role, content, channel_id, token_estimate)
+               VALUES (?, 'user', ?, ?, ?)`,
+            )
+            .run(
+              randomUUID(),
+              `[Tool results]\n${toolResultSummary}`,
+              replyChannelId,
+              Math.ceil(toolResultSummary.length / 4),
+            );
+
           // Inject any queued messages that arrived while we were working
           // This lets the agent see new context mid-loop instead of waiting
           // until the entire conversation finishes — critical for group chats
@@ -939,9 +1024,24 @@ export class MainAgent {
                 Math.ceil(queuedContent.length / 4),
               );
 
+            const ackContent = "I see new messages arrived. Let me incorporate them.";
+            // Persist the synthetic assistant ack so DB alternation is maintained
+            this.db
+              .prepare(
+                `INSERT INTO main_agent_messages
+                   (id, role, content, channel_id, token_estimate)
+                 VALUES (?, 'assistant', ?, ?, ?)`,
+              )
+              .run(
+                randomUUID(),
+                ackContent,
+                replyChannelId,
+                Math.ceil(ackContent.length / 4),
+              );
+
             messages.push({
               role: "assistant",
-              content: "I see new messages arrived. Let me incorporate them.",
+              content: ackContent,
             });
             messages.push({
               role: "user",
@@ -1039,9 +1139,7 @@ export class MainAgent {
           `[main-agent] Processing completed for ${replyChannelId.slice(0, 16)} ` +
           `in ${Date.now() - conversationStartedAt}ms`,
         );
-        if ((this as any).__conversationRetryCount?.[replyChannelId]) {
-          delete (this as any).__conversationRetryCount[replyChannelId];
-        }
+        this.conversationRetryCount.delete(replyChannelId);
         console.debug(
           `[main-agent.loop] channel=${replyChannelId} completed iter=${loopIteration} ` +
           `duration_ms=${Date.now() - conversationStartedAt}`,
@@ -1058,11 +1156,12 @@ export class MainAgent {
         errStr.includes("overloaded") || errStr.includes("rate_limit") || errStr.includes("429") ||
         errStr.includes("529");
 
+      const currentRetries = this.conversationRetryCount.get(replyChannelId) ?? 0;
+
       // Mark for conversation-level retry (handled in finally block)
-      if (isTransient && !((this as any).__conversationRetryCount?.[replyChannelId] >= 2)) {
-        if (!(this as any).__conversationRetryCount) (this as any).__conversationRetryCount = {};
-        (this as any).__conversationRetryCount[replyChannelId] = ((this as any).__conversationRetryCount?.[replyChannelId] ?? 0) + 1;
-        const retryNum = (this as any).__conversationRetryCount[replyChannelId];
+      if (isTransient && currentRetries < 2) {
+        const retryNum = currentRetries + 1;
+        this.conversationRetryCount.set(replyChannelId, retryNum);
         const retryDelay = (10 + Math.random() * 20) * 1000 * retryNum; // 10-30s * attempt
         console.log(`[main-agent] Transient error, scheduling retry in ${(retryDelay / 1000).toFixed(0)}s (retry ${retryNum}/2) for channel ${replyChannelId.slice(0, 12)}`);
 
@@ -1075,20 +1174,16 @@ export class MainAgent {
         } satisfies AgentStreamEvent);
 
         // Schedule retry — runs after finally block releases the channel
-        (this as any).__pendingRetry = (this as any).__pendingRetry || {};
-        (this as any).__pendingRetry[replyChannelId] = retryDelay;
+        this.pendingRetryDelay.set(replyChannelId, retryDelay);
       } else {
         if (isTransient) {
-          const retryCount = (this as any).__conversationRetryCount?.[replyChannelId] ?? 0;
           console.warn(
             `[main-agent] Transient error will not be retried for ${replyChannelId.slice(0, 12)} ` +
-            `(retry budget exhausted: ${retryCount}/2)`,
+            `(retry budget exhausted: ${currentRetries}/2)`,
           );
         }
         // Clear retry counter — either not transient or retries exhausted
-        if ((this as any).__conversationRetryCount?.[replyChannelId]) {
-          delete (this as any).__conversationRetryCount[replyChannelId];
-        }
+        this.conversationRetryCount.delete(replyChannelId);
 
         // Emit error event
         this.events.emit("stream", {
@@ -1251,7 +1346,7 @@ export class MainAgent {
     created_at: string;
     metadata?: string | null;
   }> {
-    const MAX_CONTEXT_TOKENS = 150000;
+    const MAX_CONTEXT_TOKENS = 80000;
     const CHARS_PER_TOKEN = 4;
     const MAX_CHARS = MAX_CONTEXT_TOKENS * CHARS_PER_TOKEN;
 
@@ -1284,6 +1379,158 @@ export class MainAgent {
     }
 
     return trimmed;
+  }
+
+  /**
+   * Merge consecutive messages with the same role into a single message.
+   * The Anthropic API requires strictly alternating user/assistant roles.
+   * Multi-step tool use gets persisted as separate assistant rows in the DB,
+   * which creates invalid runs of same-role messages when loaded back.
+   *
+   * Also ensures the first message is always a user message (drops leading
+   * assistant messages if any, since they'd be orphaned tool call summaries).
+   */
+  /**
+   * Validate message array for Anthropic API requirements.
+   * Returns null if valid, or a string describing the problem.
+   */
+  private validateMessages(messages: LLMMessage[]): string | null {
+    if (messages.length === 0) return "empty message array";
+    
+    // First message must be user
+    if (messages[0].role !== "user") {
+      return `first message is ${messages[0].role}, must be user`;
+    }
+    
+    // Must alternate roles (no consecutive same-role)
+    for (let i = 1; i < messages.length; i++) {
+      if (messages[i].role === messages[i - 1].role) {
+        return `consecutive ${messages[i].role} at index ${i - 1} and ${i}`;
+      }
+    }
+
+    // Check for tool_result blocks that reference tool_use IDs
+    // A user message with tool_result must follow an assistant message with matching tool_use
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      if (m.role === "user" && Array.isArray(m.content)) {
+        const toolResults = (m.content as any[]).filter((b: any) => b.type === "tool_result");
+        if (toolResults.length > 0 && i > 0) {
+          const prev = messages[i - 1];
+          if (prev.role !== "assistant") {
+            return `tool_result at index ${i} not preceded by assistant`;
+          }
+          // Check if the preceding assistant had matching tool_use blocks
+          if (Array.isArray(prev.content)) {
+            const toolUseIds = new Set((prev.content as any[]).filter((b: any) => b.type === "tool_use").map((b: any) => b.id));
+            for (const tr of toolResults) {
+              if (!toolUseIds.has(tr.tool_use_id)) {
+                return `tool_result references tool_use_id=${tr.tool_use_id} not found in preceding assistant message at index ${i - 1}`;
+              }
+            }
+          } else {
+            // assistant content is a string but user has tool_result — that's broken
+            return `tool_result at index ${i} but preceding assistant message is plain text`;
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  private mergeConsecutiveRoles(messages: LLMMessage[]): LLMMessage[] {
+    if (messages.length === 0) return messages;
+
+    // Drop leading assistant messages — API requires first message to be user
+    while (messages.length > 0 && messages[0].role === "assistant") {
+      messages.shift();
+    }
+
+    if (messages.length <= 1) return messages;
+
+    // First pass: identify runs of consecutive same-role messages
+    const runs: Array<{ role: string; indices: number[] }> = [];
+    for (let i = 0; i < messages.length; i++) {
+      const lastRun = runs[runs.length - 1];
+      if (lastRun && messages[i].role === lastRun.role) {
+        lastRun.indices.push(i);
+      } else {
+        runs.push({ role: messages[i].role, indices: [i] });
+      }
+    }
+
+    // Log if we find long runs (indicates DB alternation issue)
+    for (const run of runs) {
+      if (run.indices.length > 3) {
+        console.warn(
+          `[main-agent] Found ${run.indices.length} consecutive ${run.role} messages ` +
+          `(indices ${run.indices[0]}-${run.indices[run.indices.length - 1]}). ` +
+          `This indicates broken DB alternation — tool results weren't persisted as user messages.`
+        );
+      }
+    }
+
+    // Second pass: merge runs, but truncate aggressively for long runs
+    const merged: LLMMessage[] = [];
+    for (const run of runs) {
+      if (run.indices.length === 1) {
+        merged.push({ ...messages[run.indices[0]] });
+        continue;
+      }
+
+      // For long runs (>5 messages), keep only the last 3 fully and summarize the rest
+      const MAX_FULL_KEEP = 3;
+      const MAX_MERGED_CHARS = 8000; // Cap total merged content at 8K chars
+
+      const runMessages = run.indices.map(i => messages[i]);
+      
+      if (runMessages.length <= MAX_FULL_KEEP) {
+        // Short run — just concatenate
+        let content = "";
+        for (const m of runMessages) {
+          if (typeof m.content === "string") {
+            content += (content ? "\n\n" : "") + m.content;
+          }
+        }
+        merged.push({ role: run.role as "user" | "assistant", content });
+        continue;
+      }
+
+      // Long run — keep last MAX_FULL_KEEP, truncate or drop older ones
+      const oldMessages = runMessages.slice(0, -MAX_FULL_KEEP);
+      const recentMessages = runMessages.slice(-MAX_FULL_KEEP);
+      
+      let content = `[${oldMessages.length} earlier ${run.role} messages merged — tool call summaries from before restart]\n`;
+      // Add a brief excerpt from the old messages (just first 200 chars each, max 2000 total)
+      let oldContent = "";
+      for (const m of oldMessages) {
+        if (typeof m.content === "string") {
+          const excerpt = m.content.slice(0, 200);
+          if (oldContent.length + excerpt.length < 2000) {
+            oldContent += excerpt + "\n";
+          }
+        }
+      }
+      if (oldContent) {
+        content += oldContent;
+      }
+      
+      // Add recent messages fully
+      for (const m of recentMessages) {
+        if (typeof m.content === "string") {
+          content += "\n\n" + m.content;
+        }
+      }
+
+      // Hard cap on total merged content
+      if (content.length > MAX_MERGED_CHARS) {
+        content = content.slice(-MAX_MERGED_CHARS);
+      }
+
+      merged.push({ role: run.role as "user" | "assistant", content });
+    }
+    return merged;
   }
 
   private pruneHistory(
@@ -1328,8 +1575,15 @@ export class MainAgent {
     });
   }
 
-  private async compactIfNeeded(messages: LLMMessage[]): Promise<LLMMessage[]> {
+  /**
+   * Compact context if it exceeds threshold.
+   * When channelId is provided, compaction is **persisted to the DB** — the
+   * summarized messages are deleted and replaced with a single summary row.
+   * This prevents old chats from re-compacting the same messages every turn.
+   */
+  private async compactIfNeeded(messages: LLMMessage[], channelId?: string): Promise<LLMMessage[]> {
     const COMPACT_THRESHOLD = 120000; // chars
+    const HARD_CAP = 250000; // absolute maximum chars to send to API
     const totalChars = messages.reduce(
       (sum, m) =>
         sum +
@@ -1343,9 +1597,12 @@ export class MainAgent {
 
     console.log(`[main-agent] Context at ${totalChars} chars, compacting...`);
 
-    // Take the first 60% of messages and summarize them
+    // For very large contexts, summarize more aggressively
+    const summarizeRatio = totalChars > 200000 ? 0.85 : totalChars > 150000 ? 0.75 : 0.6;
+
+    // Take the first N% of messages and summarize them
     // Use safe split to avoid orphaning tool_result blocks
-    const rawSplit = Math.floor(messages.length * 0.6);
+    const rawSplit = Math.floor(messages.length * summarizeRatio);
     const splitPoint = findSafeSplitPoint(messages, rawSplit);
     const toSummarize = messages.slice(0, splitPoint);
     const toKeep = messages.slice(splitPoint);
@@ -1397,10 +1654,29 @@ export class MainAgent {
       ];
 
       // Second pass: if still over budget, aggressively truncate tool results in kept portion
-      const afterSize = calculateContextSize(compacted as LLMMessage[]);
+      let afterSize = calculateContextSize(compacted as LLMMessage[]);
       if (afterSize > COMPACT_THRESHOLD) {
         console.log(`[main-agent] Post-compaction still ${afterSize} chars, truncating tool results...`);
         compacted = pruneToolResults(compacted as LLMMessage[], 2, 200) as typeof compacted;
+        afterSize = calculateContextSize(compacted as LLMMessage[]);
+      }
+
+      // Hard cap: if still over absolute limit, drop oldest messages until we fit
+      if (afterSize > HARD_CAP) {
+        console.warn(`[main-agent] Post-compaction STILL ${afterSize} chars (hard cap ${HARD_CAP}), dropping oldest messages...`);
+        while (compacted.length > 4 && calculateContextSize(compacted as LLMMessage[]) > HARD_CAP) {
+          compacted.shift();
+        }
+        // Ensure first message is user role (API requirement)
+        if (compacted.length > 0 && compacted[0].role !== "user") {
+          compacted.shift();
+        }
+        console.log(`[main-agent] After hard cap trim: ${calculateContextSize(compacted as LLMMessage[])} chars, ${compacted.length} messages`);
+      }
+
+      // Persist compaction to DB so old chats don't re-summarize every turn
+      if (channelId && toSummarize.length > 0) {
+        this.persistCompaction(channelId, toSummarize.length, summary);
       }
 
       return compacted;
@@ -1408,6 +1684,62 @@ export class MainAgent {
       console.error("[main-agent] Compaction failed:", err);
       // Fall back to simple truncation
       return toKeep;
+    }
+  }
+
+  /**
+   * Persist compaction to DB: delete the oldest N messages for a channel
+   * and replace them with a single summary message.
+   * This prevents old chats from re-compacting the same history every turn.
+   */
+  private persistCompaction(channelId: string, summarizedCount: number, summary: string): void {
+    try {
+      // Get the IDs of the oldest N messages for this channel
+      const oldestRows = this.db.prepare(
+        `SELECT id FROM main_agent_messages
+         WHERE channel_id = ?
+         ORDER BY created_at ASC
+         LIMIT ?`
+      ).all(channelId, summarizedCount) as Array<{ id: string }>;
+
+      if (oldestRows.length === 0) return;
+
+      const ids = oldestRows.map(r => r.id);
+
+      // Use better-sqlite3's transaction() for safe atomic operation
+      const doCompaction = this.db.transaction(() => {
+        // Delete in batches (SQLite has a limit on placeholders)
+        const BATCH_SIZE = 100;
+        for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+          const batch = ids.slice(i, i + BATCH_SIZE);
+          const placeholders = batch.map(() => "?").join(",");
+          this.db.prepare(
+            `DELETE FROM main_agent_messages WHERE id IN (${placeholders})`
+          ).run(...batch);
+        }
+
+        // Insert summary as a user message + assistant ack
+        const summaryId = randomUUID();
+        const ackId = randomUUID();
+        // Use a very old timestamp so the summary sorts before remaining messages
+        const summaryTime = "2000-01-01T00:00:00.000Z";
+
+        this.db.prepare(
+          `INSERT INTO main_agent_messages (id, role, content, channel_id, created_at, token_estimate)
+           VALUES (?, 'user', ?, ?, ?, ?)`
+        ).run(summaryId, `[Conversation summary — earlier messages compacted]\n\n${summary}`, channelId, summaryTime, Math.ceil(summary.length / 4));
+
+        this.db.prepare(
+          `INSERT INTO main_agent_messages (id, role, content, channel_id, created_at, token_estimate)
+           VALUES (?, 'assistant', ?, ?, ?, ?)`
+        ).run(ackId, "Understood, I have the context from the summary. Continuing.", channelId, summaryTime, 15);
+      });
+
+      doCompaction();
+      console.log(`[main-agent] Persisted compaction for ${channelId.slice(0, 12)}: deleted ${ids.length} messages, inserted summary`);
+    } catch (err) {
+      console.error(`[main-agent] Failed to persist compaction for ${channelId.slice(0, 12)}:`, err);
+      // Non-fatal — compaction still works in-memory for this turn
     }
   }
 

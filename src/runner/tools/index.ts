@@ -4,7 +4,12 @@
 
 import type { ToolDefinition, ToolName, ToolResult, ToolExecutionResult, ToolExecutorResult, ToolSideEffects } from "../types.js";
 import { execToolDefinition, execTool } from "./exec.js";
-import { readToolDefinition, readTool, writeToolDefinition, writeTool, editToolDefinition, editTool } from "./files.js";
+import { readToolDefinition, readTool } from "./read.js";
+import { writeToolDefinition, writeTool } from "./write.js";
+import { editToolDefinition, editTool } from "./edit.js";
+import { lsToolDefinition, lsTool } from "./ls.js";
+import { grepToolDefinition, grepTool } from "./grep.js";
+import { globToolDefinition, globTool } from "./glob.js";
 import { webSearchToolDefinition, webSearchTool, webFetchToolDefinition, webFetchTool } from "./web.js";
 import { memorySearchToolDefinition, memorySearchTool, memoryReadToolDefinition, memoryReadTool, memoryWriteToolDefinition, memoryWriteTool } from "./memory.js";
 import { AGENT_CONTROL_TOOLS, executeSpawnAgent, executeRunPipeline, executeListAgents } from "./agent-control.js";
@@ -17,7 +22,12 @@ export { setReactDiscord };
 
 export type { ToolSideEffects, ToolExecutorResult };
 
-export type ToolExecutor = (params: Record<string, unknown>, cwd: string) => Promise<ToolExecutorResult>;
+/** Optional context passed to tools from the conversation loop */
+export interface ToolContext {
+  channelId?: string;
+}
+
+export type ToolExecutor = (params: Record<string, unknown>, cwd: string, context?: ToolContext) => Promise<ToolExecutorResult>;
 
 interface ToolEntry {
   definition: ToolDefinition;
@@ -41,6 +51,18 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
     definition: editToolDefinition,
     execute: editTool,
   },
+  ls: {
+    definition: lsToolDefinition,
+    execute: lsTool,
+  },
+  grep: {
+    definition: grepToolDefinition,
+    execute: grepTool,
+  },
+  glob: {
+    definition: globToolDefinition,
+    execute: globTool,
+  },
   web_search: {
     definition: webSearchToolDefinition,
     execute: (params) => webSearchTool(params),
@@ -63,7 +85,7 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   },
   spawn_agent: {
     definition: AGENT_CONTROL_TOOLS[0],
-    execute: (params, cwd) => executeSpawnAgent(params, cwd),
+    execute: (params, cwd, context) => executeSpawnAgent(params, cwd, context?.channelId),
   },
   run_pipeline: {
     definition: AGENT_CONTROL_TOOLS[1],
@@ -108,6 +130,7 @@ export async function executeTool(
   params: Record<string, unknown>,
   toolUseId: string,
   cwd: string,
+  context?: ToolContext,
 ): Promise<ToolExecutionResult> {
   const entry = TOOL_REGISTRY[toolName as ToolName];
 
@@ -123,7 +146,7 @@ export async function executeTool(
   }
 
   try {
-    const raw = await entry.execute(params, cwd);
+    const raw = await entry.execute(params, cwd, context);
     
     // Extract side effects if the tool returned them
     const output = typeof raw === "string" ? raw : raw.output;

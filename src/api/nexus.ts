@@ -10,7 +10,7 @@ import { join, extname } from "node:path";
 import { log } from "../util/logger.js";
 
 const WEB_ROOT = process.env.NEXUS_WEB_ROOT || "/Users/lobs/lobs-nexus/dist";
-const ASSETS_ROOT = join(WEB_ROOT, "assets");
+const ASSETS_ROOT = join(WEB_ROOT, "static");
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -42,7 +42,7 @@ async function sendIndex(res: ServerResponse): Promise<boolean> {
   try {
     const raw = await readFile(join(WEB_ROOT, "index.html"), "utf-8");
     const html = raw
-      .replace(/"\/assets\//g, '"/nexus/static/')
+      .replace(/"\/static\//g, '"/nexus/static/')
       .replace(/"\/vite\.svg"/g, '"/nexus/static/vite.svg"');
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
     res.end(html);

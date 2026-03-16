@@ -1,5 +1,8 @@
 /**
  * Cron tool — lets the main agent manage scheduled jobs and reminders.
+ *
+ * System jobs (heartbeat, memory-condensation) are visible in `list` but
+ * can only be toggled — they cannot be added or removed via this tool.
  */
 
 import type { ToolDefinition } from "../types.js";
@@ -11,7 +14,8 @@ export const cronToolDefinition: ToolDefinition = {
     "Manage scheduled jobs and reminders. Actions: list, add, remove, toggle. " +
     "Use schedule_kind='at' with schedule_at (ISO timestamp) for one-shot reminders. " +
     "Use schedule_kind='every' with schedule_every_ms for recurring intervals. " +
-    "Use schedule_kind='cron' with schedule_expr for cron expressions.",
+    "Use schedule_kind='cron' with schedule_expr for cron expressions. " +
+    "System jobs (heartbeat, memory-condensation) are visible but can only be toggled, not added or removed.",
   input_schema: {
     type: "object",
     properties: {
@@ -68,21 +72,22 @@ export async function executeCronTool(
 
   switch (action) {
     case "list": {
-      const jobs = cronService.listJobs();
+      const jobs = cronService.listAllJobs();
       return JSON.stringify(
         jobs.map((j) => ({
           id: j.id,
           name: j.name,
+          kind: j.kind,
           schedule: j.schedule,
           enabled: j.enabled,
-          lastFired: j.lastFired,
+          lastRun: j.lastRun,
         })),
         null,
         2,
       );
     }
     case "add": {
-      const job = cronService.addJob({
+      const job = cronService.addAgentJob({
         name: (input.name as string) || "Unnamed",
         schedule: {
           kind: (input.schedule_kind as "cron" | "at" | "every") || "at",
@@ -96,15 +101,29 @@ export async function executeCronTool(
       return JSON.stringify({ ok: true, id: job.id, name: job.name });
     }
     case "remove": {
-      cronService.removeJob(input.job_id as string);
+      const jobId = input.job_id as string;
+      // Prevent removing system jobs
+      const all = cronService.listAllJobs();
+      const found = all.find((j) => j.id === jobId);
+      if (found?.kind === "system") {
+        return JSON.stringify({ ok: false, error: "System jobs cannot be removed. Use toggle to disable." });
+      }
+      cronService.removeAgentJob(jobId);
       return JSON.stringify({ ok: true });
     }
     case "toggle": {
-      cronService.toggleJob(
-        input.job_id as string,
-        input.enabled !== false,
-      );
-      return JSON.stringify({ ok: true });
+      const jobId = input.job_id as string;
+      const shouldEnable = input.enabled !== false;
+      // Check if it's a system job or agent job
+      const all = cronService.listAllJobs();
+      const found = all.find((j) => j.id === jobId);
+      if (found?.kind === "system") {
+        const ok = cronService.toggleSystemJob(jobId, shouldEnable);
+        return JSON.stringify({ ok });
+      } else {
+        cronService.toggleAgentJob(jobId, shouldEnable);
+        return JSON.stringify({ ok: true });
+      }
     }
     default:
       return `Unknown action: ${action}`;

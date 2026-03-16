@@ -15,9 +15,11 @@ import { setLogger, log } from "./util/logger.js";
 import { resolve } from "node:path";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, renameSync, statSync, appendFileSync } from "node:fs";
 import { initToolGate } from "./runner/tool-gate.js";
-import { getCronManager } from "./orchestrator/cron.js";
 import { runHeartbeat } from "./orchestrator/heartbeat.js";
+import { runCondensationIfNeeded } from "./services/memory-condenser.js";
 import { initCronService } from "./services/cron.js";
+import { runSentinelCheck } from "./services/system-sentinel.js";
+import { runCalendarSentinel } from "./services/calendar-sentinel.js";
 import { randomUUID } from "node:crypto";
 import { browserService } from "./services/browser.js";
 import { skillsService } from "./services/skills.js";
@@ -40,6 +42,7 @@ const LOG_KEEP = 3; // keep lobs.log.1, .2, .3
 const SCAN_INTERVAL_MS = 10_000;
 const HTTP_PORT = parseInt(process.env.LOBS_PORT ?? "9420", 10);
 const ACTIVITY_LOG_INTERVAL_MS = 30_000;
+const LOG_TO_FILE = process.env.LOBS_LOG_TO_FILE === "1";
 
 /** Rotate log file if it exceeds LOG_MAX_BYTES. Called once at startup. */
 function rotateLogIfNeeded(): void {
@@ -83,10 +86,12 @@ function installRuntimeLogging(): void {
     const message = args.map(stringifyArg).join(" ");
     const line = `[${timestamp}] ${level} ${message}`;
     (stream === "stderr" ? stderr : stdout)(`${line}\n`);
-    try {
-      appendFileSync(LOG_FILE, `${line}\n`);
-    } catch {
-      // Avoid recursive logging if file writes fail.
+    if (LOG_TO_FILE) {
+      try {
+        appendFileSync(LOG_FILE, `${line}\n`);
+      } catch {
+        // Avoid recursive logging if file writes fail.
+      }
     }
   };
 
@@ -115,6 +120,7 @@ async function main() {
   installRuntimeLogging();
 
   console.log("=== lobs-core starting (standalone) ===");
+  console.log(`[log] debug=${process.env.LOBS_DEBUG ? "enabled" : "disabled"} file_append=${LOG_TO_FILE ? "enabled" : "disabled"}`);
 
   // Set up logger
   setLogger(consoleLogger as any);
@@ -218,41 +224,78 @@ async function main() {
   skillsService.loadAll();
   console.log(`Loaded ${skillsService.getAll().length} skills`);
 
-  // Set up cron jobs
-  console.log("Setting up cron jobs...");
-  const cronManager = getCronManager();
-  
-  // Heartbeat: every 30 minutes
-  cronManager.addJob({
+  // Set up unified cron service
+  console.log("Setting up cron service...");
+  const cronService = initCronService(getRawDb());
+  cronService.seedDefaults();
+
+  // Register system jobs (code handlers, not DB-backed)
+  cronService.registerSystemJob({
     id: "heartbeat",
     name: "System Heartbeat",
     schedule: "*/30 * * * *",
     enabled: true,
     handler: async () => {
-      await runHeartbeat();
+      const result = await runHeartbeat();
+      // Only alert the main agent if there are actual issues
+      if (result.alerts.length > 0) {
+        const mainAgent = (globalThis as any).__lobsMainAgent;
+        if (mainAgent) {
+          const alertText = `[HEARTBEAT ALERT] ${result.alerts.join("; ")}`;
+          await mainAgent.handleSystemEvent(alertText);
+        }
+      }
     },
   });
-  
-  // Reflection: disabled (reflection.ts removed during simplification)
-  // cronManager.addJob({
-  //   id: "reflection",
-  //   name: "Self-Reflection",
-  //   schedule: "0 */6 * * *",
-  //   enabled: true,
-  //   handler: async () => {
-  //     // await runReflection();
-  //   },
-  // });
-  
-  cronManager.start();
-  console.log("Cron manager started");
 
-  // Set up DB-backed cron service (agent-managed jobs / reminders)
-  console.log("Setting up cron service...");
-  const cronService = initCronService(getRawDb());
-  cronService.seedDefaults();
+  cronService.registerSystemJob({
+    id: "memory-condensation",
+    name: "Memory Condensation",
+    schedule: "0 4 * * *", // daily at 4am
+    enabled: true,
+    handler: async () => {
+      const result = runCondensationIfNeeded();
+      if (result) {
+        console.log(`[memory-condensation] Condensed ${result.filesCondensed} files, promoted ${result.entriesPromoted} entries`);
+      }
+    },
+  });
+
+  cronService.registerSystemJob({
+    id: "system-sentinel",
+    name: "System Sentinel",
+    schedule: "*/15 * * * *", // every 15 minutes
+    enabled: true,
+    handler: async () => {
+      const result = await runSentinelCheck();
+      if (result.shouldAlert && result.alertMessage) {
+        const mainAgent = (globalThis as any).__lobsMainAgent;
+        if (mainAgent) {
+          await mainAgent.handleSystemEvent(result.alertMessage);
+        }
+      }
+    },
+  });
+
+  cronService.registerSystemJob({
+    id: "calendar-sentinel",
+    name: "Calendar Sentinel",
+    schedule: "*/15 * * * *", // every 15 minutes
+    enabled: true,
+    handler: async () => {
+      const result = await runCalendarSentinel();
+      if (result.shouldAlert && result.alertMessage) {
+        const mainAgent = (globalThis as any).__lobsMainAgent;
+        if (mainAgent) {
+          await mainAgent.handleSystemEvent(result.alertMessage);
+        }
+      }
+    },
+  });
+
   // Event handler wired after mainAgent is created (see below)
   cronService.start();
+  console.log("Cron service started");
 
   // Start the control loop
   startControlLoop({} as any, SCAN_INTERVAL_MS);
@@ -430,7 +473,6 @@ async function main() {
     await browserService.shutdown();
     await discordService.shutdown();
     cronService.stop();
-    cronManager.stop();
     stopControlLoop();
     closeDb();
     process.exit(0);

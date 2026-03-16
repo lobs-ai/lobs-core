@@ -5,15 +5,15 @@
  * with offset/limit if needed. This prevents context bloat at the source
  * rather than trying to prune it after the fact.
  *
- * Default: ~8000 chars (~200 lines). For large outputs, we show the head
+ * Default: ~50000 chars (~2000 lines). For large outputs, we show the head
  * plus a hint about how much was cut and how to see more.
  */
 
 /** Default max characters for tool output */
-export const DEFAULT_OUTPUT_CAP = 8000;
+export const DEFAULT_OUTPUT_CAP = 50000;
 
 /** Max lines to show in preview mode */
-export const DEFAULT_MAX_LINES = 200;
+export const DEFAULT_MAX_LINES = 2000;
 
 /**
  * Cap a tool result string to a budget.

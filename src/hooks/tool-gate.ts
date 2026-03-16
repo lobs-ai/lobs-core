@@ -111,7 +111,7 @@ export function registerToolGateHook(api: LobsPluginApi): void {
 
     // Block write/edit to protected files
     if (toolName === "Write" || toolName === "Edit" || toolName === "write" || toolName === "edit") {
-      const filePath = (toolInput.file_path as string) ?? (toolInput.path as string) ?? "";
+      const filePath = (toolInput.path as string) ?? (toolInput.file_path as string) ?? "";
       for (const pattern of HARD_BLOCK_FILE_PATTERNS) {
         if (pattern.test(filePath)) {
           log().warn(`[PAW] HARD BLOCK: file write to "${filePath}" denied for worker on task ${task.id.slice(0, 8)}`);

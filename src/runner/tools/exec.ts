@@ -1,10 +1,14 @@
 /**
  * Exec tool — run shell commands.
- * 
+ *
  * Supports command, workdir, timeout, and env.
  * Tracks cwd changes: if the command is a `cd` or uses `workdir`,
  * the new cwd is returned as a side effect so the agent loop can
  * update its tracked working directory.
+ *
+ * Uses a cwd marker to detect directory changes from compound commands
+ * like `cd /foo && npm install` — the marker is parsed and stripped
+ * from output so subsequent calls use the correct cwd.
  */
 
 import { spawn } from "node:child_process";
@@ -45,11 +49,14 @@ export const execToolDefinition: ToolDefinition = {
   },
 };
 
-const MAX_CAPTURE_CHARS = 100_000;  // Max to capture from the process (raw)
-const MAX_OUTPUT_CHARS = 8_000;     // Max to return to the model (~200 lines)
-const MAX_OUTPUT_LINES = 200;       // Max lines to return to the model
+const MAX_CAPTURE_CHARS = 1_000_000; // Max to capture from the process (raw)
+const MAX_OUTPUT_CHARS = 8_000;      // Max to return to the model (~200 lines)
+const MAX_OUTPUT_LINES = 200;        // Max lines to return to the model
 const DEFAULT_TIMEOUT = 30;
 const MAX_TIMEOUT = 300;
+
+/** Sentinel used to detect the final cwd after a command runs */
+const CWD_MARKER = "__LOBS_CWD__";
 
 /**
  * Detect if a command is a bare `cd` that should change the agent's cwd.
@@ -62,11 +69,11 @@ function parseCdCommand(command: string): string | null {
   // Match bare `cd` or `cd <path>` — no pipes, semicolons, or &&
   const cdMatch = trimmed.match(/^cd(?:\s+(.+))?$/);
   if (!cdMatch) return null;
-  
+
   // Check it's not a compound command
   const target = cdMatch[1]?.trim();
   if (target && /[;&|]/.test(target)) return null;
-  
+
   return target ?? process.env.HOME ?? "/";
 }
 
@@ -80,12 +87,36 @@ function resolveCdTarget(target: string, baseCwd: string): string | null {
   if (expanded.startsWith("~/") || expanded === "~") {
     expanded = expanded.replace(/^~/, process.env.HOME ?? "/");
   }
-  
+
   const resolved = resolve(baseCwd, expanded);
-  
+
   // Verify the directory exists
   if (!existsSync(resolved)) return null;
   return resolved;
+}
+
+/**
+ * Wrap a command so that after it runs, it prints a cwd marker to stdout.
+ * The marker format is: \n__LOBS_CWD__:/path/to/cwd
+ * The original exit code is preserved.
+ */
+function wrapWithCwdMarker(command: string): string {
+  // Use a subshell to capture the exit code, then print marker, then exit with original code
+  return `{ ${command}\n}; __lobs_ec=$?; printf '\\n${CWD_MARKER}:%s' "$(pwd)"; exit $__lobs_ec`;
+}
+
+/**
+ * Parse and strip the cwd marker from stdout.
+ * Returns the cleaned stdout and the detected cwd (if any).
+ */
+function extractCwdMarker(stdout: string): { cleaned: string; detectedCwd: string | null } {
+  const markerPattern = new RegExp(`\\n?${CWD_MARKER}:(.+)$`);
+  const match = stdout.match(markerPattern);
+  if (!match) return { cleaned: stdout, detectedCwd: null };
+
+  const detectedCwd = match[1]!;
+  const cleaned = stdout.slice(0, match.index ?? stdout.length);
+  return { cleaned, detectedCwd };
 }
 
 export async function execTool(
@@ -119,19 +150,15 @@ export async function execTool(
     }
   }
 
-  // If workdir was explicitly set, signal it as a cwd change too
-  const cwdChanged = params.workdir && typeof params.workdir === "string"
-    ? resolve(params.workdir.startsWith("~")
-        ? params.workdir.replace(/^~/, process.env.HOME ?? "/")
-        : params.workdir)
-    : undefined;
+  // Wrap the command with a cwd marker so we can detect directory changes
+  const wrappedCommand = wrapWithCwdMarker(command);
 
-  const output = await new Promise<string>((resolvePromise) => {
+  const { output, detectedCwd } = await new Promise<{ output: string; detectedCwd: string | null }>((resolvePromise) => {
     let stdout = "";
     let stderr = "";
     let killed = false;
 
-    const child = spawn("bash", ["-c", command], {
+    const child = spawn("bash", ["-c", wrappedCommand], {
       cwd: workdir,
       env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -159,18 +186,22 @@ export async function execTool(
 
     child.on("error", (err) => {
       clearTimeout(timer);
-      resolvePromise(`Error spawning process: ${err.message}`);
+      resolvePromise({ output: `Error spawning process: ${err.message}`, detectedCwd: null });
     });
 
     child.on("close", (code, signal) => {
       clearTimeout(timer);
+
+      // Extract and strip the cwd marker from stdout
+      const { cleaned: cleanedStdout, detectedCwd: cwd } = extractCwdMarker(stdout);
+
       const parts: string[] = [];
 
       if (killed) {
         parts.push(`Command timed out after ${timeout} seconds.`);
       }
 
-      if (stdout.length > 0) parts.push(stdout);
+      if (cleanedStdout.length > 0) parts.push(cleanedStdout);
       if (stderr.length > 0) parts.push(`STDERR:\n${stderr}`);
 
       const exitInfo = killed
@@ -180,15 +211,23 @@ export async function execTool(
       const raw = parts.join("\n") || "(no output)";
       const capped = capOutput(raw, MAX_OUTPUT_CHARS, MAX_OUTPUT_LINES,
         "Re-run with more specific command (e.g. head/tail/grep) to see more.");
-      resolvePromise(`${capped}\n\n${exitInfo}`);
+      resolvePromise({ output: `${capped}\n\n${exitInfo}`, detectedCwd: cwd });
     });
   });
 
-  // Return with side effects if workdir was explicitly changed
-  if (cwdChanged) {
+  // Determine if cwd changed — from the marker or from explicit workdir
+  const newCwd = detectedCwd && detectedCwd !== workdir
+    ? detectedCwd
+    : params.workdir && typeof params.workdir === "string"
+      ? resolve(params.workdir.startsWith("~")
+          ? params.workdir.replace(/^~/, process.env.HOME ?? "/")
+          : params.workdir)
+      : undefined;
+
+  if (newCwd) {
     return {
       output,
-      sideEffects: { newCwd: cwdChanged },
+      sideEffects: { newCwd },
     };
   }
 

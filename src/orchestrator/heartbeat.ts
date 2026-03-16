@@ -14,10 +14,6 @@
 
 import { getRawDb } from "../db/connection.js";
 import { log } from "../util/logger.js";
-import { exec } from "node:child_process";
-import { promisify } from "node:util";
-
-const execAsync = promisify(exec);
 
 export interface HeartbeatResult {
   timestamp: Date;

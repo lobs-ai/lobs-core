@@ -38,6 +38,7 @@ import { handleGitHubRequest } from "./github.js";
 import { handleDailyBriefRequest } from "./daily-brief.js";
 import { handleSkillsRequest } from "./skills.js";
 import { handleHealthRequest } from "./health.js";
+import { handleTrainingRequest } from "./training.js";
 import { error } from "./index.js";
 
 const PREFIXES = ["/paw/api/", "/api/"];
@@ -97,6 +98,7 @@ export function registerPawRouter(api: LobsPluginApi): void {
         case "github":          await handleGitHubRequest(req, res, parts[1], parts); return true;
         case "daily-brief":     await handleDailyBriefRequest(req, res, parts[1]); return true;
         case "skills":          await handleSkillsRequest(req, res, parts[1]); return true;
+        case "training":        await handleTrainingRequest(req, res, parts[1], parts[2]); return true;
         default:                error(res, `Unknown resource: ${resource}`, 404); return true;
       }
     } catch (err) {

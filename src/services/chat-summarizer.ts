@@ -137,9 +137,13 @@ export async function maybeSummarizeChat(sessionKey: string): Promise<void> {
   const threshold = lastCount === 0 ? 2 : MIN_NEW_MESSAGES;
   if (newMessages < threshold) return;
 
-  // Trigger async summarization
+  // Trigger async summarization + title generation
   pendingSummarizations.add(sessionKey);
-  generateSummaryFromMessages(sessionKey, messages, messageCount, session.summary ?? undefined)
+  const currentLabel = session.label;
+  Promise.all([
+    generateSummaryFromMessages(sessionKey, messages, messageCount, session.summary ?? undefined),
+    generateTitle(sessionKey, messages, currentLabel ?? undefined),
+  ])
     .catch(err => log().warn(`[CHAT-SUMMARY] Failed for ${sessionKey.slice(0, 20)}: ${err}`))
     .finally(() => pendingSummarizations.delete(sessionKey));
 }
@@ -231,19 +235,6 @@ Reply with ONLY the summary, nothing else.`;
       .where(eq(chatSessions.sessionKey, sessionKey))
       .run();
 
-    // Also update the label if it's still the default
-    const session = db.select().from(chatSessions)
-      .where(eq(chatSessions.sessionKey, sessionKey))
-      .get();
-
-    if (session && (session.label === "New Chat" || !session.label)) {
-      const shortTitle = summary.split(/[.!?]/)[0]?.trim() || summary.slice(0, 80);
-      db.update(chatSessions)
-        .set({ label: shortTitle.length > 80 ? shortTitle.slice(0, 77) + "..." : shortTitle })
-        .where(eq(chatSessions.sessionKey, sessionKey))
-        .run();
-    }
-
     log().info(`[CHAT-SUMMARY] Updated summary for ${sessionKey.slice(0, 20)}: "${summary.slice(0, 60)}..."`);
   } catch (err) {
     log().warn(`[CHAT-SUMMARY] Generation failed: ${err}`);
@@ -291,4 +282,85 @@ export async function forceSummarize(sessionKey: string): Promise<string | null>
     .where(eq(chatSessions.sessionKey, sessionKey))
     .get();
   return updated?.summary ?? null;
+}
+
+/**
+ * Generate a short, descriptive title for a chat session.
+ * 
+ * Uses a micro-tier model to produce a 2-5 word title based on the conversation.
+ * Re-generates as the conversation evolves — early titles are based on the first
+ * few messages, later titles capture the broader theme.
+ */
+async function generateTitle(
+  sessionKey: string,
+  messages: Array<{ role: string; content: string }>,
+  currentLabel?: string,
+): Promise<void> {
+  if (messages.length < 2) return;
+
+  // Skip if it already has a good title and not enough messages to warrant re-titling
+  const isDefaultTitle = !currentLabel || currentLabel === "New Chat" || currentLabel.startsWith("Chat ");
+  // Re-title: always on default titles, at 10+ messages for existing titles, then every 20 after
+  const shouldRetitle = isDefaultTitle
+    || (messages.length >= 10 && messages.length < 12)
+    || (messages.length >= 30 && messages.length % 20 < 2);
+  if (!shouldRetitle) return;
+
+  try {
+    // Use recent messages for context (truncate to ~2k chars)
+    const recentMessages = messages.slice(-20);
+    const conversationText = recentMessages
+      .map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.content.slice(0, 200)}`)
+      .join("\n")
+      .slice(0, 2000);
+
+    const prompt = currentLabel && !isDefaultTitle
+      ? `Here is a conversation that was previously titled "${currentLabel}". Based on the full conversation so far, generate an updated short title (2-5 words) that captures the main topic or theme. Be concise and natural — like how a person would name a chat thread.
+
+Conversation:
+${conversationText}
+
+Reply with ONLY the title, nothing else. No quotes, no punctuation at the end.`
+      : `Generate a short title (2-5 words) for this conversation. Capture the main topic or intent. Be concise and natural — like how a person would name a chat thread.
+
+Conversation:
+${conversationText}
+
+Reply with ONLY the title, nothing else. No quotes, no punctuation at the end.`;
+
+    const result = await gatewayInvoke("sessions_spawn", {
+      task: prompt,
+      model: SUMMARY_MODEL,
+      mode: "run",
+      cleanup: "kill",
+      runTimeoutSeconds: 30,
+      maxTokens: 30,
+      metadata: { chatTitleGeneration: true, chatSessionKey: sessionKey },
+    }, SINK_SESSION_KEY);
+
+    let title = result?.reply ?? result?.response ?? result?.text ?? "";
+
+    // Clean up: strip thinking tags, quotes, trailing punctuation
+    title = title
+      .replace(/<think>[\s\S]*?<\/think>/g, "")
+      .replace(/^["']|["']$/g, "")
+      .replace(/^Title:\s*/i, "")
+      .replace(/\.+$/, "")
+      .trim();
+
+    if (!title || title.length < 2 || title.length > 80) {
+      log().warn(`[CHAT-TITLE] Bad title generated: "${title?.slice(0, 100)}"`);
+      return;
+    }
+
+    const db = getDb();
+    db.update(chatSessions)
+      .set({ label: title })
+      .where(eq(chatSessions.sessionKey, sessionKey))
+      .run();
+
+    log().info(`[CHAT-TITLE] Set title for ${sessionKey.slice(0, 20)}: "${title}"`);
+  } catch (err) {
+    log().warn(`[CHAT-TITLE] Title generation failed: ${err}`);
+  }
 }

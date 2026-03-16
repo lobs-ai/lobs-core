@@ -547,6 +547,8 @@ export const chatSessions = sqliteTable("chat_sessions", {
   complianceRequired: integer("compliance_required", { mode: "boolean" }).notNull().default(false),
   // Per-session tool overrides: JSON array of tool names to disable, e.g. '["exec","write"]'
   disabledTools: text("disabled_tools"),
+  // Tracks when the user last viewed this session (for unread badges)
+  lastReadAt: text("last_read_at"),
 });
 
 export const chatMessages = sqliteTable("chat_messages", {
@@ -879,4 +881,22 @@ export const memoryComplianceIndex = sqliteTable("memory_compliance_index", {
   updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
 }, (t) => ({
   uniqAgentPath: uniqueIndex("memory_compliance_idx_agent_path").on(t.agentType, t.filePath),
+}));
+
+// ─── Training Data ──────────────────────────────────────────────────────
+
+export const trainingData = sqliteTable("training_data", {
+  id: id(),
+  taskType: text("task_type").notNull(),      // braindump | calendar_check | daily_brief | system_state | categorization | summary
+  systemPrompt: text("system_prompt").notNull(),
+  userPrompt: text("user_prompt").notNull(),
+  context: text("context", { mode: "json" }), // assembled context blob
+  modelOutput: text("model_output").notNull(),
+  correctedOutput: text("corrected_output"),   // human correction
+  reviewStatus: text("review_status").notNull().default("pending"), // pending | approved | corrected | rejected
+  modelUsed: text("model_used").notNull(),
+  ...timestamps,
+}, (t) => ({
+  idxTaskType: index("training_data_task_type_idx").on(t.taskType),
+  idxReviewStatus: index("training_data_review_status_idx").on(t.reviewStatus),
 }));

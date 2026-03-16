@@ -1417,6 +1417,10 @@ export function runMigrations(db: PawDB): void {
   // e.g. '["exec","write"]'. null = no overrides (all tools enabled).
   // Controlled via PATCH /api/chat/sessions/:key/tools.
   try { db.run(sql`ALTER TABLE chat_sessions ADD COLUMN disabled_tools TEXT`); } catch {}
+
+  // ── Unread tracking for nexus sessions ────────────────────────────────────
+  // Added: 2026-03-15 — Tracks when user last viewed a session for unread badges.
+  try { db.run(sql`ALTER TABLE chat_sessions ADD COLUMN last_read_at TEXT`); } catch {}
 }
 
 

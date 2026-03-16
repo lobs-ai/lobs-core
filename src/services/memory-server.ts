@@ -6,7 +6,7 @@
  * Health checks via HTTP to detect silent failures.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 
@@ -22,6 +22,7 @@ const RESTART_DELAY_MAX_MS = 60_000;  // 60s max
 const RESTART_BACKOFF_FACTOR = 2;
 const HEALTH_CHECK_INTERVAL_MS = 30_000; // check every 30s
 const STARTUP_GRACE_MS = 10_000; // wait before first health check
+const MIN_FREE_DISK_BYTES = 512 * 1024 * 1024; // 512MB
 
 class MemoryServerSupervisor {
   private child: ChildProcess | null = null;
@@ -34,6 +35,7 @@ class MemoryServerSupervisor {
   private suppressedIndexLines = 0;
   private suppressedEmbedErrors = 0;
   private lastSuppressedLogAt = 0;
+  private suppressingDiskIoTrace = false;
 
   /** Start the memory server and begin supervision */
   async start(): Promise<void> {
@@ -150,6 +152,18 @@ class MemoryServerSupervisor {
   private spawnChild(bunPath: string): void {
     if (this.shutdownRequested) return;
 
+    const freeBytes = this.getFreeDiskBytes();
+    if (freeBytes !== null && freeBytes < MIN_FREE_DISK_BYTES) {
+      console.error(
+        `[memory-supervisor] Low disk space (${Math.round(freeBytes / 1024 / 1024)}MB free) ` +
+        `— skipping memory server start until space is recovered`,
+      );
+      if (!this.shutdownRequested && this.running) {
+        this.scheduleRestart(bunPath);
+      }
+      return;
+    }
+
     console.log(`[memory-supervisor] Spawning: ${bunPath} run server/index.ts (cwd: ${MEMORY_DIR})`);
 
     this.child = spawn(bunPath, ["run", "server/index.ts"], {
@@ -199,6 +213,26 @@ class MemoryServerSupervisor {
   private handleChildLine(rawLine: string, isError: boolean): void {
     const line = rawLine.trim();
     if (!line) return;
+
+    if (line.includes("SQLiteError: disk I/O error")) {
+      this.suppressingDiskIoTrace = true;
+      const freeBytes = this.getFreeDiskBytes();
+      const freeMb = freeBytes === null ? "unknown" : String(Math.round(freeBytes / 1024 / 1024));
+      console.error(`[memory] SQLite disk I/O error during startup (free space: ${freeMb}MB)`);
+      return;
+    }
+
+    if (this.suppressingDiskIoTrace) {
+      if (
+        line.startsWith("at ") ||
+        /^\d+\s+\|/.test(line) ||
+        line === "^" ||
+        line.startsWith("byteOffset:")
+      ) {
+        return;
+      }
+      this.suppressingDiskIoTrace = false;
+    }
 
     if (line.startsWith("Indexing:") || line.startsWith("→") || line.startsWith("  →")) {
       this.suppressedIndexLines++;
@@ -270,6 +304,19 @@ class MemoryServerSupervisor {
         this.spawnChild(bunPath);
       }
     }, delay);
+  }
+
+  private getFreeDiskBytes(): number | null {
+    try {
+      const output = execFileSync("df", ["-k", MEMORY_DIR], { encoding: "utf-8", timeout: 3000 }).trim();
+      const lines = output.split("\n");
+      const fields = lines[lines.length - 1]?.trim().split(/\s+/) ?? [];
+      const availableKb = Number(fields[3]);
+      if (!Number.isFinite(availableKb)) return null;
+      return availableKb * 1024;
+    } catch {
+      return null;
+    }
   }
 
   private startHealthChecks(): void {

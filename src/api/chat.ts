@@ -1,4 +1,4 @@
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, and, gt, sql } from "drizzle-orm";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getDb } from "../db/connection.js";
 import { chatSessions, chatMessages } from "../db/schema.js";
@@ -50,6 +50,7 @@ export async function handleChatRequest(
         createdAt: now,
         isActive: true,
         lastMessageAt: now,
+        lastReadAt: now,
       }).run();
 
       return json(res, { id, key: sessionKey, title, createdAt: now, compliance_required: complianceRequired }, 201);
@@ -316,19 +317,61 @@ export async function handleChatRequest(
         .orderBy(desc(chatSessions.lastMessageAt))
         .all();
       
+      // Get processing channels from main agent for status indicators
+      const mainAgent = (globalThis as any).__lobsMainAgent;
+      const processingChannels = new Set(mainAgent?.getProcessingChannels?.() ?? []);
+
       return json(res, {
-        sessions: sessions.map(s => ({
-          id: s.id,
-          key: s.sessionKey,
-          title: s.label ?? "Chat",
-          summary: s.summary ?? null,
-          createdAt: s.createdAt,
-          updatedAt: s.lastMessageAt ?? s.createdAt,
-          isActive: s.isActive,
-          compliance_required: s.complianceRequired ?? false,
-          disabled_tools: s.disabledTools ? JSON.parse(s.disabledTools) : [],
-        })),
+        sessions: sessions.map(s => {
+          // Count unread assistant text messages since lastReadAt
+          // Only count assistant messages (not tool calls or user messages)
+          let unreadCount = 0;
+          const conditions = [
+            eq(chatMessages.sessionKey, s.sessionKey),
+            eq(chatMessages.role, "assistant"),
+          ];
+          if (s.lastReadAt) {
+            conditions.push(gt(chatMessages.createdAt, s.lastReadAt));
+          }
+          const result = db.select({ count: sql<number>`count(*)` })
+            .from(chatMessages)
+            .where(and(...conditions))
+            .get();
+          unreadCount = s.lastReadAt ? (result?.count ?? 0) : 0;
+
+          const channelId = `nexus:${s.sessionKey}`;
+
+          return {
+            id: s.id,
+            key: s.sessionKey,
+            title: s.label ?? "Chat",
+            summary: s.summary ?? null,
+            createdAt: s.createdAt,
+            updatedAt: s.lastMessageAt ?? s.createdAt,
+            isActive: s.isActive,
+            compliance_required: s.complianceRequired ?? false,
+            disabled_tools: s.disabledTools ? JSON.parse(s.disabledTools) : [],
+            unreadCount,
+            processing: processingChannels.has(channelId),
+          };
+        }),
       });
+    }
+
+    // POST /api/chat/sessions/:key/read — mark session as read
+    if (sessionKey && action === "read" && method === "POST") {
+      const session = db.select().from(chatSessions)
+        .where(eq(chatSessions.sessionKey, sessionKey))
+        .get();
+      if (!session) return error(res, "Session not found", 404);
+
+      const now = new Date().toISOString();
+      db.update(chatSessions)
+        .set({ lastReadAt: now })
+        .where(eq(chatSessions.sessionKey, sessionKey))
+        .run();
+
+      return json(res, { key: sessionKey, lastReadAt: now });
     }
 
     // PATCH /api/chat/sessions/:key/compliance — toggle compliance mode for a session

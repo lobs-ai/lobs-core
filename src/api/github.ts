@@ -6,6 +6,8 @@ import { json, error, parseQuery } from "./index.js";
  * GitHub feed endpoint — aggregate GitHub activity.
  * 
  * GET /api/github/feed?limit=30 → recent GitHub events + summary
+ * GET /api/github/prs?limit=20 → aggregate PRs
+ * GET /api/github/ci?limit=20 → aggregate CI runs
  */
 
 interface GitHubEvent {
@@ -26,10 +28,31 @@ interface GitHubFeedResponse {
   };
 }
 
+const REPOS = [
+  "lobs-ai/lobs-core",
+  "lobs-ai/lobs-nexus",
+  "lobs-ai/lobs-memory",
+  "paw-engineering/paw-hub",
+  "paw-engineering/paw-portal",
+  "paw-engineering/ship-api",
+  "paw-engineering/paw-site",
+  "paw-engineering/paw-plugin",
+];
+
+const CI_REPOS = [
+  "paw-engineering/paw-hub",
+  "paw-engineering/paw-portal",
+  "lobs-ai/lobs-core",
+];
+
 // Simple in-memory cache with 60s TTL
 let cachedFeed: GitHubFeedResponse | null = null;
 let cacheTimestamp = 0;
 const CACHE_TTL_MS = 60_000;
+
+function ghExec(cmd: string): string {
+  return execSync(cmd, { encoding: "utf-8", timeout: 8000 });
+}
 
 export async function handleGitHubRequest(
   req: IncomingMessage,
@@ -43,31 +66,19 @@ export async function handleGitHubRequest(
     const limit = parseInt(query.limit ?? "20", 10);
 
     try {
-      const repos = [
-        "paw-engineering/paw-hub",
-        "paw-engineering/paw-portal",
-        "paw-engineering/paw-site",
-        "paw-engineering/ship-api",
-        "paw-engineering/paw-plugin",
-        "lobs-ai/lobs-core",
-        "lobs-ai/lobs-memory",
-      ];
-
       const allPRs: any[] = [];
-      for (const repo of repos) {
+      for (const repo of REPOS) {
         try {
-          const prs = execSync(
-            `gh pr list --repo ${repo} --json number,title,state,author,createdAt,url --limit ${limit}`,
-            { encoding: "utf-8", timeout: 5000 }
+          const prs = ghExec(
+            `gh pr list --repo ${repo} --json number,title,state,author,createdAt,url --limit ${limit}`
           );
           const parsed = JSON.parse(prs);
           allPRs.push(...parsed.map((pr: any) => ({ ...pr, repo })));
         } catch {
-          // Repo might not exist or have no PRs, skip
+          // skip
         }
       }
 
-      // Sort by createdAt descending
       allPRs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
       return json(res, { prs: allPRs.slice(0, limit * 2) });
     } catch (err) {
@@ -81,28 +92,19 @@ export async function handleGitHubRequest(
     const limit = parseInt(query.limit ?? "20", 10);
 
     try {
-      const repos = [
-        "paw-engineering/paw-hub",
-        "paw-engineering/paw-portal",
-        "paw-engineering/paw-site",
-        "lobs-ai/lobs-core",
-      ];
-
       const allRuns: any[] = [];
-      for (const repo of repos) {
+      for (const repo of CI_REPOS) {
         try {
-          const runs = execSync(
-            `gh run list --repo ${repo} --json name,status,conclusion,createdAt,url --limit ${limit}`,
-            { encoding: "utf-8", timeout: 5000 }
+          const runs = ghExec(
+            `gh run list --repo ${repo} --json name,status,conclusion,createdAt,url --limit ${limit}`
           );
           const parsed = JSON.parse(runs);
           allRuns.push(...parsed.map((run: any) => ({ ...run, repo })));
         } catch {
-          // Repo might not exist or have no CI, skip
+          // skip
         }
       }
 
-      // Sort by createdAt descending
       allRuns.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
       return json(res, { runs: allRuns.slice(0, limit * 2) });
     } catch (err) {
@@ -125,162 +127,106 @@ export async function handleGitHubRequest(
       let recentCommits = 0;
       let totalPRs = 0;
       let failedCI = 0;
+      const seenUrls = new Set<string>();
 
-      // Fetch recent events from thelobsbot
-      try {
-        const userEvents = execSync(
-          `gh api /users/thelobsbot/received_events --jq '.[0:${Math.min(limit, 30)}]'`,
-          { encoding: "utf-8", timeout: 5000 }
-        );
-        const parsed = JSON.parse(userEvents);
-        
-        for (const evt of parsed) {
-          if (evt.type === "PushEvent") {
-            recentCommits += evt.payload?.commits?.length ?? 0;
+      // 1. Fetch recent commits per repo (gives us actual commit data)
+      for (const repo of REPOS) {
+        try {
+          const commits = ghExec(
+            `gh api /repos/${repo}/commits?per_page=5 --jq '[.[] | {sha: .sha, message: .commit.message, author: .author.login, date: .commit.author.date, url: .html_url}]'`
+          );
+          const parsed = JSON.parse(commits);
+          for (const c of parsed) {
+            const url = c.url ?? `https://github.com/${repo}`;
+            if (seenUrls.has(url)) continue;
+            seenUrls.add(url);
+            recentCommits++;
+            // First line of commit message
+            const msg = (c.message ?? "").split("\n")[0].slice(0, 120);
             events.push({
               type: "push",
-              title: `Pushed ${evt.payload?.commits?.length ?? 0} commits`,
-              repo: evt.repo?.name ?? "unknown",
-              author: evt.actor?.login ?? "unknown",
-              timestamp: evt.created_at,
-              url: `https://github.com/${evt.repo?.name}`,
+              title: msg || "Push",
+              repo,
+              author: c.author ?? "unknown",
+              timestamp: c.date,
+              url,
             });
-          } else if (evt.type === "PullRequestEvent") {
+          }
+        } catch {
+          // skip
+        }
+      }
+
+      // 2. Fetch recent PRs across repos
+      for (const repo of REPOS) {
+        try {
+          const prs = ghExec(
+            `gh pr list --repo ${repo} --state all --json title,author,createdAt,url --limit 5`
+          );
+          const parsed = JSON.parse(prs);
+          for (const pr of parsed) {
+            const url = pr.url ?? "";
+            if (seenUrls.has(url)) continue;
+            seenUrls.add(url);
             totalPRs++;
             events.push({
               type: "pr",
-              title: evt.payload?.pull_request?.title ?? "PR",
-              repo: evt.repo?.name ?? "unknown",
-              author: evt.actor?.login ?? "unknown",
-              timestamp: evt.created_at,
-              url: evt.payload?.pull_request?.html_url ?? "",
-            });
-          } else if (evt.type === "IssuesEvent") {
-            events.push({
-              type: "issue",
-              title: evt.payload?.issue?.title ?? "Issue",
-              repo: evt.repo?.name ?? "unknown",
-              author: evt.actor?.login ?? "unknown",
-              timestamp: evt.created_at,
-              url: evt.payload?.issue?.html_url ?? "",
+              title: pr.title ?? "PR",
+              repo,
+              author: pr.author?.login ?? "unknown",
+              timestamp: pr.createdAt,
+              url,
             });
           }
+        } catch {
+          // skip
         }
-      } catch (err) {
-        console.error("Failed to fetch user events:", err);
       }
 
-      // Fetch org events (lobs-ai)
-      try {
-        const lobsOrgEvents = execSync(
-          `gh api /orgs/lobs-ai/events --jq '.[0:10]'`,
-          { encoding: "utf-8", timeout: 5000 }
-        );
-        const parsed = JSON.parse(lobsOrgEvents);
-        
-        for (const evt of parsed) {
-          if (evt.type === "PushEvent") {
-            recentCommits += evt.payload?.commits?.length ?? 0;
-          }
-          // Add to events if not duplicate
-          if (!events.some(e => e.url === evt.payload?.pull_request?.html_url)) {
-            if (evt.type === "PullRequestEvent") {
-              totalPRs++;
-              events.push({
-                type: "pr",
-                title: evt.payload?.pull_request?.title ?? "PR",
-                repo: evt.repo?.name ?? "unknown",
-                author: evt.actor?.login ?? "unknown",
-                timestamp: evt.created_at,
-                url: evt.payload?.pull_request?.html_url ?? "",
-              });
-            }
-          }
-        }
-      } catch (err) {
-        console.error("Failed to fetch lobs-ai org events:", err);
-      }
-
-      // Fetch org events (paw-engineering)
-      try {
-        const pawOrgEvents = execSync(
-          `gh api /orgs/paw-engineering/events --jq '.[0:10]'`,
-          { encoding: "utf-8", timeout: 5000 }
-        );
-        const parsed = JSON.parse(pawOrgEvents);
-        
-        for (const evt of parsed) {
-          if (evt.type === "PushEvent") {
-            recentCommits += evt.payload?.commits?.length ?? 0;
-          }
-          if (!events.some(e => e.url === evt.payload?.pull_request?.html_url)) {
-            if (evt.type === "PullRequestEvent") {
-              totalPRs++;
-              events.push({
-                type: "pr",
-                title: evt.payload?.pull_request?.title ?? "PR",
-                repo: evt.repo?.name ?? "unknown",
-                author: evt.actor?.login ?? "unknown",
-                timestamp: evt.created_at,
-                url: evt.payload?.pull_request?.html_url ?? "",
-              });
-            }
-          }
-        }
-      } catch (err) {
-        console.error("Failed to fetch paw-engineering org events:", err);
-      }
-
-      // Check for failed CI runs
-      const repos = ["paw-engineering/paw-hub", "lobs-ai/lobs-core"];
-      for (const repo of repos) {
+      // 3. Check for failed CI runs
+      for (const repo of CI_REPOS) {
         try {
-          const failedRuns = execSync(
-            `gh run list --repo ${repo} --status failure --json name,conclusion,createdAt,url --limit 3`,
-            { encoding: "utf-8", timeout: 5000 }
+          const failedRuns = ghExec(
+            `gh run list --repo ${repo} --status failure --json name,conclusion,createdAt,url --limit 3`
           );
           const parsed = JSON.parse(failedRuns);
           failedCI += parsed.length;
-          
+
           for (const run of parsed) {
+            const url = run.url ?? "";
+            if (seenUrls.has(url)) continue;
+            seenUrls.add(url);
             events.push({
               type: "ci",
               title: `CI failed: ${run.name}`,
               repo: repo.split("/")[1],
               author: "github-actions",
               timestamp: run.createdAt,
-              url: run.url ?? "",
+              url,
             });
           }
-        } catch (err) {
-          // Repo might not exist or have CI, skip silently
+        } catch {
+          // skip
         }
       }
 
       // Sort by timestamp descending
       events.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
-      // Limit events
-      const limitedEvents = events.slice(0, limit);
-
-      const response: GitHubFeedResponse = {
-        events: limitedEvents,
-        summary: {
-          recentCommits,
-          totalPRs,
-          failedCI,
-        },
+      const feed: GitHubFeedResponse = {
+        events: events.slice(0, limit),
+        summary: { recentCommits, totalPRs, failedCI },
       };
 
       // Update cache
-      cachedFeed = response;
+      cachedFeed = feed;
       cacheTimestamp = now;
 
-      return json(res, response);
+      return json(res, feed);
     } catch (err) {
-      return error(res, `Failed to fetch GitHub feed: ${String(err)}`, 500);
+      return error(res, `Failed to build GitHub feed: ${String(err)}`, 500);
     }
   }
 
-  return error(res, "Invalid GitHub endpoint", 404);
+  return error(res, "Not found", 404);
 }
