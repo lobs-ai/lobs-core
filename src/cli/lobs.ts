@@ -13,6 +13,13 @@
  *   lobs tasks [list|view]    Manage tasks
  *   lobs workers              Show active/recent worker runs
  *
+ * Cron:
+ *   lobs cron [list]           List all cron jobs
+ *   lobs cron add <n> <s> <p>  Add an agent cron job
+ *   lobs cron remove <id>      Remove an agent cron job
+ *   lobs cron toggle <id>      Toggle enabled/disabled
+ *   lobs cron run <id>         Trigger immediate run
+ *
  * Config:
  *   lobs config check         Validate all config files
  *   lobs config show          Dump current config file status
@@ -88,6 +95,20 @@ async function postApi(endpoint: string, body: any): Promise<any> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    }
+    return await res.json();
+  } catch (err) {
+    console.error(colorize(`Error: ${String(err)}`, "red"));
+    console.log(colorize("\nIs lobs-core running? Try: npm start", "dim"));
+    process.exit(1);
+  }
+}
+
+async function deleteApi(endpoint: string): Promise<any> {
+  try {
+    const res = await fetch(`${API_BASE}${endpoint}`, { method: "DELETE" });
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}: ${res.statusText}`);
     }
@@ -564,6 +585,134 @@ function cmdInit() {
   console.log("");
 }
 
+// ── Cron ─────────────────────────────────────────────────────────────────────
+
+function timeAgo(isoStr: string | null): string {
+  if (!isoStr) return "never";
+  const diff = Date.now() - new Date(isoStr).getTime();
+  if (diff < 0) return "future";
+  const secs = Math.floor(diff / 1000);
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+async function cmdCron(subCmd?: string, extraArgs: string[] = []) {
+  // list (default)
+  if (!subCmd || subCmd === "list") {
+    const data = await fetchApi("/scheduler");
+    const jobs = data.jobs as any[];
+
+    console.log(colorize("\n=== Cron Jobs ===\n", "bright"));
+
+    const systemJobs = jobs.filter((j: any) => j.kind === "system");
+    const agentJobs = jobs.filter((j: any) => j.kind === "agent");
+
+    console.log(colorize("System Jobs:", "cyan"));
+    if (systemJobs.length === 0) {
+      console.log("  (none)");
+    } else {
+      for (const j of systemJobs) {
+        const check = j.enabled ? colorize("✓", "green") : colorize("✗", "red");
+        const name = j.name.padEnd(22);
+        const sched = j.schedule.padEnd(16);
+        const last = `last: ${timeAgo(j.last_run)}`;
+        console.log(`  ${check} ${colorize(name, "bright")}${colorize(sched, "dim")}  ${colorize(last, "gray")}`);
+      }
+    }
+
+    console.log("");
+    console.log(colorize("Agent Jobs:", "cyan"));
+    if (agentJobs.length === 0) {
+      console.log("  (none)");
+    } else {
+      for (const j of agentJobs) {
+        const check = j.enabled ? colorize("✓", "green") : colorize("✗", "red");
+        const name = j.name.padEnd(22);
+        const sched = j.schedule.padEnd(16);
+        const last = `last: ${timeAgo(j.last_run)}`;
+        const id = colorize(`[${j.id.slice(0, 8)}]`, "dim");
+        console.log(`  ${check} ${colorize(name, "bright")}${colorize(sched, "dim")}  ${colorize(last, "gray")}  ${id}`);
+      }
+    }
+
+    console.log("");
+    return;
+  }
+
+  // add <name> <schedule> <payload>
+  if (subCmd === "add") {
+    const name = extraArgs[0];
+    const schedule = extraArgs[1];
+    const payload = extraArgs.slice(2).join(" ");
+
+    if (!name || !schedule || !payload) {
+      console.log(colorize("Usage: lobs cron add <name> <schedule> <payload>", "yellow"));
+      console.log(colorize("Example: lobs cron add 'Daily Report' '0 9 * * *' 'Generate daily report'", "dim"));
+      return;
+    }
+
+    const result = await postApi("/scheduler", { name, schedule, payload });
+    console.log(colorize("✓", "green") + ` Created cron job: ${result.name}`);
+    console.log(colorize(`  ID: ${result.id}`, "dim"));
+    console.log(colorize(`  Schedule: ${result.schedule}`, "dim"));
+    return;
+  }
+
+  // remove <id>
+  if (subCmd === "remove" || subCmd === "rm" || subCmd === "delete") {
+    const id = extraArgs[0];
+    if (!id) {
+      console.log(colorize("Usage: lobs cron remove <id>", "yellow"));
+      return;
+    }
+
+    await deleteApi(`/scheduler/${id}`);
+    console.log(colorize("✓", "green") + ` Removed cron job: ${id}`);
+    return;
+  }
+
+  // toggle <id>
+  if (subCmd === "toggle") {
+    const id = extraArgs[0];
+    if (!id) {
+      console.log(colorize("Usage: lobs cron toggle <id>", "yellow"));
+      return;
+    }
+
+    const result = await postApi(`/scheduler/${id}/toggle`, {});
+    const state = result.enabled ? colorize("enabled", "green") : colorize("disabled", "red");
+    console.log(colorize("✓", "green") + ` ${result.name} → ${state}`);
+    return;
+  }
+
+  // run <id>
+  if (subCmd === "run") {
+    const id = extraArgs[0];
+    if (!id) {
+      console.log(colorize("Usage: lobs cron run <id>", "yellow"));
+      return;
+    }
+
+    const result = await postApi(`/scheduler/${id}/run`, {});
+    console.log(colorize("✓", "green") + ` Triggered: ${result.name}`);
+    return;
+  }
+
+  // Unknown subcommand
+  console.log(colorize("Usage: lobs cron [list|add|remove|toggle|run]", "yellow"));
+  console.log("");
+  console.log("  list                         List all cron jobs");
+  console.log("  add <name> <sched> <payload>  Add an agent job");
+  console.log("  remove <id>                  Remove an agent job");
+  console.log("  toggle <id>                  Toggle enabled/disabled");
+  console.log("  run <id>                     Trigger immediate run");
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
@@ -620,6 +769,10 @@ const subcommand = args[1];
     case "health":
       await cmdHealth();
       break;
+
+    case "cron":
+      await cmdCron(subcommand, args.slice(2));
+      break;
     
     case "init":
       cmdInit();
@@ -641,6 +794,13 @@ const subcommand = args[1];
       console.log(colorize("Tasks & Workers:", "cyan"));
       console.log("  lobs tasks [list|view]   Manage tasks");
       console.log("  lobs workers             Show active/recent worker runs");
+      console.log("");
+      console.log(colorize("Cron:", "cyan"));
+      console.log("  lobs cron [list]         List all cron jobs");
+      console.log("  lobs cron add <n> <s> <p>  Add an agent cron job");
+      console.log("  lobs cron remove <id>    Remove an agent cron job");
+      console.log("  lobs cron toggle <id>    Toggle enabled/disabled");
+      console.log("  lobs cron run <id>       Trigger immediate run");
       console.log("");
       console.log(colorize("Config:", "cyan"));
       console.log("  lobs config check        Validate all config files");
