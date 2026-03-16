@@ -921,6 +921,15 @@ export class MainAgent {
           `calling_llm model=${config.modelId} msgs=${messages.length} ctx=${contextChars} sys=${systemChars} total_chars=${contextChars + systemChars}`,
         );
 
+        // Ensure messages end with user role (models like Opus 4.6 reject assistant prefill)
+        if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+          console.warn(`[main-agent] Messages end with assistant — appending synthetic user continue message`);
+          messages.push({
+            role: "user",
+            content: "[System: continue from where you left off]",
+          });
+        }
+
         // Validate message structure before sending to API
         const validation = this.validateMessages(messages);
         if (validation) {
@@ -1514,6 +1523,11 @@ export class MainAgent {
     if (messages[0].role !== "user") {
       return `first message is ${messages[0].role}, must be user`;
     }
+
+    // Last message must be user (models like Opus 4.6 reject assistant prefill)
+    if (messages[messages.length - 1].role !== "user") {
+      return `last message is ${messages[messages.length - 1].role}, must be user (no assistant prefill)`;
+    }
     
     // Must alternate roles (no consecutive same-role)
     for (let i = 1; i < messages.length; i++) {
@@ -1558,6 +1572,11 @@ export class MainAgent {
     // Drop leading assistant messages — API requires first message to be user
     while (messages.length > 0 && messages[0].role === "assistant") {
       messages.shift();
+    }
+
+    // Drop trailing assistant messages — models like Opus 4.6 reject assistant prefill
+    while (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+      messages.pop();
     }
 
     if (messages.length <= 1) return messages;

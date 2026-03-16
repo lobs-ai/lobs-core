@@ -21,6 +21,7 @@ import { GmailService } from "../integrations/gmail.js";
 import { GitHubSyncService } from "../integrations/github.js";
 import { ReflectionService } from "../services/reflection.js";
 import { LearningService } from "../services/learning.js";
+import { runHarvest, getHarvestStats, bulkApprove, exportTrainingJSONL } from "../services/training-harvester.js";
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { getModelForTier } from "../config/models.js";
@@ -842,6 +843,42 @@ function complianceWeeklyReport(_args: Record<string, unknown>, _ctx: CallableCo
   };
 }
 
+// ─── Training Pipeline ──────────────────────────────────────────────────────────
+
+async function trainingRunHarvest(_args: Record<string, unknown>, _ctx: CallableContext): Promise<Record<string, unknown>> {
+  const results = await runHarvest();
+  const total = results.reduce((sum, r) => sum + r.extracted, 0);
+  const skipped = results.reduce((sum, r) => sum + r.skipped, 0);
+  return {
+    ok: true,
+    total_extracted: total,
+    total_skipped: skipped,
+    sources: results.map(r => ({ source: r.source, extracted: r.extracted, skipped: r.skipped })),
+  };
+}
+
+function trainingGetStats(_args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
+  const stats = getHarvestStats();
+  return { ok: true, ...stats };
+}
+
+function trainingBulkApprove(args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
+  const minQuality = (args.min_quality as number) ?? 0.6;
+  const count = bulkApprove(minQuality);
+  return { ok: true, approved: count };
+}
+
+function trainingExport(args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
+  const minQuality = args.min_quality as number | undefined;
+  const taskType = args.task_type as string | undefined;
+  const jsonl = exportTrainingJSONL({ minQuality, taskType });
+  const lines = jsonl ? jsonl.split("\n").filter(Boolean) : [];
+  // Write to a temp file for downstream use
+  const outPath = `/tmp/lobs-training-export-${Date.now()}.jsonl`;
+  writeFileSync(outPath, jsonl);
+  return { ok: true, path: outPath, count: lines.length };
+}
+
 // ─── Registry ─────────────────────────────────────────────────────────────────
 
 const REGISTRY: Record<string, CallableFn | undefined> = {
@@ -900,6 +937,12 @@ const REGISTRY: Record<string, CallableFn | undefined> = {
 
   // Compliance
   "compliance.weekly_report": complianceWeeklyReport,
+
+  // Training pipeline
+  "training.run_harvest": trainingRunHarvest,
+  "training.get_stats": trainingGetStats,
+  "training.bulk_approve": trainingBulkApprove,
+  "training.export": trainingExport,
 };
 
 export function getCallable(name: string): CallableFn | undefined {
@@ -910,15 +953,25 @@ export function listCallables(): string[] {
   return Object.keys(REGISTRY);
 }
 
-export function executeCallable(name: string, args: Record<string, unknown>, ctx: CallableContext): Record<string, unknown> {
+export function executeCallable(name: string, args: Record<string, unknown>, ctx: CallableContext): Record<string, unknown> | Promise<Record<string, unknown>> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const fn = (REGISTRY as any)[name] as ((...a: any[]) => Record<string, unknown>) | undefined;
+  const fn = (REGISTRY as any)[name] as ((...a: any[]) => Record<string, unknown> | Promise<Record<string, unknown>>) | undefined;
   if (!fn) {
     log().warn(`[CALLABLE] Unknown callable: ${name}`);
     return { ok: false, error: `Unknown callable: ${name}` };
   }
   try {
     const result = fn(args, ctx);
+    // Handle async callables transparently
+    if (result && typeof (result as any).then === "function") {
+      return (result as Promise<Record<string, unknown>>).then(r => {
+        log().info(`[CALLABLE] ${name} → ok (async)`);
+        return r;
+      }).catch(e => {
+        log().error(`[CALLABLE] ${name} threw (async): ${String(e)}`);
+        return { ok: false, error: String(e) };
+      });
+    }
     log().info(`[CALLABLE] ${name} → ok`);
     return result;
   } catch (e) {
