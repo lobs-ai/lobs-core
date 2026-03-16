@@ -131,6 +131,10 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
   let stopReason: AgentResult["stopReason"] = "end_turn";
   let continuationCount = 0;
   let thinkingContent = "";
+  
+  // Mutable cwd — tracks the agent's "current directory" across tool calls.
+  // Updated when exec detects cd commands or workdir params.
+  let currentCwd = spec.cwd;
 
   // Loop detection
   const loopDetector = new LoopDetector();
@@ -147,6 +151,10 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       }
 
       turns++;
+      console.debug(
+        `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} ` +
+        `messages=${messages.length} input_tokens=${usage.inputTokens} output_tokens=${usage.outputTokens}`,
+      );
 
       // Check if we need to compact context
       if (shouldCompact(usage.inputTokens, spec.model)) {
@@ -188,6 +196,10 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       // Call the LLM
       let response: LLMResponse;
       try {
+        console.debug(
+          `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} ` +
+          `calling_llm model=${providerConfig.modelId} tools=${tools.length}`,
+        );
         response = await client.createMessage({
           model: providerConfig.modelId,
           system: systemPrompt,
@@ -196,6 +208,11 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
           maxTokens: DEFAULT_MAX_TOKENS,
           thinking: spec.thinking,
         });
+        console.debug(
+          `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} ` +
+          `llm_response stop=${response.stopReason} blocks=${response.content.length} ` +
+          `usage_in=${response.usage.inputTokens} usage_out=${response.usage.outputTokens}`,
+        );
       } catch (error) {
         // Check if it's a timeout
         if (Date.now() - startTime > timeoutMs) {
@@ -270,6 +287,9 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
 
       // Check stop reason
       if (response.stopReason === "end_turn" || response.stopReason === "stop") {
+        console.debug(
+          `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} stop=end_turn`,
+        );
         stopReason = "end_turn";
         break;
       }
@@ -280,6 +300,9 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
         continuationCount++;
         if (continuationCount <= 2) {
           console.log(`[agent-loop] max_tokens hit — requesting continuation (attempt ${continuationCount}/2)`);
+          console.debug(
+            `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} continue_after=max_tokens attempt=${continuationCount}`,
+          );
           messages.push({ role: "assistant", content: response.content as LLMMessage["content"] });
           messages.push({ role: "user", content: [{ type: "text", text: "Continue from where you left off." }] });
           continue;
@@ -305,6 +328,10 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
         // Execute tool calls with hooks
         const results = await Promise.all(
           toolCalls.map(async (call) => {
+            console.debug(
+              `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} ` +
+              `tool_start name=${call.name} id=${call.id}`,
+            );
             // Emit before_tool_call hook
             const beforeToolEvent = await hookRegistry.emit({
               hookName: "before_tool_call",
@@ -342,7 +369,24 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
             }
             
             // Execute the tool
-            const result = await executeTool(call.name, call.input, call.id, spec.cwd);
+            const { result, sideEffects } = await executeTool(call.name, call.input, call.id, currentCwd);
+            
+            // Apply side effects (e.g. cwd changes from cd/workdir)
+            if (sideEffects?.newCwd) {
+              currentCwd = sideEffects.newCwd;
+              console.debug(
+                `[agent-loop] run=${runId} agent=${spec.agent} cwd_changed to=${currentCwd}`,
+              );
+            }
+            
+            const resultContent = typeof result.content === "string"
+              ? result.content
+              : JSON.stringify(result.content);
+            console.debug(
+              `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} ` +
+              `tool_done name=${call.name} id=${call.id} error=${Boolean(result.is_error)} ` +
+              `result_len=${resultContent.length}`,
+            );
             
             // Emit after_tool_call hook
             const afterToolEvent = await hookRegistry.emit({
@@ -443,15 +487,26 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
           role: "user",
           content: results as unknown as LLMMessage["content"],
         });
+        console.debug(
+          `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} ` +
+          `tool_roundtrip count=${results.length} continuing=true`,
+        );
 
         continue;
       }
 
       // Unknown stop reason — end the loop
+      console.debug(
+        `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} ` +
+        `stop=unknown(${response.stopReason})`,
+      );
       break;
     }
 
     if (turns >= maxTurns) {
+      console.debug(
+        `[agent-loop] run=${runId} agent=${spec.agent} reached max_turns=${maxTurns}`,
+      );
       stopReason = "max_turns";
     }
 
@@ -482,6 +537,10 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       stopReason,
       thinkingContent: thinkingContent || undefined,
     };
+    console.debug(
+      `[agent-loop] run=${runId} agent=${spec.agent} finished ` +
+      `stop=${stopReason} turns=${turns} duration_s=${durationSeconds.toFixed(1)}`,
+    );
 
     // Emit after_agent_end hook
     await hookRegistry.emit({
@@ -497,6 +556,10 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
     const durationSeconds = (Date.now() - startTime) / 1000;
     const costUsd = calculateCost(spec.model, usage);
     const message = error instanceof Error ? error.message : String(error);
+    console.debug(
+      `[agent-loop] run=${runId} agent=${spec.agent} errored ` +
+      `turns=${turns} duration_s=${durationSeconds.toFixed(1)} error=${message}`,
+    );
 
     // Emit on_error hook
     await hookRegistry.emit({

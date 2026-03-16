@@ -26,6 +26,8 @@ const MAX_LIVE_TOOL_RESULT_CHARS = 6_000;
 const DEFAULT_MODEL = "strong";  // Chat defaults to strong tier (opus)
 const DEFAULT_CWD = process.env.HOME ?? "/tmp";
 const MAX_CONCURRENT_CHANNELS = 10; // Max simultaneous channel conversations
+const LLM_TURN_TIMEOUT_MS = 180_000;
+const QUEUE_RECOVERY_INTERVAL_MS = 5_000;
 
 /** Image attachment data (base64-encoded) */
 export interface ImageAttachment {
@@ -81,6 +83,7 @@ export class MainAgent {
   private channelChatType = new Map<string, string>();
   // Batched tool progress for Discord — accumulates until near 2000 chars or turn ends
   private discordToolBatches = new Map<string, string[]>();
+  private queueRecoveryTimer: NodeJS.Timeout;
   
   /** EventEmitter for SSE streaming — Nexus subscribes to this */
   public readonly events = new EventEmitter();
@@ -90,6 +93,9 @@ export class MainAgent {
     this.model = model || process.env.LOBS_MODEL || DEFAULT_MODEL;
     this.cwd = process.env.LOBS_CWD || DEFAULT_CWD;
     this.ensureTables();
+    this.queueRecoveryTimer = setInterval(() => {
+      this.recoverQueuedChannels();
+    }, QUEUE_RECOVERY_INTERVAL_MS);
   }
 
   private ensureTables() {
@@ -730,10 +736,16 @@ export class MainAgent {
         fallbackModels,
         maxRetries: 3,
       });
+      let loopIteration = 0;
 
       // Agent loop — LLM ↔ tool execution (no turn limit, timeout handles runaway)
       while (true) {
+        loopIteration++;
         if (this.onTyping) this.onTyping(replyChannelId);
+        console.debug(
+          `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
+          `history=${messages.length} queued=${this.getChannelQueueDepth(replyChannelId)} tools=${tools.length}`,
+        );
 
         // Emit SSE event: thinking (about to call LLM)
         this.events.emit("stream", {
@@ -745,14 +757,22 @@ export class MainAgent {
         // Prune: keep last 3 turns' tool results intact, truncate older ones to 400 chars
         messages = pruneToolResults(messages, 3, 400);
         messages = await this.compactIfNeeded(messages);
+        console.debug(
+          `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
+          `calling_llm model=${config.modelId} compacted_history=${messages.length}`,
+        );
 
-        const response = await client.createMessage({
+        const response = await this.createMessageWithTimeout(client, {
           model: config.modelId,
           system: fullSystem,
           messages,
           tools,
           maxTokens: 16384,
-        });
+        }, replyChannelId);
+        console.debug(
+          `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
+          `llm_response blocks=${response.content.length} stop=${response.stopReason}`,
+        );
 
         let textResponse = "";
         let hasToolUse = false;
@@ -768,6 +788,10 @@ export class MainAgent {
             textResponse += block.text;
           } else if (block.type === "tool_use") {
             hasToolUse = true;
+            console.debug(
+              `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
+              `tool_start name=${block.name} id=${block.id}`,
+            );
 
             const inputPreview = JSON.stringify(block.input).substring(0, 300);
 
@@ -800,12 +824,21 @@ export class MainAgent {
               timestamp: Date.now(),
             } satisfies AgentStreamEvent);
 
-            const result = await executeTool(
+            const { result, sideEffects } = await executeTool(
               block.name,
               block.input as Record<string, unknown>,
               block.id,
               this.cwd,
             );
+            
+            // Apply side effects (e.g. cwd changes from cd/workdir)
+            if (sideEffects?.newCwd) {
+              this.cwd = sideEffects.newCwd;
+              console.debug(
+                `[main-agent.loop] cwd_changed to=${this.cwd}`,
+              );
+            }
+            
             const resultContent = this.truncateLiveToolResult(
               typeof result.content === "string"
                 ? result.content
@@ -817,6 +850,11 @@ export class MainAgent {
               content: resultContent,
               is_error: result.is_error,
             });
+            console.debug(
+              `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
+              `tool_done name=${block.name} id=${block.id} error=${Boolean(result.is_error)} ` +
+              `result_len=${resultContent.length}`,
+            );
 
             // Discord: add result line to batch (on mode only)
             if (this.shouldShowSteps(replyChannelId) && !isNexusChannel) {
@@ -847,6 +885,10 @@ export class MainAgent {
         messages.push({ role: "assistant", content: response.content });
 
         if (hasToolUse) {
+          console.debug(
+            `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
+            `tool_roundtrip count=${toolResults.length} continuing=true`,
+          );
           // Store tool call summary in DB for continuity across restarts
           const toolSummary = toolResults.map((tr) => {
             const toolBlock = response.content.find(
@@ -907,6 +949,10 @@ export class MainAgent {
             });
 
             console.log(`[main-agent] Injected ${midLoopQueued.split("---").length - 1} queued message(s) mid-loop for channel ${replyChannelId.slice(0, 8)}`);
+            console.debug(
+              `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
+              `midloop_queue_injected=true`,
+            );
           }
 
           // Flush any accumulated Discord tool step batch before looping back
@@ -923,6 +969,11 @@ export class MainAgent {
         if (isNoReply && isDirectChat) {
           textResponse = "I'm here — what can I help with?";
         }
+        console.debug(
+          `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
+          `final_candidate len=${textResponse.length} direct=${isDirectChat} ` +
+          `no_reply=${isNoReply} heartbeat=${isRoutineHeartbeat}`,
+        );
 
         // Flush any remaining Discord tool batch before final reply
         await this.flushDiscordToolBatch(replyChannelId);
@@ -988,6 +1039,13 @@ export class MainAgent {
           `[main-agent] Processing completed for ${replyChannelId.slice(0, 16)} ` +
           `in ${Date.now() - conversationStartedAt}ms`,
         );
+        if ((this as any).__conversationRetryCount?.[replyChannelId]) {
+          delete (this as any).__conversationRetryCount[replyChannelId];
+        }
+        console.debug(
+          `[main-agent.loop] channel=${replyChannelId} completed iter=${loopIteration} ` +
+          `duration_ms=${Date.now() - conversationStartedAt}`,
+        );
         break; // Done
       }
     } catch (err) {
@@ -1020,6 +1078,13 @@ export class MainAgent {
         (this as any).__pendingRetry = (this as any).__pendingRetry || {};
         (this as any).__pendingRetry[replyChannelId] = retryDelay;
       } else {
+        if (isTransient) {
+          const retryCount = (this as any).__conversationRetryCount?.[replyChannelId] ?? 0;
+          console.warn(
+            `[main-agent] Transient error will not be retried for ${replyChannelId.slice(0, 12)} ` +
+            `(retry budget exhausted: ${retryCount}/2)`,
+          );
+        }
         // Clear retry counter — either not transient or retries exhausted
         if ((this as any).__conversationRetryCount?.[replyChannelId]) {
           delete (this as any).__conversationRetryCount[replyChannelId];
@@ -1480,5 +1545,71 @@ export class MainAgent {
     
     // Anything else (problems found, actions taken, longer explanations) - send to Discord
     return false;
+  }
+
+  private async createMessageWithTimeout(
+    client: LLMClient,
+    params: {
+      model: string;
+      system: string;
+      messages: LLMMessage[];
+      tools: ReturnType<typeof getToolDefinitions>;
+      maxTokens: number;
+    },
+    channelId: string,
+  ) {
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        client.createMessage(params),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => {
+            reject(new Error(`LLM turn timeout after ${Math.round(LLM_TURN_TIMEOUT_MS / 1000)}s for ${channelId}`));
+          }, LLM_TURN_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
+  private recoverQueuedChannels(): void {
+    if (this.processingChannels.size >= MAX_CONCURRENT_CHANNELS) return;
+
+    for (const [channelId, queue] of this.channelQueues.entries()) {
+      if (this.processingChannels.size >= MAX_CONCURRENT_CHANNELS) break;
+      if (queue.length === 0 || this.processingChannels.has(channelId)) continue;
+
+      console.warn(
+        `[main-agent] Queue recovery starting ${channelId.slice(0, 16)} ` +
+        `(${queue.length} pending, active=${this.processingChannels.size}/${MAX_CONCURRENT_CHANNELS})`,
+      );
+
+      const nextMsg = queue.shift()!;
+      if (queue.length === 0) {
+        this.channelQueues.delete(channelId);
+      }
+
+      this.db
+        .prepare(
+          `INSERT INTO main_agent_messages
+             (id, role, content, author_id, author_name, channel_id, platform_message_id, token_estimate)
+           VALUES (?, 'user', ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          nextMsg.id,
+          nextMsg.content,
+          nextMsg.authorId,
+          nextMsg.authorName,
+          nextMsg.channelId,
+          nextMsg.messageId || null,
+          Math.ceil(nextMsg.content.length / 4),
+        );
+
+      this.updateChannelSession(channelId, "processing", nextMsg.authorId, nextMsg.authorName);
+      this.processConversation(channelId).catch((err) =>
+        console.error(`[main-agent] Queue recovery failed for ${channelId.slice(0, 16)}:`, err),
+      );
+    }
   }
 }

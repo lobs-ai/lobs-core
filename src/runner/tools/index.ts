@@ -2,7 +2,7 @@
  * Tool registry — maps tool names to definitions and executors.
  */
 
-import type { ToolDefinition, ToolName, ToolResult } from "../types.js";
+import type { ToolDefinition, ToolName, ToolResult, ToolExecutionResult, ToolExecutorResult, ToolSideEffects } from "../types.js";
 import { execToolDefinition, execTool } from "./exec.js";
 import { readToolDefinition, readTool, writeToolDefinition, writeTool, editToolDefinition, editTool } from "./files.js";
 import { webSearchToolDefinition, webSearchTool, webFetchToolDefinition, webFetchTool } from "./web.js";
@@ -15,7 +15,9 @@ import { processToolDefinition, processTool } from "./process.js";
 
 export { setReactDiscord };
 
-export type ToolExecutor = (params: Record<string, unknown>, cwd: string) => Promise<string>;
+export type { ToolSideEffects, ToolExecutorResult };
+
+export type ToolExecutor = (params: Record<string, unknown>, cwd: string) => Promise<ToolExecutorResult>;
 
 interface ToolEntry {
   definition: ToolDefinition;
@@ -99,39 +101,51 @@ export function getToolDefinitions(tools: ToolName[]): ToolDefinition[] {
 }
 
 /**
- * Execute a tool call and return the result.
+ * Execute a tool call and return the result with any side effects.
  */
 export async function executeTool(
   toolName: string,
   params: Record<string, unknown>,
   toolUseId: string,
   cwd: string,
-): Promise<ToolResult> {
+): Promise<ToolExecutionResult> {
   const entry = TOOL_REGISTRY[toolName as ToolName];
 
   if (!entry) {
     return {
-      tool_use_id: toolUseId,
-      type: "tool_result",
-      content: `Unknown tool: ${toolName}`,
-      is_error: true,
+      result: {
+        tool_use_id: toolUseId,
+        type: "tool_result",
+        content: `Unknown tool: ${toolName}`,
+        is_error: true,
+      },
     };
   }
 
   try {
-    const result = await entry.execute(params, cwd);
+    const raw = await entry.execute(params, cwd);
+    
+    // Extract side effects if the tool returned them
+    const output = typeof raw === "string" ? raw : raw.output;
+    const sideEffects = typeof raw === "string" ? undefined : raw.sideEffects;
+    
     return {
-      tool_use_id: toolUseId,
-      type: "tool_result",
-      content: result,
+      result: {
+        tool_use_id: toolUseId,
+        type: "tool_result",
+        content: output,
+      },
+      sideEffects,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
-      tool_use_id: toolUseId,
-      type: "tool_result",
-      content: `Error: ${message}`,
-      is_error: true,
+      result: {
+        tool_use_id: toolUseId,
+        type: "tool_result",
+        content: `Error: ${message}`,
+        is_error: true,
+      },
     };
   }
 }

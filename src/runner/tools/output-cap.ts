@@ -5,9 +5,8 @@
  * with offset/limit if needed. This prevents context bloat at the source
  * rather than trying to prune it after the fact.
  *
- * Default: ~3000 chars (~750 tokens). Most tool results are useful in the
- * first 15-30 lines. For files and commands that produce more, we show
- * the head + a hint about how much was cut.
+ * Default: ~8000 chars (~200 lines). For large outputs, we show the head
+ * plus a hint about how much was cut and how to see more.
  */
 
 /** Default max characters for tool output */
@@ -21,8 +20,8 @@ export const DEFAULT_MAX_LINES = 200;
  * Shows the first `maxLines` lines up to `maxChars`, with a truncation notice.
  *
  * @param output   - Full tool output
- * @param maxChars - Character budget (default 3000)
- * @param maxLines - Line budget (default 80)
+ * @param maxChars - Character budget (default 8000)
+ * @param maxLines - Line budget (default 200)
  * @param hint     - Extra hint to add to truncation notice (e.g. "Use offset=N to continue.")
  */
 export function capOutput(

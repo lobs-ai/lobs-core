@@ -98,6 +98,22 @@ export interface ToolResult {
   is_error?: boolean;
 }
 
+/** Side effects a tool can signal back to the agent loop */
+export interface ToolSideEffects {
+  /** Update the agent's current working directory */
+  newCwd?: string;
+}
+
+/** Result from a tool executor — either a plain string or string + side effects */
+export type ToolExecutorResult = string | { output: string; sideEffects: ToolSideEffects };
+
+/** Extended tool execution result with side effects */
+export interface ToolExecutionResult {
+  result: ToolResult;
+  /** Side effects to apply to the agent loop state */
+  sideEffects?: ToolSideEffects;
+}
+
 import { getModelConfig } from "../config/models.js";
 
 /** Cost per million tokens by model (reads from config) */
