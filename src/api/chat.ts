@@ -1,4 +1,4 @@
-import { eq, desc, and, gt, ne, sql } from "drizzle-orm";
+import { eq, desc, and, gt, sql } from "drizzle-orm";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getDb } from "../db/connection.js";
 import { chatSessions, chatMessages } from "../db/schema.js";
@@ -323,11 +323,12 @@ export async function handleChatRequest(
 
       return json(res, {
         sessions: sessions.map(s => {
-          // Count unread non-tool messages since lastReadAt
+          // Count unread assistant text messages since lastReadAt
+          // Only count assistant messages (not tool calls or user messages)
           let unreadCount = 0;
           const conditions = [
             eq(chatMessages.sessionKey, s.sessionKey),
-            ne(chatMessages.role, "tool"),
+            eq(chatMessages.role, "assistant"),
           ];
           if (s.lastReadAt) {
             conditions.push(gt(chatMessages.createdAt, s.lastReadAt));
