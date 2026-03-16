@@ -30,8 +30,22 @@ export interface ToolContext {
 export type ToolExecutor = (params: Record<string, unknown>, cwd: string, context?: ToolContext) => Promise<ToolExecutorResult>;
 
 interface ToolEntry {
-  definition: ToolDefinition;
+  definition: ToolDefinition | (() => ToolDefinition);
   execute: ToolExecutor;
+}
+
+function getDefinition(entry: ToolEntry): ToolDefinition {
+  return typeof entry.definition === "function"
+    ? entry.definition()
+    : entry.definition;
+}
+
+function getAgentControlDefinition(name: ToolDefinition["name"]): ToolDefinition {
+  const definition = AGENT_CONTROL_TOOLS.find((tool) => tool.name === name);
+  if (!definition) {
+    throw new Error(`Missing agent control tool definition: ${name}`);
+  }
+  return definition;
 }
 
 const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
@@ -84,15 +98,15 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
     execute: (params) => memoryWriteTool(params),
   },
   spawn_agent: {
-    definition: AGENT_CONTROL_TOOLS[0],
+    definition: () => getAgentControlDefinition("spawn_agent"),
     execute: (params, cwd, context) => executeSpawnAgent(params, cwd, context?.channelId),
   },
   run_pipeline: {
-    definition: AGENT_CONTROL_TOOLS[1],
+    definition: () => getAgentControlDefinition("run_pipeline"),
     execute: (params, cwd) => executeRunPipeline(params, cwd),
   },
   list_agents: {
-    definition: AGENT_CONTROL_TOOLS[2],
+    definition: () => getAgentControlDefinition("list_agents"),
     execute: (params) => executeListAgents(),
   },
   cron: {
@@ -119,7 +133,7 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
 export function getToolDefinitions(tools: ToolName[]): ToolDefinition[] {
   return tools
     .filter((name) => TOOL_REGISTRY[name])
-    .map((name) => TOOL_REGISTRY[name].definition);
+    .map((name) => getDefinition(TOOL_REGISTRY[name]));
 }
 
 /**
