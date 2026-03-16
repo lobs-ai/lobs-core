@@ -521,21 +521,43 @@ export class MainAgent {
     await this.processConversation(msg.channelId);
   }
 
-  /** Inject a system event (heartbeat, cron, etc.) */
+  /** Inject a system event (heartbeat, cron, subagent completion, etc.) */
   async handleSystemEvent(text: string, channelId?: string): Promise<void> {
     const id = randomUUID();
     const ch = channelId || "system";
-    this.db
-      .prepare(
-        `INSERT INTO main_agent_messages
-           (id, role, content, channel_id, platform_message_id, token_estimate)
-         VALUES (?, 'user', ?, ?, ?, ?)`,
-      )
-      .run(id, `[System Event] ${text}`, ch, null, Math.ceil(text.length / 4));
+    const content = `[System Event] ${text}`;
 
+    // If channel is idle and we have capacity, store + process immediately
     if (!this.processingChannels.has(ch) && this.processingChannels.size < MAX_CONCURRENT_CHANNELS) {
+      this.db
+        .prepare(
+          `INSERT INTO main_agent_messages
+             (id, role, content, channel_id, platform_message_id, token_estimate)
+           VALUES (?, 'user', ?, ?, ?, ?)`,
+        )
+        .run(id, content, ch, null, Math.ceil(text.length / 4));
       await this.processConversation(ch);
+      return;
     }
+
+    // Channel is busy or at capacity — queue so it gets picked up when the channel finishes.
+    // Don't insert into DB yet — the queue drain logic handles that.
+    // This prevents system events (e.g. subagent completions) from being silently dropped.
+    const pendingMsg: PendingMessage = {
+      id,
+      content,
+      authorId: "system",
+      authorName: "System",
+      channelId: ch,
+      timestamp: Date.now(),
+    };
+    if (!this.channelQueues.has(ch)) {
+      this.channelQueues.set(ch, []);
+    }
+    this.channelQueues.get(ch)!.push(pendingMsg);
+    console.log(
+      `[main-agent] System event queued for busy channel ${ch.slice(0, 12)} (${this.channelQueues.get(ch)!.length} pending)`,
+    );
   }
 
   isProcessing(): boolean {

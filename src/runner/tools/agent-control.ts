@@ -201,6 +201,9 @@ export async function executeSpawnAgent(input: Record<string, unknown>, parentCw
     startedAt: Date.now(),
   });
 
+  // Capture the channelId for completion callback (so results go back to the right channel)
+  const originChannel = channelId;
+
   // Fire-and-forget: run in background
   runAgent(spec).then(result => {
     // Remove from active tracking
@@ -221,7 +224,7 @@ export async function executeSpawnAgent(input: Record<string, unknown>, parentCw
       durationSeconds: result.durationSeconds,
     }) + "\n");
 
-    // Announce completion back to main agent
+    // Announce completion back to main agent on the originating channel
     const mainAgent = (globalThis as any).__lobsMainAgent;
     if (mainAgent) {
       const status = result.succeeded ? "✅ completed" : "❌ failed";
@@ -234,7 +237,7 @@ export async function executeSpawnAgent(input: Record<string, unknown>, parentCw
         result.output.slice(0, 3000),
       ].join("\n");
       
-      mainAgent.handleSystemEvent(announcement).catch((err: any) => {
+      mainAgent.handleSystemEvent(announcement, originChannel).catch((err: any) => {
         console.error("[spawn_agent] Failed to announce completion:", err);
       });
     }
@@ -249,7 +252,8 @@ export async function executeSpawnAgent(input: Record<string, unknown>, parentCw
     const mainAgent = (globalThis as any).__lobsMainAgent;
     if (mainAgent) {
       mainAgent.handleSystemEvent(
-        `[Subagent ❌ crashed] ${agentType} (${runId}): ${String(err).slice(0, 500)}`
+        `[Subagent ❌ crashed] ${agentType} (${runId}): ${String(err).slice(0, 500)}`,
+        originChannel,
       ).catch(() => {});
     }
   });
