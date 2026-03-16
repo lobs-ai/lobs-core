@@ -15,6 +15,7 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.79.0",
     "better-sqlite3": "^11.0.0",
     "discord.js": "^14.25.1",
     "drizzle-orm": "^0.39.0",

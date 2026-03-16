@@ -29,6 +29,8 @@ export interface AgentSpec {
   thinking?: {
     type: "enabled";
     budgetTokens: number;
+  } | {
+    type: "adaptive";
   };
 }
 

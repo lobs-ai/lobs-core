@@ -18,7 +18,6 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
-import { readFileSync } from "node:fs";
 import type { ToolDefinition, TokenUsage } from "./types.js";
 import { getKeyPool } from "../services/key-pool.js";
 
@@ -63,6 +62,8 @@ export interface LLMClient {
     thinking?: {
       type: "enabled";
       budgetTokens: number;
+    } | {
+      type: "adaptive";
     };
   }): Promise<LLMResponse>;
 }
@@ -110,6 +111,48 @@ export function parseModelString(model: string): ProviderConfig {
 
   // Default to anthropic
   return { provider: "anthropic", modelId: model };
+}
+
+// ── Claude Code Tool Name Mapping ────────────────────────────────────────────
+// OAuth/setup-token requests must use Claude Code's canonical tool names.
+// Source: https://cchistory.mariozechner.at/data/prompts-2.1.11.md
+
+const claudeCodeVersion = "2.1.75";
+
+const claudeCodeTools = [
+  "Read", "Write", "Edit", "Bash", "Grep", "Glob",
+  "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "KillShell",
+  "NotebookEdit", "Skill", "Task", "TaskOutput", "TodoWrite",
+  "WebFetch", "WebSearch",
+];
+
+const ccToolLookup = new Map(claudeCodeTools.map((t) => [t.toLowerCase(), t]));
+
+/** Map a tool name to Claude Code canonical casing (case-insensitive match). */
+const toClaudeCodeName = (name: string): string =>
+  ccToolLookup.get(name.toLowerCase()) ?? name;
+
+/** Map a Claude Code tool name back to the original tool name from definitions. */
+const fromClaudeCodeName = (name: string, tools?: ToolDefinition[]): string => {
+  if (tools && tools.length > 0) {
+    const lowerName = name.toLowerCase();
+    const matched = tools.find((t) => t.name.toLowerCase() === lowerName);
+    if (matched) return matched.name;
+  }
+  return name;
+};
+
+/**
+ * Check if a model supports adaptive thinking (Opus 4.6 and Sonnet 4.6).
+ * These models have interleaved thinking built-in — the beta header is redundant.
+ */
+function supportsAdaptiveThinking(modelId: string): boolean {
+  return (
+    modelId.includes("opus-4-6") ||
+    modelId.includes("opus-4.6") ||
+    modelId.includes("sonnet-4-6") ||
+    modelId.includes("sonnet-4.6")
+  );
 }
 
 // ── Anthropic Client ─────────────────────────────────────────────────────────
@@ -226,15 +269,26 @@ function resolveAnthropicAuth(sessionId?: string): AnthropicAuth | undefined {
   return undefined;
 }
 
-function createAnthropicNativeClient(auth: AnthropicAuth): Anthropic {
+function createAnthropicNativeClient(auth: AnthropicAuth, modelId: string): Anthropic {
+  // Adaptive thinking models (Opus 4.6, Sonnet 4.6) have interleaved thinking built-in.
+  // The beta header is deprecated/redundant on these models, so skip it.
+  const needsInterleavedBeta = !supportsAdaptiveThinking(modelId);
+
+  const betaFeatures = ["fine-grained-tool-streaming-2025-05-14"];
+  if (needsInterleavedBeta) {
+    betaFeatures.push("interleaved-thinking-2025-05-14");
+  }
+
   if (auth.isOAuth) {
     return new Anthropic({
       apiKey: null,
       authToken: auth.authToken,
+      dangerouslyAllowBrowser: true,
       defaultHeaders: {
         "accept": "application/json",
-        "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
-        "user-agent": "claude-cli/2.1.62",
+        "anthropic-dangerous-direct-browser-access": "true",
+        "anthropic-beta": `claude-code-20250219,oauth-2025-04-20,${betaFeatures.join(",")}`,
+        "user-agent": `claude-cli/${claudeCodeVersion}`,
         "x-app": "cli",
       },
     });
@@ -242,9 +296,11 @@ function createAnthropicNativeClient(auth: AnthropicAuth): Anthropic {
 
   return new Anthropic({
     apiKey: auth.apiKey,
+    dangerouslyAllowBrowser: true,
     defaultHeaders: {
       "accept": "application/json",
-      "anthropic-beta": "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "anthropic-beta": betaFeatures.join(","),
     },
   });
 }
@@ -254,12 +310,14 @@ class AnthropicClient implements LLMClient {
   private sessionId?: string;
   private keyIndex?: number;
   private keyLabel?: string;
+  private isOAuth: boolean;
 
-  constructor(auth: AnthropicAuth, sessionId?: string) {
-    this.client = createAnthropicNativeClient(auth);
+  constructor(auth: AnthropicAuth, modelId: string, sessionId?: string) {
+    this.client = createAnthropicNativeClient(auth, modelId);
     this.sessionId = sessionId;
     this.keyIndex = auth.keyIndex;
     this.keyLabel = auth.keyLabel;
+    this.isOAuth = auth.isOAuth;
   }
 
   async createMessage(params: {
@@ -271,18 +329,41 @@ class AnthropicClient implements LLMClient {
     thinking?: {
       type: "enabled";
       budgetTokens: number;
+    } | {
+      type: "adaptive";
     };
   }): Promise<LLMResponse> {
     console.log(
       `[AnthropicClient] request session=${this.sessionId?.slice(0, 40) ?? "none"} ` +
-      `key=${this.keyLabel ?? `key-${this.keyIndex ?? "env"}`} model=${params.model}`,
+      `key=${this.keyLabel ?? `key-${this.keyIndex ?? "env"}`} model=${params.model} ` +
+      `oauth=${this.isOAuth} stream=true`,
     );
-    // Apply prompt caching — wrap system prompt in array format with cache_control on last block
-    const systemParam: string | Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> =
-      [{ type: "text", text: params.system, cache_control: { type: "ephemeral" } }];
 
-    // Apply cache_control to last tool definition
-    const tools = [...params.tools] as Anthropic.Tool[];
+    // Build system prompt blocks — OAuth requires Claude Code preamble
+    const systemBlocks: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> = [];
+    if (this.isOAuth) {
+      systemBlocks.push({
+        type: "text",
+        text: "You are Claude Code, Anthropic's official CLI for Claude.",
+        cache_control: { type: "ephemeral" },
+      });
+    }
+    systemBlocks.push({
+      type: "text",
+      text: params.system,
+      cache_control: { type: "ephemeral" },
+    });
+
+    // Convert tools — OAuth requires Claude Code canonical tool names
+    const tools: Anthropic.Tool[] = params.tools.map((t) => ({
+      name: this.isOAuth ? toClaudeCodeName(t.name) : t.name,
+      description: t.description,
+      input_schema: {
+        type: "object" as const,
+        properties: (t.input_schema as any).properties || {},
+        required: (t.input_schema as any).required || [],
+      },
+    }));
     if (tools.length > 0) {
       tools[tools.length - 1] = {
         ...tools[tools.length - 1],
@@ -290,27 +371,51 @@ class AnthropicClient implements LLMClient {
       };
     }
 
-    // Build API params — use any to allow thinking extension
+    // Convert messages — map tool_use names for OAuth
+    let messages = params.messages as Anthropic.MessageParam[];
+    if (this.isOAuth) {
+      messages = (params.messages as any[]).map((msg: any) => {
+        if (!Array.isArray(msg.content)) return msg;
+        return {
+          ...msg,
+          content: msg.content.map((block: any) => {
+            if (block.type === "tool_use") {
+              return { ...block, name: toClaudeCodeName(block.name) };
+            }
+            return block;
+          }),
+        };
+      });
+    }
+
+    // Build API params
     const apiParams: any = {
       model: params.model,
-      system: systemParam,
+      system: systemBlocks,
       tools,
-      messages: params.messages as Anthropic.MessageParam[],
+      messages,
+      stream: true,
     };
 
-    // Thinking mode — use max_output_tokens instead of max_tokens when thinking is enabled
+    // Thinking mode
     if (params.thinking) {
-      apiParams.thinking = {
-        type: params.thinking.type,
-        budget_tokens: params.thinking.budgetTokens,
-      };
+      if (params.thinking.type === "adaptive") {
+        apiParams.thinking = { type: "adaptive" };
+      } else {
+        apiParams.thinking = {
+          type: params.thinking.type,
+          budget_tokens: params.thinking.budgetTokens,
+        };
+      }
       apiParams.max_output_tokens = params.maxTokens;
     } else {
       apiParams.max_tokens = params.maxTokens;
     }
 
     try {
-      const response = await this.client.messages.create(apiParams);
+      // Use streaming — matches Claude Code's calling convention
+      const stream = this.client.messages.stream(apiParams);
+      const response = await stream.finalMessage();
 
       const usage: TokenUsage = {
         inputTokens: response.usage.input_tokens,
@@ -336,8 +441,16 @@ class AnthropicClient implements LLMClient {
         anthropicServerErrorsByKey.delete(this.keyIndex);
       }
 
+      // Map tool names back from Claude Code names to original names
+      const content = (response.content as any[]).map((block: any) => {
+        if (block.type === "tool_use" && this.isOAuth) {
+          return { ...block, name: fromClaudeCodeName(block.name, params.tools) };
+        }
+        return block;
+      }) as LLMResponse["content"];
+
       return {
-        content: response.content as LLMResponse["content"],
+        content,
         stopReason: response.stop_reason === "end_turn" ? "end_turn"
           : response.stop_reason === "tool_use" ? "tool_use"
           : response.stop_reason === "max_tokens" ? "max_tokens"
@@ -723,7 +836,7 @@ class ResilientLLMClient implements LLMClient {
     messages: LLMMessage[];
     tools: ToolDefinition[];
     maxTokens: number;
-    thinking?: { type: "enabled"; budgetTokens: number };
+    thinking?: { type: "enabled"; budgetTokens: number } | { type: "adaptive" };
   }): Promise<LLMResponse> {
     const modelsToTry = [this.primaryModel, ...this.fallbackModels];
 
@@ -854,7 +967,7 @@ export function createClient(config: ProviderConfig, sessionId?: string): LLMCli
       }
       throw new Error("No Anthropic credentials found");
     }
-    return new AnthropicClient(auth, sessionId);
+    return new AnthropicClient(auth, config.modelId, sessionId);
   }
 
   // All other providers use OpenAI-compatible API
