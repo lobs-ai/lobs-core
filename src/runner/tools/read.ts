@@ -6,8 +6,8 @@
  */
 
 import { readFileSync, existsSync, statSync } from "node:fs";
-import { resolve, isAbsolute } from "node:path";
 import type { ToolDefinition } from "../types.js";
+import { resolveToCwd } from "./path-utils.js";
 
 // ── Tool Definition ──────────────────────────────────────────────────────────
 
@@ -46,12 +46,6 @@ const BINARY_CHECK_BYTES = 8192;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function resolvePath(filePath: string, cwd: string): string {
-  if (!filePath) throw new Error("path is required");
-  const expanded = filePath.replace(/^~/, process.env.HOME ?? "");
-  return isAbsolute(expanded) ? expanded : resolve(cwd, expanded);
-}
-
 function isBinary(buffer: Buffer): boolean {
   const check = buffer.subarray(0, Math.min(BINARY_CHECK_BYTES, buffer.length));
   for (let i = 0; i < check.length; i++) {
@@ -70,7 +64,7 @@ export async function readTool(
   const filePath = params.path as string;
   if (!filePath) throw new Error("path is required");
 
-  const resolved = resolvePath(filePath, cwd);
+  const resolved = resolveToCwd(filePath, cwd);
 
   if (!existsSync(resolved)) {
     throw new Error(`File not found: ${filePath}`);

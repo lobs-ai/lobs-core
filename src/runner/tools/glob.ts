@@ -5,9 +5,9 @@
  */
 
 import { spawn } from "node:child_process";
-import { resolve, isAbsolute } from "node:path";
 import type { ToolDefinition } from "../types.js";
 import { capOutput } from "./output-cap.js";
+import { resolveToCwd } from "./path-utils.js";
 
 // ── Tool Definition ──────────────────────────────────────────────────────────
 
@@ -54,8 +54,7 @@ export async function globTool(
   if (!pattern) throw new Error("pattern is required");
 
   const basePath = (params.path as string) || ".";
-  const expanded = basePath.replace(/^~/, process.env.HOME ?? "");
-  const resolved = isAbsolute(expanded) ? expanded : resolve(cwd, expanded);
+  const resolved = resolveToCwd(basePath, cwd);
 
   const hasFd = await commandExists("fd");
 

@@ -6,8 +6,8 @@
  */
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { resolve, isAbsolute } from "node:path";
 import type { ToolDefinition } from "../types.js";
+import { resolveToCwd } from "./path-utils.js";
 
 // ── Tool Definition ──────────────────────────────────────────────────────────
 
@@ -42,12 +42,6 @@ export const editToolDefinition: ToolDefinition = {
 const DIFF_CONTEXT_LINES = 3;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-
-function resolvePath(filePath: string, cwd: string): string {
-  if (!filePath) throw new Error("path is required");
-  const expanded = filePath.replace(/^~/, process.env.HOME ?? "");
-  return isAbsolute(expanded) ? expanded : resolve(cwd, expanded);
-}
 
 /**
  * Generate a unified diff snippet showing the change with context lines.
@@ -99,6 +93,42 @@ function generateDiff(
   return parts.join("\n");
 }
 
+/**
+ * Normalize whitespace for fuzzy comparison:
+ * collapse runs of spaces/tabs to single space, trim each line.
+ */
+function normalizeWhitespace(s: string): string {
+  return s
+    .split("\n")
+    .map((line) => line.replace(/[\t ]+/g, " ").trim())
+    .join("\n");
+}
+
+/**
+ * Fuzzy-match old_string against the file content by normalizing whitespace.
+ * Returns the actual text from the file that matches, or null.
+ */
+function fuzzyFindSimilar(content: string, oldStr: string): string | null {
+  const normalizedOld = normalizeWhitespace(oldStr);
+  const oldLines = normalizedOld.split("\n");
+  const contentLines = content.split("\n");
+  const windowSize = oldLines.length;
+
+  if (windowSize === 0 || windowSize > contentLines.length) return null;
+
+  for (let i = 0; i <= contentLines.length - windowSize; i++) {
+    const window = contentLines.slice(i, i + windowSize);
+    const normalizedWindow = window
+      .map((line) => line.replace(/[\t ]+/g, " ").trim())
+      .join("\n");
+    if (normalizedWindow === normalizedOld) {
+      return window.join("\n");
+    }
+  }
+
+  return null;
+}
+
 // ── Tool Implementation ──────────────────────────────────────────────────────
 
 export async function editTool(
@@ -118,7 +148,7 @@ export async function editTool(
     throw new Error("new_string is required");
   }
 
-  const resolved = resolvePath(filePath, cwd);
+  const resolved = resolveToCwd(filePath, cwd);
 
   if (!existsSync(resolved)) {
     throw new Error(`File not found: ${filePath}`);
@@ -132,6 +162,13 @@ export async function editTool(
     // Check if new_string already exists (idempotent edit)
     if (content.includes(newText)) {
       return `The new text already exists in ${filePath} (edit may have already been applied).`;
+    }
+    // Try fuzzy matching to provide a helpful suggestion
+    const similar = fuzzyFindSimilar(content, oldText);
+    if (similar) {
+      throw new Error(
+        `old_string not found in file. Did you mean:\n\`\`\`\n${similar}\n\`\`\``,
+      );
     }
     throw new Error(
       `Could not find the specified text in ${filePath}. ` +

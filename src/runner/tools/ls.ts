@@ -6,9 +6,10 @@
  */
 
 import { readdirSync, statSync, lstatSync } from "node:fs";
-import { resolve, isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import type { ToolDefinition } from "../types.js";
 import { capOutput } from "./output-cap.js";
+import { resolveToCwd } from "./path-utils.js";
 
 // ── Tool Definition ──────────────────────────────────────────────────────────
 
@@ -50,8 +51,7 @@ export async function lsTool(
   cwd: string,
 ): Promise<string> {
   const dirPath = (params.path as string) || ".";
-  const expanded = dirPath.replace(/^~/, process.env.HOME ?? "");
-  const resolved = isAbsolute(expanded) ? expanded : resolve(cwd, expanded);
+  const resolved = resolveToCwd(dirPath, cwd);
   const limit = typeof params.limit === "number" ? Math.max(1, params.limit) : undefined;
 
   let entries;

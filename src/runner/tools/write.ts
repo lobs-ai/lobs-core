@@ -7,8 +7,9 @@
 
 import { existsSync } from "node:fs";
 import { writeFile, mkdir } from "node:fs/promises";
-import { dirname, resolve, isAbsolute } from "node:path";
+import { dirname } from "node:path";
 import type { ToolDefinition } from "../types.js";
+import { resolveToCwd } from "./path-utils.js";
 
 // ── Tool Definition ──────────────────────────────────────────────────────────
 
@@ -33,14 +34,6 @@ export const writeToolDefinition: ToolDefinition = {
   },
 };
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-function resolvePath(filePath: string, cwd: string): string {
-  if (!filePath) throw new Error("path is required");
-  const expanded = filePath.replace(/^~/, process.env.HOME ?? "");
-  return isAbsolute(expanded) ? expanded : resolve(cwd, expanded);
-}
-
 // ── Tool Implementation ──────────────────────────────────────────────────────
 
 export async function writeTool(
@@ -55,7 +48,7 @@ export async function writeTool(
     throw new Error("content is required");
   }
 
-  const resolved = resolvePath(filePath, cwd);
+  const resolved = resolveToCwd(filePath, cwd);
   const dir = dirname(resolved);
 
   // Create parent directories
