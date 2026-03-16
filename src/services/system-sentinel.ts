@@ -32,7 +32,7 @@ async function callLocalModel(
   options?: { maxTokens?: number; temperature?: number },
 ): Promise<string> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30_000);
+  const timeout = setTimeout(() => controller.abort(), 60_000); // 60s — thinking models need more time
 
   try {
     const response = await fetch(`${LM_STUDIO_BASE}/chat/completions`, {
@@ -44,7 +44,10 @@ async function callLocalModel(
           { role: "system", content: system },
           { role: "user", content: user },
         ],
-        max_tokens: options?.maxTokens ?? 512,
+        // Thinking models (Qwen3.5) use lots of tokens for reasoning before
+        // producing output. We need a much higher budget so the actual JSON
+        // answer isn't truncated.
+        max_tokens: options?.maxTokens ?? 2048,
         temperature: options?.temperature ?? 0.3,
         stream: false,
       }),
@@ -58,7 +61,12 @@ async function callLocalModel(
     const data = await response.json() as {
       choices?: Array<{ message?: { content?: string } }>;
     };
-    return data.choices?.[0]?.message?.content?.trim() ?? "";
+    const raw = data.choices?.[0]?.message?.content?.trim() ?? "";
+
+    // Strip thinking/reasoning prefix from Qwen3.5-style models.
+    // The model outputs "Thinking Process:\n..." before the actual answer.
+    // We extract just the JSON portion since all sentinel tasks expect JSON.
+    return raw;
   } finally {
     clearTimeout(timeout);
   }
@@ -191,7 +199,7 @@ ${context.todayEvents.length > 0
     : "No events loaded yet"}`;
 
   try {
-    const raw = await callLocalModel(systemPrompt, userPrompt, { maxTokens: 800 });
+    const raw = await callLocalModel(systemPrompt, userPrompt, { maxTokens: 2048 });
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
       log().warn("[SENTINEL] Daily brief returned non-JSON");

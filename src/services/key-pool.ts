@@ -18,14 +18,19 @@ type Provider = "anthropic" | "openai" | "openrouter";
 interface KeySelection {
   key: string;
   keyIndex: number;
+  label?: string;
 }
 
 interface KeyHealth {
   healthy: boolean;
   lastFailure?: Date;
+  recoverAt?: Date;
   failureReason?: string;
   failureType: "auth" | "rate_limit" | "unknown";
 }
+
+const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 15 * 60 * 1000;
+const DEFAULT_UNKNOWN_COOLDOWN_MS = 60 * 1000;
 
 // ── KeyPool Service ──────────────────────────────────────────────────────────
 
@@ -77,7 +82,7 @@ export class KeyPoolService {
       if (!this.isHealthy(provider, keyIndex)) {
         return undefined; // Only key is unhealthy
       }
-      return { key: keys[0].key, keyIndex };
+      return { key: keys[0].key, keyIndex, label: keys[0].label ?? `key-${keyIndex}` };
     }
 
     // Multi-key — sticky assignment
@@ -92,36 +97,61 @@ export class KeyPoolService {
 
     // Check if current assignment is healthy
     if (this.isHealthy(provider, keyIndex)) {
-      return { key: keys[keyIndex].key, keyIndex };
+      return { key: keys[keyIndex].key, keyIndex, label: keys[keyIndex].label ?? `key-${keyIndex}` };
     }
 
     // Current key unhealthy — find next healthy key
     const nextIndex = this.findNextHealthyKey(provider, keyIndex, keys.length);
     if (nextIndex === undefined) {
-      return undefined; // All keys unhealthy
+      const fallbackIndex = this.findLeastBadKey(provider, keys.length);
+      if (fallbackIndex === undefined) {
+        return undefined;
+      }
+      const fallbackLabel = keys[fallbackIndex]?.label ?? `key-${fallbackIndex}`;
+      console.warn(
+        `[KeyPool] All ${provider} keys unhealthy; falling back to ${fallbackLabel} for session=${sessionId.slice(0, 24)}`,
+      );
+      this.assignments.set(assignmentKey, fallbackIndex);
+      return { key: keys[fallbackIndex].key, keyIndex: fallbackIndex, label: fallbackLabel };
     }
 
     // Reassign to healthy key
     this.assignments.set(assignmentKey, nextIndex);
-    return { key: keys[nextIndex].key, keyIndex: nextIndex };
+    const oldLabel = keys[keyIndex]?.label ?? `key-${keyIndex}`;
+    const newLabel = keys[nextIndex]?.label ?? `key-${nextIndex}`;
+    console.warn(`[KeyPool] Reassigned ${provider} session=${sessionId.slice(0, 24)} from ${oldLabel} -> ${newLabel}`);
+    return { key: keys[nextIndex].key, keyIndex: nextIndex, label: newLabel };
   }
 
   /**
    * Mark a key as failed — triggers failover for sessions using it.
    * @param errorType - auth (401/403), rate_limit (429), or unknown
    */
-  markFailed(provider: Provider, keyIndex: number, error: string, errorType: "auth" | "rate_limit" | "unknown"): void {
+  markFailed(
+    provider: Provider,
+    keyIndex: number,
+    error: string,
+    errorType: "auth" | "rate_limit" | "unknown",
+    cooldownMs?: number,
+  ): void {
     const healthKey = `${provider}:${keyIndex}`;
+    const effectiveCooldownMs =
+      errorType === "rate_limit"
+        ? Math.max(cooldownMs ?? DEFAULT_RATE_LIMIT_COOLDOWN_MS, DEFAULT_RATE_LIMIT_COOLDOWN_MS)
+        : cooldownMs ?? DEFAULT_UNKNOWN_COOLDOWN_MS;
     this.health.set(healthKey, {
       healthy: false,
       lastFailure: new Date(),
+      recoverAt: errorType === "auth" ? undefined : new Date(Date.now() + effectiveCooldownMs),
       failureReason: error,
       failureType: errorType,
     });
 
     const keys = this.pools.get(provider);
     const label = keys?.[keyIndex]?.label ?? `key-${keyIndex}`;
-    console.warn(`[KeyPool] Marked ${provider}/${label} as unhealthy (${errorType}): ${error}`);
+    const cooldownSuffix =
+      errorType === "auth" ? "" : ` cooldown_ms=${effectiveCooldownMs}`;
+    console.warn(`[KeyPool] Marked ${provider}/${label} as unhealthy (${errorType})${cooldownSuffix}: ${error}`);
   }
 
   /**
@@ -131,17 +161,47 @@ export class KeyPoolService {
   getAuth(
     provider: Provider,
     sessionId: string
-  ): { apiKey?: string; authToken?: string; isOAuth: boolean; keyIndex: number } | undefined {
+  ): { apiKey?: string; authToken?: string; isOAuth: boolean; keyIndex: number; label?: string } | undefined {
     const selection = this.getKeySelection(provider, sessionId);
     if (!selection) return undefined;
-    const { key, keyIndex } = selection;
+    const { key, keyIndex, label } = selection;
 
     // Detect OAuth token for Anthropic
     if (provider === "anthropic" && key.includes("sk-ant-oat")) {
-      return { authToken: key, isOAuth: true, keyIndex };
+      return { authToken: key, isOAuth: true, keyIndex, label };
     }
 
-    return { apiKey: key, isOAuth: false, keyIndex };
+    return { apiKey: key, isOAuth: false, keyIndex, label };
+  }
+
+  getPoolHealthSummary(provider: Provider): {
+    total: number;
+    healthy: number;
+    authFailed: number;
+    rateLimited: number;
+    providerFailed: number;
+  } {
+    const keys = this.pools.get(provider) ?? [];
+    const summary = {
+      total: keys.length,
+      healthy: 0,
+      authFailed: 0,
+      rateLimited: 0,
+      providerFailed: 0,
+    };
+
+    for (let i = 0; i < keys.length; i++) {
+      const health = this.health.get(`${provider}:${i}`);
+      if (!health || health.healthy) {
+        summary.healthy += 1;
+        continue;
+      }
+      if (health.failureType === "auth") summary.authFailed += 1;
+      else if (health.failureType === "rate_limit") summary.rateLimited += 1;
+      else summary.providerFailed += 1;
+    }
+
+    return summary;
   }
 
   /**
@@ -151,7 +211,8 @@ export class KeyPoolService {
     provider: Provider,
     sessionId: string,
     error: string,
-    errorType: "auth" | "rate_limit" | "unknown"
+    errorType: "auth" | "rate_limit" | "unknown",
+    cooldownMs?: number,
   ): boolean {
     const assignmentKey = `${provider}:${sessionId}`;
     const keys = this.pools.get(provider);
@@ -163,8 +224,32 @@ export class KeyPoolService {
       this.assignments.set(assignmentKey, keyIndex);
     }
 
-    this.markFailed(provider, keyIndex, error, errorType);
+    this.markFailed(provider, keyIndex, error, errorType, cooldownMs);
     return true;
+  }
+
+  rotateSession(provider: Provider, sessionId: string, reason: string): boolean {
+    const keys = this.pools.get(provider);
+    if (!keys || keys.length <= 1) return false;
+
+    const assignmentKey = `${provider}:${sessionId}`;
+    const currentIndex = this.assignments.get(assignmentKey) ?? this.hashSessionToKey(sessionId, keys.length);
+    const nextIndex = this.findNextHealthyKey(provider, currentIndex, keys.length);
+    const targetIndex = nextIndex ?? this.findLeastBadKey(provider, keys.length, currentIndex);
+    if (targetIndex === undefined || targetIndex === currentIndex) return false;
+
+    this.assignments.set(assignmentKey, targetIndex);
+    const oldLabel = keys[currentIndex]?.label ?? `key-${currentIndex}`;
+    const newLabel = keys[targetIndex]?.label ?? `key-${targetIndex}`;
+    console.warn(
+      `[KeyPool] Rotated ${provider} session=${sessionId.slice(0, 24)} from ${oldLabel} -> ${newLabel} (${reason})`,
+    );
+    return true;
+  }
+
+  getKeyLabel(provider: Provider, keyIndex: number): string | undefined {
+    const keys = this.pools.get(provider);
+    return keys?.[keyIndex]?.label ?? (keys?.[keyIndex] ? `key-${keyIndex}` : undefined);
   }
 
   /**
@@ -209,6 +294,25 @@ export class KeyPoolService {
     return undefined;
   }
 
+  private findLeastBadKey(provider: Provider, poolSize: number, excludeIndex?: number): number | undefined {
+    let bestIndex: number | undefined;
+    let bestTimestamp = Number.POSITIVE_INFINITY;
+
+    for (let i = 0; i < poolSize; i++) {
+      if (i === excludeIndex) continue;
+      const health = this.health.get(`${provider}:${i}`);
+      if (health?.failureType === "auth") continue;
+      if (health?.healthy === false) continue;
+      const ts = health?.lastFailure?.getTime() ?? 0;
+      if (bestIndex === undefined || ts < bestTimestamp) {
+        bestIndex = i;
+        bestTimestamp = ts;
+      }
+    }
+
+    return bestIndex;
+  }
+
   private startRecoveryLoop(): void {
     // Check for key recovery every 60s
     this.recoveryCheckInterval = setInterval(() => {
@@ -223,16 +327,18 @@ export class KeyPoolService {
       if (health.healthy) continue; // Already healthy
       if (!health.lastFailure) continue;
 
-      const elapsed = now.getTime() - health.lastFailure.getTime();
-
       // Auth failures stay down until manual reset
       if (health.failureType === "auth") {
         continue;
       }
 
-      // Rate limit failures recover after 60s
-      if (health.failureType === "rate_limit" && elapsed > 60_000) {
+      if (!health.recoverAt || now < health.recoverAt) {
+        continue;
+      }
+
+      if (health.failureType === "rate_limit") {
         health.healthy = true;
+        health.recoverAt = undefined;
         const [provider, indexStr] = healthKey.split(":");
         const keyIndex = parseInt(indexStr, 10);
         const keys = this.pools.get(provider as Provider);
@@ -241,9 +347,9 @@ export class KeyPoolService {
         continue;
       }
 
-      // Unknown failures recover after 60s
-      if (health.failureType === "unknown" && elapsed > 60_000) {
+      if (health.failureType === "unknown") {
         health.healthy = true;
+        health.recoverAt = undefined;
         const [provider, indexStr] = healthKey.split(":");
         const keyIndex = parseInt(indexStr, 10);
         const keys = this.pools.get(provider as Provider);

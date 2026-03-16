@@ -70,7 +70,7 @@ async function callLocalModel(
   options?: { maxTokens?: number; temperature?: number },
 ): Promise<string> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30_000);
+  const timeout = setTimeout(() => controller.abort(), 60_000); // 60s — thinking models need more time
 
   try {
     const response = await fetch(`${LM_STUDIO_BASE}/chat/completions`, {
@@ -82,7 +82,9 @@ async function callLocalModel(
           { role: "system", content: system },
           { role: "user", content: user },
         ],
-        max_tokens: options?.maxTokens ?? 512,
+        // Thinking models (Qwen3.5) use lots of tokens reasoning before output.
+        // Need higher budget so the actual JSON answer isn't truncated.
+        max_tokens: options?.maxTokens ?? 2048,
         temperature: options?.temperature ?? 0.2,
         stream: false,
       }),

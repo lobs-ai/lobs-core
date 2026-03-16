@@ -119,7 +119,15 @@ interface AnthropicAuth {
   authToken?: string;
   isOAuth: boolean;
   keyIndex?: number;
+  keyLabel?: string;
 }
+
+const ANTHROPIC_5XX_FAILOVER_THRESHOLD = 2;
+const ANTHROPIC_GLOBAL_5XX_QUARANTINE_THRESHOLD = 3;
+const ANTHROPIC_GLOBAL_5XX_QUARANTINE_MS = 10 * 60 * 1000;
+const anthropicServerErrorsBySession = new Map<string, { keyIndex: number; count: number }>();
+const anthropicServerErrorsByKey = new Map<number, number>();
+const RATE_LIMIT_COOLDOWN_FLOOR_MS = 15 * 60 * 1000;
 
 const DEFAULT_KEYPOOL_SESSION_ID = "__default__";
 
@@ -155,6 +163,25 @@ function getRetryAfterSeconds(error: unknown): number | undefined {
   return match ? parseInt(match[1], 10) : undefined;
 }
 
+function getRateLimitCooldownMs(error: unknown): number {
+  const retryAfterSeconds = getRetryAfterSeconds(error);
+  const retryAfterMs = retryAfterSeconds ? retryAfterSeconds * 1000 : 0;
+  return Math.max(retryAfterMs, RATE_LIMIT_COOLDOWN_FLOOR_MS);
+}
+
+function annotateRetryAfter(error: unknown, retryAfterSeconds?: number): Error {
+  const base =
+    error instanceof Error
+      ? error
+      : new Error(String(error));
+
+  if (retryAfterSeconds !== undefined && !base.message.includes("retry_after=")) {
+    base.message = `${base.message} retry_after=${retryAfterSeconds}`;
+  }
+
+  return base;
+}
+
 export function shouldRetryProviderError(error: unknown): boolean | undefined {
   if (error && typeof error === "object" && "headers" in error) {
     const headers = (error as { headers?: unknown }).headers;
@@ -172,7 +199,12 @@ function resolveAnthropicAuth(sessionId?: string): AnthropicAuth | undefined {
   // Try KeyPool first, even for callers without a session-scoped ID.
   const keyPool = getKeyPool();
   const auth = keyPool.getAuth("anthropic", sessionId ?? DEFAULT_KEYPOOL_SESSION_ID);
-  if (auth) return auth as AnthropicAuth;
+  if (auth) {
+    return {
+      ...auth,
+      keyLabel: auth.label,
+    } as AnthropicAuth;
+  }
 
   // If a pool is configured but no healthy key is available, do not fall back to
   // single-key env vars. That would silently reuse a key the pool just marked bad.
@@ -220,10 +252,14 @@ function createAnthropicNativeClient(auth: AnthropicAuth): Anthropic {
 class AnthropicClient implements LLMClient {
   private client: Anthropic;
   private sessionId?: string;
+  private keyIndex?: number;
+  private keyLabel?: string;
 
   constructor(auth: AnthropicAuth, sessionId?: string) {
     this.client = createAnthropicNativeClient(auth);
     this.sessionId = sessionId;
+    this.keyIndex = auth.keyIndex;
+    this.keyLabel = auth.keyLabel;
   }
 
   async createMessage(params: {
@@ -237,6 +273,10 @@ class AnthropicClient implements LLMClient {
       budgetTokens: number;
     };
   }): Promise<LLMResponse> {
+    console.log(
+      `[AnthropicClient] request session=${this.sessionId?.slice(0, 40) ?? "none"} ` +
+      `key=${this.keyLabel ?? `key-${this.keyIndex ?? "env"}`} model=${params.model}`,
+    );
     // Apply prompt caching — wrap system prompt in array format with cache_control on last block
     const systemParam: string | Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> =
       [{ type: "text", text: params.system, cache_control: { type: "ephemeral" } }];
@@ -291,6 +331,11 @@ class AnthropicClient implements LLMClient {
           .join("\n\n");
       }
 
+      if (this.sessionId && this.keyIndex !== undefined) {
+        anthropicServerErrorsBySession.delete(this.sessionId);
+        anthropicServerErrorsByKey.delete(this.keyIndex);
+      }
+
       return {
         content: response.content as LLMResponse["content"],
         stopReason: response.stop_reason === "end_turn" ? "end_turn"
@@ -311,8 +356,48 @@ class AnthropicClient implements LLMClient {
           keyPool.markSessionFailed("anthropic", this.sessionId, message, "auth");
           console.warn("[AnthropicClient] Auth failure detected, rotating key");
         } else if (status === 429) {
-          keyPool.markSessionFailed("anthropic", this.sessionId, message, "rate_limit");
-          console.warn("[AnthropicClient] Rate limit detected, rotating key");
+          const cooldownMs = getRateLimitCooldownMs(error);
+          keyPool.markSessionFailed("anthropic", this.sessionId, message, "rate_limit", cooldownMs);
+          const rotated = keyPool.rotateSession("anthropic", this.sessionId, `rate_limit:${cooldownMs}`);
+          console.warn(
+            `[AnthropicClient] Rate limit detected on key=${this.keyLabel ?? `key-${this.keyIndex ?? "unknown"}`} ` +
+            `cooldown_ms=${cooldownMs} rotated=${rotated}`,
+          );
+        } else if (status && status >= 500 && status < 600 && this.keyIndex !== undefined) {
+          const prev = anthropicServerErrorsBySession.get(this.sessionId);
+          const count = prev && prev.keyIndex === this.keyIndex ? prev.count + 1 : 1;
+          anthropicServerErrorsBySession.set(this.sessionId, { keyIndex: this.keyIndex, count });
+          const globalCount = (anthropicServerErrorsByKey.get(this.keyIndex) ?? 0) + 1;
+          anthropicServerErrorsByKey.set(this.keyIndex, globalCount);
+          console.warn(
+            `[AnthropicClient] Server error ${status} on key=${this.keyLabel ?? `key-${this.keyIndex}`} ` +
+            `session=${this.sessionId.slice(0, 40)} consecutive=${count} global=${globalCount}`,
+          );
+          if (globalCount >= ANTHROPIC_GLOBAL_5XX_QUARANTINE_THRESHOLD) {
+            keyPool.markFailed(
+              "anthropic",
+              this.keyIndex,
+              message,
+              "unknown",
+              ANTHROPIC_GLOBAL_5XX_QUARANTINE_MS,
+            );
+            anthropicServerErrorsByKey.delete(this.keyIndex);
+            console.warn(
+              `[AnthropicClient] Quarantined key=${this.keyLabel ?? `key-${this.keyIndex}`} ` +
+              `after repeated cross-session server errors cooldown_ms=${ANTHROPIC_GLOBAL_5XX_QUARANTINE_MS}`,
+            );
+          }
+          if (count >= ANTHROPIC_5XX_FAILOVER_THRESHOLD) {
+            keyPool.rotateSession(
+              "anthropic",
+              this.sessionId,
+              `repeated_server_errors:${this.keyLabel ?? `key-${this.keyIndex}`}`,
+            );
+            anthropicServerErrorsBySession.delete(this.sessionId);
+            console.warn(
+              `[AnthropicClient] Repeated server errors on ${this.keyLabel ?? `key-${this.keyIndex}`}, rotating key`,
+            );
+          }
         }
       }
 
@@ -540,8 +625,10 @@ class OpenAICompatibleClient implements LLMClient {
           keyPool.markSessionFailed(providerKey, this.sessionId, error.message, "auth");
           console.warn(`[${this.provider}Client] Auth failure detected, rotating key`);
         } else if (response.status === 429) {
-          keyPool.markSessionFailed(providerKey, this.sessionId, error.message, "rate_limit");
-          console.warn(`[${this.provider}Client] Rate limit detected, rotating key`);
+          const cooldownMs = getRateLimitCooldownMs(error);
+          keyPool.markSessionFailed(providerKey, this.sessionId, error.message, "rate_limit", cooldownMs);
+          const rotated = keyPool.rotateSession(providerKey, this.sessionId, `rate_limit:${cooldownMs}`);
+          console.warn(`[${this.provider}Client] Rate limit detected, cooldown_ms=${cooldownMs} rotated=${rotated}`);
         }
       }
 
@@ -676,12 +763,17 @@ class ResilientLLMClient implements LLMClient {
           // Rate limit — retry with backoff
           if (status === 429) {
             const retryAfter = getRetryAfterSeconds(error);
-            const waitTime = retryAfter ?? this.exponentialBackoff(attempt);
-
+            const annotatedError = annotateRetryAfter(error, retryAfter);
             if (attempt < this.maxRetries && shouldRetry !== false) {
-              await this.sleep(waitTime * 1000);
+              console.warn(
+                `[ResilientLLMClient] Rate limit for model ${model}, retrying immediately with rotated key ` +
+                `(attempt ${attempt}/${this.maxRetries}) session=${this.sessionId?.slice(0, 40) ?? "none"} ` +
+                `retry_after=${retryAfter ?? "unknown"}`,
+              );
               continue;
             }
+
+            throw annotatedError;
           }
 
           // Server errors — retry with exponential backoff + jitter
@@ -750,8 +842,18 @@ export function createResilientClient(
  */
 export function createClient(config: ProviderConfig, sessionId?: string): LLMClient {
   if (config.provider === "anthropic") {
+    const keyPool = getKeyPool();
     const auth = resolveAnthropicAuth(sessionId);
-    if (!auth) throw new Error("No Anthropic credentials found");
+    if (!auth) {
+      if (keyPool.hasKeys("anthropic")) {
+        const summary = keyPool.getPoolHealthSummary("anthropic");
+        throw new Error(
+          `all_anthropic_keys_unavailable: configured=${summary.total} healthy=${summary.healthy} ` +
+          `auth_failed=${summary.authFailed} rate_limited=${summary.rateLimited} provider_failed=${summary.providerFailed}`,
+        );
+      }
+      throw new Error("No Anthropic credentials found");
+    }
     return new AnthropicClient(auth, sessionId);
   }
 

@@ -190,6 +190,14 @@ export class MainAgent {
     return channelId.length > 16 ? `${channelId.slice(0, 16)}...` : channelId;
   }
 
+  private extractRetryAfterMs(errorText: string): number | undefined {
+    const match = errorText.match(/retry_after=(\d+)/i);
+    if (!match) return undefined;
+    const seconds = parseInt(match[1], 10);
+    if (!Number.isFinite(seconds)) return undefined;
+    return seconds * 1000;
+  }
+
   private async runChannelHook<T>(
     channelId: string,
     hookName: string,
@@ -317,6 +325,41 @@ export class MainAgent {
   /** Mark queued messages as processed */
   private markQueueProcessed(channelId: string): void {
     this.db.prepare(`UPDATE message_queue SET processed = 1 WHERE channel_id = ? AND processed = 0`).run(channelId);
+  }
+
+  /**
+   * Promote one queued message into main_agent_messages.
+   * This must be idempotent because restart recovery and queue-drain paths can
+   * see the same logical message after a crash/restart boundary.
+   */
+  private promoteQueuedMessage(msg: PendingMessage, source: string): boolean {
+    const res = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO main_agent_messages
+           (id, role, content, author_id, author_name, channel_id, platform_message_id, token_estimate)
+         VALUES (?, 'user', ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        msg.id,
+        msg.content,
+        msg.authorId,
+        msg.authorName,
+        msg.channelId,
+        msg.messageId || null,
+        Math.ceil(msg.content.length / 4),
+      );
+
+    if (res.changes === 0) {
+      console.warn(
+        `[main-agent.queue] channel=${this.channelTag(msg.channelId)} source=${source} duplicate_msg_id=${msg.id.slice(0, 8)} skipped_history_insert=true`,
+      );
+      return false;
+    }
+
+    console.log(
+      `[main-agent.queue] channel=${this.channelTag(msg.channelId)} source=${source} promoted_msg_id=${msg.id.slice(0, 8)}`,
+    );
+    return true;
   }
 
   /** Load unprocessed queued messages from DB (for restart recovery) */
@@ -1239,6 +1282,8 @@ export class MainAgent {
       const isTransient = errStr.includes("500") || errStr.includes("api_error") ||
         errStr.includes("overloaded") || errStr.includes("rate_limit") || errStr.includes("429") ||
         errStr.includes("529");
+      const retryAfterMs = this.extractRetryAfterMs(errStr);
+      const isRateLimit = errStr.includes("rate_limit") || errStr.includes("429");
 
       const currentRetries = this.conversationRetryCount.get(replyChannelId) ?? 0;
 
@@ -1246,14 +1291,18 @@ export class MainAgent {
       if (isTransient && currentRetries < 2) {
         const retryNum = currentRetries + 1;
         this.conversationRetryCount.set(replyChannelId, retryNum);
-        const retryDelay = (10 + Math.random() * 20) * 1000 * retryNum; // 10-30s * attempt
+        const retryDelay = isRateLimit && retryAfterMs
+          ? retryAfterMs
+          : (10 + Math.random() * 20) * 1000 * retryNum; // 10-30s * attempt
         console.log(`[main-agent] Transient error, scheduling retry in ${(retryDelay / 1000).toFixed(0)}s (retry ${retryNum}/2) for channel ${replyChannelId.slice(0, 12)}`);
 
         // Emit a temporary status so frontend knows we're retrying, not dead
         this.events.emit("stream", {
           type: "error",
           channelId: replyChannelId,
-          result: `⏳ API error — retrying in ${Math.round(retryDelay / 1000)}s...`,
+          result: isRateLimit
+            ? `⏳ Rate limited — retrying in ${Math.round(retryDelay / 1000)}s...`
+            : `⏳ API error — retrying in ${Math.round(retryDelay / 1000)}s...`,
           timestamp: Date.now(),
         } satisfies AgentStreamEvent);
 
@@ -1338,22 +1387,7 @@ export class MainAgent {
           this.channelQueues.delete(replyChannelId);
         }
         
-        // Store and process the queued message
-        this.db
-          .prepare(
-            `INSERT INTO main_agent_messages
-               (id, role, content, author_id, author_name, channel_id, platform_message_id, token_estimate)
-             VALUES (?, 'user', ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            nextMsg.id,
-            nextMsg.content,
-            nextMsg.authorId,
-            nextMsg.authorName,
-            nextMsg.channelId,
-            nextMsg.messageId || null,
-            Math.ceil(nextMsg.content.length / 4),
-          );
+        this.promoteQueuedMessage(nextMsg, "same-channel-drain");
         
         this.updateChannelSession(replyChannelId, "processing", nextMsg.authorId, nextMsg.authorName);
         await this.processConversation(replyChannelId);
@@ -1377,21 +1411,7 @@ export class MainAgent {
             this.channelQueues.delete(channelId);
           }
           
-          this.db
-            .prepare(
-              `INSERT INTO main_agent_messages
-                 (id, role, content, author_id, author_name, channel_id, platform_message_id, token_estimate)
-               VALUES (?, 'user', ?, ?, ?, ?, ?, ?)`,
-            )
-            .run(
-              nextMsg.id,
-              nextMsg.content,
-              nextMsg.authorId,
-              nextMsg.authorName,
-              nextMsg.channelId,
-              nextMsg.messageId || null,
-              Math.ceil(nextMsg.content.length / 4),
-            );
+          this.promoteQueuedMessage(nextMsg, "cross-channel-dispatch");
           
           this.updateChannelSession(channelId, "processing", nextMsg.authorId, nextMsg.authorName);
           // Don't await — fire concurrently so we fill all slots
@@ -2008,36 +2028,25 @@ export class MainAgent {
       if (this.processingChannels.size >= MAX_CONCURRENT_CHANNELS) break;
       if (queue.length === 0 || this.processingChannels.has(channelId)) continue;
 
-      console.warn(
-        `[main-agent] Queue recovery starting ${this.channelTag(channelId)} ` +
-        `(${queue.length} pending, active=${this.processingChannels.size}/${MAX_CONCURRENT_CHANNELS})`,
-      );
-
-      const nextMsg = queue.shift()!;
-      if (queue.length === 0) {
-        this.channelQueues.delete(channelId);
-      }
-
-      this.db
-        .prepare(
-          `INSERT INTO main_agent_messages
-             (id, role, content, author_id, author_name, channel_id, platform_message_id, token_estimate)
-           VALUES (?, 'user', ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          nextMsg.id,
-          nextMsg.content,
-          nextMsg.authorId,
-          nextMsg.authorName,
-          nextMsg.channelId,
-          nextMsg.messageId || null,
-          Math.ceil(nextMsg.content.length / 4),
+      try {
+        console.warn(
+          `[main-agent] Queue recovery starting ${this.channelTag(channelId)} ` +
+          `(${queue.length} pending, active=${this.processingChannels.size}/${MAX_CONCURRENT_CHANNELS})`,
         );
 
-      this.updateChannelSession(channelId, "processing", nextMsg.authorId, nextMsg.authorName);
-      this.processConversation(channelId).catch((err) =>
-        console.error(`[main-agent] Queue recovery failed for ${channelId.slice(0, 16)}:`, err),
-      );
+        const nextMsg = queue.shift()!;
+        if (queue.length === 0) {
+          this.channelQueues.delete(channelId);
+        }
+
+        this.promoteQueuedMessage(nextMsg, "timer-recovery");
+        this.updateChannelSession(channelId, "processing", nextMsg.authorId, nextMsg.authorName);
+        this.processConversation(channelId).catch((err) =>
+          console.error(`[main-agent] Queue recovery failed for ${channelId.slice(0, 16)}:`, err),
+        );
+      } catch (err) {
+        console.error(`[main-agent] Queue recovery crashed for ${this.channelTag(channelId)}:`, err);
+      }
     }
   }
 }
