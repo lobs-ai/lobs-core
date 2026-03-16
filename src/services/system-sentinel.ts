@@ -124,10 +124,10 @@ ${context.recentErrors.length > 0
 
     // Log as training data
     logTrainingExample({
-      taskType: "system_state_check",
+      taskType: "system_state",
       systemPrompt,
       userPrompt,
-      context: context as Record<string, unknown>,
+      context: context as unknown as Record<string, unknown>,
       modelOutput: JSON.stringify(result),
       modelUsed: "local",
     });
@@ -205,7 +205,7 @@ ${context.todayEvents.length > 0
       taskType: "daily_brief",
       systemPrompt,
       userPrompt,
-      context: context as Record<string, unknown>,
+      context: context as unknown as Record<string, unknown>,
       modelOutput: JSON.stringify(result),
       modelUsed: "local",
     });
