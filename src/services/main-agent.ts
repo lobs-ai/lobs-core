@@ -1220,10 +1220,10 @@ export class MainAgent {
       );
 
       // Check for pending retry (transient API errors)
-      const pendingRetryDelay = (this as any).__pendingRetry?.[replyChannelId];
-      if (pendingRetryDelay) {
-        delete (this as any).__pendingRetry[replyChannelId];
-        this.scheduleConversationRetry(replyChannelId, pendingRetryDelay);
+      const pendingDelay = this.pendingRetryDelay.get(replyChannelId);
+      if (pendingDelay) {
+        this.pendingRetryDelay.delete(replyChannelId);
+        this.scheduleConversationRetry(replyChannelId, pendingDelay);
         // Still do queue draining below so other channels can start
       }
       
@@ -1239,12 +1239,12 @@ export class MainAgent {
       }
 
       // Mark persisted queue as processed for this channel (skip if retrying)
-      if (!pendingRetryDelay) {
+      if (!pendingDelay) {
         this.markQueueProcessed(replyChannelId);
       }
 
       // Process queued messages for this channel (skip if we have a pending retry)
-      const channelQueue = !pendingRetryDelay ? this.channelQueues.get(replyChannelId) : undefined;
+      const channelQueue = !pendingDelay ? this.channelQueues.get(replyChannelId) : undefined;
       if (channelQueue && channelQueue.length > 0) {
         const nextMsg = channelQueue.shift()!;
         if (channelQueue.length === 0) {
@@ -1274,7 +1274,7 @@ export class MainAgent {
       }
 
       // No more queued messages — mark channel idle (skip if pending retry)
-      if (!pendingRetryDelay) {
+      if (!pendingDelay) {
         this.updateChannelSession(replyChannelId, "idle");
       }
 
@@ -1329,9 +1329,7 @@ export class MainAgent {
       this.updateChannelSession(channelId, "processing");
       this.processConversation(channelId).catch(err => {
         console.error(`[main-agent] Conversation retry failed for ${channelId.slice(0, 12)}:`, err);
-        if ((this as any).__conversationRetryCount?.[channelId]) {
-          delete (this as any).__conversationRetryCount[channelId];
-        }
+        this.conversationRetryCount.delete(channelId);
         this.processingChannels.delete(channelId);
         this.updateChannelSession(channelId, "idle");
       });
