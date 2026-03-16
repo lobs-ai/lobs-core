@@ -26,8 +26,11 @@ const MAX_LIVE_TOOL_RESULT_CHARS = 6_000;
 const DEFAULT_MODEL = "strong";  // Chat defaults to strong tier (opus)
 const DEFAULT_CWD = process.env.HOME ?? "/tmp";
 const MAX_CONCURRENT_CHANNELS = 10; // Max simultaneous channel conversations
-const LLM_TURN_TIMEOUT_MS = 120_000; // 2 minutes per LLM turn (was 3min — too generous)
+const LLM_TURN_TIMEOUT_MS = 600_000; // 10 minutes per LLM turn for long tool-heavy responses
 const QUEUE_RECOVERY_INTERVAL_MS = 5_000;
+const REPLY_HANDLER_TIMEOUT_MS = 15_000;
+const PROGRESS_HANDLER_TIMEOUT_MS = 15_000;
+const TYPING_HANDLER_TIMEOUT_MS = 5_000;
 
 /** Tools that mutate state and must run sequentially (not parallelizable) */
 const SEQUENTIAL_TOOLS = new Set(["exec", "process", "write", "edit", "memory_write", "spawn_agent"]);
@@ -183,6 +186,70 @@ export class MainAgent {
     this.onProgress = handler;
   }
 
+  private channelTag(channelId: string): string {
+    return channelId.length > 16 ? `${channelId.slice(0, 16)}...` : channelId;
+  }
+
+  private async runChannelHook<T>(
+    channelId: string,
+    hookName: string,
+    timeoutMs: number,
+    fn: () => Promise<T> | T,
+  ): Promise<T> {
+    const startedAt = Date.now();
+    console.debug(
+      `[main-agent.hook] channel=${this.channelTag(channelId)} hook=${hookName} start timeout_ms=${timeoutMs}`,
+    );
+    try {
+      const result = await Promise.race([
+        Promise.resolve().then(fn),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`${hookName} timeout after ${timeoutMs}ms for ${channelId}`)),
+            timeoutMs,
+          ),
+        ),
+      ]);
+      console.debug(
+        `[main-agent.hook] channel=${this.channelTag(channelId)} hook=${hookName} done duration_ms=${Date.now() - startedAt}`,
+      );
+      return result;
+    } catch (err) {
+      console.error(
+        `[main-agent.hook] channel=${this.channelTag(channelId)} hook=${hookName} failed duration_ms=${Date.now() - startedAt}:`,
+        err,
+      );
+      throw err;
+    }
+  }
+
+  private async emitTyping(channelId: string): Promise<void> {
+    if (!this.onTyping) return;
+    await this.runChannelHook(channelId, "typing", TYPING_HANDLER_TIMEOUT_MS, () => this.onTyping!(channelId));
+  }
+
+  private async emitProgress(channelId: string, content: string): Promise<void> {
+    if (!this.onProgress) return;
+    await this.runChannelHook(channelId, "progress", PROGRESS_HANDLER_TIMEOUT_MS, () => this.onProgress!(channelId, content));
+  }
+
+  private async emitReply(channelId: string, content: string): Promise<void> {
+    if (!this.onReply) return;
+    const chunks = this.splitMessage(content, 1900);
+    console.log(
+      `[main-agent.reply] channel=${this.channelTag(channelId)} chunks=${chunks.length} total_chars=${content.length}`,
+    );
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      await this.runChannelHook(
+        channelId,
+        `reply_chunk_${i + 1}_of_${chunks.length}`,
+        REPLY_HANDLER_TIMEOUT_MS,
+        () => this.onReply!(channelId, chunk),
+      );
+    }
+  }
+
   /** Check if a channel should see tool step progress (DMs + Nexus only, not group chats) */
   private shouldShowSteps(channelId: string): boolean {
     const chatType = this.channelChatType.get(channelId);
@@ -226,8 +293,7 @@ export class MainAgent {
     const batch = this.discordToolBatches.get(channelId);
     if (!batch || batch.length === 0) return;
     this.discordToolBatches.delete(channelId);
-    if (!this.onProgress) return;
-    await this.onProgress(channelId, batch.join("\n"));
+    await this.emitProgress(channelId, batch.join("\n"));
   }
 
   setSystemPrompt(prompt: string) {
@@ -466,6 +532,11 @@ export class MainAgent {
   /** Handle an incoming user message — queues if channel is busy or at concurrency limit */
   async handleMessage(msg: PendingMessage): Promise<void> {
     const channelId = msg.channelId;
+    console.log(
+      `[main-agent.inbound] channel=${this.channelTag(channelId)} msg=${msg.id.slice(0, 8)} ` +
+      `author=${msg.authorName} len=${msg.content.length} active=${this.processingChannels.has(channelId)} ` +
+      `global_active=${this.processingChannels.size}/${MAX_CONCURRENT_CHANNELS}`,
+    );
 
     // Track chat type for step visibility
     // Default chat type: nexus channels → nexus, system → system, everything else → dm
@@ -488,7 +559,8 @@ export class MainAgent {
       this.channelQueues.get(channelId)!.push(msg);
       const queueDepth = this.channelQueues.get(channelId)!.length;
       console.log(
-        `[main-agent] Queued message for channel ${channelId.slice(0, 8)} (${queueDepth} pending, ${this.processingChannels.size}/${MAX_CONCURRENT_CHANNELS} active)`,
+        `[main-agent.queue] channel=${this.channelTag(channelId)} msg=${msg.id.slice(0, 8)} ` +
+        `depth=${queueDepth} active=${this.processingChannels.size}/${MAX_CONCURRENT_CHANNELS}`,
       );
       // Emit queued event so frontends can show queue status
       this.events.emit("stream", {
@@ -523,6 +595,9 @@ export class MainAgent {
 
     // Update channel session state
     this.updateChannelSession(channelId, "processing", msg.authorId, msg.authorName);
+    console.log(
+      `[main-agent.inbound] channel=${this.channelTag(channelId)} msg=${msg.id.slice(0, 8)} accepted_for_processing=true`,
+    );
 
     await this.processConversation(msg.channelId);
   }
@@ -532,6 +607,10 @@ export class MainAgent {
     const id = randomUUID();
     const ch = channelId || "system";
     const content = `[System Event] ${text}`;
+    console.log(
+      `[main-agent.system] channel=${this.channelTag(ch)} event=${id.slice(0, 8)} len=${content.length} ` +
+      `active=${this.processingChannels.has(ch)} global_active=${this.processingChannels.size}/${MAX_CONCURRENT_CHANNELS}`,
+    );
 
     // If channel is idle and we have capacity, store + process immediately
     if (!this.processingChannels.has(ch) && this.processingChannels.size < MAX_CONCURRENT_CHANNELS) {
@@ -606,10 +685,11 @@ export class MainAgent {
 
   private async processConversation(replyChannelId: string): Promise<void> {
     const conversationStartedAt = Date.now();
+    const sessionId = `main-agent:${replyChannelId}`;
     // Mark this channel as being processed
     this.processingChannels.add(replyChannelId);
     console.log(
-      `[main-agent] Processing started for ${replyChannelId.slice(0, 16)} ` +
+      `[main-agent] Processing started for ${this.channelTag(replyChannelId)} session=${sessionId} ` +
       `(active=${this.processingChannels.size}/${MAX_CONCURRENT_CHANNELS}, queued=${this.getQueueDepth()})`,
     );
 
@@ -632,13 +712,18 @@ export class MainAgent {
     }, timeoutMinutes * 60 * 1000);
 
     try {
-      if (this.onTyping) this.onTyping(replyChannelId);
+      await this.emitTyping(replyChannelId).catch(() => {});
 
       // 1. Get history for this channel
       let history = this.getRecentHistory(replyChannelId);
 
       // 2. Prune old tool outputs
       history = this.pruneHistory(history);
+      const historyChars = history.reduce((sum, msg) => sum + msg.content.length, 0);
+      console.log(
+        `[main-agent.context] channel=${this.channelTag(replyChannelId)} session=${sessionId} ` +
+        `history_messages=${history.length} history_chars=${historyChars} queued=${this.getChannelQueueDepth(replyChannelId)}`,
+      );
 
       // Reload system prompt AND workspace context fresh each turn
       // This ensures edits to SYSTEM_PROMPT.md, SOUL.md, USER.md, MEMORY.md, TOOLS.md
@@ -769,7 +854,7 @@ export class MainAgent {
       // Agent loop — LLM ↔ tool execution (no turn limit, timeout handles runaway)
       while (true) {
         loopIteration++;
-        if (this.onTyping) this.onTyping(replyChannelId);
+        await this.emitTyping(replyChannelId).catch(() => {});
         console.debug(
           `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
           `history=${messages.length} queued=${this.getChannelQueueDepth(replyChannelId)} tools=${tools.length}`,
@@ -880,6 +965,7 @@ export class MainAgent {
           const allReadOnly = toolUseBlocks.every(b => !SEQUENTIAL_TOOLS.has(b.name));
 
           const executeOneBlock = async (block: typeof toolUseBlocks[0]) => {
+            const toolStartedAt = Date.now();
             const { result, sideEffects } = await executeTool(
               block.name,
               block.input as Record<string, unknown>,
@@ -898,7 +984,7 @@ export class MainAgent {
             console.debug(
               `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
               `tool_done name=${block.name} id=${block.id} error=${Boolean(result.is_error)} ` +
-              `result_len=${resultContent.length}`,
+              `result_len=${resultContent.length} duration_ms=${Date.now() - toolStartedAt}`,
             );
             // Discord result line (on mode only)
             if (this.shouldShowSteps(replyChannelId) && !isNexusChannel) {
@@ -1100,9 +1186,7 @@ export class MainAgent {
 
           // Reply
           if (this.onReply) {
-            for (const chunk of this.splitMessage(textResponse, 1900)) {
-              await this.onReply(replyChannelId, chunk);
-            }
+            await this.emitReply(replyChannelId, textResponse);
           }
 
           // Emit SSE event: assistant reply
@@ -1136,7 +1220,7 @@ export class MainAgent {
           timestamp: Date.now(),
         } satisfies AgentStreamEvent);
         console.log(
-          `[main-agent] Processing completed for ${replyChannelId.slice(0, 16)} ` +
+          `[main-agent] Processing completed for ${this.channelTag(replyChannelId)} session=${sessionId} ` +
           `in ${Date.now() - conversationStartedAt}ms`,
         );
         this.conversationRetryCount.delete(replyChannelId);
@@ -1204,7 +1288,7 @@ export class MainAgent {
             } else {
               friendlyMsg = `❌ Error: ${errStr.substring(0, 200)}`;
             }
-            await this.onReply(replyChannelId, friendlyMsg);
+            await this.emitReply(replyChannelId, friendlyMsg);
           }
         } catch (replyErr) {
           console.error("[main-agent] Failed to send error reply:", replyErr);
@@ -1215,7 +1299,7 @@ export class MainAgent {
       // Mark this channel as no longer processing
       this.processingChannels.delete(replyChannelId);
       console.log(
-        `[main-agent] Processing released for ${replyChannelId.slice(0, 16)} ` +
+        `[main-agent] Processing released for ${this.channelTag(replyChannelId)} session=${sessionId} ` +
         `(active=${this.processingChannels.size}/${MAX_CONCURRENT_CHANNELS}, queued=${this.getQueueDepth()})`,
       );
 
@@ -1246,6 +1330,9 @@ export class MainAgent {
       // Process queued messages for this channel (skip if we have a pending retry)
       const channelQueue = !pendingDelay ? this.channelQueues.get(replyChannelId) : undefined;
       if (channelQueue && channelQueue.length > 0) {
+        console.log(
+          `[main-agent.queue] channel=${this.channelTag(replyChannelId)} draining_next=true depth=${channelQueue.length}`,
+        );
         const nextMsg = channelQueue.shift()!;
         if (channelQueue.length === 0) {
           this.channelQueues.delete(replyChannelId);
@@ -1282,6 +1369,9 @@ export class MainAgent {
       for (const [channelId, queue] of this.channelQueues.entries()) {
         if (this.processingChannels.size >= MAX_CONCURRENT_CHANNELS) break;
         if (queue.length > 0 && !this.processingChannels.has(channelId)) {
+          console.log(
+            `[main-agent.queue] channel=${this.channelTag(channelId)} cross_channel_dispatch depth=${queue.length}`,
+          );
           const nextMsg = queue.shift()!;
           if (queue.length === 0) {
             this.channelQueues.delete(channelId);
@@ -1314,8 +1404,12 @@ export class MainAgent {
   }
 
   private scheduleConversationRetry(channelId: string, delayMs: number): void {
+    console.log(
+      `[main-agent.retry] channel=${this.channelTag(channelId)} scheduled delay_ms=${Math.round(delayMs)}`,
+    );
     setTimeout(() => {
       if (this.processingChannels.has(channelId)) {
+        console.warn(`[main-agent.retry] channel=${this.channelTag(channelId)} skipped_already_processing=true`);
         return;
       }
 
@@ -1327,6 +1421,7 @@ export class MainAgent {
       }
 
       this.updateChannelSession(channelId, "processing");
+      console.log(`[main-agent.retry] channel=${this.channelTag(channelId)} retry_start=true`);
       this.processConversation(channelId).catch(err => {
         console.error(`[main-agent] Conversation retry failed for ${channelId.slice(0, 12)}:`, err);
         this.conversationRetryCount.delete(channelId);
@@ -1744,6 +1839,9 @@ export class MainAgent {
   private drainQueue(channelId: string): string {
     const queue = this.channelQueues.get(channelId);
     if (!queue || queue.length === 0) return "";
+    console.log(
+      `[main-agent.queue] channel=${this.channelTag(channelId)} drain_all count=${queue.length}`,
+    );
     
     const texts = queue.map(
       (m, i) =>
@@ -1911,7 +2009,7 @@ export class MainAgent {
       if (queue.length === 0 || this.processingChannels.has(channelId)) continue;
 
       console.warn(
-        `[main-agent] Queue recovery starting ${channelId.slice(0, 16)} ` +
+        `[main-agent] Queue recovery starting ${this.channelTag(channelId)} ` +
         `(${queue.length} pending, active=${this.processingChannels.size}/${MAX_CONCURRENT_CHANNELS})`,
       );
 

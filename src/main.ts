@@ -42,14 +42,14 @@ const LOG_KEEP = 3; // keep lobs.log.1, .2, .3
 const SCAN_INTERVAL_MS = 10_000;
 const HTTP_PORT = parseInt(process.env.LOBS_PORT ?? "9420", 10);
 const ACTIVITY_LOG_INTERVAL_MS = 30_000;
-const LOG_TO_FILE = process.env.LOBS_LOG_TO_FILE === "1";
+const LOG_TO_FILE = process.env.LOBS_LOG_TO_FILE !== "0";
 
-/** Rotate log file if it exceeds LOG_MAX_BYTES. Called once at startup. */
-function rotateLogIfNeeded(): void {
+/** Rotate log file if it exceeds LOG_MAX_BYTES. Returns previous size when rotated. */
+function rotateLogFile(): number | null {
   try {
-    if (!existsSync(LOG_FILE)) return;
+    if (!existsSync(LOG_FILE)) return null;
     const size = statSync(LOG_FILE).size;
-    if (size < LOG_MAX_BYTES) return;
+    if (size < LOG_MAX_BYTES) return null;
 
     // Shift existing rotated logs: .3 → delete, .2 → .3, .1 → .2
     for (let i = LOG_KEEP; i >= 1; i--) {
@@ -61,15 +61,17 @@ function rotateLogIfNeeded(): void {
 
     // Current → .1
     renameSync(LOG_FILE, `${LOG_FILE}.1`);
-    console.log(`[log] Rotated log (was ${(size / 1024 / 1024).toFixed(1)} MB)`);
+    return size;
   } catch (err) {
-    console.warn(`[log] Rotation failed: ${err}`);
+    return null;
   }
 }
 
 function installRuntimeLogging(): void {
   const stdout = process.stdout.write.bind(process.stdout);
   const stderr = process.stderr.write.bind(process.stderr);
+  const mirrorToStdio = process.stdout.isTTY || process.stderr.isTTY || process.env.LOBS_LOG_MIRROR_STDIO === "1";
+  let fileWriteFailed = false;
 
   const stringifyArg = (arg: unknown): string => {
     if (typeof arg === "string") return arg;
@@ -81,18 +83,42 @@ function installRuntimeLogging(): void {
     }
   };
 
+  const writeRaw = (stream: "stdout" | "stderr", line: string) => {
+    if (mirrorToStdio) {
+      (stream === "stderr" ? stderr : stdout)(`${line}\n`);
+    }
+  };
+
+  const appendToLogFile = (line: string) => {
+    if (!LOG_TO_FILE) return;
+    try {
+      mkdirSync(resolve(LOG_FILE, ".."), { recursive: true });
+      const payload = `${line}\n`;
+      const currentSize = existsSync(LOG_FILE) ? statSync(LOG_FILE).size : 0;
+      if (currentSize + Buffer.byteLength(payload) > LOG_MAX_BYTES) {
+        const rotatedBytes = rotateLogFile();
+        if (rotatedBytes !== null) {
+          const notice = `[${new Date().toISOString()}] INFO [log] Rotated log (was ${(rotatedBytes / 1024 / 1024).toFixed(1)} MB)`;
+          appendFileSync(LOG_FILE, `${notice}\n`);
+          writeRaw("stdout", notice);
+        }
+      }
+      appendFileSync(LOG_FILE, payload);
+      fileWriteFailed = false;
+    } catch (err) {
+      if (!fileWriteFailed) {
+        writeRaw("stderr", `[${new Date().toISOString()}] ERROR [log] Failed to append to ${LOG_FILE}: ${String(err)}`);
+      }
+      fileWriteFailed = true;
+    }
+  };
+
   const writeLine = (stream: "stdout" | "stderr", level: string, args: unknown[]) => {
     const timestamp = new Date().toISOString();
     const message = args.map(stringifyArg).join(" ");
     const line = `[${timestamp}] ${level} ${message}`;
-    (stream === "stderr" ? stderr : stdout)(`${line}\n`);
-    if (LOG_TO_FILE) {
-      try {
-        appendFileSync(LOG_FILE, `${line}\n`);
-      } catch {
-        // Avoid recursive logging if file writes fail.
-      }
-    }
+    writeRaw(stream, line);
+    appendToLogFile(line);
   };
 
   console.log = (...args: unknown[]) => writeLine("stdout", "INFO", args);
@@ -115,8 +141,8 @@ const consoleLogger = {
 };
 
 async function main() {
-  // Rotate log before any output
-  rotateLogIfNeeded();
+  // Rotate oversized log before any output
+  rotateLogFile();
   installRuntimeLogging();
 
   console.log("=== lobs-core starting (standalone) ===");
@@ -381,6 +407,10 @@ async function main() {
 
       // Wire incoming messages — Discord messages go to agent
       discordService.onMessage((msg) => {
+        console.log(
+          `[discord->main-agent] inbound id=${msg.messageId.slice(0, 8)} channel=${msg.channelId.slice(0, 16)} ` +
+          `dm=${msg.isDm} mentioned=${msg.isMentioned} len=${msg.content.length}`,
+        );
         mainAgent.handleMessage({
           id: randomUUID(),
           messageId: msg.messageId,
@@ -393,6 +423,11 @@ async function main() {
           isMentioned: msg.isMentioned,
           chatType: msg.isDm ? "dm" : "group",
           images: msg.images,
+        }).catch((err) => {
+          console.error(
+            `[discord->main-agent] failed id=${msg.messageId.slice(0, 8)} channel=${msg.channelId.slice(0, 16)}:`,
+            err,
+          );
         });
       });
 

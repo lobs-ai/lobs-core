@@ -36,6 +36,7 @@ const SECRETS_DIR = resolve(CONFIG_DIR, "secrets");
 const PID_FILE = resolve(HOME, ".lobs/lobs.pid");
 const LOG_FILE = resolve(HOME, ".lobs/lobs.log");
 const LOBS_CORE_DIR = resolve(HOME, "lobs/lobs-core");
+const LAUNCHD_PLIST = resolve(HOME, "Library/LaunchAgents/com.lobs.core.plist");
 
 // ── ANSI Colors ──────────────────────────────────────────────────────────────
 
@@ -120,7 +121,17 @@ function isServerReachable(): Promise<boolean> {
     .catch(() => false);
 }
 
-async function cmdStart() {
+function unloadLaunchdService(): void {
+  if (!existsSync(LAUNCHD_PLIST)) return;
+  try {
+    execSync(`launchctl unload "${LAUNCHD_PLIST}" 2>/dev/null`, { encoding: "utf-8" });
+    console.log(colorize("Unloaded launchd service (won't auto-restart)", "dim"));
+  } catch {
+    // May already be unloaded
+  }
+}
+
+async function cmdStart(opts: { useLaunchd?: boolean } = {}) {
   // Check if already running
   const pid = getRunningPid();
   if (pid) {
@@ -144,11 +155,9 @@ async function cmdStart() {
 
   console.log(colorize("Starting lobs-core...", "cyan"));
 
-  // Re-load launchd service if plist exists (ensures auto-restart on crash)
-  const plistPathStart = resolve(HOME, "Library/LaunchAgents/com.lobs.core.plist");
-  if (existsSync(plistPathStart)) {
+  if (opts.useLaunchd && existsSync(LAUNCHD_PLIST)) {
     try {
-      execSync(`launchctl load "${plistPathStart}" 2>/dev/null`, { encoding: "utf-8" });
+      execSync(`launchctl load "${LAUNCHD_PLIST}" 2>/dev/null`, { encoding: "utf-8" });
       // launchd will start it for us — wait for it
       let launchdStarted = false;
       for (let i = 0; i < 10; i++) {
@@ -168,15 +177,16 @@ async function cmdStart() {
     } catch {
       // Fall through to manual spawn
     }
+  } else if (existsSync(LAUNCHD_PLIST)) {
+    unloadLaunchdService();
+    console.log(colorize("launchd plist exists but was left disabled; use `lobs start --launchd` to opt in", "dim"));
   }
 
-  // Spawn detached process with output going to log file
-  const logFd = require("node:fs").openSync(LOG_FILE, "a");
   const child = spawn("node", [mainJs], {
     cwd: LOBS_CORE_DIR,
     detached: true,
-    stdio: ["ignore", logFd, logFd],
-    env: { ...process.env, LOBS_PORT: String(LOBS_PORT) },
+    stdio: "ignore",
+    env: { ...process.env, LOBS_PORT: String(LOBS_PORT), LOBS_LOG_TO_FILE: "1" },
   });
 
   child.unref();
@@ -207,16 +217,7 @@ async function cmdStart() {
 }
 
 async function cmdStop() {
-  // First, unload launchd service so it doesn't auto-restart
-  const plistPath = resolve(HOME, "Library/LaunchAgents/com.lobs.core.plist");
-  if (existsSync(plistPath)) {
-    try {
-      execSync(`launchctl unload "${plistPath}" 2>/dev/null`, { encoding: "utf-8" });
-      console.log(colorize("Unloaded launchd service (won't auto-restart)", "dim"));
-    } catch {
-      // May already be unloaded
-    }
-  }
+  unloadLaunchdService();
 
   const pid = getRunningPid();
   if (!pid) {
@@ -285,7 +286,7 @@ async function cmdBuild(): Promise<boolean> {
   }
 }
 
-async function cmdRestart(skipBuild = false) {
+async function cmdRestart(skipBuild = false, opts: { useLaunchd?: boolean } = {}) {
   // Auto-build before restart unless --no-build
   if (!skipBuild) {
     const buildOk = await cmdBuild();
@@ -317,7 +318,7 @@ async function cmdRestart(skipBuild = false) {
       await new Promise(r => setTimeout(r, 2000));
     }
   }
-  await cmdStart();
+  await cmdStart(opts);
 }
 
 async function cmdLogs(tail: number = 50) {
@@ -572,7 +573,7 @@ const subcommand = args[1];
 (async () => {
   switch (command) {
     case "start":
-      await cmdStart();
+      await cmdStart({ useLaunchd: args.includes("--launchd") });
       break;
 
     case "stop":
@@ -580,7 +581,7 @@ const subcommand = args[1];
       break;
 
     case "restart":
-      await cmdRestart(args.includes("--no-build"));
+      await cmdRestart(args.includes("--no-build"), { useLaunchd: args.includes("--launchd") });
       break;
 
     case "build":
@@ -630,8 +631,8 @@ const subcommand = args[1];
     default:
       console.log(colorize("\nlobs", "bright") + " — CLI for managing lobs-core\n");
       console.log(colorize("Process:", "cyan"));
-      console.log("  lobs start               Start lobs-core (re-enables auto-restart)");
-      console.log("  lobs stop                Stop and STAY stopped (disables auto-restart)");
+      console.log("  lobs start [--launchd]   Start lobs-core (manual by default)");
+      console.log("  lobs stop                Stop lobs-core and unload launchd");
       console.log("  lobs restart             Build + restart (use --no-build to skip)");
       console.log("  lobs build               Build without restarting");
       console.log("  lobs status              System overview");

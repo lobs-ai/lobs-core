@@ -162,6 +162,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       case "topics":          await handleTopicsRequest(req, res, parts[1], parts); return;
       case "tiles":           await handleTilesRequest(req, res, parts[1], parts); return;
       case "skills":          await handleSkillsRequest(req, res, parts[1]); return;
+      case "training":        await handleTrainingRequest(req, res, parts[1], parts[2]); return;
       default:                error(res, `Unknown resource: ${resource}`, 404); return;
     }
   } catch (err) {
