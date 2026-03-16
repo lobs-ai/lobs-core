@@ -19,6 +19,7 @@ import { runHeartbeat } from "./orchestrator/heartbeat.js";
 import { runCondensationIfNeeded } from "./services/memory-condenser.js";
 import { initCronService } from "./services/cron.js";
 import { runSentinelCheck } from "./services/system-sentinel.js";
+import { runCalendarSentinel } from "./services/calendar-sentinel.js";
 import { randomUUID } from "node:crypto";
 import { browserService } from "./services/browser.js";
 import { skillsService } from "./services/skills.js";
@@ -267,6 +268,22 @@ async function main() {
     enabled: true,
     handler: async () => {
       const result = await runSentinelCheck();
+      if (result.shouldAlert && result.alertMessage) {
+        const mainAgent = (globalThis as any).__lobsMainAgent;
+        if (mainAgent) {
+          await mainAgent.handleSystemEvent(result.alertMessage);
+        }
+      }
+    },
+  });
+
+  cronService.registerSystemJob({
+    id: "calendar-sentinel",
+    name: "Calendar Sentinel",
+    schedule: "*/15 * * * *", // every 15 minutes
+    enabled: true,
+    handler: async () => {
+      const result = await runCalendarSentinel();
       if (result.shouldAlert && result.alertMessage) {
         const mainAgent = (globalThis as any).__lobsMainAgent;
         if (mainAgent) {

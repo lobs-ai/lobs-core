@@ -841,9 +841,7 @@ export class MainAgent {
         }
 
         // Execute tool calls — parallel when safe, sequential when side effects possible
-        // Tools that mutate state (exec, process, write, edit, memory_write, spawn_agent) must run sequentially
         // Read-only tools (read, grep, glob, ls, web_search, web_fetch, memory_search, memory_read) can run in parallel
-        const SEQUENTIAL_TOOLS = new Set(["exec", "process", "write", "edit", "memory_write", "spawn_agent"]);
         const isNexusChannel = replyChannelId.startsWith("nexus:");
 
         if (toolUseBlocks.length > 0) {
@@ -1141,9 +1139,7 @@ export class MainAgent {
           `[main-agent] Processing completed for ${replyChannelId.slice(0, 16)} ` +
           `in ${Date.now() - conversationStartedAt}ms`,
         );
-        if ((this as any).__conversationRetryCount?.[replyChannelId]) {
-          delete (this as any).__conversationRetryCount[replyChannelId];
-        }
+        this.conversationRetryCount.delete(replyChannelId);
         console.debug(
           `[main-agent.loop] channel=${replyChannelId} completed iter=${loopIteration} ` +
           `duration_ms=${Date.now() - conversationStartedAt}`,
@@ -1160,11 +1156,12 @@ export class MainAgent {
         errStr.includes("overloaded") || errStr.includes("rate_limit") || errStr.includes("429") ||
         errStr.includes("529");
 
+      const currentRetries = this.conversationRetryCount.get(replyChannelId) ?? 0;
+
       // Mark for conversation-level retry (handled in finally block)
-      if (isTransient && !((this as any).__conversationRetryCount?.[replyChannelId] >= 2)) {
-        if (!(this as any).__conversationRetryCount) (this as any).__conversationRetryCount = {};
-        (this as any).__conversationRetryCount[replyChannelId] = ((this as any).__conversationRetryCount?.[replyChannelId] ?? 0) + 1;
-        const retryNum = (this as any).__conversationRetryCount[replyChannelId];
+      if (isTransient && currentRetries < 2) {
+        const retryNum = currentRetries + 1;
+        this.conversationRetryCount.set(replyChannelId, retryNum);
         const retryDelay = (10 + Math.random() * 20) * 1000 * retryNum; // 10-30s * attempt
         console.log(`[main-agent] Transient error, scheduling retry in ${(retryDelay / 1000).toFixed(0)}s (retry ${retryNum}/2) for channel ${replyChannelId.slice(0, 12)}`);
 
@@ -1177,20 +1174,16 @@ export class MainAgent {
         } satisfies AgentStreamEvent);
 
         // Schedule retry — runs after finally block releases the channel
-        (this as any).__pendingRetry = (this as any).__pendingRetry || {};
-        (this as any).__pendingRetry[replyChannelId] = retryDelay;
+        this.pendingRetryDelay.set(replyChannelId, retryDelay);
       } else {
         if (isTransient) {
-          const retryCount = (this as any).__conversationRetryCount?.[replyChannelId] ?? 0;
           console.warn(
             `[main-agent] Transient error will not be retried for ${replyChannelId.slice(0, 12)} ` +
-            `(retry budget exhausted: ${retryCount}/2)`,
+            `(retry budget exhausted: ${currentRetries}/2)`,
           );
         }
         // Clear retry counter — either not transient or retries exhausted
-        if ((this as any).__conversationRetryCount?.[replyChannelId]) {
-          delete (this as any).__conversationRetryCount[replyChannelId];
-        }
+        this.conversationRetryCount.delete(replyChannelId);
 
         // Emit error event
         this.events.emit("stream", {
