@@ -26,7 +26,7 @@
  *   lobs init                 Initialize config directory structure
  *
  * Logs:
- *   lobs logs [--tail N]      Show recent log output
+ *   lobs logs [follow] [--tail N]  Show recent log output or follow logs
  */
 
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
@@ -342,7 +342,7 @@ async function cmdRestart(skipBuild = false, opts: { useLaunchd?: boolean } = {}
   await cmdStart(opts);
 }
 
-async function cmdLogs(tail: number = 50) {
+async function cmdLogs(tail: number = 50, follow: boolean = false) {
   if (!existsSync(LOG_FILE)) {
     console.log(colorize("No log file found.", "yellow"));
     console.log(colorize(`  Expected at: ${LOG_FILE}`, "dim"));
@@ -350,6 +350,22 @@ async function cmdLogs(tail: number = 50) {
   }
 
   try {
+    if (follow) {
+      console.log(colorize(`\n=== Following ${LOG_FILE} (last ${tail} lines) ===\n`, "bright"));
+      const child = spawn("tail", ["-n", String(tail), "-f", LOG_FILE], {
+        stdio: "inherit",
+      });
+
+      await new Promise<void>((resolve) => {
+        child.on("exit", () => resolve());
+        child.on("error", (err) => {
+          console.error(colorize(`Error following logs: ${err}`, "red"));
+          resolve();
+        });
+      });
+      return;
+    }
+
     const output = execSync(`tail -n ${tail} "${LOG_FILE}"`, { encoding: "utf-8" });
     console.log(colorize(`\n=== Last ${tail} lines of ${LOG_FILE} ===\n`, "bright"));
     console.log(output);
@@ -762,7 +778,8 @@ const subcommand = args[1];
     case "logs": {
       const tailIdx = args.indexOf("--tail");
       const tail = tailIdx !== -1 ? parseInt(args[tailIdx + 1] || "50", 10) : 50;
-      await cmdLogs(tail);
+      const follow = subcommand === "follow";
+      await cmdLogs(tail, follow);
       break;
     }
     
@@ -809,6 +826,7 @@ const subcommand = args[1];
       console.log("");
       console.log(colorize("Logs:", "cyan"));
       console.log("  lobs logs [--tail N]     Show recent log output");
+      console.log("  lobs logs follow         Follow live log output");
       console.log("");
       console.log(colorize("Config dir:", "dim") + ` ${CONFIG_DIR}`);
       console.log(colorize("Logs:", "dim") + `       ${LOG_FILE}`);
