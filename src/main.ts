@@ -40,6 +40,7 @@ const LOG_KEEP = 3; // keep lobs.log.1, .2, .3
 const SCAN_INTERVAL_MS = 10_000;
 const HTTP_PORT = parseInt(process.env.LOBS_PORT ?? "9420", 10);
 const ACTIVITY_LOG_INTERVAL_MS = 30_000;
+const LOG_TO_FILE = process.env.LOBS_LOG_TO_FILE === "1";
 
 /** Rotate log file if it exceeds LOG_MAX_BYTES. Called once at startup. */
 function rotateLogIfNeeded(): void {
@@ -83,10 +84,12 @@ function installRuntimeLogging(): void {
     const message = args.map(stringifyArg).join(" ");
     const line = `[${timestamp}] ${level} ${message}`;
     (stream === "stderr" ? stderr : stdout)(`${line}\n`);
-    try {
-      appendFileSync(LOG_FILE, `${line}\n`);
-    } catch {
-      // Avoid recursive logging if file writes fail.
+    if (LOG_TO_FILE) {
+      try {
+        appendFileSync(LOG_FILE, `${line}\n`);
+      } catch {
+        // Avoid recursive logging if file writes fail.
+      }
     }
   };
 
@@ -115,6 +118,7 @@ async function main() {
   installRuntimeLogging();
 
   console.log("=== lobs-core starting (standalone) ===");
+  console.log(`[log] debug=${process.env.LOBS_DEBUG ? "enabled" : "disabled"} file_append=${LOG_TO_FILE ? "enabled" : "disabled"}`);
 
   // Set up logger
   setLogger(consoleLogger as any);

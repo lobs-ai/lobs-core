@@ -14,6 +14,7 @@
 
 import { getRawDb } from "../db/connection.js";
 import { log } from "../util/logger.js";
+import { runCondensationIfNeeded } from "../services/memory-condenser.js";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -261,6 +262,20 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
     log().info(`[heartbeat] ✓ System healthy`);
   } else {
     log().info(`[heartbeat] ⚠ System ${status}: ${alerts.join("; ")}`);
+  }
+  
+  // Run daily memory condensation (once per day, safe to call repeatedly)
+  try {
+    const condensed = runCondensationIfNeeded();
+    if (condensed) {
+      log().info(
+        `[heartbeat] Memory condensation: ${condensed.filesCondensed} files condensed, ${condensed.entriesPromoted} promoted`,
+      );
+    }
+  } catch (err) {
+    log().warn(
+      `[heartbeat] Memory condensation failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
   
   return result;

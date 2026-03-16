@@ -74,6 +74,7 @@ class DiscordService {
     try {
       const channel = await this.client.channels.fetch(channelId);
       if (channel && channel.isTextBased()) {
+        console.debug(`[discord] Sending message to ${channelId} (${content.length} chars)`);
         await (channel as TextChannel).send(content);
       }
     } catch (err) {
@@ -153,17 +154,20 @@ class DiscordService {
       // Filter DMs
       if (!msg.guildId) {
         if (!this.config!.dmAllowFrom.includes(msg.author.id)) {
+          console.debug(`[discord] Dropping unauthorized DM from ${msg.author.tag} (${msg.author.id})`);
           return; // Silently drop unauthorized DMs
         }
       } else {
         // Filter guild channels
         const policy = this.config!.channelPolicies[msg.channelId];
         if (!policy || !policy.allow) {
+          console.debug(`[discord] Dropping message from disallowed channel ${msg.channelId}`);
           return; // Silently drop messages from disallowed channels
         }
         
         // Check mention requirement
         if (policy.requireMention && !msg.mentions.has(this.client!.user!)) {
+          console.debug(`[discord] Dropping message from ${msg.channelId} without required mention`);
           return; // Silently drop if mention required but not present
         }
       }
@@ -183,6 +187,11 @@ class DiscordService {
         // Also fetch image attachments
         images = await this.fetchImageAttachments(msg.attachments);
       }
+
+      console.info(
+        `[discord] Accepted inbound message channel=${msg.channelId} dm=${isDm} ` +
+        `mentioned=${isMentioned} author=${msg.author.tag} len=${content.length}`,
+      );
 
       handler({
         messageId: msg.id,
@@ -300,6 +309,7 @@ class DiscordService {
     try {
       const channel = await this.client.channels.fetch(channelId);
       if (channel && channel.isTextBased()) {
+        console.debug(`[discord] Sending typing indicator to ${channelId}`);
         await (channel as TextChannel).sendTyping();
       }
     } catch {

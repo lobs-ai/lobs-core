@@ -312,6 +312,33 @@ describe("MainAgent Session Management", () => {
     expect(resumedSession.status).toBe("processing");
   });
 
+  it("should recover a queued channel when nothing is actively processing it", async () => {
+    const processSpy = vi
+      .spyOn(agent as any, "processConversation")
+      .mockResolvedValue(undefined);
+
+    (agent as any).channelQueues.set("channel-stuck", [{
+      id: "queued-1",
+      content: "hello from queue",
+      authorId: "user-1",
+      authorName: "Alice",
+      channelId: "channel-stuck",
+      timestamp: Date.now(),
+    }]);
+
+    (agent as any).recoverQueuedChannels();
+
+    expect(processSpy).toHaveBeenCalledWith("channel-stuck");
+    expect(agent.getChannelQueueDepth("channel-stuck")).toBe(0);
+
+    const session = db.prepare(`
+      SELECT status, last_author_name FROM channel_sessions WHERE channel_id = ?
+    `).get("channel-stuck") as { status: string; last_author_name: string };
+
+    expect(session.status).toBe("processing");
+    expect(session.last_author_name).toBe("Alice");
+  });
+
   it("should handle empty message history gracefully", () => {
     const history = db.prepare(`
       SELECT * FROM main_agent_messages WHERE channel_id = 'nonexistent'
