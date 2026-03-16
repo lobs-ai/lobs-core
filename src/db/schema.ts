@@ -547,6 +547,8 @@ export const chatSessions = sqliteTable("chat_sessions", {
   complianceRequired: integer("compliance_required", { mode: "boolean" }).notNull().default(false),
   // Per-session tool overrides: JSON array of tool names to disable, e.g. '["exec","write"]'
   disabledTools: text("disabled_tools"),
+  // Tracks when the user last viewed this session (for unread badges)
+  lastReadAt: text("last_read_at"),
 });
 
 export const chatMessages = sqliteTable("chat_messages", {
