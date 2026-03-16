@@ -689,8 +689,8 @@ export class MainAgent {
         });
       }
 
-      // 5. Compact if needed
-      messages = await this.compactIfNeeded(messages);
+      // 5. Compact if needed (pass channelId to persist compaction to DB)
+      messages = await this.compactIfNeeded(messages, replyChannelId);
 
       // Check for per-channel model override
       const sessionRow = this.db.prepare(
@@ -756,7 +756,7 @@ export class MainAgent {
 
         // Prune: keep last 3 turns' tool results intact, truncate older ones to 400 chars
         messages = pruneToolResults(messages, 3, 400);
-        messages = await this.compactIfNeeded(messages);
+        messages = await this.compactIfNeeded(messages, replyChannelId);
         const contextChars = messages.reduce((s, m) =>
           s + (typeof m.content === "string" ? m.content.length : JSON.stringify(m.content).length), 0);
         const systemChars = fullSystem.length;
@@ -1534,7 +1534,13 @@ export class MainAgent {
     });
   }
 
-  private async compactIfNeeded(messages: LLMMessage[]): Promise<LLMMessage[]> {
+  /**
+   * Compact context if it exceeds threshold.
+   * When channelId is provided, compaction is **persisted to the DB** — the
+   * summarized messages are deleted and replaced with a single summary row.
+   * This prevents old chats from re-compacting the same messages every turn.
+   */
+  private async compactIfNeeded(messages: LLMMessage[], channelId?: string): Promise<LLMMessage[]> {
     const COMPACT_THRESHOLD = 120000; // chars
     const HARD_CAP = 250000; // absolute maximum chars to send to API
     const totalChars = messages.reduce(
@@ -1627,11 +1633,72 @@ export class MainAgent {
         console.log(`[main-agent] After hard cap trim: ${calculateContextSize(compacted as LLMMessage[])} chars, ${compacted.length} messages`);
       }
 
+      // Persist compaction to DB so old chats don't re-summarize every turn
+      if (channelId && toSummarize.length > 0) {
+        this.persistCompaction(channelId, toSummarize.length, summary);
+      }
+
       return compacted;
     } catch (err) {
       console.error("[main-agent] Compaction failed:", err);
       // Fall back to simple truncation
       return toKeep;
+    }
+  }
+
+  /**
+   * Persist compaction to DB: delete the oldest N messages for a channel
+   * and replace them with a single summary message.
+   * This prevents old chats from re-compacting the same history every turn.
+   */
+  private persistCompaction(channelId: string, summarizedCount: number, summary: string): void {
+    try {
+      // Get the IDs of the oldest N messages for this channel
+      const oldestRows = this.db.prepare(
+        `SELECT id FROM main_agent_messages
+         WHERE channel_id = ?
+         ORDER BY created_at ASC
+         LIMIT ?`
+      ).all(channelId, summarizedCount) as Array<{ id: string }>;
+
+      if (oldestRows.length === 0) return;
+
+      const ids = oldestRows.map(r => r.id);
+
+      // Use better-sqlite3's transaction() for safe atomic operation
+      const doCompaction = this.db.transaction(() => {
+        // Delete in batches (SQLite has a limit on placeholders)
+        const BATCH_SIZE = 100;
+        for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+          const batch = ids.slice(i, i + BATCH_SIZE);
+          const placeholders = batch.map(() => "?").join(",");
+          this.db.prepare(
+            `DELETE FROM main_agent_messages WHERE id IN (${placeholders})`
+          ).run(...batch);
+        }
+
+        // Insert summary as a user message + assistant ack
+        const summaryId = randomUUID();
+        const ackId = randomUUID();
+        // Use a very old timestamp so the summary sorts before remaining messages
+        const summaryTime = "2000-01-01T00:00:00.000Z";
+
+        this.db.prepare(
+          `INSERT INTO main_agent_messages (id, role, content, channel_id, created_at, token_estimate)
+           VALUES (?, 'user', ?, ?, ?, ?)`
+        ).run(summaryId, `[Conversation summary — earlier messages compacted]\n\n${summary}`, channelId, summaryTime, Math.ceil(summary.length / 4));
+
+        this.db.prepare(
+          `INSERT INTO main_agent_messages (id, role, content, channel_id, created_at, token_estimate)
+           VALUES (?, 'assistant', ?, ?, ?, ?)`
+        ).run(ackId, "Understood, I have the context from the summary. Continuing.", channelId, summaryTime, 15);
+      });
+
+      doCompaction();
+      console.log(`[main-agent] Persisted compaction for ${channelId.slice(0, 12)}: deleted ${ids.length} messages, inserted summary`);
+    } catch (err) {
+      console.error(`[main-agent] Failed to persist compaction for ${channelId.slice(0, 12)}:`, err);
+      // Non-fatal — compaction still works in-memory for this turn
     }
   }
 
