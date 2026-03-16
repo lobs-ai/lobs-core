@@ -325,10 +325,10 @@ export class MainAgent {
       this.updateChannelSession("system", "idle");
     }
 
-    // Don't resume stale sessions — if last activity was >2 minutes ago,
-    // the conversation context is cold and retrying will just waste API calls.
-    // Quick restarts (crash loops) should still be caught.
-    const STALE_THRESHOLD_MS = 2 * 60 * 1000;
+    // Skip sessions that are extremely stale (>30 minutes) — those are likely
+    // leftover from a previous crash where shutdown didn't clean up properly.
+    // Normal restarts (build, migration, etc.) take well under 30 minutes.
+    const STALE_THRESHOLD_MS = 30 * 60 * 1000;
     const now = Date.now();
     for (const s of activeSessions) {
       if (channelsToResume.has(s.channel_id)) {
@@ -341,18 +341,11 @@ export class MainAgent {
       }
     }
 
-    // Only resume channels that have actual unprocessed user messages in the queue.
-    // Sessions that were just "processing" with no queued messages were mid-response
-    // when they crashed — injecting a synthetic restart message creates wasteful loops.
+    // For sessions that were "processing" with no queued user messages,
+    // they were mid-response when the process died. We still want to resume
+    // these — the agent was actively doing work that got interrupted.
+    // We'll inject a synthetic resume message so the agent can pick up where it left off.
     const queuedChannelSet = new Set(queuedChannels.map(q => q.channel_id));
-    for (const channelId of [...channelsToResume]) {
-      if (!queuedChannelSet.has(channelId)) {
-        // No pending user messages — was mid-response, not mid-input
-        console.log(`[main-agent] Skipping ${channelId.slice(0, 12)} — no queued user messages, was mid-response`);
-        channelsToResume.delete(channelId);
-        this.updateChannelSession(channelId, "idle");
-      }
-    }
 
     if (channelsToResume.size === 0) {
       console.log("[main-agent] No recent sessions to resume — all stale or system-only");
@@ -377,10 +370,12 @@ export class MainAgent {
       const lastActivity = session?.last_activity || "unknown";
 
       // Inject a system event so the agent knows it restarted and should continue
+      const hasQueuedMessages = queuedChannelSet.has(channelId);
       const resumeText = [
         `[System] lobs-core restarted. This session was active at ${lastActivity}.`,
         session?.context_summary ? `Last context: ${session.context_summary}` : null,
         persistedMsgs.length > 0 ? `${persistedMsgs.length} queued message(s) waiting.` : null,
+        !hasQueuedMessages ? `You were mid-response when the process died. Continue where you left off.` : null,
         `Orient fast: check state (git status/log, build status) before re-reading files. Act on what you find — don't re-investigate from scratch.`,
       ].filter(Boolean).join(" ");
 
