@@ -18,7 +18,11 @@ class BrowserService {
       await this.launching;
       return this.context!;
     }
-    this.launching = this._launch();
+    this.launching = this._launch().catch((err) => {
+      // Clear so next call retries instead of caching the failure
+      this.launching = null;
+      throw err;
+    });
     await this.launching;
     return this.context!;
   }
