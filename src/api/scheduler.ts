@@ -5,9 +5,9 @@ import { getCronService } from "../services/cron.js";
 /**
  * Scheduler endpoint — manage cron jobs via the CronService.
  *
- * GET  /api/scheduler           → list all cron jobs
- * POST /api/scheduler/:name/toggle → toggle enabled state
- * POST /api/scheduler/:name/run    → trigger immediate run (not yet supported)
+ * GET  /api/scheduler               → list all cron jobs (system + agent)
+ * POST /api/scheduler/:name/toggle  → toggle enabled state
+ * POST /api/scheduler/:name/run     → trigger immediate run
  */
 
 export async function handleSchedulerRequest(
@@ -26,19 +26,14 @@ export async function handleSchedulerRequest(
   // GET /api/scheduler — list all jobs
   if (!jobName && method === "GET") {
     try {
-      const jobs = cronService.listJobs();
+      const jobs = cronService.listAllJobs();
       const formatted = jobs.map((job) => ({
-        name: job.name,
         id: job.id,
-        cron:
-          job.schedule.kind === "cron"
-            ? job.schedule.expr
-            : job.schedule.kind === "every"
-              ? `every ${job.schedule.everyMs}ms`
-              : `at ${job.schedule.at}`,
-        kind: job.schedule.kind,
+        name: job.name,
+        kind: job.kind,
+        schedule: job.schedule,
         enabled: job.enabled,
-        last_run: job.lastFired ?? null,
+        last_run: job.lastRun ?? null,
       }));
 
       return json(res, { jobs: formatted });
@@ -50,18 +45,24 @@ export async function handleSchedulerRequest(
   // POST /api/scheduler/:name/toggle
   if (jobName && parts[2] === "toggle" && method === "POST") {
     try {
-      const jobs = cronService.listJobs();
+      const jobs = cronService.listAllJobs();
       const job = jobs.find((j) => j.name === jobName || j.id === jobName);
 
       if (!job) {
         return error(res, `Job not found: ${jobName}`, 404);
       }
 
-      cronService.toggleJob(job.id, !job.enabled);
+      if (job.kind === "system") {
+        cronService.toggleSystemJob(job.id, !job.enabled);
+      } else {
+        cronService.toggleAgentJob(job.id, !job.enabled);
+      }
 
       return json(res, {
         success: true,
+        id: job.id,
         name: job.name,
+        kind: job.kind,
         enabled: !job.enabled,
       });
     } catch (err) {
@@ -69,13 +70,25 @@ export async function handleSchedulerRequest(
     }
   }
 
-  // POST /api/scheduler/:name/run — not yet wired (would need to expose fireJob)
+  // POST /api/scheduler/:name/run — trigger an immediate run
   if (jobName && parts[2] === "run" && method === "POST") {
-    return error(
-      res,
-      "Manual job triggering not yet supported via API",
-      501,
-    );
+    try {
+      const jobs = cronService.listAllJobs();
+      const job = jobs.find((j) => j.name === jobName || j.id === jobName);
+
+      if (!job) {
+        return error(res, `Job not found: ${jobName}`, 404);
+      }
+
+      const triggered = await cronService.triggerJob(job.id);
+      if (!triggered) {
+        return error(res, `Failed to trigger job: ${jobName}`, 500);
+      }
+
+      return json(res, { success: true, id: job.id, name: job.name });
+    } catch (err) {
+      return error(res, `Failed to run job: ${String(err)}`, 500);
+    }
   }
 
   return error(res, "Invalid scheduler endpoint", 404);

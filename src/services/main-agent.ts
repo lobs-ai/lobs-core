@@ -680,6 +680,11 @@ export class MainAgent {
         return { role, content: m.content };
       });
 
+      // 3b. Merge consecutive same-role messages (DB can have runs of
+      //     assistant messages from multi-step tool use persisted separately).
+      //     The Anthropic API requires strictly alternating user/assistant roles.
+      messages = this.mergeConsecutiveRoles(messages);
+
       // 4. Add queued messages for this channel
       const queuedText = this.drainQueue(replyChannelId);
       if (queuedText) {
@@ -1284,6 +1289,32 @@ export class MainAgent {
     }
 
     return trimmed;
+  }
+
+  /**
+   * Merge consecutive messages with the same role into a single message.
+   * The Anthropic API requires strictly alternating user/assistant roles.
+   * Multi-step tool use gets persisted as separate assistant rows in the DB,
+   * which creates invalid runs of same-role messages when loaded back.
+   */
+  private mergeConsecutiveRoles(messages: LLMMessage[]): LLMMessage[] {
+    if (messages.length <= 1) return messages;
+    const merged: LLMMessage[] = [];
+    for (const msg of messages) {
+      const last = merged[merged.length - 1];
+      if (last && last.role === msg.role) {
+        // Both have string content — concatenate with separator
+        if (typeof last.content === "string" && typeof msg.content === "string") {
+          last.content = last.content + "\n\n" + msg.content;
+        }
+        // If either has array content (image blocks), just keep both as-is
+        // by converting to array form — but this case shouldn't happen in practice
+        // since consecutive assistant messages from tool use are always strings.
+      } else {
+        merged.push({ ...msg });
+      }
+    }
+    return merged;
   }
 
   private pruneHistory(

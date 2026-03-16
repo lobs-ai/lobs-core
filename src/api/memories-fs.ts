@@ -24,7 +24,7 @@ import { json, parseQuery } from "./index.js";
 import { isMemoryCompliant, parseMemoryFrontmatter } from "../util/memory-frontmatter.js";
 import { getAgentCompliantMemoryDir, getAgentDir, getAgentMemoryDir } from "../config/lobs.js";
 
-const AGENTS = ["programmer", "writer", "researcher", "reviewer", "architect"];
+const AGENTS = ["main", "programmer", "writer", "researcher", "reviewer", "architect"];
 
 type ComplianceFilter = "cloud" | "local" | "all";
 

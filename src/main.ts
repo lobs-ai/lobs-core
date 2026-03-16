@@ -15,8 +15,8 @@ import { setLogger, log } from "./util/logger.js";
 import { resolve } from "node:path";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, renameSync, statSync, appendFileSync } from "node:fs";
 import { initToolGate } from "./runner/tool-gate.js";
-import { getCronManager } from "./orchestrator/cron.js";
 import { runHeartbeat } from "./orchestrator/heartbeat.js";
+import { runCondensationIfNeeded } from "./services/memory-condenser.js";
 import { initCronService } from "./services/cron.js";
 import { randomUUID } from "node:crypto";
 import { browserService } from "./services/browser.js";
@@ -222,41 +222,46 @@ async function main() {
   skillsService.loadAll();
   console.log(`Loaded ${skillsService.getAll().length} skills`);
 
-  // Set up cron jobs
-  console.log("Setting up cron jobs...");
-  const cronManager = getCronManager();
-  
-  // Heartbeat: every 30 minutes
-  cronManager.addJob({
+  // Set up unified cron service
+  console.log("Setting up cron service...");
+  const cronService = initCronService(getRawDb());
+  cronService.seedDefaults();
+
+  // Register system jobs (code handlers, not DB-backed)
+  cronService.registerSystemJob({
     id: "heartbeat",
     name: "System Heartbeat",
     schedule: "*/30 * * * *",
     enabled: true,
     handler: async () => {
-      await runHeartbeat();
+      const result = await runHeartbeat();
+      // Only alert the main agent if there are actual issues
+      if (result.alerts.length > 0) {
+        const mainAgent = (globalThis as any).__lobsMainAgent;
+        if (mainAgent) {
+          const alertText = `[HEARTBEAT ALERT] ${result.alerts.join("; ")}`;
+          await mainAgent.handleSystemEvent(alertText);
+        }
+      }
     },
   });
-  
-  // Reflection: disabled (reflection.ts removed during simplification)
-  // cronManager.addJob({
-  //   id: "reflection",
-  //   name: "Self-Reflection",
-  //   schedule: "0 */6 * * *",
-  //   enabled: true,
-  //   handler: async () => {
-  //     // await runReflection();
-  //   },
-  // });
-  
-  cronManager.start();
-  console.log("Cron manager started");
 
-  // Set up DB-backed cron service (agent-managed jobs / reminders)
-  console.log("Setting up cron service...");
-  const cronService = initCronService(getRawDb());
-  cronService.seedDefaults();
+  cronService.registerSystemJob({
+    id: "memory-condensation",
+    name: "Memory Condensation",
+    schedule: "0 4 * * *", // daily at 4am
+    enabled: true,
+    handler: async () => {
+      const result = runCondensationIfNeeded();
+      if (result) {
+        console.log(`[memory-condensation] Condensed ${result.filesCondensed} files, promoted ${result.entriesPromoted} entries`);
+      }
+    },
+  });
+
   // Event handler wired after mainAgent is created (see below)
   cronService.start();
+  console.log("Cron service started");
 
   // Start the control loop
   startControlLoop({} as any, SCAN_INTERVAL_MS);
@@ -434,7 +439,6 @@ async function main() {
     await browserService.shutdown();
     await discordService.shutdown();
     cronService.stop();
-    cronManager.stop();
     stopControlLoop();
     closeDb();
     process.exit(0);

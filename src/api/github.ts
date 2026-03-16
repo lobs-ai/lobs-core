@@ -170,33 +170,64 @@ export async function handleGitHubRequest(
         console.error("Failed to fetch user events:", err);
       }
 
+      // Helper to process org events into the events array
+      function processOrgEvents(parsed: any[]) {
+        for (const evt of parsed) {
+          const repo = evt.repo?.name ?? "unknown";
+          const author = evt.actor?.login ?? "unknown";
+          const ts = evt.created_at;
+
+          if (evt.type === "PushEvent") {
+            const commitCount = evt.payload?.commits?.length ?? 0;
+            recentCommits += commitCount;
+            const repoShort = repo.includes("/") ? repo : repo;
+            const pushUrl = `https://github.com/${repo}`;
+            if (!events.some(e => e.type === "push" && e.url === pushUrl && e.author === author && e.timestamp === ts)) {
+              events.push({
+                type: "push",
+                title: `Pushed ${commitCount} commit${commitCount !== 1 ? "s" : ""}`,
+                repo,
+                author,
+                timestamp: ts,
+                url: pushUrl,
+              });
+            }
+          } else if (evt.type === "PullRequestEvent") {
+            const prUrl = evt.payload?.pull_request?.html_url ?? "";
+            if (!events.some(e => e.url === prUrl)) {
+              totalPRs++;
+              events.push({
+                type: "pr",
+                title: evt.payload?.pull_request?.title ?? "PR",
+                repo,
+                author,
+                timestamp: ts,
+                url: prUrl,
+              });
+            }
+          } else if (evt.type === "IssuesEvent") {
+            const issueUrl = evt.payload?.issue?.html_url ?? "";
+            if (!events.some(e => e.url === issueUrl)) {
+              events.push({
+                type: "issue",
+                title: evt.payload?.issue?.title ?? "Issue",
+                repo,
+                author,
+                timestamp: ts,
+                url: issueUrl,
+              });
+            }
+          }
+        }
+      }
+
       // Fetch org events (lobs-ai)
       try {
         const lobsOrgEvents = execSync(
           `gh api /orgs/lobs-ai/events --jq '.[0:10]'`,
           { encoding: "utf-8", timeout: 5000 }
         );
-        const parsed = JSON.parse(lobsOrgEvents);
-        
-        for (const evt of parsed) {
-          if (evt.type === "PushEvent") {
-            recentCommits += evt.payload?.commits?.length ?? 0;
-          }
-          // Add to events if not duplicate
-          if (!events.some(e => e.url === evt.payload?.pull_request?.html_url)) {
-            if (evt.type === "PullRequestEvent") {
-              totalPRs++;
-              events.push({
-                type: "pr",
-                title: evt.payload?.pull_request?.title ?? "PR",
-                repo: evt.repo?.name ?? "unknown",
-                author: evt.actor?.login ?? "unknown",
-                timestamp: evt.created_at,
-                url: evt.payload?.pull_request?.html_url ?? "",
-              });
-            }
-          }
-        }
+        processOrgEvents(JSON.parse(lobsOrgEvents));
       } catch (err) {
         console.error("Failed to fetch lobs-ai org events:", err);
       }
@@ -207,26 +238,7 @@ export async function handleGitHubRequest(
           `gh api /orgs/paw-engineering/events --jq '.[0:10]'`,
           { encoding: "utf-8", timeout: 5000 }
         );
-        const parsed = JSON.parse(pawOrgEvents);
-        
-        for (const evt of parsed) {
-          if (evt.type === "PushEvent") {
-            recentCommits += evt.payload?.commits?.length ?? 0;
-          }
-          if (!events.some(e => e.url === evt.payload?.pull_request?.html_url)) {
-            if (evt.type === "PullRequestEvent") {
-              totalPRs++;
-              events.push({
-                type: "pr",
-                title: evt.payload?.pull_request?.title ?? "PR",
-                repo: evt.repo?.name ?? "unknown",
-                author: evt.actor?.login ?? "unknown",
-                timestamp: evt.created_at,
-                url: evt.payload?.pull_request?.html_url ?? "",
-              });
-            }
-          }
-        }
+        processOrgEvents(JSON.parse(pawOrgEvents));
       } catch (err) {
         console.error("Failed to fetch paw-engineering org events:", err);
       }
