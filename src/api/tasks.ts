@@ -7,7 +7,7 @@ import { inferProjectId } from "../util/project-inference.js";
 import { eq, and, inArray, desc, lte } from "drizzle-orm";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getDb } from "../db/connection.js";
-import { tasks, projects } from "../db/schema.js";
+import { tasks, projects, workerRuns } from "../db/schema.js";
 import { json, error, parseBody, parseQuery } from "./index.js";
 import { readFileSync as _readFileSync } from "node:fs";
 import { LearningService } from "../services/learning.js";
@@ -320,6 +320,14 @@ Return ONLY valid JSON in this exact format with no other text:
         resolved: unresolved.length === 0,
         unresolved_count: unresolved.length,
       });
+    }
+    if (sub === "runs" && req.method === "GET") {
+      // GET /api/tasks/:id/runs — return worker_runs linked to this task
+      const runs = db.select().from(workerRuns)
+        .where(eq(workerRuns.taskId, id))
+        .orderBy(desc(workerRuns.startedAt))
+        .all();
+      return json(res, { runs });
     }
     if (sub === "review-state" && req.method === "PATCH") {
       const body = await parseBody(req) as Record<string, unknown>;

@@ -26,8 +26,11 @@ const MAX_LIVE_TOOL_RESULT_CHARS = 6_000;
 const DEFAULT_MODEL = "strong";  // Chat defaults to strong tier (opus)
 const DEFAULT_CWD = process.env.HOME ?? "/tmp";
 const MAX_CONCURRENT_CHANNELS = 10; // Max simultaneous channel conversations
-const LLM_TURN_TIMEOUT_MS = 180_000;
+const LLM_TURN_TIMEOUT_MS = 120_000; // 2 minutes per LLM turn (was 3min — too generous)
 const QUEUE_RECOVERY_INTERVAL_MS = 5_000;
+
+/** Tools that mutate state and must run sequentially (not parallelizable) */
+const SEQUENTIAL_TOOLS = new Set(["exec", "process", "write", "edit", "memory_write", "spawn_agent"]);
 
 /** Image attachment data (base64-encoded) */
 export interface ImageAttachment {
@@ -84,6 +87,9 @@ export class MainAgent {
   // Batched tool progress for Discord — accumulates until near 2000 chars or turn ends
   private discordToolBatches = new Map<string, string[]>();
   private queueRecoveryTimer: NodeJS.Timeout;
+  // Retry state for transient errors (properly typed, no more `as any`)
+  private conversationRetryCount = new Map<string, number>();
+  private pendingRetryDelay = new Map<string, number>();
   
   /** EventEmitter for SSE streaming — Nexus subscribes to this */
   public readonly events = new EventEmitter();
@@ -823,22 +829,32 @@ export class MainAgent {
           is_error?: boolean;
         }> = [];
 
+        // Separate text blocks from tool_use blocks
+        const toolUseBlocks: Array<{ type: "tool_use"; id: string; name: string; input: Record<string, unknown> }> = [];
         for (const block of response.content) {
           if (block.type === "text") {
             textResponse += block.text;
           } else if (block.type === "tool_use") {
             hasToolUse = true;
+            toolUseBlocks.push(block as typeof toolUseBlocks[0]);
+          }
+        }
+
+        // Execute tool calls — parallel when safe, sequential when side effects possible
+        // Tools that mutate state (exec, process, write, edit, memory_write, spawn_agent) must run sequentially
+        // Read-only tools (read, grep, glob, ls, web_search, web_fetch, memory_search, memory_read) can run in parallel
+        const SEQUENTIAL_TOOLS = new Set(["exec", "process", "write", "edit", "memory_write", "spawn_agent"]);
+        const isNexusChannel = replyChannelId.startsWith("nexus:");
+
+        if (toolUseBlocks.length > 0) {
+          // Emit all tool_start events upfront
+          for (const block of toolUseBlocks) {
+            const inputPreview = JSON.stringify(block.input).substring(0, 300);
             console.debug(
               `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
               `tool_start name=${block.name} id=${block.id}`,
             );
-
-            const inputPreview = JSON.stringify(block.input).substring(0, 300);
-
-            // Discord channels: batch tool steps; Nexus: SSE events only
-            const isNexusChannel = replyChannelId.startsWith("nexus:");
             if (this.shouldShowSteps(replyChannelId) && !isNexusChannel) {
-              // Discord batched tool steps
               const discordMode = this.getDiscordToolsMode(replyChannelId);
               if (discordMode === "on") {
                 await this.batchDiscordToolStep(
@@ -851,10 +867,7 @@ export class MainAgent {
                   `\`${block.name}\``,
                 );
               }
-              // "off" — no tool progress at all
             }
-
-            // Emit SSE event: tool starting (Nexus always gets these)
             this.events.emit("stream", {
               type: "tool_start",
               channelId: replyChannelId,
@@ -863,40 +876,33 @@ export class MainAgent {
               toolUseId: block.id,
               timestamp: Date.now(),
             } satisfies AgentStreamEvent);
+          }
 
+          // Determine if we can parallelize: only if ALL tools in this batch are read-only
+          const allReadOnly = toolUseBlocks.every(b => !SEQUENTIAL_TOOLS.has(b.name));
+
+          const executeOneBlock = async (block: typeof toolUseBlocks[0]) => {
             const { result, sideEffects } = await executeTool(
               block.name,
               block.input as Record<string, unknown>,
               block.id,
               this.cwd,
             );
-            
-            // Apply side effects (e.g. cwd changes from cd/workdir)
             if (sideEffects?.newCwd) {
               this.cwd = sideEffects.newCwd;
-              console.debug(
-                `[main-agent.loop] cwd_changed to=${this.cwd}`,
-              );
+              console.debug(`[main-agent.loop] cwd_changed to=${this.cwd}`);
             }
-            
             const resultContent = this.truncateLiveToolResult(
               typeof result.content === "string"
                 ? result.content
                 : JSON.stringify(result.content),
             );
-            toolResults.push({
-              type: "tool_result",
-              tool_use_id: result.tool_use_id,
-              content: resultContent,
-              is_error: result.is_error,
-            });
             console.debug(
               `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
               `tool_done name=${block.name} id=${block.id} error=${Boolean(result.is_error)} ` +
               `result_len=${resultContent.length}`,
             );
-
-            // Discord: add result line to batch (on mode only)
+            // Discord result line (on mode only)
             if (this.shouldShowSteps(replyChannelId) && !isNexusChannel) {
               const discordMode = this.getDiscordToolsMode(replyChannelId);
               if (discordMode === "on") {
@@ -907,8 +913,6 @@ export class MainAgent {
                 );
               }
             }
-
-            // Emit SSE event: tool completed
             this.events.emit("stream", {
               type: "tool_result",
               channelId: replyChannelId,
@@ -918,6 +922,28 @@ export class MainAgent {
               isError: result.is_error,
               timestamp: Date.now(),
             } satisfies AgentStreamEvent);
+            return {
+              type: "tool_result" as const,
+              tool_use_id: result.tool_use_id,
+              content: resultContent,
+              is_error: result.is_error,
+            };
+          };
+
+          if (allReadOnly && toolUseBlocks.length > 1) {
+            // Parallel execution for read-only tools
+            console.debug(
+              `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
+              `parallel_tools count=${toolUseBlocks.length} tools=${toolUseBlocks.map(b => b.name).join(",")}`,
+            );
+            const results = await Promise.all(toolUseBlocks.map(executeOneBlock));
+            toolResults.push(...results);
+          } else {
+            // Sequential execution when any tool has side effects
+            for (const block of toolUseBlocks) {
+              const result = await executeOneBlock(block);
+              toolResults.push(result);
+            }
           }
         }
 
