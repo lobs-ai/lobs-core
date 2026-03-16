@@ -4,7 +4,12 @@
 
 import type { ToolDefinition, ToolName, ToolResult, ToolExecutionResult, ToolExecutorResult, ToolSideEffects } from "../types.js";
 import { execToolDefinition, execTool } from "./exec.js";
-import { readToolDefinition, readTool, writeToolDefinition, writeTool, editToolDefinition, editTool } from "./files.js";
+import { readToolDefinition, readTool } from "./read.js";
+import { writeToolDefinition, writeTool } from "./write.js";
+import { editToolDefinition, editTool } from "./edit.js";
+import { lsToolDefinition, lsTool } from "./ls.js";
+import { grepToolDefinition, grepTool } from "./grep.js";
+import { globToolDefinition, globTool } from "./glob.js";
 import { webSearchToolDefinition, webSearchTool, webFetchToolDefinition, webFetchTool } from "./web.js";
 import { memorySearchToolDefinition, memorySearchTool, memoryReadToolDefinition, memoryReadTool, memoryWriteToolDefinition, memoryWriteTool } from "./memory.js";
 import { AGENT_CONTROL_TOOLS, executeSpawnAgent, executeRunPipeline, executeListAgents } from "./agent-control.js";
@@ -40,6 +45,18 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   edit: {
     definition: editToolDefinition,
     execute: editTool,
+  },
+  ls: {
+    definition: lsToolDefinition,
+    execute: lsTool,
+  },
+  grep: {
+    definition: grepToolDefinition,
+    execute: grepTool,
+  },
+  glob: {
+    definition: globToolDefinition,
+    execute: globTool,
   },
   web_search: {
     definition: webSearchToolDefinition,
