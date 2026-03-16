@@ -161,7 +161,12 @@ const BUILTIN_PIPELINES: Record<string, Array<{ agentType: string; modelTier: st
 /**
  * Execute the spawn_agent tool.
  */
-export async function executeSpawnAgent(input: Record<string, unknown>, parentCwd?: string, channelId?: string): Promise<string> {
+export async function executeSpawnAgent(
+  input: Record<string, unknown>,
+  parentCwd?: string,
+  channelId?: string,
+  onComplete?: (result: { runId: string; agentType: string; succeeded: boolean; output: string; error?: string }) => void,
+): Promise<string> {
   const agentType = input.agent_type as string;
   const task = input.task as string;
   const modelTier = (input.model_tier as string) ?? "small";
@@ -223,6 +228,15 @@ export async function executeSpawnAgent(input: Record<string, unknown>, parentCw
       costUsd: result.costUsd,
       durationSeconds: result.durationSeconds,
     }) + "\n");
+
+    // Fire onComplete callback if provided (for reflection workers, etc.)
+    if (onComplete) {
+      try {
+        onComplete({ runId, agentType, succeeded: result.succeeded, output: result.output, error: result.error });
+      } catch (cbErr) {
+        log().error(`[AGENT_TOOL] onComplete callback error for ${runId}: ${cbErr}`);
+      }
+    }
 
     // Announce completion back to main agent on the originating channel
     const mainAgent = (globalThis as any).__lobsMainAgent;

@@ -8,9 +8,9 @@
  * The intelligence is in the retrieval, not the model.
  */
 
-import { eq, and, desc, inArray, gte } from "drizzle-orm";
+import { eq, and, desc, inArray, gte, isNull, sql } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
-import { tasks, projects } from "../db/schema.js";
+import { tasks, projects, workerRuns } from "../db/schema.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -222,7 +222,20 @@ export function assembleDailyBriefContext(): DailyBriefContext {
       blockedBy: b.blockedBy as string | null,
     })),
     todayEvents: [], // filled by caller from Google Calendar
-    overdueItems: [], // TODO: check due dates
+    overdueItems: db.select({
+      title: tasks.title,
+      dueDate: tasks.dueDate,
+      priority: tasks.priority,
+    })
+      .from(tasks)
+      .where(and(
+        inArray(tasks.status, ["active", "in_progress", "blocked"]),
+        sql`${tasks.dueDate} IS NOT NULL AND ${tasks.dueDate} < ${today}`,
+      ))
+      .orderBy(tasks.dueDate)
+      .limit(20)
+      .all()
+      .map(t => ({ title: t.title, dueDate: t.dueDate!, priority: t.priority })),
   };
 }
 
@@ -263,8 +276,25 @@ export function assembleSystemStateContext(): SystemStateContext {
       title: b.title,
       blockedBy: b.blockedBy as string | null,
     })),
-    activeWorkerRuns: 0, // TODO: check worker_runs table
-    recentErrors: [], // TODO: pull from logs
+    activeWorkerRuns: db.select({ count: sql<number>`count(*)` })
+      .from(workerRuns)
+      .where(isNull(workerRuns.endedAt))
+      .get()?.count ?? 0,
+    recentErrors: db.select({
+      summary: workerRuns.summary,
+      endedAt: workerRuns.endedAt,
+      agentType: workerRuns.agentType,
+      failureType: workerRuns.failureType,
+    })
+      .from(workerRuns)
+      .where(and(
+        eq(workerRuns.succeeded, false),
+        gte(workerRuns.endedAt, new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()),
+      ))
+      .orderBy(desc(workerRuns.endedAt))
+      .limit(10)
+      .all()
+      .map(r => `[${r.agentType ?? "unknown"}] ${r.failureType ?? "error"}: ${(r.summary ?? "no summary").slice(0, 120)}`),
   };
 }
 

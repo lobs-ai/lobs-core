@@ -79,7 +79,7 @@ export function requeueSpawn(req: SpawnRequest): void {
 // ── Main NodeHandlers class ────────────────────────────────────────────────────
 
 export class NodeHandlers {
-  execute(nodeDef: NodeDef, run: WorkflowRun): NodeResult {
+  async execute(nodeDef: NodeDef, run: WorkflowRun): Promise<NodeResult> {
     const { type } = nodeDef;
     log().debug?.(`[WORKFLOW] execute node ${nodeDef.id} (type=${type})`);
 
@@ -539,7 +539,7 @@ export class NodeHandlers {
 
   // ── ts_call ───────────────────────────────────────────────────────────────
 
-  private _executeTsCall(nodeDef: NodeDef, run: WorkflowRun): NodeResult {
+  private async _executeTsCall(nodeDef: NodeDef, run: WorkflowRun): Promise<NodeResult> {
     const config = nodeDef.config as Record<string, unknown> & { callable?: string };
     const callable = config.callable ?? "";
     const rawArgs = (config.args as Record<string, unknown>) ?? {};
@@ -562,7 +562,7 @@ export class NodeHandlers {
       runContext: run.context, // Pass full context so callables can access it
     };
     log().info(`[WORKFLOW] ts_call: ${callable}`);
-    const result = executeCallable(callable, args, ctx);
+    const result = await executeCallable(callable, args, ctx);
     return { status: "completed", output: result };
   }
 

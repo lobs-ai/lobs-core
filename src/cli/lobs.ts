@@ -13,13 +13,20 @@
  *   lobs tasks [list|view]    Manage tasks
  *   lobs workers              Show active/recent worker runs
  *
+ * Cron:
+ *   lobs cron [list]           List all cron jobs
+ *   lobs cron add <n> <s> <p>  Add an agent cron job
+ *   lobs cron remove <id>      Remove an agent cron job
+ *   lobs cron toggle <id>      Toggle enabled/disabled
+ *   lobs cron run <id>         Trigger immediate run
+ *
  * Config:
  *   lobs config check         Validate all config files
  *   lobs config show          Dump current config file status
  *   lobs init                 Initialize config directory structure
  *
  * Logs:
- *   lobs logs [--tail N]      Show recent log output
+ *   lobs logs [follow] [--tail N]  Show recent log output or follow logs
  */
 
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
@@ -88,6 +95,20 @@ async function postApi(endpoint: string, body: any): Promise<any> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    }
+    return await res.json();
+  } catch (err) {
+    console.error(colorize(`Error: ${String(err)}`, "red"));
+    console.log(colorize("\nIs lobs-core running? Try: npm start", "dim"));
+    process.exit(1);
+  }
+}
+
+async function deleteApi(endpoint: string): Promise<any> {
+  try {
+    const res = await fetch(`${API_BASE}${endpoint}`, { method: "DELETE" });
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}: ${res.statusText}`);
     }
@@ -321,7 +342,7 @@ async function cmdRestart(skipBuild = false, opts: { useLaunchd?: boolean } = {}
   await cmdStart(opts);
 }
 
-async function cmdLogs(tail: number = 50) {
+async function cmdLogs(tail: number = 50, follow: boolean = false) {
   if (!existsSync(LOG_FILE)) {
     console.log(colorize("No log file found.", "yellow"));
     console.log(colorize(`  Expected at: ${LOG_FILE}`, "dim"));
@@ -329,6 +350,22 @@ async function cmdLogs(tail: number = 50) {
   }
 
   try {
+    if (follow) {
+      console.log(colorize(`\n=== Following ${LOG_FILE} (last ${tail} lines) ===\n`, "bright"));
+      const child = spawn("tail", ["-n", String(tail), "-f", LOG_FILE], {
+        stdio: "inherit",
+      });
+
+      await new Promise<void>((resolve) => {
+        child.on("exit", () => resolve());
+        child.on("error", (err) => {
+          console.error(colorize(`Error following logs: ${err}`, "red"));
+          resolve();
+        });
+      });
+      return;
+    }
+
     const output = execSync(`tail -n ${tail} "${LOG_FILE}"`, { encoding: "utf-8" });
     console.log(colorize(`\n=== Last ${tail} lines of ${LOG_FILE} ===\n`, "bright"));
     console.log(output);
@@ -564,6 +601,134 @@ function cmdInit() {
   console.log("");
 }
 
+// ── Cron ─────────────────────────────────────────────────────────────────────
+
+function timeAgo(isoStr: string | null): string {
+  if (!isoStr) return "never";
+  const diff = Date.now() - new Date(isoStr).getTime();
+  if (diff < 0) return "future";
+  const secs = Math.floor(diff / 1000);
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+async function cmdCron(subCmd?: string, extraArgs: string[] = []) {
+  // list (default)
+  if (!subCmd || subCmd === "list") {
+    const data = await fetchApi("/scheduler");
+    const jobs = data.jobs as any[];
+
+    console.log(colorize("\n=== Cron Jobs ===\n", "bright"));
+
+    const systemJobs = jobs.filter((j: any) => j.kind === "system");
+    const agentJobs = jobs.filter((j: any) => j.kind === "agent");
+
+    console.log(colorize("System Jobs:", "cyan"));
+    if (systemJobs.length === 0) {
+      console.log("  (none)");
+    } else {
+      for (const j of systemJobs) {
+        const check = j.enabled ? colorize("✓", "green") : colorize("✗", "red");
+        const name = j.name.padEnd(22);
+        const sched = j.schedule.padEnd(16);
+        const last = `last: ${timeAgo(j.last_run)}`;
+        console.log(`  ${check} ${colorize(name, "bright")}${colorize(sched, "dim")}  ${colorize(last, "gray")}`);
+      }
+    }
+
+    console.log("");
+    console.log(colorize("Agent Jobs:", "cyan"));
+    if (agentJobs.length === 0) {
+      console.log("  (none)");
+    } else {
+      for (const j of agentJobs) {
+        const check = j.enabled ? colorize("✓", "green") : colorize("✗", "red");
+        const name = j.name.padEnd(22);
+        const sched = j.schedule.padEnd(16);
+        const last = `last: ${timeAgo(j.last_run)}`;
+        const id = colorize(`[${j.id.slice(0, 8)}]`, "dim");
+        console.log(`  ${check} ${colorize(name, "bright")}${colorize(sched, "dim")}  ${colorize(last, "gray")}  ${id}`);
+      }
+    }
+
+    console.log("");
+    return;
+  }
+
+  // add <name> <schedule> <payload>
+  if (subCmd === "add") {
+    const name = extraArgs[0];
+    const schedule = extraArgs[1];
+    const payload = extraArgs.slice(2).join(" ");
+
+    if (!name || !schedule || !payload) {
+      console.log(colorize("Usage: lobs cron add <name> <schedule> <payload>", "yellow"));
+      console.log(colorize("Example: lobs cron add 'Daily Report' '0 9 * * *' 'Generate daily report'", "dim"));
+      return;
+    }
+
+    const result = await postApi("/scheduler", { name, schedule, payload });
+    console.log(colorize("✓", "green") + ` Created cron job: ${result.name}`);
+    console.log(colorize(`  ID: ${result.id}`, "dim"));
+    console.log(colorize(`  Schedule: ${result.schedule}`, "dim"));
+    return;
+  }
+
+  // remove <id>
+  if (subCmd === "remove" || subCmd === "rm" || subCmd === "delete") {
+    const id = extraArgs[0];
+    if (!id) {
+      console.log(colorize("Usage: lobs cron remove <id>", "yellow"));
+      return;
+    }
+
+    await deleteApi(`/scheduler/${id}`);
+    console.log(colorize("✓", "green") + ` Removed cron job: ${id}`);
+    return;
+  }
+
+  // toggle <id>
+  if (subCmd === "toggle") {
+    const id = extraArgs[0];
+    if (!id) {
+      console.log(colorize("Usage: lobs cron toggle <id>", "yellow"));
+      return;
+    }
+
+    const result = await postApi(`/scheduler/${id}/toggle`, {});
+    const state = result.enabled ? colorize("enabled", "green") : colorize("disabled", "red");
+    console.log(colorize("✓", "green") + ` ${result.name} → ${state}`);
+    return;
+  }
+
+  // run <id>
+  if (subCmd === "run") {
+    const id = extraArgs[0];
+    if (!id) {
+      console.log(colorize("Usage: lobs cron run <id>", "yellow"));
+      return;
+    }
+
+    const result = await postApi(`/scheduler/${id}/run`, {});
+    console.log(colorize("✓", "green") + ` Triggered: ${result.name}`);
+    return;
+  }
+
+  // Unknown subcommand
+  console.log(colorize("Usage: lobs cron [list|add|remove|toggle|run]", "yellow"));
+  console.log("");
+  console.log("  list                         List all cron jobs");
+  console.log("  add <name> <sched> <payload>  Add an agent job");
+  console.log("  remove <id>                  Remove an agent job");
+  console.log("  toggle <id>                  Toggle enabled/disabled");
+  console.log("  run <id>                     Trigger immediate run");
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
@@ -613,12 +778,17 @@ const subcommand = args[1];
     case "logs": {
       const tailIdx = args.indexOf("--tail");
       const tail = tailIdx !== -1 ? parseInt(args[tailIdx + 1] || "50", 10) : 50;
-      await cmdLogs(tail);
+      const follow = subcommand === "follow";
+      await cmdLogs(tail, follow);
       break;
     }
     
     case "health":
       await cmdHealth();
+      break;
+
+    case "cron":
+      await cmdCron(subcommand, args.slice(2));
       break;
     
     case "init":
@@ -642,6 +812,13 @@ const subcommand = args[1];
       console.log("  lobs tasks [list|view]   Manage tasks");
       console.log("  lobs workers             Show active/recent worker runs");
       console.log("");
+      console.log(colorize("Cron:", "cyan"));
+      console.log("  lobs cron [list]         List all cron jobs");
+      console.log("  lobs cron add <n> <s> <p>  Add an agent cron job");
+      console.log("  lobs cron remove <id>    Remove an agent cron job");
+      console.log("  lobs cron toggle <id>    Toggle enabled/disabled");
+      console.log("  lobs cron run <id>       Trigger immediate run");
+      console.log("");
       console.log(colorize("Config:", "cyan"));
       console.log("  lobs config check        Validate all config files");
       console.log("  lobs config show         Show config file status");
@@ -649,6 +826,7 @@ const subcommand = args[1];
       console.log("");
       console.log(colorize("Logs:", "cyan"));
       console.log("  lobs logs [--tail N]     Show recent log output");
+      console.log("  lobs logs follow         Follow live log output");
       console.log("");
       console.log(colorize("Config dir:", "dim") + ` ${CONFIG_DIR}`);
       console.log(colorize("Logs:", "dim") + `       ${LOG_FILE}`);

@@ -250,11 +250,9 @@ export function startControlLoop(ctx: LobsPluginServiceContext, intervalMs: numb
   seedModelHealthFromHistory(24);
 
   const tick = () => {
-    try {
-      runTick();
-    } catch (err) {
+    runTick().catch(err => {
       log().error(`orchestrator: tick failed: ${String(err)}`);
-    }
+    });
   };
 
   void tick();
@@ -269,7 +267,7 @@ export function stopControlLoop(): void {
   }
 }
 
-function runTick(): void {
+async function runTick(): Promise<void> {
   if (!executor) return;
 
   // On first tick, resume any in-flight workers from before restart
@@ -287,7 +285,7 @@ function runTick(): void {
       // Keep advancing until the run blocks (waiting for spawn, delay, etc.)
       let passes = 0;
       while (passes < 5) {
-        const didWork = executor.advance(run);
+        const didWork = await executor.advance(run);
         if (!didWork) break;
         passes++;
         advanced++;

@@ -319,6 +319,21 @@ async function main() {
     },
   });
 
+  cronService.registerSystemJob({
+    id: "training-harvest",
+    name: "Training Data Harvest",
+    schedule: "0 5 * * *", // daily at 5am, after memory condensation at 4am
+    enabled: true,
+    handler: async () => {
+      const { runHarvest } = await import("./services/training-harvester.js");
+      const results = await runHarvest();
+      const total = results.reduce((sum, r) => sum + r.extracted, 0);
+      if (total > 0) {
+        console.log(`[training-harvest] Harvested ${total} new training samples`);
+      }
+    },
+  });
+
   // Event handler wired after mainAgent is created (see below)
   cronService.start();
   console.log("Cron service started");

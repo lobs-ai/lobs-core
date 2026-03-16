@@ -7,12 +7,8 @@
  *   2. Agent jobs — DB-backed, fire text payloads into the main agent via handleSystemEvent.
  *      Managed by the agent via the cron tool, or via the API.
  *
- * Schedule kinds:
- *   - "cron"  — standard 5-field cron expression (minute hour day month weekday)
- *   - "at"    — one-shot fire at specific ISO timestamp
- *   - "every" — recurring interval in milliseconds
- *
- * Uses proper cron expression parsing (supports *, *\/N, specific values, ranges, lists).
+ * Both kinds of jobs are checked in a single 60-second tick loop
+ * using proper cron expression matching.
  */
 
 import { randomUUID } from "node:crypto";
@@ -31,44 +27,23 @@ interface ParsedSchedule {
 
 /**
  * Parse a single cron field into an array of valid values.
- * Supports: * (all), *\/N (every N), N (specific), N-M (range), N,M (list)
+ * Supports: * (all), N (specific), N-M (range), N,M (list), step /N
  */
 function parseField(field: string, min: number, max: number): number[] {
   const results = new Set<number>();
 
   for (const part of field.split(",")) {
-    const trimmed = part.trim();
+    const [rangeStr, stepStr] = part.trim().split("/");
+    const step = stepStr ? parseInt(stepStr, 10) : 1;
 
-    // */N — every N
-    if (trimmed.startsWith("*/")) {
-      const step = parseInt(trimmed.slice(2), 10);
-      if (isNaN(step) || step <= 0) throw new Error(`Invalid step: ${trimmed}`);
+    if (rangeStr === "*") {
       for (let i = min; i <= max; i += step) results.add(i);
-      continue;
+    } else if (rangeStr.includes("-")) {
+      const [lo, hi] = rangeStr.split("-").map(Number);
+      for (let i = lo; i <= hi; i += step) results.add(i);
+    } else {
+      results.add(parseInt(rangeStr, 10));
     }
-
-    // * — wildcard
-    if (trimmed === "*") {
-      for (let i = min; i <= max; i++) results.add(i);
-      continue;
-    }
-
-    // N-M — range
-    if (trimmed.includes("-")) {
-      const [startStr, endStr] = trimmed.split("-");
-      const start = parseInt(startStr, 10);
-      const end = parseInt(endStr, 10);
-      if (isNaN(start) || isNaN(end)) throw new Error(`Invalid range: ${trimmed}`);
-      for (let i = start; i <= end; i++) results.add(i);
-      continue;
-    }
-
-    // N — specific value
-    const num = parseInt(trimmed, 10);
-    if (isNaN(num) || num < min || num > max) {
-      throw new Error(`Invalid value: ${trimmed} (must be ${min}-${max})`);
-    }
-    results.add(num);
   }
 
   return Array.from(results).sort((a, b) => a - b);
@@ -77,17 +52,17 @@ function parseField(field: string, min: number, max: number): number[] {
 /**
  * Parse a 5-field cron expression.
  */
-function parseCronExpression(expr: string): ParsedSchedule {
+export function parseCronExpression(expr: string): ParsedSchedule {
   const parts = expr.trim().split(/\s+/);
-  if (parts.length !== 5) {
-    throw new Error(`Invalid cron expression: "${expr}" (expected 5 fields)`);
+  if (parts.length < 5) {
+    throw new Error(`Invalid cron expression: "${expr}"`);
   }
   return {
     minute: parseField(parts[0], 0, 59),
     hour: parseField(parts[1], 0, 23),
     dayOfMonth: parseField(parts[2], 1, 31),
     month: parseField(parts[3], 1, 12),
-    dayOfWeek: parseField(parts[4], 0, 6), // 0 = Sunday
+    dayOfWeek: parseField(parts[4], 0, 6),
   };
 }
 
@@ -141,6 +116,39 @@ export interface CronJobView {
   schedule: string;       // human-readable schedule string
   enabled: boolean;
   lastRun: string | null;
+  nextRun: string | null; // ISO timestamp of next scheduled run
+}
+
+/**
+ * Compute the next fire time for a cron expression, brute-force scanning minute-by-minute.
+ * Returns null if no match within 48 hours (safeguard).
+ */
+function computeNextCronRun(cronExpr: string): string | null {
+  try {
+    const schedule = parseCronExpression(cronExpr);
+    const now = new Date();
+    // Start from next minute boundary
+    const candidate = new Date(now);
+    candidate.setSeconds(0, 0);
+    candidate.setMinutes(candidate.getMinutes() + 1);
+
+    // Scan up to 48 hours ahead (2880 minutes)
+    for (let i = 0; i < 2880; i++) {
+      if (
+        schedule.minute.includes(candidate.getMinutes()) &&
+        schedule.hour.includes(candidate.getHours()) &&
+        schedule.dayOfMonth.includes(candidate.getDate()) &&
+        schedule.month.includes(candidate.getMonth() + 1) &&
+        schedule.dayOfWeek.includes(candidate.getDay())
+      ) {
+        return candidate.toISOString();
+      }
+      candidate.setMinutes(candidate.getMinutes() + 1);
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // ── CronService ─────────────────────────────────────────────────
@@ -152,9 +160,10 @@ export class CronService {
   private systemJobs: Map<string, SystemJob> = new Map();
   private systemSchedules: Map<string, ParsedSchedule> = new Map();
 
-  // Agent jobs (DB-backed, text payloads)
+  // Agent jobs (DB-backed, text payloads) — loaded from DB each tick
   private agentJobs: Map<string, AgentJob> = new Map();
-  private agentTimers: Map<string, NodeJS.Timeout> = new Map();
+  // Parsed schedules for cron-type agent jobs
+  private agentSchedules: Map<string, ParsedSchedule> = new Map();
 
   // Unified tick interval
   private tickInterval?: NodeJS.Timeout;
@@ -166,6 +175,7 @@ export class CronService {
   constructor(db: Database.Database) {
     this.db = db;
     this.ensureTables();
+    this.runMigrations();
   }
 
   private ensureTables() {
@@ -184,6 +194,12 @@ export class CronService {
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `);
+  }
+
+  /** Idempotent migrations — safe to leave permanently */
+  private runMigrations() {
+    // Remove the old seeded Heartbeat agent job (duplicated the system heartbeat job)
+    this.db.prepare("DELETE FROM cron_jobs WHERE name = 'Heartbeat'").run();
   }
 
   // ── System Job Registration ─────────────────────────────────
@@ -221,7 +237,7 @@ export class CronService {
     this.onEvent = handler;
   }
 
-  /** Add a new agent job */
+  /** Add a new agent job. Returns the created job with generated ID. */
   addAgentJob(job: Omit<AgentJob, "id" | "createdAt">): AgentJob {
     const id = randomUUID();
     const now = new Date().toISOString();
@@ -247,20 +263,26 @@ export class CronService {
 
     const fullJob: AgentJob = { ...job, id, createdAt: now };
     this.agentJobs.set(id, fullJob);
-    if (job.enabled && this.running) this.scheduleAgentJob(fullJob);
+
+    // Parse cron schedule if applicable
+    if (job.schedule.kind === "cron" && job.schedule.expr) {
+      try {
+        const parsed = parseCronExpression(job.schedule.expr);
+        this.agentSchedules.set(id, parsed);
+      } catch (err) {
+        log().warn(`[cron] Failed to parse cron for agent job "${job.name}": ${err}`);
+      }
+    }
+
     return fullJob;
   }
 
-  /** Remove an agent job */
-  removeAgentJob(id: string) {
-    const timer = this.agentTimers.get(id);
-    if (timer) {
-      clearTimeout(timer);
-      clearInterval(timer);
-    }
-    this.agentTimers.delete(id);
+  /** Remove an agent job. Returns true if a job was deleted. */
+  removeAgentJob(id: string): boolean {
+    this.agentSchedules.delete(id);
     this.agentJobs.delete(id);
-    this.db.prepare("DELETE FROM cron_jobs WHERE id = ?").run(id);
+    const result = this.db.prepare("DELETE FROM cron_jobs WHERE id = ?").run(id);
+    return result.changes > 0;
   }
 
   /** Toggle an agent job enabled/disabled */
@@ -271,16 +293,6 @@ export class CronService {
     const job = this.agentJobs.get(id);
     if (job) {
       job.enabled = enabled;
-      if (enabled) {
-        this.scheduleAgentJob(job);
-      } else {
-        const timer = this.agentTimers.get(id);
-        if (timer) {
-          clearTimeout(timer);
-          clearInterval(timer);
-        }
-        this.agentTimers.delete(id);
-      }
     }
   }
 
@@ -319,25 +331,37 @@ export class CronService {
         schedule: job.schedule,
         enabled: job.enabled,
         lastRun: job.lastRun?.toISOString() ?? null,
+        nextRun: job.enabled ? computeNextCronRun(job.schedule) : null,
       });
     }
 
-    // Agent jobs
-    for (const job of this.listAgentJobs()) {
+    // Agent jobs (from DB for freshness)
+    for (const agentJob of this.listAgentJobs()) {
       const scheduleStr =
-        job.schedule.kind === "cron"
-          ? job.schedule.expr ?? "*/30 * * * *"
-          : job.schedule.kind === "every"
-            ? `every ${job.schedule.everyMs}ms`
-            : `at ${job.schedule.at}`;
+        agentJob.schedule.kind === "cron"
+          ? agentJob.schedule.expr ?? "(unknown)"
+          : agentJob.schedule.kind === "at"
+            ? `at ${agentJob.schedule.at}`
+            : `every ${(agentJob.schedule.everyMs ?? 0) / 1000}s`;
+
+      let nextRun: string | null = null;
+      if (agentJob.enabled) {
+        if (agentJob.schedule.kind === "cron" && agentJob.schedule.expr) {
+          nextRun = computeNextCronRun(agentJob.schedule.expr);
+        } else if (agentJob.schedule.kind === "at" && agentJob.schedule.at) {
+          const atTime = new Date(agentJob.schedule.at);
+          nextRun = atTime.getTime() > Date.now() ? atTime.toISOString() : null;
+        }
+      }
 
       views.push({
-        id: job.id,
-        name: job.name,
+        id: agentJob.id,
+        name: agentJob.name,
         kind: "agent",
         schedule: scheduleStr,
-        enabled: job.enabled,
-        lastRun: job.lastFired ?? null,
+        enabled: agentJob.enabled,
+        lastRun: agentJob.lastFired ?? null,
+        nextRun,
       });
     }
 
@@ -351,11 +375,10 @@ export class CronService {
     if (this.running) return;
     this.running = true;
 
-    // Load and schedule agent jobs from DB
+    // Load agent jobs from DB into memory
     this.loadAgentJobs();
-    this.scheduleAllAgentJobs();
 
-    // Start the 60-second tick for system cron jobs
+    // Start the 60-second tick for ALL jobs (system + agent)
     this.tickInterval = setInterval(() => this.tick(), 60_000);
 
     const systemCount = this.systemJobs.size;
@@ -374,35 +397,13 @@ export class CronService {
       this.tickInterval = undefined;
     }
 
-    for (const [, timer] of this.agentTimers) {
-      clearTimeout(timer);
-      clearInterval(timer);
-    }
-    this.agentTimers.clear();
-
     log().info("[cron] Stopped");
   }
 
-  /** Seed default agent jobs if none exist */
+  /** Seed default agent jobs — no-op, no default agent jobs needed */
   seedDefaults() {
-    const count = (
-      this.db.prepare("SELECT COUNT(*) as c FROM cron_jobs").get() as any
-    ).c;
-    if (count > 0) return;
-
-    this.addAgentJob({
-      name: "Heartbeat",
-      schedule: {
-        kind: "cron",
-        expr: "*/30 * * * *",
-        tz: "America/New_York",
-      },
-      payload:
-        "Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.",
-      enabled: true,
-    });
-
-    console.log("[cron] Seeded default agent jobs");
+    // Previously seeded a "Heartbeat" agent job, but that duplicated the
+    // system heartbeat job registered in main.ts. No default agent jobs needed.
   }
 
   /** Manually trigger a job by ID (system or agent) */
@@ -426,17 +427,18 @@ export class CronService {
     return false;
   }
 
-  // ── Internal: System Job Tick ─────────────────────────────────
+  // ── Internal: Unified Tick ────────────────────────────────────
 
   /**
-   * Tick — runs every 60 seconds, checks system cron jobs.
-   * Agent jobs use their own timers (setTimeout/setInterval).
+   * Tick — runs every 60 seconds, checks ALL jobs (system + agent).
+   * Both system and agent cron jobs use proper cron expression matching.
    */
   private async tick(): Promise<void> {
     const now = new Date();
     now.setSeconds(0);
     now.setMilliseconds(0);
 
+    // ── System jobs ──
     for (const [id, job] of this.systemJobs.entries()) {
       if (!job.enabled) continue;
 
@@ -449,6 +451,56 @@ export class CronService {
       if (job.lastRun && job.lastRun.getTime() === now.getTime()) continue;
 
       await this.runSystemJob(job);
+    }
+
+    // ── Agent jobs ──
+    // Reload from DB each tick to pick up newly added/changed jobs
+    this.loadAgentJobs();
+
+    for (const [id, job] of this.agentJobs.entries()) {
+      if (!job.enabled) continue;
+
+      switch (job.schedule.kind) {
+        case "cron": {
+          const schedule = this.agentSchedules.get(id);
+          if (!schedule) continue;
+
+          if (!matchesCronSchedule(schedule, now)) continue;
+
+          // Avoid duplicate runs within the same minute
+          if (job.lastFired) {
+            const lastFiredTime = new Date(job.lastFired);
+            lastFiredTime.setSeconds(0);
+            lastFiredTime.setMilliseconds(0);
+            if (lastFiredTime.getTime() === now.getTime()) continue;
+          }
+
+          await this.fireAgentJob(job);
+          break;
+        }
+        case "at": {
+          if (!job.schedule.at) continue;
+          const targetTime = new Date(job.schedule.at).getTime();
+          // Fire once when target time is reached, then disable
+          if (Date.now() >= targetTime && !job.lastFired) {
+            await this.fireAgentJob(job);
+            this.db
+              .prepare("UPDATE cron_jobs SET enabled = 0 WHERE id = ?")
+              .run(job.id);
+          }
+          break;
+        }
+        case "every": {
+          const ms = job.schedule.everyMs || 60_000;
+          const lastFiredMs = job.lastFired
+            ? new Date(job.lastFired).getTime()
+            : 0;
+          if (Date.now() - lastFiredMs >= ms) {
+            await this.fireAgentJob(job);
+          }
+          break;
+        }
+      }
     }
   }
 
@@ -467,15 +519,19 @@ export class CronService {
     }
   }
 
-  // ── Internal: Agent Job Scheduling ────────────────────────────
+  // ── Internal: Agent Job Helpers ───────────────────────────────
 
+  /** Load all agent jobs from DB into memory, parsing cron schedules */
   private loadAgentJobs() {
     const rows = this.db
-      .prepare("SELECT * FROM cron_jobs WHERE enabled = 1")
+      .prepare("SELECT * FROM cron_jobs")
       .all() as any[];
+
     this.agentJobs.clear();
+    this.agentSchedules.clear();
+
     for (const row of rows) {
-      this.agentJobs.set(row.id, {
+      const job: AgentJob = {
         id: row.id,
         name: row.name,
         schedule: {
@@ -486,60 +542,20 @@ export class CronService {
           tz: row.schedule_tz ?? "America/New_York",
         },
         payload: row.payload,
-        enabled: true,
+        enabled: row.enabled === 1,
         lastFired: row.last_fired ?? undefined,
         createdAt: row.created_at,
-      });
-    }
-  }
+      };
+      this.agentJobs.set(row.id, job);
 
-  private scheduleAllAgentJobs() {
-    for (const job of this.agentJobs.values()) {
-      this.scheduleAgentJob(job);
-    }
-  }
-
-  private scheduleAgentJob(job: AgentJob) {
-    // Clear existing timer
-    const existing = this.agentTimers.get(job.id);
-    if (existing) {
-      clearTimeout(existing);
-      clearInterval(existing);
-    }
-
-    switch (job.schedule.kind) {
-      case "every": {
-        const ms = job.schedule.everyMs || 60_000;
-        const timer = setInterval(() => this.fireAgentJob(job), ms);
-        this.agentTimers.set(job.id, timer);
-        break;
-      }
-      case "at": {
-        const targetTime = new Date(job.schedule.at!).getTime();
-        const delay = targetTime - Date.now();
-        if (delay > 0) {
-          const timer = setTimeout(() => {
-            this.fireAgentJob(job);
-            this.db
-              .prepare("UPDATE cron_jobs SET enabled = 0 WHERE id = ?")
-              .run(job.id);
-          }, delay);
-          this.agentTimers.set(job.id, timer);
-        } else {
-          this.db
-            .prepare("UPDATE cron_jobs SET enabled = 0 WHERE id = ?")
-            .run(job.id);
+      // Pre-parse cron expressions for cron-type jobs
+      if (job.schedule.kind === "cron" && job.schedule.expr) {
+        try {
+          const parsed = parseCronExpression(job.schedule.expr);
+          this.agentSchedules.set(row.id, parsed);
+        } catch (err) {
+          log().warn(`[cron] Failed to parse cron for agent job "${job.name}": ${err}`);
         }
-        break;
-      }
-      case "cron": {
-        // Use proper cron parsing — run via the tick system instead of setInterval
-        // But we still need the interval approach for agent jobs since the tick
-        // only handles system jobs. Convert to approximate ms interval.
-        const ms = this.cronToMs(job.schedule.expr || "*/30 * * * *");
-        const timer = setInterval(() => this.fireAgentJob(job), ms);
-        this.agentTimers.set(job.id, timer);
-        break;
       }
     }
   }
@@ -559,22 +575,6 @@ export class CronService {
         log().warn(`[cron] Error firing agent job ${job.name}: ${err}`);
       }
     }
-  }
-
-  /**
-   * Convert common cron patterns to approximate ms.
-   * Used for agent job interval scheduling.
-   * (System jobs use proper cron matching via the tick loop.)
-   */
-  private cronToMs(expr: string): number {
-    const parts = expr.trim().split(/\s+/);
-    if (parts.length >= 5) {
-      const [min, hour] = parts;
-      if (min.startsWith("*/")) return parseInt(min.slice(2), 10) * 60_000;
-      if (min === "0" && hour === "*") return 3_600_000;
-      if (min === "0" && hour.startsWith("*/")) return parseInt(hour.slice(2), 10) * 3_600_000;
-    }
-    return 1_800_000; // default 30 min
   }
 }
 

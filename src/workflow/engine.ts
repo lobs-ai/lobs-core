@@ -109,7 +109,7 @@ export class WorkflowExecutor {
   /**
    * Advance a run by at most one step. Returns true if work was done.
    */
-  advance(run: WorkflowRunRow): boolean {
+  async advance(run: WorkflowRunRow): Promise<boolean> {
     try {
       const db = getDb();
       const workflow = db.select().from(workflowDefinitions)
@@ -163,7 +163,7 @@ export class WorkflowExecutor {
       const ns = nodeStates[nodeId] ?? {};
       const status = ns["status"] as string ?? "pending";
 
-      if (status === "pending") return this._startNode(run, nodeDef, nodeStates, workflow);
+      if (status === "pending") return await this._startNode(run, nodeDef, nodeStates, workflow);
       if (status === "running") return this._checkNode(run, nodeDef, nodeStates, workflow);
       if (status === "completed") return this._transition(run, nodeDef, nodeStates, workflow);
       if (status === "failed") return this._handleFailure(run, nodeDef, nodeStates, workflow);
@@ -396,12 +396,12 @@ export class WorkflowExecutor {
 
   // ── Internal ───────────────────────────────────────────────────────────────
 
-  private _startNode(
+  private async _startNode(
     run: WorkflowRunRow,
     nodeDef: Record<string, unknown>,
     nodeStates: Record<string, Record<string, unknown>>,
     _workflow: WorkflowDefRow,
-  ): boolean {
+  ): Promise<boolean> {
     const nodeId = nodeDef["id"] as string;
     const ns: Record<string, unknown> = nodeStates[nodeId] ?? {};
     ns["attempts"] = (ns["attempts"] as number ?? 0) + 1;
@@ -428,7 +428,7 @@ export class WorkflowExecutor {
     };
 
     try {
-      const result = this.nodeHandlers.execute(nodeDef as any, runObj);
+      const result = await this.nodeHandlers.execute(nodeDef as any, runObj);
       ns["status"] = result.status;
       if (result.output) {
         ns["output"] = result.output;

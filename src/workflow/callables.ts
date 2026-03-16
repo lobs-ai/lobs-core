@@ -21,10 +21,12 @@ import { GmailService } from "../integrations/gmail.js";
 import { GitHubSyncService } from "../integrations/github.js";
 import { ReflectionService } from "../services/reflection.js";
 import { LearningService } from "../services/learning.js";
+import { runHarvest, getHarvestStats, bulkApprove, exportTrainingJSONL } from "../services/training-harvester.js";
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { getModelForTier } from "../config/models.js";
 import { getGatewayConfig } from "../config/lobs.js";
+import { executeSpawnAgent } from "../runner/tools/agent-control.js";
 
 export interface CallableContext {
   workflowRunId?: string;
@@ -270,36 +272,89 @@ ${existingTaskList}
 ## Reflections
 ${reflectionSummaries}`;
 
-  // Spawn a sub-agent to triage reflections autonomously
-  const gatewayCfg = getGatewayConfig();
-  let gwPort = gatewayCfg.port;
-  let gwToken = gatewayCfg.token;
+  // Spawn a writer sub-agent to triage reflections — creates inbox items and tasks
+  const triageTask = eventText + `
 
-  if (gwToken) {
-    const triageInstructions = "\n\nYou have access to CLI tools for creating tasks and inbox items. Use these instead of raw SQL:\n\nTo create a task (medium/low impact — auto-assigned to agents):\npaw-task create --title \"TITLE\" --agent AGENT_TYPE --tier TIER --notes \"NOTES\"\n\nTo create an inbox item (high impact only — needs Rafe's review):\npaw-inbox create --title \"TITLE\" --content \"DETAILED CONTENT\" --summary \"ONE LINE SUMMARY\" --type suggestion --action --agent SOURCE_AGENT\n\nTo check existing tasks (avoid duplicates):\npaw-task list --status active\n\nAgent types: programmer, writer, researcher, reviewer, architect\nModel tiers: micro (trivial), small (simple), medium (moderate), standard (significant), strong (complex)\n\nAfter creating all items, print a summary of what you created.";
-    fetch(`http://127.0.0.1:${gwPort}/tools/invoke`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${gwToken}` },
-      body: JSON.stringify({
-        tool: "sessions_spawn",
-        sessionKey: "agent:sink:paw-orchestrator-v2",
-        args: {
-          task: eventText + triageInstructions,
-          agentId: "main",
-          model: getModelForTier("standard"),
-          mode: "run",
-          cleanup: "keep",
-          runTimeoutSeconds: 300,
-        },
-      }),
-    }).then(r => r.json()).then(data => {
-      log().info(`[REFLECTION] Triage agent spawned: ${JSON.stringify(data).slice(0, 200)}`);
-    }).catch(e => {
-      log().warn(`[REFLECTION] Failed to spawn triage agent: ${e}`);
-    });
-  } else {
-    log().warn("[REFLECTION] No gateway token for triage agent");
-  }
+IMPORTANT: After analyzing all reflections above, output a structured JSON summary of what should be created:
+
+\`\`\`json
+{
+  "suggestions": [
+    {
+      "title": "Clear actionable title",
+      "content": "Detailed description with reasoning from the reflection",
+      "summary": "One-line summary",
+      "type": "suggestion",
+      "requiresAction": true,
+      "sourceAgent": "agent_type",
+      "priority": "medium"
+    }
+  ],
+  "autoTasks": [
+    {
+      "title": "Small obvious fix title",
+      "agent": "programmer",
+      "tier": "micro",
+      "notes": "Brief description"
+    }
+  ],
+  "skipped": ["reason for each skipped item"]
+}
+\`\`\``;
+
+  executeSpawnAgent(
+    {
+      agent_type: "writer",
+      task: triageTask,
+      model_tier: "small",
+      timeout: 300,
+    },
+    undefined,
+    undefined,
+    // onComplete: parse the triage output and create inbox items + tasks
+    (result) => {
+      try {
+        const output = result.output || "";
+        const jsonMatch = output.match(/```json\s*([\s\S]*?)```/);
+        if (jsonMatch) {
+          const triage = JSON.parse(jsonMatch[1]);
+          const db = getDb();
+
+          // Create inbox suggestion items
+          for (const s of (triage.suggestions ?? [])) {
+            db.insert(inboxItems).values({
+              id: randomUUID(),
+              title: s.title,
+              content: (s.content || "").slice(0, 24000),
+              summary: (s.summary || s.title).slice(0, 500),
+              type: "suggestion",
+              requiresAction: true,
+              actionStatus: "pending",
+              sourceAgent: s.sourceAgent || "reflection",
+              modifiedAt: new Date().toISOString(),
+            }).run();
+          }
+          log().info(`[REFLECTION] Triage created ${(triage.suggestions ?? []).length} suggestions, ${(triage.autoTasks ?? []).length} auto-tasks`);
+
+          // Create auto-approve tasks for obvious small fixes
+          for (const t of (triage.autoTasks ?? [])) {
+            db.insert(tasks).values({
+              id: randomUUID(),
+              title: t.title,
+              status: "active",
+              agent: t.agent || "programmer",
+              modelTier: t.tier || "micro",
+              notes: t.notes || "",
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            }).run();
+          }
+        }
+      } catch (e) {
+        log().error(`[REFLECTION] Triage result parsing failed: ${e}`);
+      }
+    }
+  );
 
   // Mark reflections as swept so they don't get re-processed
   for (const r of reflections) {
@@ -350,19 +405,6 @@ function reflectionStoreOutput(args: Record<string, unknown>, _ctx: CallableCont
 function reflectionSpawnAll(args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
   const hours = (args.window_hours as number) ?? 3;
 
-  // Read gateway config
-  const reflectionGatewayCfg = getGatewayConfig();
-  let gatewayPort = reflectionGatewayCfg.port;
-  let gatewayToken = reflectionGatewayCfg.token;
-
-  if (!gatewayToken) {
-    log().warn("[REFLECTION] No gateway token — cannot spawn reflection workers");
-    return { ok: false, error: "no gateway token" };
-  }
-
-  const baseUrl = `http://127.0.0.1:${gatewayPort}`;
-
-  // Pick agents that need reflection and spawn async
   const spawned: string[] = [];
 
   for (const _agent of reflectionSvc.listAgents()) {
@@ -370,34 +412,59 @@ function reflectionSpawnAll(args: Record<string, unknown>, _ctx: CallableContext
     if (!pick) continue;
 
     const prompt = reflectionSvc.buildReflectionPrompt(pick.agentType, pick.reflectionId);
+    const reflectionId = pick.reflectionId;
+    const agentType = pick.agentType;
 
-    // Async spawn via fetch (fire-and-forget — result collection handled by subagent_ended hook)
-    const payload = JSON.stringify({
-      tool: "sessions_spawn",
-      sessionKey: "agent:sink:paw-orchestrator-v2",
-      args: {
+    // Spawn via lobs-core's own runner with a completion callback
+    executeSpawnAgent(
+      {
+        agent_type: agentType,
         task: prompt,
-        agentId: pick.agentType,
-        model: getModelForTier("standard"),
-        mode: "run",
-        cleanup: "keep",
-        runTimeoutSeconds: 300,
-        maxTokens: 16384,
-        metadata: { pawReflection: true, reflectionId: pick.reflectionId, agentType: pick.agentType },
+        model_tier: "small",
+        timeout: 300,
       },
-    });
+      undefined, // cwd
+      undefined, // channelId — no need to announce to Discord
+      // onComplete: capture the reflection result and store in DB
+      (result) => {
+        const db = getDb();
+        try {
+          const output = result.output || "";
+          // Try to parse structured JSON from the output
+          let parsed: Record<string, unknown> = {};
+          const jsonMatch = output.match(/```json\s*([\s\S]*?)```/) ?? output.match(/\{[\s\S]*"inefficiencies"[\s\S]*\}/);
+          if (jsonMatch) {
+            try {
+              parsed = JSON.parse(jsonMatch[1] ?? jsonMatch[0]);
+            } catch { /* ignore parse errors */ }
+          }
 
-    fetch(`${baseUrl}/tools/invoke`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${gatewayToken}` },
-      body: payload,
-    }).then(r => r.json()).then(data => {
-      log().info(`[REFLECTION] Spawned ${pick.agentType} (reflection=${pick.reflectionId.slice(0, 8)}): ${JSON.stringify(data).slice(0, 120)}`);
-    }).catch(e => {
-      log().warn(`[REFLECTION] Spawn ${pick.agentType} failed: ${e}`);
-    });
+          const reflectionResult: Record<string, unknown> = {
+            raw: output.slice(0, 16000),
+            inefficiencies: parsed.inefficiencies ?? [],
+            systemRisks: parsed.systemRisks ?? parsed.system_risks ?? [],
+            missedOpportunities: parsed.missedOpportunities ?? parsed.missed_opportunities ?? [],
+            identityAdjustments: parsed.identityAdjustments ?? parsed.identity_adjustments ?? [],
+            suggestions: parsed.suggestions ?? [],
+          };
 
-    spawned.push(pick.agentType);
+          db.update(agentReflections)
+            .set({
+              status: result.succeeded ? "completed" : "failed",
+              result: reflectionResult,
+              completedAt: new Date().toISOString(),
+            })
+            .where(eq(agentReflections.id, reflectionId))
+            .run();
+
+          log().info(`[REFLECTION] ${agentType} reflection ${reflectionId.slice(0, 8)} ${result.succeeded ? "completed" : "failed"} (output: ${output.length} chars)`);
+        } catch (e) {
+          log().error(`[REFLECTION] Failed to store result for ${reflectionId}: ${e}`);
+        }
+      }
+    );
+
+    spawned.push(agentType);
   }
 
   if (spawned.length === 0) {
@@ -593,14 +660,6 @@ function inboxProcessThreads(_args: Record<string, unknown>, _ctx: CallableConte
     return { ok: true, processed: 0, note: "no items to process" };
   }
 
-  const inboxGatewayCfg = getGatewayConfig();
-  let gwPort = inboxGatewayCfg.port;
-  let gwToken = inboxGatewayCfg.token;
-
-  if (!gwToken) {
-    return { ok: false, error: "no gateway token" };
-  }
-
   const itemSummaries = toProcess.map(item => {
     const typ = (item as any).type ?? "suggestion";
     const src = (item as any).sourceAgent ?? "unknown";
@@ -611,36 +670,67 @@ function inboxProcessThreads(_args: Record<string, unknown>, _ctx: CallableConte
   const prompt = [
     "[Inbox Processing] " + toProcess.length + " inbox item(s) need processing.",
     "",
-    "These items were reviewed by Rafe. For approved items, process each one:",
-    "- If it needs a task: use paw-task create",
-    "- If it needs research: create a researcher task",
-    "- If it needs architecture: create an architect task", 
-    "- If Rafe left comments: read them and respond appropriately",
-    "- Use your judgment on what each item needs",
+    "These items were reviewed by Rafe. For approved items, process each one.",
+    "For each item, output a structured JSON with the actions to take:",
     "",
-    "After processing each item, mark it done:",
-    "  paw-inbox approve <id>   (if not already approved)",
+    "```json",
+    "{",
+    '  "actions": [',
+    '    { "itemId": "UUID", "action": "create_task", "title": "...", "agent": "programmer", "tier": "small", "notes": "..." },',
+    '    { "itemId": "UUID", "action": "dismiss", "reason": "already done" }',
+    "  ]",
+    "}",
+    "```",
     "",
     "## Items",
     itemSummaries,
   ].join("\n");
 
-  fetch("http://127.0.0.1:" + gwPort + "/tools/invoke", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + gwToken },
-    body: JSON.stringify({
-      tool: "sessions_spawn",
-      sessionKey: "agent:sink:paw-orchestrator-v2",
-      args: {
-        task: prompt,
-        agentId: "main",
-        model: getModelForTier("standard"),
-        mode: "run",
-        cleanup: "keep",
-        runTimeoutSeconds: 300,
-      },
-    }),
-  }).catch(e => log().error("[INBOX] spawn failed: " + e));
+  const itemIds = toProcess.map(i => i.id);
+  executeSpawnAgent(
+    {
+      agent_type: "writer",
+      task: prompt,
+      model_tier: "small",
+      timeout: 300,
+    },
+    undefined,
+    undefined,
+    (result) => {
+      try {
+        const output = result.output || "";
+        const jsonMatch = output.match(/```json\s*([\s\S]*?)```/);
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[1]);
+          const db = getDb();
+          for (const action of (parsed.actions ?? [])) {
+            if (action.action === "create_task") {
+              db.insert(tasks).values({
+                id: randomUUID(),
+                title: action.title,
+                status: "active",
+                agent: action.agent || "programmer",
+                modelTier: action.tier || "small",
+                notes: action.notes || "",
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+              }).run();
+            }
+            // Mark inbox item as done
+            if (action.itemId) {
+              db.update(inboxItems)
+                .set({ actionStatus: "done" })
+                .where(eq(inboxItems.id, action.itemId))
+                .run();
+            }
+          }
+          log().info(`[INBOX] Processed ${(parsed.actions ?? []).length} inbox actions`);
+        }
+      } catch (e) {
+        log().error(`[INBOX] Processing result parse failed: ${e}`);
+      }
+    }
+  );
 
   // Mark items as processing to prevent re-spawn on next cycle
   for (const item of toProcess) {
@@ -753,6 +843,42 @@ function complianceWeeklyReport(_args: Record<string, unknown>, _ctx: CallableCo
   };
 }
 
+// ─── Training Pipeline ──────────────────────────────────────────────────────────
+
+async function trainingRunHarvest(_args: Record<string, unknown>, _ctx: CallableContext): Promise<Record<string, unknown>> {
+  const results = await runHarvest();
+  const total = results.reduce((sum, r) => sum + r.extracted, 0);
+  const skipped = results.reduce((sum, r) => sum + r.skipped, 0);
+  return {
+    ok: true,
+    total_extracted: total,
+    total_skipped: skipped,
+    sources: results.map(r => ({ source: r.source, extracted: r.extracted, skipped: r.skipped })),
+  };
+}
+
+function trainingGetStats(_args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
+  const stats = getHarvestStats();
+  return { ok: true, ...stats };
+}
+
+function trainingBulkApprove(args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
+  const minQuality = (args.min_quality as number) ?? 0.6;
+  const count = bulkApprove(minQuality);
+  return { ok: true, approved: count };
+}
+
+function trainingExport(args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
+  const minQuality = args.min_quality as number | undefined;
+  const taskType = args.task_type as string | undefined;
+  const jsonl = exportTrainingJSONL({ minQuality, taskType });
+  const lines = jsonl ? jsonl.split("\n").filter(Boolean) : [];
+  // Write to a temp file for downstream use
+  const outPath = `/tmp/lobs-training-export-${Date.now()}.jsonl`;
+  writeFileSync(outPath, jsonl);
+  return { ok: true, path: outPath, count: lines.length };
+}
+
 // ─── Registry ─────────────────────────────────────────────────────────────────
 
 const REGISTRY: Record<string, CallableFn | undefined> = {
@@ -811,6 +937,12 @@ const REGISTRY: Record<string, CallableFn | undefined> = {
 
   // Compliance
   "compliance.weekly_report": complianceWeeklyReport,
+
+  // Training pipeline
+  "training.run_harvest": trainingRunHarvest,
+  "training.get_stats": trainingGetStats,
+  "training.bulk_approve": trainingBulkApprove,
+  "training.export": trainingExport,
 };
 
 export function getCallable(name: string): CallableFn | undefined {
@@ -821,15 +953,25 @@ export function listCallables(): string[] {
   return Object.keys(REGISTRY);
 }
 
-export function executeCallable(name: string, args: Record<string, unknown>, ctx: CallableContext): Record<string, unknown> {
+export function executeCallable(name: string, args: Record<string, unknown>, ctx: CallableContext): Record<string, unknown> | Promise<Record<string, unknown>> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const fn = (REGISTRY as any)[name] as ((...a: any[]) => Record<string, unknown>) | undefined;
+  const fn = (REGISTRY as any)[name] as ((...a: any[]) => Record<string, unknown> | Promise<Record<string, unknown>>) | undefined;
   if (!fn) {
     log().warn(`[CALLABLE] Unknown callable: ${name}`);
     return { ok: false, error: `Unknown callable: ${name}` };
   }
   try {
     const result = fn(args, ctx);
+    // Handle async callables transparently
+    if (result && typeof (result as any).then === "function") {
+      return (result as Promise<Record<string, unknown>>).then(r => {
+        log().info(`[CALLABLE] ${name} → ok (async)`);
+        return r;
+      }).catch(e => {
+        log().error(`[CALLABLE] ${name} threw (async): ${String(e)}`);
+        return { ok: false, error: String(e) };
+      });
+    }
     log().info(`[CALLABLE] ${name} → ok`);
     return result;
   } catch (e) {
