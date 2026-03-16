@@ -14,6 +14,8 @@ import { LearningService } from "../services/learning.js";
 import { classifyAndLog } from "../services/task-sensitivity.js";
 import { getModelForTier } from "../config/models.js";
 import { getGatewayConfig } from "../config/lobs.js";
+import { assembleBrainDumpContext, formatBrainDumpContext } from "../services/context-assembler.js";
+import { logTrainingExample } from "../services/training-data.js";
 
 const learningSvc = new LearningService();
 
@@ -144,26 +146,39 @@ export async function handleTaskRequest(
     const body = await parseBody(req) as { text?: string; project_id?: string; model_tier_override?: string };
     if (!body.text?.trim()) return error(res, "text is required");
 
-    const systemPrompt = `You are a task extraction assistant. Given freeform text, extract discrete actionable tasks.
+    // Assemble project context if project_id provided
+    let contextBlock = "";
+    let contextData: Record<string, unknown> = {};
+    if (body.project_id) {
+      const ctx = assembleBrainDumpContext(body.project_id);
+      contextBlock = formatBrainDumpContext(ctx);
+      contextData = ctx as unknown as Record<string, unknown>;
+    }
+
+    const systemPrompt = `You are a task extraction assistant. Given freeform text and project context, extract discrete actionable tasks.
 For each task assign:
 - title: concise, action-oriented title
 - agent: one of programmer/writer/researcher/reviewer/architect (pick best fit based on task nature)
 - model_tier: one of micro/small/medium/standard/strong (complexity-based: micro=trivial, strong=complex/uncertain)
 - notes: 1-3 sentences of clear context for the agent executing it
 
+IMPORTANT: Check the active tasks and recently completed tasks in the context. Do NOT create duplicates of existing or recently completed work.
+
 Return ONLY valid JSON in this exact format with no other text:
 {"proposed_tasks": [{"title": "...", "agent": "...", "model_tier": "...", "notes": "..."}]}`;
 
-    const userPrompt = `Extract actionable tasks from this text:
+    const userPrompt = contextBlock
+      ? `${contextBlock}\n\n---\n\nExtract actionable tasks from this brain dump:\n\n${body.text}`
+      : `Extract actionable tasks from this text:\n\n${body.text}`;
 
-${body.text}`;
+    const modelId = body.model_tier_override
+      ? getModelForTier(body.model_tier_override)
+      : getModelForTier("small");
 
     const result = await _brainDumpInvoke("sessions_spawn", {
       task: userPrompt,
       system: systemPrompt,
-      model: body.model_tier_override
-        ? getModelForTier(body.model_tier_override)
-        : getModelForTier("small"),
+      model: modelId,
       mode: "run",
       cleanup: "kill",
       runTimeoutSeconds: 60,
@@ -175,6 +190,22 @@ ${body.text}`;
     const jsonMatch = rawReply.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return error(res, "LLM did not return valid JSON. Reply: " + rawReply.slice(0, 200), 500);
     const parsed = JSON.parse(jsonMatch[0]);
+
+    // Log training example for fine-tuning data collection
+    try {
+      logTrainingExample({
+        taskType: "braindump",
+        systemPrompt,
+        userPrompt,
+        context: contextData,
+        modelOutput: rawReply,
+        modelUsed: modelId,
+      });
+    } catch (e) {
+      // Don't fail the request if training data logging fails
+      console.error("[training-data] Failed to log example:", e);
+    }
+
     return json(res, { proposed_tasks: parsed.proposed_tasks ?? [] });
   }
 

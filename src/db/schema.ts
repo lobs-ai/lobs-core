@@ -882,3 +882,21 @@ export const memoryComplianceIndex = sqliteTable("memory_compliance_index", {
 }, (t) => ({
   uniqAgentPath: uniqueIndex("memory_compliance_idx_agent_path").on(t.agentType, t.filePath),
 }));
+
+// ─── Training Data ──────────────────────────────────────────────────────
+
+export const trainingData = sqliteTable("training_data", {
+  id: id(),
+  taskType: text("task_type").notNull(),      // braindump | calendar_check | daily_brief | system_state | categorization | summary
+  systemPrompt: text("system_prompt").notNull(),
+  userPrompt: text("user_prompt").notNull(),
+  context: text("context", { mode: "json" }), // assembled context blob
+  modelOutput: text("model_output").notNull(),
+  correctedOutput: text("corrected_output"),   // human correction
+  reviewStatus: text("review_status").notNull().default("pending"), // pending | approved | corrected | rejected
+  modelUsed: text("model_used").notNull(),
+  ...timestamps,
+}, (t) => ({
+  idxTaskType: index("training_data_task_type_idx").on(t.taskType),
+  idxReviewStatus: index("training_data_review_status_idx").on(t.reviewStatus),
+}));
