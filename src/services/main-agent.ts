@@ -937,6 +937,27 @@ export class MainAgent {
           // Feed tool results back as a user turn
           messages.push({ role: "user", content: toolResults });
 
+          // Also persist the tool results as a user message so DB maintains alternation
+          const toolResultSummary = toolResults.map((tr) => {
+            const resultPreview =
+              tr.content.length > 500
+                ? tr.content.slice(0, 500) + "..."
+                : tr.content;
+            return `[${tr.tool_use_id}] ${tr.is_error ? "ERROR: " : ""}${resultPreview}`;
+          }).join("\n");
+          this.db
+            .prepare(
+              `INSERT INTO main_agent_messages
+                 (id, role, content, channel_id, token_estimate)
+               VALUES (?, 'user', ?, ?, ?)`,
+            )
+            .run(
+              randomUUID(),
+              `[Tool results]\n${toolResultSummary}`,
+              replyChannelId,
+              Math.ceil(toolResultSummary.length / 4),
+            );
+
           // Inject any queued messages that arrived while we were working
           // This lets the agent see new context mid-loop instead of waiting
           // until the entire conversation finishes — critical for group chats
@@ -957,9 +978,24 @@ export class MainAgent {
                 Math.ceil(queuedContent.length / 4),
               );
 
+            const ackContent = "I see new messages arrived. Let me incorporate them.";
+            // Persist the synthetic assistant ack so DB alternation is maintained
+            this.db
+              .prepare(
+                `INSERT INTO main_agent_messages
+                   (id, role, content, channel_id, token_estimate)
+                 VALUES (?, 'assistant', ?, ?, ?)`,
+              )
+              .run(
+                randomUUID(),
+                ackContent,
+                replyChannelId,
+                Math.ceil(ackContent.length / 4),
+              );
+
             messages.push({
               role: "assistant",
-              content: "I see new messages arrived. Let me incorporate them.",
+              content: ackContent,
             });
             messages.push({
               role: "user",
@@ -1372,20 +1408,86 @@ export class MainAgent {
 
     if (messages.length <= 1) return messages;
 
-    const merged: LLMMessage[] = [];
-    for (const msg of messages) {
-      const last = merged[merged.length - 1];
-      if (last && last.role === msg.role) {
-        // Both have string content — concatenate with separator
-        if (typeof last.content === "string" && typeof msg.content === "string") {
-          last.content = last.content + "\n\n" + msg.content;
-        }
-        // If either has array content (image blocks), keep as separate entries
-        // by skipping the merge — shouldn't happen in practice since
-        // consecutive assistant messages from tool use are always strings.
+    // First pass: identify runs of consecutive same-role messages
+    const runs: Array<{ role: string; indices: number[] }> = [];
+    for (let i = 0; i < messages.length; i++) {
+      const lastRun = runs[runs.length - 1];
+      if (lastRun && messages[i].role === lastRun.role) {
+        lastRun.indices.push(i);
       } else {
-        merged.push({ ...msg });
+        runs.push({ role: messages[i].role, indices: [i] });
       }
+    }
+
+    // Log if we find long runs (indicates DB alternation issue)
+    for (const run of runs) {
+      if (run.indices.length > 3) {
+        console.warn(
+          `[main-agent] Found ${run.indices.length} consecutive ${run.role} messages ` +
+          `(indices ${run.indices[0]}-${run.indices[run.indices.length - 1]}). ` +
+          `This indicates broken DB alternation — tool results weren't persisted as user messages.`
+        );
+      }
+    }
+
+    // Second pass: merge runs, but truncate aggressively for long runs
+    const merged: LLMMessage[] = [];
+    for (const run of runs) {
+      if (run.indices.length === 1) {
+        merged.push({ ...messages[run.indices[0]] });
+        continue;
+      }
+
+      // For long runs (>5 messages), keep only the last 3 fully and summarize the rest
+      const MAX_FULL_KEEP = 3;
+      const MAX_MERGED_CHARS = 8000; // Cap total merged content at 8K chars
+
+      const runMessages = run.indices.map(i => messages[i]);
+      
+      if (runMessages.length <= MAX_FULL_KEEP) {
+        // Short run — just concatenate
+        let content = "";
+        for (const m of runMessages) {
+          if (typeof m.content === "string") {
+            content += (content ? "\n\n" : "") + m.content;
+          }
+        }
+        merged.push({ role: run.role as "user" | "assistant", content });
+        continue;
+      }
+
+      // Long run — keep last MAX_FULL_KEEP, truncate or drop older ones
+      const oldMessages = runMessages.slice(0, -MAX_FULL_KEEP);
+      const recentMessages = runMessages.slice(-MAX_FULL_KEEP);
+      
+      let content = `[${oldMessages.length} earlier ${run.role} messages merged — tool call summaries from before restart]\n`;
+      // Add a brief excerpt from the old messages (just first 200 chars each, max 2000 total)
+      let oldContent = "";
+      for (const m of oldMessages) {
+        if (typeof m.content === "string") {
+          const excerpt = m.content.slice(0, 200);
+          if (oldContent.length + excerpt.length < 2000) {
+            oldContent += excerpt + "\n";
+          }
+        }
+      }
+      if (oldContent) {
+        content += oldContent;
+      }
+      
+      // Add recent messages fully
+      for (const m of recentMessages) {
+        if (typeof m.content === "string") {
+          content += "\n\n" + m.content;
+        }
+      }
+
+      // Hard cap on total merged content
+      if (content.length > MAX_MERGED_CHARS) {
+        content = content.slice(-MAX_MERGED_CHARS);
+      }
+
+      merged.push({ role: run.role as "user" | "assistant", content });
     }
     return merged;
   }
