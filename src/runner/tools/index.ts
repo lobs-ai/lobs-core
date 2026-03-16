@@ -22,7 +22,12 @@ export { setReactDiscord };
 
 export type { ToolSideEffects, ToolExecutorResult };
 
-export type ToolExecutor = (params: Record<string, unknown>, cwd: string) => Promise<ToolExecutorResult>;
+/** Optional context passed to tools from the conversation loop */
+export interface ToolContext {
+  channelId?: string;
+}
+
+export type ToolExecutor = (params: Record<string, unknown>, cwd: string, context?: ToolContext) => Promise<ToolExecutorResult>;
 
 interface ToolEntry {
   definition: ToolDefinition;
@@ -80,7 +85,7 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   },
   spawn_agent: {
     definition: AGENT_CONTROL_TOOLS[0],
-    execute: (params, cwd) => executeSpawnAgent(params, cwd),
+    execute: (params, cwd, context) => executeSpawnAgent(params, cwd, context?.channelId),
   },
   run_pipeline: {
     definition: AGENT_CONTROL_TOOLS[1],
@@ -125,6 +130,7 @@ export async function executeTool(
   params: Record<string, unknown>,
   toolUseId: string,
   cwd: string,
+  context?: ToolContext,
 ): Promise<ToolExecutionResult> {
   const entry = TOOL_REGISTRY[toolName as ToolName];
 
@@ -140,7 +146,7 @@ export async function executeTool(
   }
 
   try {
-    const raw = await entry.execute(params, cwd);
+    const raw = await entry.execute(params, cwd, context);
     
     // Extract side effects if the tool returned them
     const output = typeof raw === "string" ? raw : raw.output;

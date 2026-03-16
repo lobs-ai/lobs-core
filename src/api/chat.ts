@@ -317,6 +317,10 @@ export async function handleChatRequest(
         .orderBy(desc(chatSessions.lastMessageAt))
         .all();
       
+      // Get processing channels from main agent for status indicators
+      const mainAgent = (globalThis as any).__lobsMainAgent;
+      const processingChannels = new Set(mainAgent?.getProcessingChannels?.() ?? []);
+
       return json(res, {
         sessions: sessions.map(s => {
           // Count unread non-tool messages since lastReadAt
@@ -334,6 +338,8 @@ export async function handleChatRequest(
             .get();
           unreadCount = s.lastReadAt ? (result?.count ?? 0) : 0;
 
+          const channelId = `nexus:${s.sessionKey}`;
+
           return {
             id: s.id,
             key: s.sessionKey,
@@ -345,6 +351,7 @@ export async function handleChatRequest(
             compliance_required: s.complianceRequired ?? false,
             disabled_tools: s.disabledTools ? JSON.parse(s.disabledTools) : [],
             unreadCount,
+            processing: processingChannels.has(channelId),
           };
         }),
       });

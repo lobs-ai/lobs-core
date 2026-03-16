@@ -757,10 +757,28 @@ export class MainAgent {
         // Prune: keep last 3 turns' tool results intact, truncate older ones to 400 chars
         messages = pruneToolResults(messages, 3, 400);
         messages = await this.compactIfNeeded(messages);
+        const contextChars = messages.reduce((s, m) =>
+          s + (typeof m.content === "string" ? m.content.length : JSON.stringify(m.content).length), 0);
+        const systemChars = fullSystem.length;
         console.debug(
           `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
-          `calling_llm model=${config.modelId} compacted_history=${messages.length}`,
+          `calling_llm model=${config.modelId} msgs=${messages.length} ctx=${contextChars} sys=${systemChars} total_chars=${contextChars + systemChars}`,
         );
+
+        // Validate message structure before sending to API
+        const validation = this.validateMessages(messages);
+        if (validation) {
+          console.error(`[main-agent] Message validation failed for ${replyChannelId.slice(0, 12)}: ${validation}`);
+          // Log the roles sequence for debugging
+          console.error(`[main-agent] Roles sequence: ${messages.map(m => m.role).join(', ')}`);
+          // Log content types for tool_result detection
+          for (let vi = 0; vi < messages.length; vi++) {
+            const m = messages[vi];
+            if (typeof m.content !== 'string') {
+              console.error(`[main-agent] msg[${vi}] role=${m.role} content_type=array blocks=${Array.isArray(m.content) ? m.content.map((b: any) => b.type).join(',') : typeof m.content}`);
+            }
+          }
+        }
 
         const response = await this.createMessageWithTimeout(client, {
           model: config.modelId,
@@ -1251,7 +1269,7 @@ export class MainAgent {
     created_at: string;
     metadata?: string | null;
   }> {
-    const MAX_CONTEXT_TOKENS = 150000;
+    const MAX_CONTEXT_TOKENS = 80000;
     const CHARS_PER_TOKEN = 4;
     const MAX_CHARS = MAX_CONTEXT_TOKENS * CHARS_PER_TOKEN;
 
@@ -1295,6 +1313,55 @@ export class MainAgent {
    * Also ensures the first message is always a user message (drops leading
    * assistant messages if any, since they'd be orphaned tool call summaries).
    */
+  /**
+   * Validate message array for Anthropic API requirements.
+   * Returns null if valid, or a string describing the problem.
+   */
+  private validateMessages(messages: LLMMessage[]): string | null {
+    if (messages.length === 0) return "empty message array";
+    
+    // First message must be user
+    if (messages[0].role !== "user") {
+      return `first message is ${messages[0].role}, must be user`;
+    }
+    
+    // Must alternate roles (no consecutive same-role)
+    for (let i = 1; i < messages.length; i++) {
+      if (messages[i].role === messages[i - 1].role) {
+        return `consecutive ${messages[i].role} at index ${i - 1} and ${i}`;
+      }
+    }
+
+    // Check for tool_result blocks that reference tool_use IDs
+    // A user message with tool_result must follow an assistant message with matching tool_use
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      if (m.role === "user" && Array.isArray(m.content)) {
+        const toolResults = (m.content as any[]).filter((b: any) => b.type === "tool_result");
+        if (toolResults.length > 0 && i > 0) {
+          const prev = messages[i - 1];
+          if (prev.role !== "assistant") {
+            return `tool_result at index ${i} not preceded by assistant`;
+          }
+          // Check if the preceding assistant had matching tool_use blocks
+          if (Array.isArray(prev.content)) {
+            const toolUseIds = new Set((prev.content as any[]).filter((b: any) => b.type === "tool_use").map((b: any) => b.id));
+            for (const tr of toolResults) {
+              if (!toolUseIds.has(tr.tool_use_id)) {
+                return `tool_result references tool_use_id=${tr.tool_use_id} not found in preceding assistant message at index ${i - 1}`;
+              }
+            }
+          } else {
+            // assistant content is a string but user has tool_result — that's broken
+            return `tool_result at index ${i} but preceding assistant message is plain text`;
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
   private mergeConsecutiveRoles(messages: LLMMessage[]): LLMMessage[] {
     if (messages.length === 0) return messages;
 
@@ -1367,6 +1434,7 @@ export class MainAgent {
 
   private async compactIfNeeded(messages: LLMMessage[]): Promise<LLMMessage[]> {
     const COMPACT_THRESHOLD = 120000; // chars
+    const HARD_CAP = 250000; // absolute maximum chars to send to API
     const totalChars = messages.reduce(
       (sum, m) =>
         sum +
@@ -1380,9 +1448,12 @@ export class MainAgent {
 
     console.log(`[main-agent] Context at ${totalChars} chars, compacting...`);
 
-    // Take the first 60% of messages and summarize them
+    // For very large contexts, summarize more aggressively
+    const summarizeRatio = totalChars > 200000 ? 0.85 : totalChars > 150000 ? 0.75 : 0.6;
+
+    // Take the first N% of messages and summarize them
     // Use safe split to avoid orphaning tool_result blocks
-    const rawSplit = Math.floor(messages.length * 0.6);
+    const rawSplit = Math.floor(messages.length * summarizeRatio);
     const splitPoint = findSafeSplitPoint(messages, rawSplit);
     const toSummarize = messages.slice(0, splitPoint);
     const toKeep = messages.slice(splitPoint);
@@ -1434,10 +1505,24 @@ export class MainAgent {
       ];
 
       // Second pass: if still over budget, aggressively truncate tool results in kept portion
-      const afterSize = calculateContextSize(compacted as LLMMessage[]);
+      let afterSize = calculateContextSize(compacted as LLMMessage[]);
       if (afterSize > COMPACT_THRESHOLD) {
         console.log(`[main-agent] Post-compaction still ${afterSize} chars, truncating tool results...`);
         compacted = pruneToolResults(compacted as LLMMessage[], 2, 200) as typeof compacted;
+        afterSize = calculateContextSize(compacted as LLMMessage[]);
+      }
+
+      // Hard cap: if still over absolute limit, drop oldest messages until we fit
+      if (afterSize > HARD_CAP) {
+        console.warn(`[main-agent] Post-compaction STILL ${afterSize} chars (hard cap ${HARD_CAP}), dropping oldest messages...`);
+        while (compacted.length > 4 && calculateContextSize(compacted as LLMMessage[]) > HARD_CAP) {
+          compacted.shift();
+        }
+        // Ensure first message is user role (API requirement)
+        if (compacted.length > 0 && compacted[0].role !== "user") {
+          compacted.shift();
+        }
+        console.log(`[main-agent] After hard cap trim: ${calculateContextSize(compacted as LLMMessage[])} chars, ${compacted.length} messages`);
       }
 
       return compacted;

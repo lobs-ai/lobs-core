@@ -161,7 +161,7 @@ const BUILTIN_PIPELINES: Record<string, Array<{ agentType: string; modelTier: st
 /**
  * Execute the spawn_agent tool.
  */
-export async function executeSpawnAgent(input: Record<string, unknown>, parentCwd?: string): Promise<string> {
+export async function executeSpawnAgent(input: Record<string, unknown>, parentCwd?: string, channelId?: string): Promise<string> {
   const agentType = input.agent_type as string;
   const task = input.task as string;
   const modelTier = (input.model_tier as string) ?? "small";
