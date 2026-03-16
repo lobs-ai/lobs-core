@@ -1296,9 +1296,20 @@ export class MainAgent {
    * The Anthropic API requires strictly alternating user/assistant roles.
    * Multi-step tool use gets persisted as separate assistant rows in the DB,
    * which creates invalid runs of same-role messages when loaded back.
+   *
+   * Also ensures the first message is always a user message (drops leading
+   * assistant messages if any, since they'd be orphaned tool call summaries).
    */
   private mergeConsecutiveRoles(messages: LLMMessage[]): LLMMessage[] {
+    if (messages.length === 0) return messages;
+
+    // Drop leading assistant messages — API requires first message to be user
+    while (messages.length > 0 && messages[0].role === "assistant") {
+      messages.shift();
+    }
+
     if (messages.length <= 1) return messages;
+
     const merged: LLMMessage[] = [];
     for (const msg of messages) {
       const last = merged[merged.length - 1];
@@ -1307,9 +1318,9 @@ export class MainAgent {
         if (typeof last.content === "string" && typeof msg.content === "string") {
           last.content = last.content + "\n\n" + msg.content;
         }
-        // If either has array content (image blocks), just keep both as-is
-        // by converting to array form — but this case shouldn't happen in practice
-        // since consecutive assistant messages from tool use are always strings.
+        // If either has array content (image blocks), keep as separate entries
+        // by skipping the merge — shouldn't happen in practice since
+        // consecutive assistant messages from tool use are always strings.
       } else {
         merged.push({ ...msg });
       }
