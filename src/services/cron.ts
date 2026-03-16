@@ -116,6 +116,39 @@ export interface CronJobView {
   schedule: string;       // human-readable schedule string
   enabled: boolean;
   lastRun: string | null;
+  nextRun: string | null; // ISO timestamp of next scheduled run
+}
+
+/**
+ * Compute the next fire time for a cron expression, brute-force scanning minute-by-minute.
+ * Returns null if no match within 48 hours (safeguard).
+ */
+function computeNextCronRun(cronExpr: string): string | null {
+  try {
+    const schedule = parseCronExpression(cronExpr);
+    const now = new Date();
+    // Start from next minute boundary
+    const candidate = new Date(now);
+    candidate.setSeconds(0, 0);
+    candidate.setMinutes(candidate.getMinutes() + 1);
+
+    // Scan up to 48 hours ahead (2880 minutes)
+    for (let i = 0; i < 2880; i++) {
+      if (
+        schedule.minute.includes(candidate.getMinutes()) &&
+        schedule.hour.includes(candidate.getHours()) &&
+        schedule.dayOfMonth.includes(candidate.getDate()) &&
+        schedule.month.includes(candidate.getMonth() + 1) &&
+        schedule.dayOfWeek.includes(candidate.getDay())
+      ) {
+        return candidate.toISOString();
+      }
+      candidate.setMinutes(candidate.getMinutes() + 1);
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // ── CronService ─────────────────────────────────────────────────
@@ -298,23 +331,37 @@ export class CronService {
         schedule: job.schedule,
         enabled: job.enabled,
         lastRun: job.lastRun?.toISOString() ?? null,
+        nextRun: job.enabled ? computeNextCronRun(job.schedule) : null,
       });
     }
 
     // Agent jobs (from DB for freshness)
     for (const agentJob of this.listAgentJobs()) {
+      const scheduleStr =
+        agentJob.schedule.kind === "cron"
+          ? agentJob.schedule.expr ?? "(unknown)"
+          : agentJob.schedule.kind === "at"
+            ? `at ${agentJob.schedule.at}`
+            : `every ${(agentJob.schedule.everyMs ?? 0) / 1000}s`;
+
+      let nextRun: string | null = null;
+      if (agentJob.enabled) {
+        if (agentJob.schedule.kind === "cron" && agentJob.schedule.expr) {
+          nextRun = computeNextCronRun(agentJob.schedule.expr);
+        } else if (agentJob.schedule.kind === "at" && agentJob.schedule.at) {
+          const atTime = new Date(agentJob.schedule.at);
+          nextRun = atTime.getTime() > Date.now() ? atTime.toISOString() : null;
+        }
+      }
+
       views.push({
         id: agentJob.id,
         name: agentJob.name,
         kind: "agent",
-        schedule:
-          agentJob.schedule.kind === "cron"
-            ? agentJob.schedule.expr ?? "(unknown)"
-            : agentJob.schedule.kind === "at"
-              ? `at ${agentJob.schedule.at}`
-              : `every ${(agentJob.schedule.everyMs ?? 0) / 1000}s`,
+        schedule: scheduleStr,
         enabled: agentJob.enabled,
         lastRun: agentJob.lastFired ?? null,
+        nextRun,
       });
     }
 

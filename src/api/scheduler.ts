@@ -35,7 +35,8 @@ export async function handleSchedulerRequest(
         kind: job.kind,
         schedule: job.schedule,
         enabled: job.enabled,
-        last_run: job.lastRun ?? null,
+        lastRun: job.lastRun ?? null,
+        nextRun: job.nextRun ?? null,
       }));
 
       return json(res, { jobs: formatted });
