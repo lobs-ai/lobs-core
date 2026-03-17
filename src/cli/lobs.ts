@@ -8,6 +8,10 @@
  *   lobs restart              Restart lobs-core
  *   lobs status               System overview (server, tasks, workers)
  *   lobs health               Detailed health check (DB, memory, LM Studio)
+ *   lobs preflight            Session startup: health + LM Studio model-availability check
+ *
+ * LM Studio diagnostics:
+ *   lobs models               Model-availability diagnostic (which models are missing/loaded)
  *
  * Tasks & workers:
  *   lobs tasks [list|view]    Manage tasks
@@ -503,12 +507,24 @@ async function cmdHealth() {
   console.log(colorize("\n=== Health Check ===\n", "bright"));
   
   const status = data.status === "healthy" ? colorize("✓ HEALTHY", "green") : colorize("✗ UNHEALTHY", "red");
-  console.log(`Status:       ${status}`);
-  console.log(`Uptime:       ${formatUptime(data.uptime)}`);
-  console.log(`PID:          ${data.pid || "unknown"}`);
-  console.log(`DB:           ${data.db === "ok" ? colorize("✓", "green") : colorize("✗", "red")}`);
-  console.log(`Memory Server: ${data.memory_server === "ok" ? colorize("✓", "green") : colorize("✗ down", "yellow")}`);
-  console.log(`LM Studio:    ${data.lm_studio === "ok" ? colorize("✓", "green") : colorize("✗ down", "yellow")}`);
+  console.log(`Status:        ${status}`);
+  console.log(`Uptime:        ${formatUptime(data.uptime)}`);
+  console.log(`PID:           ${data.pid || "unknown"}`);
+  console.log(`DB:            ${data.db === "ok" ? colorize("✓ ok", "green") : colorize("✗ error", "red")}`);
+  console.log(`Memory Server: ${data.memory_server === "ok" ? colorize("✓ ok", "green") : colorize("✗ down", "yellow")}`);
+
+  const lmOk = data.lm_studio === "ok";
+  console.log(`LM Studio:     ${lmOk ? colorize("✓ ok", "green") : colorize("✗ down", "yellow")}`);
+
+  // When LM Studio is down, surface the cross-link to full diagnostics.
+  if (!lmOk) {
+    console.log("");
+    console.log(colorize("  → LM Studio is unreachable. Run diagnostics:", "yellow"));
+    console.log(colorize("    lobs preflight", "bright") + "    — full session preflight (health + model check)");
+    console.log(colorize("    lobs models", "bright") + "       — model-availability diagnostic only");
+    console.log(`    API: ${colorize("GET /api/lm-studio", "dim")}`);
+  }
+
   console.log("");
 }
 
@@ -516,6 +532,77 @@ async function cmdModels() {
   const report = await runLmStudioDiagnostic();
   const lines = formatDiagnosticReport(report, { color: process.stdout.isTTY });
   for (const line of lines) console.log(line);
+  process.exit(report.ok ? 0 : 1);
+}
+
+/**
+ * `lobs preflight` — consolidated session startup check.
+ *
+ * Runs in two phases:
+ *   1. System health (DB, memory server, LM Studio reachability)
+ *   2. LM Studio model-availability diagnostic (always runs, not just when down)
+ *
+ * Exit codes:
+ *   0 — all checks passed
+ *   1 — one or more checks failed (models missing / LM Studio down)
+ */
+async function cmdPreflight() {
+  console.log(colorize("\n╔══════════════════════════════════╗", "cyan"));
+  console.log(colorize("║  LM Studio Preflight Checklist   ║", "cyan"));
+  console.log(colorize("╚══════════════════════════════════╝", "cyan"));
+  console.log("");
+
+  // ── Phase 1: System health ──────────────────────────────────────────────
+  console.log(colorize("Phase 1 — System Health", "bright"));
+  console.log(colorize("─────────────────────────────────", "dim"));
+
+  let healthData: Record<string, unknown>;
+  try {
+    healthData = await fetchApi("/health");
+  } catch {
+    console.log(colorize("  ✗ lobs-core unreachable", "red") + " — is the server running? (lobs start)");
+    console.log("");
+    process.exit(1);
+  }
+
+  const dbOk        = healthData.db            === "ok";
+  const memOk       = healthData.memory_server === "ok";
+  const lmReachable = healthData.lm_studio     === "ok";
+
+  console.log(`  DB:            ${dbOk  ? colorize("✓ ok", "green") : colorize("✗ error", "red")}`);
+  console.log(`  Memory Server: ${memOk ? colorize("✓ ok", "green") : colorize("✗ down", "yellow")}`);
+  console.log(`  LM Studio:     ${lmReachable ? colorize("✓ reachable", "green") : colorize("✗ unreachable", "red")}`);
+
+  if (!lmReachable) {
+    console.log("");
+    console.log(colorize("  ✗ LM Studio is unreachable — model diagnostic skipped.", "red"));
+    console.log("    Start LM Studio and load at least one model before spawning local agents.");
+    console.log("    API docs: GET /api/lm-studio  (status, models, latency sub-routes)");
+    console.log("");
+    process.exit(1);
+  }
+
+  console.log("");
+
+  // ── Phase 2: Model availability diagnostic ─────────────────────────────
+  console.log(colorize("Phase 2 — Model Availability", "bright"));
+  console.log(colorize("─────────────────────────────────", "dim"));
+
+  const report = await runLmStudioDiagnostic();
+  const lines  = formatDiagnosticReport(report, { color: process.stdout.isTTY });
+  for (const line of lines) console.log("  " + line);
+
+  // ── Summary ─────────────────────────────────────────────────────────────
+  console.log("");
+  console.log(colorize("─────────────────────────────────", "dim"));
+  if (report.ok) {
+    console.log(colorize("✓ Preflight passed — system ready to spawn local agents.", "green"));
+  } else {
+    console.log(colorize("✗ Preflight failed — load missing models in LM Studio before spawning.", "red"));
+    console.log("  Diagnostic API: GET /api/lm-studio/models  (for remote callers / paw-hub)");
+  }
+  console.log("");
+
   process.exit(report.ok ? 0 : 1);
 }
 
@@ -793,6 +880,10 @@ const subcommand = args[1];
     
     case "health":
       await cmdHealth();
+      break;
+
+    case "preflight":
+      await cmdPreflight();
       break;
 
     case "models":

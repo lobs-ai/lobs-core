@@ -2,7 +2,7 @@
 
 **Status:** Implemented  
 **Date:** 2026-03-17  
-**Updated:** 2026-03-17 — native runner path wired, two diagnostic bugs fixed
+**Updated:** 2026-03-17 — native runner path wired, two diagnostic bugs fixed; preflight command + cross-links added
 
 ## Context
 
@@ -58,15 +58,42 @@ Behaviour:
 2. `checkModelsBeforeSpawn`: used exact normalization only — missed fuzzy near-matches (e.g. `qwen3.5-35b`
    with loaded `qwen3.5-35b-mlx-instruct`). Fixed by delegating to `findClosestMatch`.
 
-**Session startup:** the `/api/lm-studio` endpoints (`/api/lm-studio`, `/api/lm-studio/models`,
-`/api/lm-studio/latency`) can be called at session start for a full diagnostic overview. The
-`processSpawnWithRunner` preflight fires automatically per spawn — no manual session step needed.
+**Session startup:** run `lobs preflight` at the start of every work session before spawning
+local agents. This is the consolidated entry point:
+
+1. Phase 1 — `GET /api/health`: checks DB, memory server, and LM Studio reachability
+2. Phase 2 — `runLmStudioDiagnostic()`: full model-availability scan
+
+When health reports `lm_studio: "down"`, the response now includes a `lm_studio_diagnostic`
+object with API routes and CLI hints so callers (paw-hub, Nexus, CI) know where to go next.
+
+See [docs/runbooks/session-startup-checklist.md](../runbooks/session-startup-checklist.md)
+for the full runbook including troubleshooting steps.
+
+The `processSpawnWithRunner` per-spawn preflight still fires automatically — `lobs preflight`
+is the human-facing session-start gate, not a replacement for per-spawn checks.
 
 ### `src/cli/lobs.ts`
 
-`lobs models` command:
+`lobs preflight` command (new — session startup gate):
+- Phase 1: `GET /api/health` — checks DB, memory server, LM Studio reachability
+- Phase 2: `runLmStudioDiagnostic()` — model-availability scan
+- Exits 0 (ready) or 1 (action needed)
+
+`lobs models` command (granular — model scan only):
 - Runs full `runLmStudioDiagnostic()` and formats output
 - Exits 0 on ok, 1 on mismatches (CI/script-friendly)
+
+`lobs health` command (updated):
+- When `lm_studio` is down, surfaces `lobs preflight`, `lobs models`, and `GET /api/lm-studio`
+
+### `src/api/health.ts`
+
+Health response cross-link (new):
+- When `lm_studio: "down"`, response includes `lm_studio_diagnostic` with:
+  - `hint` — human-readable message
+  - `api.{status,models,latency}` — API routes for programmatic callers
+  - `cli` — `"lobs preflight"` for human callers
 
 ## Fuzzy Matching Strategy
 

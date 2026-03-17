@@ -53,7 +53,7 @@ export async function handleHealthRequest(_req: IncomingMessage, res: ServerResp
 
   const memoryStatus = memoryServer.getStatus();
 
-  json(res, {
+  const body: Record<string, unknown> = {
     status,
     uptime: process.uptime(),
     pid: pid ?? process.pid,
@@ -65,5 +65,21 @@ export async function handleHealthRequest(_req: IncomingMessage, res: ServerResp
       running: memoryStatus.running,
     },
     lm_studio: lmStudio ? "ok" : "down",
-  });
+  };
+
+  // When LM Studio is unreachable, include diagnostic links so callers know
+  // exactly where to get the full model-availability report.
+  if (!lmStudio) {
+    body.lm_studio_diagnostic = {
+      hint: "LM Studio appears unreachable. Run `lobs preflight` or query the diagnostic API for details.",
+      api: {
+        status: "/api/lm-studio",
+        models: "/api/lm-studio/models",
+        latency: "/api/lm-studio/latency",
+      },
+      cli: "lobs preflight",
+    };
+  }
+
+  json(res, body);
 }
