@@ -180,6 +180,26 @@ async function checkSessionAlive(sessionKey: string): Promise<boolean> {
   try {
     // Strategy: check the transcript file directly instead of relying on sessions_list,
     // which can miss ephemeral subagent sessions after store cleanup.
+    //
+    // STALE THRESHOLD RATIONALE:
+    // We use 2 minutes, NOT the runTimeoutSeconds (30 min).
+    //
+    // Reason: sessions.json and transcript file mtimes are updated by the RUNNING process.
+    // After a crash/restart, the running process is gone — so the file will NOT be updated
+    // further. A file last-touched 2+ minutes ago with no live process behind it is a ghost.
+    //
+    // The original 30-min threshold was the source of the 'orphaned on restart' detection
+    // latency bug: ghost-run watchdog waits 5 min to start checking, then finds a transcript
+    // written 3 min ago, concludes "alive", waits another 30 min. Total: 35+ minutes of
+    // the capacity slot being held by a dead worker.
+    //
+    // With 2 min: watchdog fires at 5 min, file is 5+ min old → correctly marked dead.
+    // Worst case for live sessions: a genuinely slow model call (5-10 min of silence) at
+    // exactly the 5-min watchdog window. The worker-liveness check (5a) won't fire until
+    // 12 min anyway, so a 2-min threshold is safe for that path. The ghost-run watchdog
+    // (step 8) only activates on runs > 5 min old, so any run seen by the watchdog has
+    // had at least 5 min to write something — the 2-min threshold gives a 3-min buffer.
+    const STALE_THRESHOLD_MS = 2 * 60 * 1000; // 2 min — see rationale above
 
     // Extract agent id from session key (e.g. "agent:programmer:subagent:UUID" → "programmer")
     const parts = sessionKey.split(":");
@@ -195,8 +215,8 @@ async function checkSessionAlive(sessionKey: string): Promise<boolean> {
       if (entry) {
         const updatedAt = entry.updatedAt as number;
         const ageMs = Date.now() - updatedAt;
-        const STALE_THRESHOLD_MS = 30 * 60 * 1000; // 30 min — matches runTimeoutSeconds
         if (ageMs <= STALE_THRESHOLD_MS) return true;
+        log().debug?.(`checkSessionAlive: sessions.json entry stale (${Math.round(ageMs / 1000)}s) — checking transcript`);
         // Entry exists but stale — check transcript file mtime as backup
       }
     } catch {}
@@ -209,9 +229,8 @@ async function checkSessionAlive(sessionKey: string): Promise<boolean> {
         // statSync imported at top level
         const stat = statSync(transcriptPath);
         const fileAgeMs = Date.now() - stat.mtimeMs;
-        const FILE_STALE_MS = 30 * 60 * 1000; // 30 min — matches runTimeoutSeconds
-        if (fileAgeMs <= FILE_STALE_MS) return true;
-        log().debug?.("checkSessionAlive: transcript " + transcriptPath.slice(-50) + " stale (" + Math.round(fileAgeMs / 60000) + "min)");
+        if (fileAgeMs <= STALE_THRESHOLD_MS) return true;
+        log().debug?.(`checkSessionAlive: transcript ${transcriptPath.slice(-50)} stale (${Math.round(fileAgeMs / 60000)}min) → dead`);
         return false;
       } catch {
         // No transcript file — session truly doesn't exist
@@ -274,6 +293,21 @@ async function runTick(): Promise<void> {
   // On first tick, resume any in-flight workers from before restart
   if (isFirstTick) {
     isFirstTick = false;
+
+    // ── Startup orphan fast-path ─────────────────────────────────────────────
+    // The normal ghost watchdog only considers worker_runs >5 minutes old.
+    // That means restart orphans sit undetected for 5+ minutes after startup,
+    // blocking capacity slots and triggering 'orphaned on restart' timeout storms.
+    //
+    // On the first tick we run a targeted sweep of ALL open worker_runs (no age
+    // cutoff) and close any whose sessions are dead (checkSessionAlive uses a
+    // 2-min staleness threshold — sufficient after a process restart).
+    //
+    // processPendingResumes() below handles the work_state reset + resume logic.
+    // This path only handles runs that were NOT picked up by pendingResumes
+    // (e.g. runs with no task_id, or where the session key was never registered).
+    closeStartupOrphans().catch(e => log().warn(`paw: closeStartupOrphans error: ${e}`));
+
     processPendingResumes().catch(e => log().warn(`paw: processPendingResumes error: ${e}`));
   }
 
@@ -860,6 +894,67 @@ function runStallWatchdog(): void {
         log().error(`[STALL_WATCHDOG] workflow_run cleanup error: ${e}`);
       }
     }
+  }
+}
+
+// ── Startup orphan fast-path ──────────────────────────────────────────────────
+
+/**
+ * Called once on the first orchestrator tick after startup.
+ *
+ * Finds ALL open worker_runs (no age cutoff) and checks whether their sessions
+ * are still alive. Dead sessions are closed immediately as 'orphaned on restart'
+ * infra failures. This eliminates the 5-minute window the normal ghost watchdog
+ * would otherwise leave.
+ *
+ * processPendingResumes() is called after this and handles the resume/reset logic
+ * for tasks whose sessions are still alive. This function only closes orphans that
+ * won't be handled by that path.
+ *
+ * Why async: checkSessionAlive is async (reads filesystem / sessions.json).
+ */
+async function closeStartupOrphans(): Promise<void> {
+  try {
+    const db = getRawDb();
+    const openRuns = db.prepare(`
+      SELECT id, worker_id, task_id, agent_type, started_at
+      FROM worker_runs
+      WHERE ended_at IS NULL
+    `).all() as GhostRunRow[];
+
+    if (openRuns.length === 0) {
+      log().debug?.("[STARTUP_ORPHAN] No open worker_runs — nothing to close");
+      return;
+    }
+
+    log().info(`[STARTUP_ORPHAN] Checking ${openRuns.length} open worker_run(s) for restart orphans`);
+    const now = new Date().toISOString();
+    let closedCount = 0;
+
+    for (const wr of openRuns) {
+      const sessionKey = wr.worker_id;
+      let alive = false;
+
+      if (sessionKey) {
+        alive = await checkSessionAlive(sessionKey);
+      }
+      // No session key → definitely dead
+
+      if (!alive) {
+        closeGhostRun(wr, now);
+        closedCount++;
+      } else {
+        log().debug?.(`[STARTUP_ORPHAN] worker_run ${wr.id} session ${sessionKey?.slice(0, 30)} appears alive — skipping (processPendingResumes will handle)`);
+      }
+    }
+
+    if (closedCount > 0) {
+      log().warn(`[STARTUP_ORPHAN] Closed ${closedCount}/${openRuns.length} orphaned worker_run(s) at startup`);
+    } else {
+      log().info(`[STARTUP_ORPHAN] All ${openRuns.length} open run(s) still alive — no orphans to close`);
+    }
+  } catch (e) {
+    log().error(`[STARTUP_ORPHAN] error: ${e}`);
   }
 }
 

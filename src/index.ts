@@ -62,13 +62,17 @@ const pawPlugin = {
       ).all() as Array<{ taskId: string; title: string; sessionKey: string | null }>;
 
       if (stuckTasks.length > 0) {
-        log().info(`paw: startup recovery — found ${stuckTasks.length} in-progress tasks, attempting to resume`);
+        log().info(`paw: startup recovery — found ${stuckTasks.length} in-progress tasks, scheduling resume checks`);
 
         for (const task of stuckTasks) {
           if (task.sessionKey) {
-            // Session exists — try to resume by sending a continue message
+            // Schedule for resume — processPendingResumes() (called from the first
+            // orchestrator tick) will verify whether each session is still alive via
+            // the gateway API before sending a resume message. Dead sessions are reset
+            // to not_started. This deferred check avoids the race where this synchronous
+            // startup code fires before the gateway is ready to answer liveness queries.
             scheduleResume(task.sessionKey, task.taskId, task.title);
-            log().info(`paw: will resume session ${task.sessionKey.slice(0, 40)} for task ${task.taskId.slice(0, 8)} (${task.title.slice(0, 30)})`);
+            log().info(`paw: queued resume check for session ${task.sessionKey.slice(0, 40)} (task ${task.taskId.slice(0, 8)}: ${task.title.slice(0, 30)})`);
           } else {
             // No session — reset to not_started so it gets re-dispatched
             raw.prepare(`UPDATE tasks SET work_state = 'not_started', updated_at = datetime('now') WHERE id = ?`).run(task.taskId);
@@ -406,7 +410,89 @@ export async function processPendingResumes(): Promise<void> {
 
   const SINK_SESSION_KEY = "agent:sink:paw-orchestrator-v2";
 
+  // ── Liveness pre-check ────────────────────────────────────────────────────
+  // Before sending any resume message, verify each session is actually alive
+  // via the gateway. Sessions scheduled for resume at plugin startup (register())
+  // were recorded SYNCHRONOUSLY without any liveness verification — they may have
+  // died before/during the restart. Sending a resume to a dead session causes a
+  // hung send that ultimately produces an 'orphaned on restart' timeout record.
+  //
+  // We fetch the full session list once (up to 200, 3h window) and compare.
+  let aliveSessions = new Set<string>();
+  let livenessCheckFailed = false;
+  try {
+    const listResp = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+      body: JSON.stringify({
+        tool: "sessions/list",
+        sessionKey: SINK_SESSION_KEY,
+        args: { activeMinutes: 180, limit: 200 },
+      }),
+      signal: AbortSignal.timeout(6000),
+    });
+    if (listResp.ok) {
+      const data = (await listResp.json()) as any;
+      const content = data?.result?.content;
+      let sessions: any[] = [];
+      if (Array.isArray(content)) {
+        for (const c of content) {
+          if (c.type === "text" && c.text) {
+            try { sessions = JSON.parse(c.text)?.sessions ?? []; } catch {}
+          }
+        }
+      }
+      for (const s of sessions) {
+        if (s.key) aliveSessions.add(s.key);
+      }
+      log().info(`paw: processPendingResumes — gateway reports ${aliveSessions.size} live session(s); will verify ${pendingResumes.length} resume candidate(s)`);
+    } else {
+      livenessCheckFailed = true;
+      log().warn(`paw: processPendingResumes — liveness list call failed (HTTP ${listResp.status}); resetting all candidates to not_started`);
+    }
+  } catch (e) {
+    livenessCheckFailed = true;
+    log().warn(`paw: processPendingResumes — liveness check error: ${e}; resetting all candidates to not_started`);
+  }
+
+  if (livenessCheckFailed) {
+    // Cannot verify — safest option is to reset all candidates so the orchestrator
+    // re-dispatches them cleanly rather than firing resumes at potentially dead sessions.
+    const { getRawDb } = await import("./db/connection.js");
+    const raw = getRawDb();
+    for (const r of pendingResumes) {
+      raw.prepare(`UPDATE tasks SET work_state = 'not_started', updated_at = datetime('now') WHERE id = ?`).run(r.taskId);
+      log().info(`paw: reset task ${r.taskId.slice(0, 8)} to not_started — liveness check unavailable`);
+    }
+    pendingResumes.length = 0;
+    return;
+  }
+
   for (const resume of pendingResumes) {
+    // Verify session is alive BEFORE attempting to send a resume message.
+    if (!aliveSessions.has(resume.sessionKey)) {
+      log().info(
+        `paw: session ${resume.sessionKey.slice(0, 40)} not in live set — ` +
+        `resetting task ${resume.taskId.slice(0, 8)} (${resume.title.slice(0, 30)}) to not_started`
+      );
+      const { getRawDb } = await import("./db/connection.js");
+      const raw = getRawDb();
+      raw.prepare(`UPDATE tasks SET work_state = 'not_started', updated_at = datetime('now') WHERE id = ?`).run(resume.taskId);
+      // Also close the stale worker_run so it doesn't block capacity
+      try {
+        const { getDb } = await import("./db/connection.js");
+        const { workerRuns } = await import("./db/schema.js");
+        const { eq } = await import("drizzle-orm");
+        getDb().update(workerRuns).set({
+          endedAt: new Date().toISOString(),
+          succeeded: false,
+          timeoutReason: "orphaned on restart",
+          failureType: "infra",
+        }).where(eq(workerRuns.workerId, resume.sessionKey)).run();
+      } catch {}
+      continue;
+    }
+
     try {
       const response = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {
         method: "POST",

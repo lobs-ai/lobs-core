@@ -483,46 +483,54 @@ async function main() {
     mainAgent.resumeAfterRestart().catch(err => {
       console.error("[main-agent] Resume after restart failed:", err);
     });
-    
-    // Resume workers that were running before restart
-    const rawDb = getRawDb();
-    const orphanedTasks = rawDb.prepare(`
-      SELECT id, title, agent, model_tier, notes, context_refs, project_id
-      FROM tasks WHERE status = 'running' OR (status = 'active' AND id IN (
-        SELECT DISTINCT task_id FROM worker_runs WHERE ended_at IS NULL AND task_id IS NOT NULL
-      ))
-    `).all();
 
-    if (orphanedTasks.length > 0) {
-      console.log(`[restart] Found ${orphanedTasks.length} task(s) to resume`);
-      
-      // Mark orphaned worker runs as failed (infra), reset tasks to 'active'
-      rawDb.prepare(`
-        UPDATE worker_runs SET ended_at = datetime('now'), succeeded = 0,
-        timeout_reason = 'orphaned on restart', failure_type = 'infra'
-        WHERE ended_at IS NULL
-      `).run();
-      
-      rawDb.prepare(`
-        UPDATE tasks SET status = 'active', updated_at = datetime('now')
-        WHERE status = 'running'
-      `).run();
-      
-      // Reset busy agents
-      rawDb.prepare(`
-        UPDATE agent_status SET status = 'idle', current_task_id = NULL
-        WHERE status = 'busy'
-      `).run();
-      
-      // Increment crash_count so auto-fail guard doesn't penalize
-      for (const task of orphanedTasks) {
+    // NOTE: Worker restart cleanup is intentionally NOT done here.
+    //
+    // The paw plugin's processPendingResumes() (called from the first orchestrator
+    // control-loop tick) owns orphaned-worker recovery. It:
+    //   1. Calls failStaleSpawnRuns() to handle spawn-node stuck runs
+    //   2. Verifies each candidate session is alive via the gateway API
+    //   3. Sends a resume message if alive, or resets work_state to not_started if dead
+    //
+    // Running a competing bulk-UPDATE here (marking ALL open worker_runs as
+    // 'orphaned on restart') created a race: processPendingResumes and this block
+    // both fired at ~3 seconds and stomped on each other, causing the recurring
+    // 'orphaned on restart' flood (4× in 6 hours, ~15k seconds total).
+    //
+    // The only safe cleanup this block does is reset tasks whose status is literally
+    // 'running' (which is set at the DB level by the orchestrator, separate from
+    // paw's work_state='in_progress').  These can't be recovered — the orchestrator
+    // process itself is what was running them.
+    const rawDb = getRawDb();
+
+    // Reset busy agent_status rows — these are cosmetic/advisory, safe to clear immediately.
+    rawDb.prepare(`
+      UPDATE agent_status SET status = 'idle', current_task_id = NULL
+      WHERE status = 'busy'
+    `).run();
+
+    // Reset tasks stuck in status='running' that have NO open worker_runs and are
+    // NOT already being handled by processPendingResumes (work_state != 'in_progress').
+    // These are tasks the orchestrator itself was orchestrating (not worker sessions).
+    const stuckOrchTasks = rawDb.prepare(`
+      SELECT id FROM tasks
+      WHERE status = 'running'
+        AND work_state != 'in_progress'
+        AND id NOT IN (
+          SELECT DISTINCT task_id FROM worker_runs WHERE ended_at IS NULL AND task_id IS NOT NULL
+        )
+    `).all() as Array<{ id: string }>;
+
+    if (stuckOrchTasks.length > 0) {
+      console.log(`[restart] Resetting ${stuckOrchTasks.length} orchestrator-level stuck task(s) to active`);
+      for (const task of stuckOrchTasks) {
         rawDb.prepare(`
-          UPDATE tasks SET crash_count = COALESCE(crash_count, 0) + 1, updated_at = datetime('now')
+          UPDATE tasks SET status = 'active',
+            crash_count = COALESCE(crash_count, 0) + 1,
+            updated_at = datetime('now')
           WHERE id = ?
-        `).run((task as any).id);
+        `).run(task.id);
       }
-      
-      console.log(`[restart] Reset ${orphanedTasks.length} task(s) to active — orchestrator will re-dispatch`);
     }
   }, 3000);
   
