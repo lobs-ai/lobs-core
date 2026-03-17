@@ -174,6 +174,7 @@ export async function executeSpawnAgent(
   const defaultCwd = parentCwd ?? HOME;
   const cwd = (input.cwd as string) ?? defaultCwd;
   const timeout = Math.min((input.timeout as number) ?? 7200, 7200);
+  const maxTurns = input.max_turns as number | undefined;
   const extraTools = (input.extra_tools as string[]) ?? [];
 
   const model = getModelForTier(modelTier);
@@ -197,6 +198,7 @@ export async function executeSpawnAgent(
     tools,
     cwd,
     timeout,
+    ...(maxTurns != null && { maxTurns }),
   };
 
   // Track the spawned agent

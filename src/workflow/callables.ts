@@ -416,12 +416,15 @@ function reflectionSpawnAll(args: Record<string, unknown>, _ctx: CallableContext
     const agentType = pick.agentType;
 
     // Spawn via lobs-core's own runner with a completion callback
+    // Reflections need no tools and should complete in 1-3 turns
     executeSpawnAgent(
       {
         agent_type: agentType,
         task: prompt,
         model_tier: "small",
         timeout: 300,
+        max_turns: 5,
+        extra_tools: [],  // no tools needed — data is in the prompt
       },
       undefined, // cwd
       undefined, // channelId — no need to announce to Discord

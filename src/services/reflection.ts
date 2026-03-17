@@ -212,14 +212,12 @@ export class ReflectionService {
         ).join("\n")
       : "No active projects.";
 
-    return `You are the ${agentType} agent in a multi-agent system (PAW \u2014 Personal AI Workforce). Your role is to deeply reflect on your work, the system state, and suggest concrete improvements.
+    return `You are the ${agentType} agent. Reflect on the data below and output a JSON block. Do NOT use tools or investigate files \u2014 everything you need is provided here. Be brief and concrete.
 
-**IMPORTANT: Before writing your reflection, use your tools to investigate.** Read your own workspace files (SOUL.md, AGENTS.md, IDENTITY.md, memory/ files) to understand your identity and history. Look at relevant project directories, recent git logs, or any artifacts produced. The more grounded your observations, the more useful they are.
-
-## Your Recent Work (${agentType})
+## Recent Work
 ${runSummary}
 
-## System-Wide Activity (all agents, last 15 runs)
+## System Activity (all agents)
 ${systemActivity}
 
 ## Active Tasks
@@ -228,32 +226,24 @@ ${taskList}
 ## Active Projects
 ${projectList}
 
-## Your Workspace
-Your workspace is at: ~/.lobs/agents/${agentType}/
-Shared memory is at: ~/lobs-shared-memory/
-
-## Recent Failures & Issues
+## Recent Failures
 ${this._getFailureSummary(agentType)}
 
-## Recent Suggestion Outcomes
+## Prior Suggestion Outcomes
 ${this._getSuggestionOutcomes()}
 
-## Reflection Instructions
-1. **First, investigate.** Read files in your workspace and shared memory. Check git history. Look at project state. Spend time understanding before opining.
-2. **Then reflect.** Based on what you found AND the data above, write your structured reflection.
-3. **Think forward, not just backward.** Don't just identify problems — propose new capabilities, integrations, and workflows that would make the system more valuable. What should we build that we haven't thought of? What would save Rafe time he doesn't even realize he's spending?
-4. **Be concrete.** Reference specific files, tasks, projects, and patterns. Vague suggestions like "improve error handling" are useless — say exactly what, where, and how.
-
-Output your reflection as a JSON block (this MUST appear in your final message):
+Based ONLY on the data above, output this JSON block:
 ${"```"}json
 {
-  "inefficiencies": ["specific observation grounded in evidence"],
+  "inefficiencies": ["specific observation from the data above"],
   "systemRisks": ["specific risk with reasoning"],
   "missedOpportunities": ["specific opportunity with expected value"],
   "concreteSuggestions": ["actionable step that could be done this week"],
   "summary": "One paragraph synthesizing key insights"
 }
 ${"```"}
+
+Do not read files. Do not use tools. Just analyze the provided data and respond with the JSON. Keep reasoning brief.
 
 Reflection ID: ${reflectionId}`;
   }
