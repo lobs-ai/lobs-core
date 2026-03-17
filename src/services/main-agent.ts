@@ -1142,13 +1142,30 @@ export class MainAgent {
               Math.ceil(toolResultSummary.length / 4),
             );
 
-          // Inject any queued messages that arrived while we were working
-          // This lets the agent see new context mid-loop instead of waiting
-          // until the entire conversation finishes — critical for group chats
-          const midLoopQueued = this.drainQueue(replyChannelId);
+          // Inject any queued messages that arrived while we were working.
+          // IMPORTANT: Append to the existing tool_results user message rather than
+          // inserting a fake assistant message + new user message. The old approach
+          // broke the tool-calling flow — the model saw a synthetic "I see new messages"
+          // assistant turn after tool results, which disrupted its multi-step tool use
+          // and caused it to output tool calls as text or stop using tools entirely.
+          const midLoopQueued = this.drainQueue(replyChannelId, true); // skip DB persist — we persist below
           if (midLoopQueued) {
-            // Store in DB for continuity
-            const queuedContent = `[New messages received during processing]\n\n${midLoopQueued}`;
+            const queuedNote = `\n\n[New messages received during processing]\n\n${midLoopQueued}`;
+            
+            // Append to the last user message (tool results) as a text block
+            const lastUserMsg = messages[messages.length - 1];
+            if (lastUserMsg && lastUserMsg.role === "user" && Array.isArray(lastUserMsg.content)) {
+              // Tool results are an array of tool_result blocks — add a text block
+              (lastUserMsg.content as Array<Record<string, unknown>>).push({
+                type: "text",
+                text: queuedNote,
+              });
+            } else if (lastUserMsg && lastUserMsg.role === "user") {
+              // String content — just append
+              lastUserMsg.content = (lastUserMsg.content as string) + queuedNote;
+            }
+
+            // Persist queued messages to DB for history continuity
             this.db
               .prepare(
                 `INSERT INTO main_agent_messages
@@ -1157,39 +1174,15 @@ export class MainAgent {
               )
               .run(
                 randomUUID(),
-                queuedContent,
+                `[New messages received during processing]\n\n${midLoopQueued}`,
                 replyChannelId,
-                Math.ceil(queuedContent.length / 4),
+                Math.ceil(midLoopQueued.length / 4),
               );
 
-            const ackContent = "I see new messages arrived. Let me incorporate them.";
-            // Persist the synthetic assistant ack so DB alternation is maintained
-            this.db
-              .prepare(
-                `INSERT INTO main_agent_messages
-                   (id, role, content, channel_id, token_estimate)
-                 VALUES (?, 'assistant', ?, ?, ?)`,
-              )
-              .run(
-                randomUUID(),
-                ackContent,
-                replyChannelId,
-                Math.ceil(ackContent.length / 4),
-              );
-
-            messages.push({
-              role: "assistant",
-              content: ackContent,
-            });
-            messages.push({
-              role: "user",
-              content: queuedContent,
-            });
-
-            console.log(`[main-agent] Injected ${midLoopQueued.split("---").length - 1} queued message(s) mid-loop for channel ${replyChannelId.slice(0, 8)}`);
+            console.log(`[main-agent] Appended ${midLoopQueued.split("---").length - 1} queued message(s) to tool results for channel ${replyChannelId.slice(0, 8)}`);
             console.debug(
               `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
-              `midloop_queue_injected=true`,
+              `midloop_queue_appended=true`,
             );
           }
 
@@ -1826,7 +1819,7 @@ export class MainAgent {
     }
   }
 
-  private drainQueue(channelId: string): string {
+  private drainQueue(channelId: string, skipDbPersist = false): string {
     const queue = this.channelQueues.get(channelId);
     if (!queue || queue.length === 0) return "";
     console.log(
@@ -1838,18 +1831,21 @@ export class MainAgent {
         `---\nQueued #${i + 1} from ${m.authorName} (${new Date(m.timestamp).toLocaleTimeString()}):\n${m.content}`,
     );
     
-    // Store the queued block as a single DB entry
     const queuedBlock = texts.join("\n\n");
-    this.db.prepare(`
-      INSERT INTO main_agent_messages (id, role, content, channel_id, platform_message_id, token_estimate)
-      VALUES (?, 'user', ?, ?, ?, ?)
-    `).run(
-      randomUUID(),
-      `[Queued messages while agent was busy]\n\n${queuedBlock}`,
-      channelId,
-      null,
-      Math.ceil(queuedBlock.length / 4),
-    );
+    
+    // Store the queued block as a single DB entry (caller can skip if they persist separately)
+    if (!skipDbPersist) {
+      this.db.prepare(`
+        INSERT INTO main_agent_messages (id, role, content, channel_id, platform_message_id, token_estimate)
+        VALUES (?, 'user', ?, ?, ?, ?)
+      `).run(
+        randomUUID(),
+        `[Queued messages while agent was busy]\n\n${queuedBlock}`,
+        channelId,
+        null,
+        Math.ceil(queuedBlock.length / 4),
+      );
+    }
     
     // Clear this channel's in-memory queue and mark DB queue processed
     this.channelQueues.delete(channelId);
