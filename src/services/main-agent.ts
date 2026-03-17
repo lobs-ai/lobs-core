@@ -17,12 +17,12 @@ import { getToolsForSession, getSessionType } from "../runner/tools/tool-sets.js
 import { loadWorkspaceContext, buildSystemPrompt } from "./workspace-loader.js";
 import { buildFallbackChain, resolveModelForTier, type ModelTier } from "../orchestrator/model-chooser.js";
 import Database from "better-sqlite3";
-import { compactMessages, pruneToolResults, findSafeSplitPoint, calculateContextSize } from "./compaction.js";
+import { compactMessages, findSafeSplitPoint, calculateContextSize } from "./compaction.js";
 import { LoopDetector } from "../runner/loop-detector.js";
 
 const MAX_HISTORY = 50;
 const MAX_CONTEXT_CHARS = 150_000; // Rough char budget for history
-const MAX_LIVE_TOOL_RESULT_CHARS = 50_000;
+const MAX_LIVE_TOOL_RESULT_CHARS = 200_000; // Safety valve only — compaction handles context budgets
 const DEFAULT_MODEL = "strong";  // Chat defaults to strong tier (opus)
 const DEFAULT_CWD = process.env.HOME ?? "/tmp";
 const MAX_CONCURRENT_CHANNELS = 10; // Max simultaneous channel conversations
@@ -910,8 +910,8 @@ export class MainAgent {
           timestamp: Date.now(),
         } satisfies AgentStreamEvent);
 
-        // Prune: keep last 6 turns' tool results intact, truncate older ones to 800 chars
-        messages = pruneToolResults(messages, 6, 800);
+        // Compact if approaching context limit — no pre-pruning, let the compactor
+        // see full tool results so it can produce high-quality summaries
         messages = await this.compactIfNeeded(messages, replyChannelId);
         const contextChars = messages.reduce((s, m) =>
           s + (typeof m.content === "string" ? m.content.length : JSON.stringify(m.content).length), 0);
@@ -1746,13 +1746,7 @@ export class MainAgent {
         }
       }
 
-      // Second pass: if still over budget, truncate tool results in kept portion
       let afterSize = calculateContextSize(compacted);
-      if (afterSize > COMPACT_THRESHOLD) {
-        console.log(`[main-agent] Post-compaction still ${afterSize} chars, truncating tool results...`);
-        compacted = pruneToolResults(compacted, 3, 400);
-        afterSize = calculateContextSize(compacted);
-      }
 
       // Hard cap: if still over absolute limit, drop oldest messages until we fit
       if (afterSize > HARD_CAP) {
