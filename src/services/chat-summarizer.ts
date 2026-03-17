@@ -27,7 +27,7 @@ const SUMMARY_THRESHOLD = 6;
 const MAX_CONTEXT_CHARS = 12_000;
 
 /** Timeout for local model calls */
-const TIMEOUT_MS = 30_000;
+const TIMEOUT_MS = 60_000;
 
 // ── Prompts ─────────────────────────────────────────────────────────────
 
@@ -330,13 +330,32 @@ export async function maybeSummarizeChat(sessionKey: string): Promise<string | n
 export async function forceSummarize(sessionKey: string): Promise<{ title: string | null; summary: string | null }> {
   const db = getDb();
 
-  // Reset the label to force title regeneration
+  // Store original label so we can restore it if title generation fails
+  const existing = db.select({ label: chatSessions.label })
+    .from(chatSessions)
+    .where(eq(chatSessions.sessionKey, sessionKey))
+    .get();
+  const originalLabel = existing?.label;
+
+  // Reset label to allow title regeneration, reset message count for summary
   db.update(chatSessions)
     .set({ label: "New Chat", messageCountAtSummary: 0 })
     .where(eq(chatSessions.sessionKey, sessionKey))
     .run();
 
-  const title = await generateChatTitle(sessionKey);
+  let title: string | null = null;
+  try {
+    title = await generateChatTitle(sessionKey);
+  } catch (err) {
+    // If title generation fails, restore original label
+    if (originalLabel && originalLabel !== "New Chat") {
+      db.update(chatSessions)
+        .set({ label: originalLabel })
+        .where(eq(chatSessions.sessionKey, sessionKey))
+        .run();
+    }
+    log().error(`[chat-summarizer] Title generation failed for ${sessionKey}: ${err}`);
+  }
   const summary = await maybeSummarizeChat(sessionKey);
   return { title, summary };
 }

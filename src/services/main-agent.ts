@@ -1091,19 +1091,25 @@ export class MainAgent {
             `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
             `tool_roundtrip count=${toolResults.length} continuing=true`,
           );
-          // Store tool call summary in DB for continuity across restarts
-          const toolSummary = toolResults.map((tr) => {
-            const toolBlock = response.content.find(
-              (b): b is { type: "tool_use"; id: string; name: string; input: Record<string, unknown> } =>
-                b.type === "tool_use" && b.id === tr.tool_use_id,
-            );
-            const toolName = toolBlock?.name || "unknown";
-            const resultPreview =
-              tr.content.length > 500
-                ? tr.content.slice(0, 500) + "..."
-                : tr.content;
-            return `[${toolName}] ${resultPreview}`;
+          // Store tool call summary in DB for continuity across restarts.
+          // IMPORTANT: Store the tool CALL (name + input), not the tool RESULT.
+          // Storing results here caused the model to see its own messages containing
+          // tool output as plain text, which degraded tool-calling behavior in long
+          // conversations — the model would start outputting tool calls as text instead
+          // of using structured tool_use blocks.
+          const toolSummary = toolUseBlocks.map((block) => {
+            const inputStr = JSON.stringify(block.input);
+            const inputPreview = inputStr.length > 300
+              ? inputStr.slice(0, 300) + "..."
+              : inputStr;
+            return `[${block.name}] ${inputPreview}`;
           }).join("\n");
+
+          // Also include any text the model said alongside the tool calls
+          const assistantText = textResponse?.trim();
+          const fullToolSummary = assistantText
+            ? `${assistantText}\n\n[Tool calls]\n${toolSummary}`
+            : `[Tool calls]\n${toolSummary}`;
 
           this.db
             .prepare(
@@ -1113,9 +1119,9 @@ export class MainAgent {
             )
             .run(
               randomUUID(),
-              `[Tool calls]\n${toolSummary}`,
+              fullToolSummary,
               replyChannelId,
-              Math.ceil(toolSummary.length / 4),
+              Math.ceil(fullToolSummary.length / 4),
             );
 
           // Feed tool results back as a user turn
