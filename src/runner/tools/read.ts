@@ -15,7 +15,8 @@ export const readToolDefinition: ToolDefinition = {
   name: "read",
   description:
     "Read the contents of a file. For text files, output is truncated to 500 lines or 50KB by default " +
-    "(whichever is hit first). Use offset/limit for large files.",
+    "(whichever is hit first). Use offset/limit for large files. " +
+    "Prefer reading whole files — most source files fit in 500 lines. Don't read small chunks.",
   input_schema: {
     type: "object",
     properties: {
