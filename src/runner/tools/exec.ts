@@ -21,7 +21,7 @@ export const execToolDefinition: ToolDefinition = {
   name: "exec",
   description:
     "Execute a shell command. Returns stdout, stderr, and exit code. " +
-    "Output is capped to ~200 lines/8KB by default — use head/tail/grep for large outputs. " +
+    "Output is capped to ~500 lines/25KB by default — use head/tail/grep for large outputs. " +
     "Commands run in the agent's working directory by default. " +
     "Use workdir to change directory. Use timeout to limit execution time (default 30s, max 300s).",
   input_schema: {
@@ -50,8 +50,8 @@ export const execToolDefinition: ToolDefinition = {
 };
 
 const MAX_CAPTURE_CHARS = 1_000_000; // Max to capture from the process (raw)
-const MAX_OUTPUT_CHARS = 8_000;      // Max to return to the model (~200 lines)
-const MAX_OUTPUT_LINES = 200;        // Max lines to return to the model
+const MAX_OUTPUT_CHARS = 25_000;     // Max to return to the model
+const MAX_OUTPUT_LINES = 500;        // Max lines to return to the model
 const DEFAULT_TIMEOUT = 30;
 const MAX_TIMEOUT = 300;
 
