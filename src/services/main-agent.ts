@@ -22,7 +22,7 @@ import { LoopDetector } from "../runner/loop-detector.js";
 
 const MAX_HISTORY = 50;
 const MAX_CONTEXT_CHARS = 150_000; // Rough char budget for history
-const MAX_LIVE_TOOL_RESULT_CHARS = 30_000;
+const MAX_LIVE_TOOL_RESULT_CHARS = 50_000;
 const DEFAULT_MODEL = "strong";  // Chat defaults to strong tier (opus)
 const DEFAULT_CWD = process.env.HOME ?? "/tmp";
 const MAX_CONCURRENT_CHANNELS = 10; // Max simultaneous channel conversations
