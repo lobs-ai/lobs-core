@@ -49,6 +49,7 @@ import { LearningService, inferTaskCategory } from "../services/learning.js";
 import { runAgent, assembleContext } from "../runner/index.js";
 import type { AgentResult } from "../runner/index.js";
 import { getAgentSessionsDir } from "../config/lobs.js";
+import { checkModelsBeforeSpawn } from "../diagnostics/lmstudio.js";
 
 const learningSvc = new LearningService();
 
@@ -1955,6 +1956,74 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
       });
       return;
     }
+  }
+
+  // ── LM Studio model availability guard ───────────────────────────────────
+  // Before dispatching, verify the chosen model (+ fallbacks) is actually
+  // loaded in LM Studio. Prevents silent routing failures when model IDs drift
+  // (e.g. "qwen3.5-35b" → "qwen3.5-35b-mlx-instruct") and returns a clear
+  // diagnostic instead of the cryptic "No models loaded" error at inference time.
+  //
+  // Fail-open: on network/timeout errors we log and proceed — the guard must
+  // never block a spawn on its own infrastructure failure.
+  try {
+    // buildFallbackChain returns [primary, ...fallbacks] — use it directly
+    const modelsToCheck = buildFallbackChain(model, "standard", req.agentType);
+    const lmsDiag = await checkModelsBeforeSpawn(modelsToCheck, { timeoutMs: 2500 });
+
+    if (!lmsDiag.ok) {
+      if (!lmsDiag.reachable) {
+        // LM Studio is down — only block if the primary chosen model is local
+        const isLocalPrimary = model.startsWith("lmstudio/") || model.startsWith("local/") || !model.includes("/");
+        if (isLocalPrimary) {
+          const workerProjectId = (taskCtx["projectId"] as string) ?? (taskCtx["project_id"] as string) ?? undefined;
+          log().error(
+            `[LM_STUDIO_DIAG] LM Studio unreachable — blocking spawn of ${req.agentType} ` +
+            `(model=${model}). Start LM Studio and load the model, then retry.`
+          );
+          decrementPendingSpawns(workerProjectId, req.agentType);
+          writeSpawnResult(req.runId, req.nodeId, {
+            status: "failed",
+            error: `lmstudio_unreachable: LM Studio is not running. ` +
+              `Cannot spawn ${req.agentType} with local model ${model}. ` +
+              `Run 'lobs models' for details.`,
+          });
+          return;
+        }
+      } else if (lmsDiag.missingIds.length > 0) {
+        // LM Studio is up but the model isn't loaded — report suggestions
+        const workerProjectId = (taskCtx["projectId"] as string) ?? (taskCtx["project_id"] as string) ?? undefined;
+        const suggestionParts = Object.entries(lmsDiag.suggestions)
+          .map(([id, suggestion]) => `${id} → ${suggestion}`)
+          .join(", ");
+        const suggestionStr = suggestionParts ? ` Suggestions: ${suggestionParts}.` : "";
+        log().error(
+          `[LM_STUDIO_DIAG] Model(s) not loaded in LM Studio — blocking spawn of ${req.agentType} ` +
+          `(missing=${lmsDiag.missingIds.join(", ")}, loaded=${lmsDiag.loadedModels.join(", ")}).${suggestionStr} ` +
+          `Run 'lobs models' for details.`
+        );
+        decrementPendingSpawns(workerProjectId, req.agentType);
+        writeSpawnResult(req.runId, req.nodeId, {
+          status: "failed",
+          error:
+            `lmstudio_model_not_loaded: model(s) [${lmsDiag.missingIds.join(", ")}] not found in LM Studio. ` +
+            `Loaded: [${lmsDiag.loadedModels.join(", ") || "none"}]. ` +
+            (suggestionStr ? suggestionStr + " " : "") +
+            `Update models.json or load the model in LM Studio, then retry. ` +
+            `Run 'lobs models' for details.`,
+        });
+        return;
+      }
+    } else if (!lmsDiag.reachable) {
+      // Nothing to check (no local models) — continue silently
+    } else {
+      log().debug?.(
+        `[LM_STUDIO_DIAG] ✓ All required models loaded (${lmsDiag.loadedModels.length} in LM Studio)`
+      );
+    }
+  } catch (diagErr) {
+    // Fail-open: diagnostic errors must never block spawning
+    log().warn(`[LM_STUDIO_DIAG] Diagnostic failed (fail-open): ${diagErr}`);
   }
 
   log().info(

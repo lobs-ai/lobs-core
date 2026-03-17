@@ -34,6 +34,7 @@ import { resolve, dirname } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { validateAllConfigs, printValidationResults } from "../config/validator.js";
 import { getModelConfig } from "../config/models.js";
+import { runLmStudioDiagnostic, formatDiagnosticReport } from "../diagnostics/lmstudio.js";
 
 const HOME = process.env.HOME ?? "";
 const LOBS_PORT = parseInt(process.env.LOBS_PORT ?? "9420", 10);
@@ -511,6 +512,13 @@ async function cmdHealth() {
   console.log("");
 }
 
+async function cmdModels() {
+  const report = await runLmStudioDiagnostic();
+  const lines = formatDiagnosticReport(report, { color: process.stdout.isTTY });
+  for (const line of lines) console.log(line);
+  process.exit(report.ok ? 0 : 1);
+}
+
 function cmdInit() {
   console.log(colorize("\n=== Initializing Config ===\n", "bright"));
   
@@ -787,6 +795,10 @@ const subcommand = args[1];
       await cmdHealth();
       break;
 
+    case "models":
+      await cmdModels();
+      break;
+
     case "cron":
       await cmdCron(subcommand, args.slice(2));
       break;
@@ -818,6 +830,9 @@ const subcommand = args[1];
       console.log("  lobs cron remove <id>    Remove an agent cron job");
       console.log("  lobs cron toggle <id>    Toggle enabled/disabled");
       console.log("  lobs cron run <id>       Trigger immediate run");
+      console.log("");
+      console.log(colorize("Models:", "cyan"));
+      console.log("  lobs models              Diagnose LM Studio model availability");
       console.log("");
       console.log(colorize("Config:", "cyan"));
       console.log("  lobs config check        Validate all config files");
