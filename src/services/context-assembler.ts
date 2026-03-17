@@ -289,13 +289,19 @@ export function assembleSystemStateContext(): SystemStateContext {
       .from(workerRuns)
       .where(and(
         eq(workerRuns.succeeded, false),
-        gte(workerRuns.endedAt, new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()),
+        // 3-hour window — older errors are stale context that confuses reflections
+        gte(workerRuns.endedAt, new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString()),
       ))
       .orderBy(desc(workerRuns.endedAt))
-      .limit(10)
+      .limit(5)
       .all()
-      // Filter out reflection timeouts — they're expected and not real errors
-      .filter(r => !(r.failureType === "timeout" && r.summary?.toLowerCase().includes("reflect")))
+      // Filter out reflection timeouts and orphaned-on-restart from old reflection runs
+      .filter(r => {
+        const summary = r.summary?.toLowerCase() ?? "";
+        if (r.failureType === "timeout" && summary.includes("reflect")) return false;
+        if (r.failureType === "orphaned" && summary.includes("reflect")) return false;
+        return true;
+      })
       .map(r => `[${r.agentType ?? "unknown"}] ${r.failureType ?? "error"}: ${(r.summary ?? "no summary").slice(0, 120)}`),
   };
 }
