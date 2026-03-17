@@ -71,21 +71,13 @@ export async function webSearchTool(
   }
 }
 
-// ── web_fetch via Scrapling (Python) ─────────────────────────────────────────
-
-import { execFile } from "child_process";
-import { promisify } from "util";
-import path from "path";
-import { fileURLToPath } from "url";
-
-const execFileAsync = promisify(execFile);
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// ── web_fetch via Playwright (browserService) ────────────────────────────────
 
 export const webFetchToolDefinition: ToolDefinition = {
   name: "web_fetch",
   description:
-    "Fetch and extract readable content from a URL. Returns clean text/markdown from web pages. " +
-    "Handles anti-bot systems and dynamic content. Use for reading articles, docs, and web pages.",
+    "Fetch and extract readable content from a URL. Returns clean text from web pages, " +
+    "including JS-rendered content. Use for reading articles, docs, and web pages.",
   input_schema: {
     type: "object",
     properties: {
@@ -96,11 +88,6 @@ export const webFetchToolDefinition: ToolDefinition = {
       maxChars: {
         type: "number",
         description: "Maximum characters to return (default 6000)",
-      },
-      mode: {
-        type: "string",
-        enum: ["markdown", "text"],
-        description: "Extraction mode (default: markdown)",
       },
     },
     required: ["url"],
@@ -128,38 +115,14 @@ export async function webFetchTool(
 
   const maxChars =
     typeof params.maxChars === "number" ? params.maxChars : 6000;
-  const mode = params.mode === "text" ? "text" : "markdown";
-
-  // Resolve paths to the venv python and the fetch script
-  const coreRoot = path.resolve(__dirname, "..", "..", "..");
-  const pythonBin = path.join(coreRoot, ".venv", "bin", "python3");
-  const scriptPath = path.join(
-    coreRoot,
-    "src",
-    "runner",
-    "tools",
-    "web_fetch.py",
-  );
 
   try {
-    const { stdout } = await execFileAsync(
-      pythonBin,
-      [scriptPath, url, "--max-chars", String(maxChars), "--mode", mode],
-      { timeout: 45_000 },
-    );
-
-    const result = JSON.parse(stdout.trim());
-
-    if (!result.ok) {
-      return `Failed to fetch ${url}: ${result.error}`;
-    }
+    const result = await browserService.fetch(url, maxChars);
 
     const parts: string[] = [];
     if (result.title) parts.push(`Title: ${result.title}`);
     parts.push(`URL: ${result.url}`);
-    parts.push(
-      `Length: ${result.length} chars${result.truncated ? " (truncated)" : ""}`,
-    );
+    parts.push(`Length: ${result.content.length} chars`);
     parts.push("");
     parts.push(result.content);
 

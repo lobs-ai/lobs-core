@@ -23,7 +23,7 @@ const activeAgents = new Map<string, { type: string; task: string; startedAt: nu
 const AGENT_DEFAULT_TOOLS: Record<string, ToolName[]> = {
   programmer: ["exec", "read", "write", "edit", "memory_search", "memory_read", "memory_write"],
   reviewer: ["exec", "read", "memory_search", "memory_read", "memory_write"],
-  researcher: ["exec", "read", "write", "web_search", "memory_search", "memory_read", "memory_write"],
+  researcher: ["exec", "read", "write", "web_search", "web_fetch", "memory_search", "memory_read", "memory_write"],
   writer: ["read", "write", "edit", "memory_search", "memory_read", "memory_write"],
   architect: ["read", "write", "memory_search", "memory_read", "memory_write"],
 };
