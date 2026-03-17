@@ -71,7 +71,15 @@ export async function webSearchTool(
   }
 }
 
-// ── web_fetch via Playwright (browserService) ────────────────────────────────
+// ── web_fetch via Scrapling (Python) ─────────────────────────────────────────
+
+import { execFile } from "child_process";
+import { promisify } from "util";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const execFileAsync = promisify(execFile);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const webFetchToolDefinition: ToolDefinition = {
   name: "web_fetch",
@@ -117,18 +125,42 @@ export async function webFetchTool(
     typeof params.maxChars === "number" ? params.maxChars : 6000;
 
   try {
-    const result = await browserService.fetch(url, maxChars);
+    // Call the Python Scrapling-based fetcher
+    const scriptPath = path.resolve(__dirname, "web_fetch.py");
+    const { stdout } = await execFileAsync(
+      "python3",
+      [scriptPath, url, "--max-chars", String(maxChars), "--mode", "markdown"],
+      { timeout: 30000 },
+    );
+
+    const result = JSON.parse(stdout.trim());
+
+    if (!result.ok) {
+      return `Failed to fetch ${url}: ${result.error}`;
+    }
 
     const parts: string[] = [];
     if (result.title) parts.push(`Title: ${result.title}`);
     parts.push(`URL: ${result.url}`);
-    parts.push(`Length: ${result.content.length} chars`);
+    parts.push(`Length: ${result.length} chars`);
     parts.push("");
     parts.push(result.content);
 
     return parts.join("\n");
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return `Failed to fetch ${url}: ${message}`;
+    // Fall back to Playwright if Scrapling fails
+    try {
+      const result = await browserService.fetch(url, maxChars);
+      const parts: string[] = [];
+      if (result.title) parts.push(`Title: ${result.title}`);
+      parts.push(`URL: ${result.url}`);
+      parts.push(`Length: ${result.content.length} chars`);
+      parts.push("");
+      parts.push(result.content);
+      return parts.join("\n");
+    } catch {
+      return `Failed to fetch ${url}: ${message}`;
+    }
   }
 }
