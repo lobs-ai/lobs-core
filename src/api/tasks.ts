@@ -16,6 +16,7 @@ import { getModelForTier } from "../config/models.js";
 import { getGatewayConfig } from "../config/lobs.js";
 import { assembleBrainDumpContext, formatBrainDumpContext } from "../services/context-assembler.js";
 import { logTrainingExample } from "../services/training-data.js";
+import { findDuplicateTask } from "../util/task-dedup.js";
 
 const learningSvc = new LearningService();
 
@@ -216,8 +217,21 @@ Return ONLY valid JSON in this exact format with no other text:
     const db = getDb();
     const now = new Date().toISOString();
     const created = [];
+    const skipped = [];
     for (const t of body.tasks) {
       if (!t.title?.trim()) continue;
+
+      // ── Deduplication (24h window) ──────────────────────────────────────
+      const dup = findDuplicateTask({
+        title: t.title.trim(),
+        agent: t.agent,
+        modelTier: t.model_tier ?? "standard",
+      });
+      if (dup) {
+        skipped.push({ title: t.title, existing_id: dup.id, reason: "duplicate_within_24h" });
+        continue;
+      }
+
       const taskId = randomUUID();
       const braindumpIsCompliant = classifyAndLog(taskId, t.title, t.notes ?? "");
       db.insert(tasks).values({
@@ -234,7 +248,7 @@ Return ONLY valid JSON in this exact format with no other text:
       }).run();
       created.push(db.select().from(tasks).where(eq(tasks.id, taskId)).get());
     }
-    return json(res, { created }, 201);
+    return json(res, { created, skipped }, 201);
   }
 
   // /api/tasks/:id — single task + sub-routes
@@ -451,6 +465,24 @@ Return ONLY valid JSON in this exact format with no other text:
     if (!body.title) return error(res, "title is required");
     const taskId = (body.id as string) ?? randomUUID();
     const now = new Date().toISOString();
+
+    // ── Deduplication (24h window) ─────────────────────────────────────────
+    // Skip if caller explicitly opts out via ?force=true or body.force=true.
+    const forceCreate = body.force === true || body.force === "true";
+    if (!forceCreate) {
+      const dup = findDuplicateTask({
+        title: (body.title as string).trim(),
+        agent: body.agent as string | undefined,
+        modelTier: (body.model_tier as string | undefined) ?? "standard",
+      });
+      if (dup) {
+        return json(res, {
+          duplicate: true,
+          existing: dup,
+          message: `Task already exists within the last 24 hours (id: ${dup.id}). Pass force=true to override.`,
+        }, 409);
+      }
+    }
 
     // ── Sensitivity classification (Tier 1 regex, <1ms) ──────────────────
     // Auto-classify the task based on FERPA/HIPAA/PII patterns in title+notes.

@@ -54,19 +54,33 @@ try {
       const status = args.flags.status ?? "active";
       if (!STATUSES.includes(status)) die(`Invalid status: ${status}`);
 
-      // Dedup: reject if a task with the same title already exists in an active/pending state.
-      // Applies to ALL agent types (programmer, architect, researcher, writer, reviewer, etc.)
-      // to prevent duplicates from slipping through when triage agents spawn tasks.
-      const DEDUP_STATUSES = ["active", "proposed", "queued", "waiting_on"];
+      // Dedup: reject if a task with the same title + agent + tier already exists within 24 h
+      // in an active/pending state. Applies to ALL agent types to prevent duplicates from
+      // slipping through when triage agents spawn tasks during high-restart periods.
+      const DEDUP_STATUSES = ["active", "proposed", "queued", "waiting_on", "in_progress", "blocked"];
+      const dedupSince = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      // Match on title + status window + 24h; agent/tier are "soft" — null in DB matches any.
       const existing = db.prepare(
-        `SELECT id, agent, status FROM tasks WHERE title = ? AND status IN (${DEDUP_STATUSES.map(() => "?").join(",")}) LIMIT 1`
-      ).get(title, ...DEDUP_STATUSES) as { id: string; agent: string; status: string } | undefined;
+        `SELECT id, agent, model_tier, status, created_at FROM tasks
+         WHERE title = ?
+           AND status IN (${DEDUP_STATUSES.map(() => "?").join(",")})
+           AND created_at >= ?
+           AND (? IS NULL OR agent IS NULL OR agent = ?)
+           AND (? IS NULL OR model_tier IS NULL OR model_tier = ?)
+         LIMIT 1`
+      ).get(
+        title,
+        ...DEDUP_STATUSES,
+        dedupSince,
+        agent ?? null, agent ?? null,
+        tier ?? null, tier ?? null,
+      ) as { id: string; agent: string | null; model_tier: string | null; status: string; created_at: string } | undefined;
       if (existing) {
         console.log(JSON.stringify({
           ok: false,
           skipped: true,
-          reason: "duplicate",
-          message: `Task already exists with same title (id=${existing.id}, agent=${existing.agent}, status=${existing.status}) — skipping to prevent duplicate`,
+          reason: "duplicate_within_24h",
+          message: `Task already exists within 24 h (id=${existing.id}, agent=${existing.agent}, tier=${existing.model_tier}, status=${existing.status}) — skipping to prevent duplicate`,
           existing_id: existing.id,
         }));
         process.exit(0);
