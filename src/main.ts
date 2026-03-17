@@ -32,6 +32,8 @@ import { setReactDiscord } from "./runner/tools/index.js";
 import { validateAllConfigs } from "./config/validator.js";
 import { memoryServer } from "./services/memory-server.js";
 import { countActiveWorkers, getActiveWorkers } from "./orchestrator/worker-manager.js";
+import { runStartupTelemetry, startDiskSpaceMonitor } from "./services/restart-telemetry.js";
+import { getGatewayConfig } from "./config/lobs.js";
 
 const HOME = process.env.HOME ?? "";
 const DB_PATH = resolve(HOME, ".lobs/lobs.db");
@@ -161,6 +163,16 @@ async function main() {
       "SQLITE_CORRUPT", "Cannot allocate memory", "EADDRINUSE",
       "MODULE_NOT_FOUND", "ERR_MODULE_NOT_FOUND",
     ];
+    // ENOSPC: disk full — always fatal; clean PID before exit so next start isn't blocked
+    if (err.code === "ENOSPC") {
+      console.error(
+        "[FATAL] ENOSPC: no space left on device — lobs-core is shutting down.\n" +
+          "  Free disk space and restart with: lobs start\n" +
+          "  Run `df -h` to check disk usage.",
+      );
+      if (existsSync(PID_FILE)) try { unlinkSync(PID_FILE); } catch {}
+      process.exit(1);
+    }
     if (fatal.some(f => err.message?.includes(f) || err.code === f)) {
       console.error("[FATAL] Critical error — shutting down");
       if (existsSync(PID_FILE)) try { unlinkSync(PID_FILE); } catch {}
@@ -221,6 +233,17 @@ async function main() {
   if (configValidation.legacy_layout) {
     console.warn("[WARN] Using legacy config layout — run 'lobs init' to migrate");
   }
+
+  // ── Startup Telemetry ── (post-mortem: 2026-03-16 restart cascade) ───────
+  {
+    let gatewayToken: string | undefined;
+    try { gatewayToken = getGatewayConfig().token; } catch {}
+    const telemetry = await runStartupTelemetry(gatewayToken);
+    if (telemetry.hasCritical) {
+      console.error("[startup-telemetry] One or more CRITICAL probes fired — review logs above");
+    }
+  }
+  const stopDiskMonitor = startDiskSpaceMonitor();
 
   // Initialize database
   const db = initDb(DB_PATH);
@@ -519,6 +542,7 @@ async function main() {
       console.log("PID file removed");
     }
     
+    stopDiskMonitor();
     await memoryServer.shutdown();
     await browserService.shutdown();
     await discordService.shutdown();

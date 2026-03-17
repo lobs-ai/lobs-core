@@ -9,6 +9,7 @@
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
+import { checkMemorySupervisorHealth } from "./restart-telemetry.js";
 
 const HOME = process.env.HOME ?? "";
 const MEMORY_DIR = resolve(HOME, "lobs/lobs-core/memory");
@@ -36,6 +37,8 @@ class MemoryServerSupervisor {
   private suppressedEmbedErrors = 0;
   private lastSuppressedLogAt = 0;
   private suppressingDiskIoTrace = false;
+  private consecutiveHealthFailures = 0;
+  private inBackoffMode = false;
 
   /** Start the memory server and begin supervision */
   async start(): Promise<void> {
@@ -323,14 +326,35 @@ class MemoryServerSupervisor {
     this.healthTimer = setInterval(async () => {
       if (!this.running || this.shutdownRequested) return;
 
+      // If we're in extended backoff mode, skip fast-poll restarts
+      if (this.inBackoffMode) return;
+
       const healthy = await this.isHealthy();
       if (!healthy && this.child) {
-        console.warn("[memory-supervisor] Health check failed — restarting memory server");
+        this.consecutiveHealthFailures++;
+
+        // After 10 consecutive failures, switch to 5-min backoff mode
+        const crossedThreshold = checkMemorySupervisorHealth(this.consecutiveHealthFailures);
+        if (crossedThreshold) {
+          this.inBackoffMode = true;
+          setTimeout(() => {
+            this.inBackoffMode = false;
+            this.consecutiveHealthFailures = 0;
+            console.log("[memory-supervisor] Resuming health checks after extended backoff");
+          }, 5 * 60 * 1000);
+          return;
+        }
+
+        console.warn(
+          `[memory-supervisor] Health check failed (${this.consecutiveHealthFailures} consecutive) — restarting memory server`,
+        );
         this.child.kill("SIGTERM");
         // The 'exit' handler will trigger scheduleRestart
       } else if (healthy) {
-        // Reset backoff on successful health check
+        // Reset counters on successful health check
         this.restartCount = 0;
+        this.consecutiveHealthFailures = 0;
+        this.inBackoffMode = false;
       }
     }, HEALTH_CHECK_INTERVAL_MS);
   }
