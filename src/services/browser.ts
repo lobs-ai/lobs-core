@@ -1,17 +1,20 @@
 /**
- * Browser service — Playwright headless browser for web search and page fetching.
+ * Browser service — SearXNG for search, Playwright for page fetching.
  * 
- * Search order: Google → DuckDuckGo fallback
- * Browser is lazy-launched on first use and reused across calls.
+ * Search: local SearXNG instance (no CAPTCHAs, aggregates multiple engines)
+ * Fetch: Playwright headless browser for JS-rendered pages
  */
 
-import { chromium, Browser, BrowserContext, Page } from "playwright";
+import { chromium, Browser, BrowserContext } from "playwright";
+
+const SEARXNG_URL = process.env.SEARXNG_URL || "http://localhost:8888";
 
 class BrowserService {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private launching: Promise<void> | null = null;
 
+  /** Lazy-launch Playwright (only needed for fetch/screenshot, not search) */
   async ensureBrowser(): Promise<BrowserContext> {
     if (this.context) return this.context;
     if (this.launching) {
@@ -19,7 +22,6 @@ class BrowserService {
       return this.context!;
     }
     this.launching = this._launch().catch((err) => {
-      // Clear so next call retries instead of caching the failure
       this.launching = null;
       throw err;
     });
@@ -28,8 +30,6 @@ class BrowserService {
   }
 
   private async _launch() {
-    // Use new headless mode (--headless=new) to avoid bot detection.
-    // The old headless mode gets blocked by most search engines.
     this.browser = await chromium.launch({
       headless: false,
       args: ["--headless=new"],
@@ -42,60 +42,48 @@ class BrowserService {
     });
   }
 
-  async search(query: string, count: number = 5): Promise<SearchResult[]> {
-    // Try Google first, fall back to DuckDuckGo
+  /**
+   * Search via local SearXNG instance.
+   * No CAPTCHAs, no rate limits, aggregates Google/Bing/DuckDuckGo/Brave/etc.
+   */
+  async search(query: string, count: number = 5, options?: { language?: string; country?: string }): Promise<SearchResult[]> {
     try {
-      const results = await this.searchGoogle(query, count);
-      if (results.length > 0) return results;
-    } catch (err) {
-      console.warn("[browser] Google search failed, trying DuckDuckGo:", (err as Error).message);
-    }
-
-    try {
-      return await this.searchDDG(query, count);
-    } catch (err) {
-      console.error("[browser] DuckDuckGo search also failed:", (err as Error).message);
-      return [];
-    }
-  }
-
-  private async searchGoogle(query: string, count: number): Promise<SearchResult[]> {
-    const ctx = await this.ensureBrowser();
-    const page = await ctx.newPage();
-    try {
-      const url = `https://www.google.com/search?q=${encodeURIComponent(query)}&num=${count}&hl=en`;
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
-
-      // Check for CAPTCHA/consent
-      const blocked = await page.evaluate(() => {
-        const body = document.body.innerText.toLowerCase();
-        return body.includes("unusual traffic") || body.includes("captcha") || 
-               document.querySelector("form[action*='consent']") !== null;
+      const params = new URLSearchParams({
+        q: query,
+        format: "json",
+        language: options?.language || "en",
       });
-      if (blocked) throw new Error("Google blocked (CAPTCHA/consent)");
 
-      const results = await page.evaluate((maxResults: number) => {
-        const items = document.querySelectorAll("div.g, div[data-sokoban-container]");
-        return Array.from(items).slice(0, maxResults).map(el => {
-          const linkEl = el.querySelector("a[href^='http']");
-          const titleEl = el.querySelector("h3");
-          const snippetEl = el.querySelector("[data-sncf], .VwiC3b, [style*='-webkit-line-clamp']");
-          if (!linkEl || !titleEl) return null;
-          return {
-            title: titleEl.textContent?.trim() || "",
-            url: linkEl.getAttribute("href") || "",
-            snippet: snippetEl?.textContent?.trim() || "",
-          };
-        }).filter(Boolean) as Array<{ title: string; url: string; snippet: string }>;
-      }, count);
+      const response = await fetch(`${SEARXNG_URL}/search?${params.toString()}`, {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(15000),
+      });
 
-      return results;
-    } finally {
-      await page.close();
+      if (!response.ok) {
+        throw new Error(`SearXNG returned ${response.status}: ${response.statusText}`);
+      }
+
+      const data = await response.json() as SearXNGResponse;
+      
+      return data.results.slice(0, count).map(r => ({
+        title: r.title || "",
+        url: r.url || "",
+        snippet: r.content || "",
+      }));
+    } catch (err) {
+      console.error("[browser] SearXNG search failed:", (err as Error).message);
+      // Fall back to DuckDuckGo HTML scraping as last resort
+      try {
+        return await this.searchDDGFallback(query, count);
+      } catch (fallbackErr) {
+        console.error("[browser] DDG fallback also failed:", (fallbackErr as Error).message);
+        return [];
+      }
     }
   }
 
-  private async searchDDG(query: string, count: number): Promise<SearchResult[]> {
+  /** Emergency fallback: scrape DDG HTML (only if SearXNG is down) */
+  private async searchDDGFallback(query: string, count: number): Promise<SearchResult[]> {
     const ctx = await this.ensureBrowser();
     const page = await ctx.newPage();
     try {
@@ -115,7 +103,6 @@ class BrowserService {
         }).filter(r => r.title && r.url);
       }, count);
 
-      // Clean DDG redirect URLs
       return results.map(r => ({
         ...r,
         url: r.url.startsWith("//duckduckgo.com/l/?")
@@ -164,7 +151,6 @@ class BrowserService {
     }
   }
 
-  /** Take a screenshot of a page */
   async screenshot(url: string, path: string): Promise<void> {
     const ctx = await this.ensureBrowser();
     const page = await ctx.newPage();
@@ -199,4 +185,18 @@ export interface FetchResult {
   title: string;
   url: string;
   content: string;
+}
+
+interface SearXNGResult {
+  title: string;
+  url: string;
+  content: string;
+  engine: string;
+  score: number;
+}
+
+interface SearXNGResponse {
+  results: SearXNGResult[];
+  number_of_results: number;
+  query: string;
 }

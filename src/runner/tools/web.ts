@@ -47,8 +47,11 @@ export async function webSearchTool(
     10,
   );
 
+  const language = typeof params.language === "string" ? params.language : undefined;
+  const country = typeof params.country === "string" ? params.country : undefined;
+
   try {
-    const results = await browserService.search(query, count);
+    const results = await browserService.search(query, count, { language, country });
 
     if (results.length === 0) {
       return `No results found for: ${query}`;
