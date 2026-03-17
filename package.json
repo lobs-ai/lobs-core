@@ -12,7 +12,8 @@
     "test": "vitest",
     "lint": "eslint src/",
     "sync-addons": "bin/sync-addons",
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "postinstall": "npx playwright install"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.79.0",

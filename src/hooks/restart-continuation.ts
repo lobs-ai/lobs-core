@@ -60,11 +60,11 @@ export function registerRestartContinuationHook(api: any): void {
         const { port, token } = getGatewayConfig();
         if (!token) return;
 
-        const res = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
+        const res = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
           body: JSON.stringify({
-            tool: "sessions_send",
+            tool: "sessions/send",
             sessionKey: "agent:sink:paw-orchestrator-v2",
             args: {
               sessionKey: "agent:main:discord:direct:644578016298795010",

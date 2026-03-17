@@ -177,14 +177,14 @@ async function callModel(prompt: string): Promise<string> {
   let gatewayToken = cfg.token;
 
   try {
-    const response = await fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
+    const response = await fetch(`http://127.0.0.1:${gatewayPort}/v2/invoke`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         ...(gatewayToken ? { Authorization: `Bearer ${gatewayToken}` } : {}),
       },
       body: JSON.stringify({
-        tool: "sessions_spawn",
+        tool: "sessions/spawn",
         sessionKey: "agent:sink:paw-orchestrator-v2",
         args: {
           task: prompt,

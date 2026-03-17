@@ -26,7 +26,7 @@ function loadGatewayConfig(): { port: number; token: string } {
 async function gatewayInvoke(tool: string, args: Record<string, unknown>): Promise<any> {
   const { port, token } = loadGatewayConfig();
   if (!token) throw new Error("No gateway auth token configured");
-  const res = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
+  const res = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
     body: JSON.stringify({ tool, args }),
@@ -149,7 +149,7 @@ Important rules:
 ${rawText}`;
 
       try {
-        await gatewayInvoke("sessions_spawn", {
+        await gatewayInvoke("sessions/spawn", {
           task: prompt,
           mode: "run",
           model: getModelForTier("standard"),

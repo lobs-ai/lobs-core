@@ -304,11 +304,11 @@ async function failStaleSpawnRuns(): Promise<void> {
     async function isSessionAliveNow(sessionKey: string): Promise<boolean> {
       if (!token) return false; // can't verify without token — treat as dead on restart
       try {
-        const resp = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
+        const resp = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
           body: JSON.stringify({
-            tool: "sessions_list",
+            tool: "sessions/list",
             sessionKey: "agent:sink:paw-orchestrator-v2",
             args: { activeMinutes: 120, limit: 100 },
           }),
@@ -408,14 +408,14 @@ export async function processPendingResumes(): Promise<void> {
 
   for (const resume of pendingResumes) {
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
+      const response = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${token}`,
         },
         body: JSON.stringify({
-          tool: "sessions_send",
+          tool: "sessions/send",
           sessionKey: SINK_SESSION_KEY,
           args: {
             sessionKey: resume.sessionKey,

@@ -96,7 +96,7 @@ function _brainDumpGatewayCfg(): { port: number; token: string } {
 async function _brainDumpInvoke(tool: string, args: Record<string, unknown>): Promise<any> {
   const { port, token } = _brainDumpGatewayCfg();
   if (!token) throw new Error("No gateway auth token configured");
-  const r = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
+  const r = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
     body: JSON.stringify({ tool, args, sessionKey: "agent:sink:paw-orchestrator-v2" }),
@@ -175,7 +175,7 @@ Return ONLY valid JSON in this exact format with no other text:
       ? getModelForTier(body.model_tier_override)
       : getModelForTier("small");
 
-    const result = await _brainDumpInvoke("sessions_spawn", {
+    const result = await _brainDumpInvoke("sessions/spawn", {
       task: userPrompt,
       system: systemPrompt,
       model: modelId,

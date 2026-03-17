@@ -72,11 +72,11 @@ ${context}
 
 USER QUESTION: ${body.message}`;
 
-      const r = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
+      const r = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
         body: JSON.stringify({
-          tool: "sessions_spawn",
+          tool: "sessions/spawn",
           args: { task: prompt, mode: "run", model: getModelForTier("standard"), runTimeoutSeconds: 60, cleanup: "keep" },
           sessionKey: "agent:sink:paw-orchestrator-v2",
         }),
@@ -90,11 +90,11 @@ USER QUESTION: ${body.message}`;
       const deadline = Date.now() + 60000;
       while (Date.now() < deadline) {
         await new Promise(r => setTimeout(r, 3000));
-        const hr = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
+        const hr = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
           body: JSON.stringify({
-            tool: "sessions_history",
+            tool: "sessions/history",
             args: { sessionKey, limit: 5, includeTools: false },
             sessionKey: "agent:sink:paw-orchestrator-v2",
           }),

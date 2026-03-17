@@ -142,7 +142,7 @@ ${meeting.summary}
     try {
       const { port, token } = getGatewayConfig();
 
-      const r = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
+      const r = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
         body: JSON.stringify({

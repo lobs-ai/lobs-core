@@ -20,7 +20,7 @@ function gatewayCfg(): { port: number; token: string } {
 
 async function gatewayInvoke(tool: string, args: Record<string, unknown>): Promise<any> {
   const { port, token } = gatewayCfg();
-  const r = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
+  const r = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
     body: JSON.stringify({ tool, args, sessionKey: "agent:sink:paw-orchestrator-v2" }),
@@ -43,7 +43,7 @@ ${task}
 
 Remember: Write the COMPLETE analysis to ${outFile} using the Write tool. That file is your only output.`;
 
-  const spawnResult = await gatewayInvoke("sessions_spawn", {
+  const spawnResult = await gatewayInvoke("sessions/spawn", {
     task: wrappedTask,
     mode: "run",
     model: getModelForTier("standard"),

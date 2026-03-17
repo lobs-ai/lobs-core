@@ -53,7 +53,7 @@ describe("Workflow Engine", () => {
       expect(run.workflowId).toBe(wfId);
     });
 
-    it("should advance pending to running with current node set", () => {
+    it("should advance pending to running with current node set", async () => {
       const db = getDb();
       const wfId = randomUUID();
       db.insert(workflowDefinitions).values({
@@ -71,7 +71,7 @@ describe("Workflow Engine", () => {
       const wf = db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, wfId)).get()!;
       const run = executor.startRun(wf);
 
-      const didWork = executor.advance(run);
+      const didWork = await executor.advance(run);
       expect(didWork).toBe(true);
 
       const updated = db.select().from(workflowRuns).where(eq(workflowRuns.id, run.id)).get()!;

@@ -212,7 +212,7 @@ async function collectWorkerUsage(sessionKey: string): Promise<WorkerUsageSnapsh
   }
 
   try {
-    const historyRaw = await invokeGatewayTool("sessions_history", { sessionKey, limit: 150, includeTools: true });
+    const historyRaw = await invokeGatewayTool("sessions/history", { sessionKey, limit: 150, includeTools: true });
     return extractUsageSnapshot(historyRaw);
   } catch (e) {
     log().warn(`[PAW] sessions_history usage fetch failed for ${sessionKey}: ${e}`);
@@ -354,7 +354,7 @@ async function invokeGatewayTool(tool: string, args: Record<string, unknown>): P
   let gatewayToken = cfg.token;
   if (!gatewayToken) throw new Error("No gateway token configured");
 
-  const resp = await fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
+  const resp = await fetch(`http://127.0.0.1:${gatewayPort}/v2/invoke`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

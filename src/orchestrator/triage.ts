@@ -52,14 +52,14 @@ function ensureTable(): void {
 async function collectWorkerOutput(sessionKey: string): Promise<string> {
   try {
     const { port, token } = getGatewayConfig();
-    const response = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
+    const response = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${token}`,
       },
       body: JSON.stringify({
-        tool: "sessions_history",
+        tool: "sessions/history",
         sessionKey: SINK_SESSION_KEY,
         args: { sessionKey, limit: 10, includeTools: false },
       }),
@@ -198,14 +198,14 @@ export async function maybeFlushTriageQueue(): Promise<void> {
     message += `After triaging, the queue will auto-clear.`;
 
     const { port, token } = getGatewayConfig();
-    const response = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
+    const response = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${token}`,
       },
       body: JSON.stringify({
-        tool: "sessions_send",
+        tool: "sessions/send",
         sessionKey: SINK_SESSION_KEY,
         args: {
           sessionKey: MAIN_SESSION_KEY,
