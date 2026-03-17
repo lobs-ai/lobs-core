@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# ============================================================
+# check-staged-changes.sh
+# Weekly automation: scan agent repos for >100 lines of staged
+# (index) changes and write inbox suggestions to daily memory.
+#
+# Runs every Friday at 17:00 via cron — forces commit/test/revert
+# decisions before weekend so WIP doesn't go stale.
+#
+# Usage:
+#   ./check-staged-changes.sh            # normal run
+#   ./check-staged-changes.sh --dry-run  # print report, no writes
+#
+# Cron setup (run: crontab -e):
+#   0 17 * * 5 /Users/lobs/lobs/lobs-core/scripts/check-staged-changes.sh >> ~/.lobs/logs/staged-check.log 2>&1
+# ============================================================
+
+set -euo pipefail
+
+DRY_RUN=false
+if [[ "${1:-}" == "--dry-run" ]]; then
+  DRY_RUN=true
+fi
+
+# ---- Config -----------------------------------------------
+THRESHOLD=100      # line count that triggers an alert
+MEMORY_DIR="$HOME/.lobs/workspace/daily"
+LOG_PREFIX="[staged-check]"
+
+# Repos to scan — derived from lobs-memory config.json collections
+# (all paths that are git repos; skip pure markdown vaults)
+REPOS=(
+  "$HOME/lobs/lobs-core"
+  "$HOME/lobs/lobs-nexus"
+  "$HOME/lobs/lobs-mobile"
+  "$HOME/lobs/lobs-shared-memory"
+  "$HOME/lobs/lobslab-infra"
+  "$HOME/paw/paw-hub"
+  "$HOME/paw/paw-designs"
+  "$HOME/paw/bot-shared"
+  "$HOME/paw/lobs-sets-sail"
+  "$HOME/ship-api"
+  "$HOME/lobs-sail"
+)
+
+# ---- Helpers ----------------------------------------------
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $LOG_PREFIX $*"; }
+
+# Return the number of staged diff lines (additions + deletions)
+staged_line_count() {
+  local repo="$1"
+  git -C "$repo" diff --cached --numstat 2>/dev/null \
+    | awk '{add+=$1; del+=$2} END {print add+del+0}'
+}
+
+# Age of oldest staged file in days (mtime of .git/index vs now)
+staged_age_days() {
+  local repo="$1"
+  local index="$repo/.git/index"
+  if [[ ! -f "$index" ]]; then echo 0; return; fi
+  local mtime now
+  mtime=$(stat -f "%m" "$index" 2>/dev/null || stat -c "%Y" "$index" 2>/dev/null || echo 0)
+  now=$(date +%s)
+  echo $(( (now - mtime) / 86400 ))
+}
+
+# Compact diff summary: first 60 lines of --stat, then truncate
+staged_diff_summary() {
+  local repo="$1"
+  git -C "$repo" diff --cached --stat 2>/dev/null | head -60
+}
+
+# Full diff (first 200 lines for the suggestion body)
+staged_diff_excerpt() {
+  local repo="$1"
+  git -C "$repo" diff --cached 2>/dev/null | head -200
+}
+
+# Write or append to today's daily memory file
+write_memory_note() {
+  local date_str file content
+  date_str=$(date '+%Y-%m-%d')
+  file="$MEMORY_DIR/${date_str}.md"
+
+  mkdir -p "$MEMORY_DIR"
+
+  # Create file with header if it doesn't exist
+  if [[ ! -f "$file" ]]; then
+    cat > "$file" <<EOF
+# Daily Memory — ${date_str}
+
+EOF
+  fi
+
+  content="$1"
+  printf '\n%s\n' "$content" >> "$file"
+  log "Wrote inbox suggestion → $file"
+}
+
+# ---- Main scan --------------------------------------------
+log "Starting staged-changes scan (threshold: ${THRESHOLD} lines)"
+
+FLAGGED=0
+CHECKED=0
+
+for repo in "${REPOS[@]}"; do
+  # Skip if directory doesn't exist or isn't a git repo
+  if [[ ! -d "$repo/.git" ]]; then
+    log "SKIP $repo (not a git repo)"
+    continue
+  fi
+
+  CHECKED=$((CHECKED + 1))
+  repo_name=$(basename "$repo")
+
+  line_count=$(staged_line_count "$repo")
+  age_days=$(staged_age_days "$repo")
+
+  if [[ "$line_count" -le "$THRESHOLD" ]]; then
+    log "OK   $repo_name — ${line_count} staged lines (≤${THRESHOLD}, skipping)"
+    continue
+  fi
+
+  FLAGGED=$((FLAGGED + 1))
+  log "FLAG $repo_name — ${line_count} staged lines, ~${age_days}d old"
+
+  # Build the diff summary
+  diff_stat=$(staged_diff_summary "$repo")
+  diff_excerpt=$(staged_diff_excerpt "$repo")
+
+  # Truncation notice if diff was cut
+  diff_total_lines=$(git -C "$repo" diff --cached 2>/dev/null | wc -l | tr -d ' ')
+  truncation_note=""
+  if [[ "$diff_total_lines" -gt 200 ]]; then
+    truncation_note="_(diff truncated — ${diff_total_lines} total lines, showing first 200)_"
+  fi
+
+  suggestion="## 🚨 Staged WIP Alert — \`${repo_name}\`
+
+**Date flagged:** $(date '+%Y-%m-%d %H:%M %Z')
+**Repo:** \`${repo}\`
+**Staged lines:** ${line_count} (threshold: ${THRESHOLD})
+**Approximate age:** ~${age_days} day(s) (based on index mtime)
+
+### Why this matters
+Staged changes that linger over a weekend lose context, create merge-conflict risk,
+and block clean branches. The 386-line \`config.json\` incident (2026-03-17) is a
+known example of this pattern.
+
+### Required action (before weekend)
+Pick one — don't leave it staged:
+- [ ] **Commit** — \`git commit -m \"wip: <description>\"\` (even a WIP commit is better than stale index)
+- [ ] **Test + commit** — run tests first, then commit cleanly
+- [ ] **Revert** — \`git restore --staged .\` if the work is abandoned or wrong
+- [ ] **Stash** — \`git stash push -m \"<description>\"\` if you need to context-switch
+
+### Staged diff stat
+\`\`\`
+${diff_stat}
+\`\`\`
+
+### Diff excerpt
+${truncation_note}
+\`\`\`diff
+${diff_excerpt}
+\`\`\`
+
+---
+_Auto-generated by \`check-staged-changes.sh\` · lobs-core weekly automation_"
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo ""
+    echo "=== DRY RUN: would write to daily memory ==="
+    echo "$suggestion"
+    echo "============================================"
+  else
+    write_memory_note "$suggestion"
+  fi
+done
+
+# ---- Summary ----------------------------------------------
+log "Done. Checked ${CHECKED} repos, flagged ${FLAGGED}."
+
+if [[ "$FLAGGED" -gt 0 && "$DRY_RUN" == "false" ]]; then
+  log "Inbox suggestions written to $MEMORY_DIR/$(date '+%Y-%m-%d').md"
+fi
+
+exit 0
