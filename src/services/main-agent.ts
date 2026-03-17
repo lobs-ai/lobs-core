@@ -910,8 +910,8 @@ export class MainAgent {
           timestamp: Date.now(),
         } satisfies AgentStreamEvent);
 
-        // Prune: keep last 3 turns' tool results intact, truncate older ones to 400 chars
-        messages = pruneToolResults(messages, 3, 400);
+        // Prune: keep last 6 turns' tool results intact, truncate older ones to 800 chars
+        messages = pruneToolResults(messages, 6, 800);
         messages = await this.compactIfNeeded(messages, replyChannelId);
         const contextChars = messages.reduce((s, m) =>
           s + (typeof m.content === "string" ? m.content.length : JSON.stringify(m.content).length), 0);

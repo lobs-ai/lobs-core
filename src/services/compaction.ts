@@ -66,27 +66,27 @@ export async function compactMessages(
     const role = m.role.toUpperCase();
     let content = "";
     if (typeof m.content === "string") {
-      content = m.content.substring(0, 400);
+      content = m.content.substring(0, 800);
     } else if (Array.isArray(m.content)) {
       content = (m.content as Array<Record<string, unknown>>).map(block => {
-        if (typeof block === "string") return (block as string).substring(0, 200);
+        if (typeof block === "string") return (block as string).substring(0, 400);
         const b = block as Record<string, unknown>;
-        if (b.type === "text") return String(b.text || "").substring(0, 200);
-        if (b.type === "tool_use") return `[Tool: ${b.name}(${JSON.stringify(b.input).substring(0, 100)})]`;
+        if (b.type === "text") return String(b.text || "").substring(0, 400);
+        if (b.type === "tool_use") return `[Tool: ${b.name}(${JSON.stringify(b.input).substring(0, 200)})]`;
         if (b.type === "tool_result") {
           const rc = typeof b.content === "string" ? b.content : JSON.stringify(b.content);
-          return `[Result: ${String(rc).substring(0, 150)}]`;
+          return `[Result: ${String(rc).substring(0, 300)}]`;
         }
         return "[content block]";
       }).join(" ");
     } else {
-      content = JSON.stringify(m.content).substring(0, 300);
+      content = JSON.stringify(m.content).substring(0, 600);
     }
     return `[${i}] ${role}: ${content}`;
   }).join("\n");
 
   const systemPrompt = cfg.preserveIdentifiers
-    ? `You are a conversation compactor. Summarize this conversation history into a structured summary.
+    ? `You are a conversation compactor. Summarize this conversation history into a structured summary that prevents the agent from needing to re-read files or re-investigate things it already discovered.
 
 RULES:
 1. PRESERVE all identifiers exactly: file paths, URLs, git branches, issue numbers, variable names, channel IDs, user IDs, model names
@@ -94,10 +94,20 @@ RULES:
 3. PRESERVE all open questions and blockers
 4. PRESERVE current task state (what was being worked on, what's done, what's next)
 5. PRESERVE any constraints, requirements, or acceptance criteria mentioned
-6. Use bullet points for clarity
-7. Group by: Decisions, Current State, Open Questions, Key Identifiers
+6. PRESERVE key findings from tool results — file contents discovered, grep results, command outputs that informed decisions
+7. Include enough detail that the agent does NOT need to re-run tools to recover context
+8. Use bullet points for clarity
+9. Group by: Goals, Key Findings, Decisions, Current State, Open Questions, Key Identifiers
 
 Output format:
+## Goals
+- ...
+
+## Key Findings
+- File X contains Y (key lines/structures discovered)
+- Command output showed Z
+- ...
+
 ## Decisions
 - ...
 
@@ -235,11 +245,11 @@ export function pruneToolResults(
     // Keep recent messages intact
     if (i >= cutoffIndex) return m;
 
-    // For old messages, truncate large tool outputs
+    // For old messages, truncate large tool outputs but preserve key structure
     if (typeof m.content === "string" && m.content.length > maxOldToolOutputChars * 3 && m.role === "user") {
       return {
         ...m,
-        content: m.content.substring(0, maxOldToolOutputChars) + "\n\n[Earlier output truncated. Re-run the tool if needed.]",
+        content: smartTruncateToolOutput(m.content, maxOldToolOutputChars),
       };
     }
 
@@ -252,7 +262,7 @@ export function pruneToolResults(
           if (b.type === "tool_result" && typeof b.content === "string" && b.content.length > maxOldToolOutputChars * 3) {
             return {
               ...b,
-              content: b.content.substring(0, maxOldToolOutputChars) + "\n[Truncated]",
+              content: smartTruncateToolOutput(b.content, maxOldToolOutputChars),
             };
           }
           return block;
@@ -262,6 +272,25 @@ export function pruneToolResults(
 
     return m;
   });
+}
+
+/**
+ * Smart truncation for old tool outputs.
+ * Keeps the beginning (usually most informative) plus the end (exit codes, summaries).
+ * Also preserves lines containing file paths and key identifiers.
+ */
+function smartTruncateToolOutput(content: string, maxChars: number): string {
+  if (content.length <= maxChars) return content;
+  
+  const headSize = Math.floor(maxChars * 0.7);
+  const tailSize = Math.floor(maxChars * 0.2);
+  
+  const head = content.substring(0, headSize);
+  const tail = content.substring(content.length - tailSize);
+  
+  const totalLines = content.split("\n").length;
+  
+  return head + `\n\n[...truncated ${totalLines} lines. Re-run if full output needed.]\n\n` + tail;
 }
 
 /**
