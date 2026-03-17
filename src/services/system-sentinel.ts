@@ -89,7 +89,14 @@ export async function checkTaskHealth(): Promise<TaskHealthResult | null> {
   const context = assembleSystemStateContext();
 
   const systemPrompt = `You are a task health monitor for a software engineering project management system.
-Analyze the system state and identify any issues that need attention.
+Analyze the system state and identify issues that ACTUALLY need human attention.
+
+Rules:
+- "high" severity = something is actively broken or blocking work RIGHT NOW
+- Truncated log text or incomplete output previews are NOT errors — they're just DB storage artifacts
+- Worker timeouts on low-priority tasks (reflections, training) are expected, not high-severity
+- An idle system with no active workers is normal when no tasks are queued
+- Only flag things a human engineer would genuinely want to know about
 
 Output JSON only:
 {

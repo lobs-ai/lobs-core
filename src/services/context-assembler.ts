@@ -294,6 +294,8 @@ export function assembleSystemStateContext(): SystemStateContext {
       .orderBy(desc(workerRuns.endedAt))
       .limit(10)
       .all()
+      // Filter out reflection timeouts — they're expected and not real errors
+      .filter(r => !(r.failureType === "timeout" && r.summary?.toLowerCase().includes("reflect")))
       .map(r => `[${r.agentType ?? "unknown"}] ${r.failureType ?? "error"}: ${(r.summary ?? "no summary").slice(0, 120)}`),
   };
 }
