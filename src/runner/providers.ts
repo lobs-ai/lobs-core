@@ -185,6 +185,11 @@ function getHttpStatus(error: unknown): number | undefined {
   }
 
   const message = error instanceof Error ? error.message : String(error);
+
+  // Anthropic overloaded_error doesn't include a numeric status in the message,
+  // but it corresponds to HTTP 529
+  if (message.includes("overloaded_error")) return 529;
+
   const match = message.match(/\b(\d{3})\b/);
   return match ? parseInt(match[1], 10) : undefined;
 }
@@ -475,6 +480,16 @@ class AnthropicClient implements LLMClient {
           console.warn(
             `[AnthropicClient] Rate limit detected on key=${this.keyLabel ?? `key-${this.keyIndex ?? "unknown"}`} ` +
             `cooldown_ms=${cooldownMs} rotated=${rotated}`,
+          );
+        } else if (status === 529 || message.includes("overloaded_error")) {
+          // Overloaded errors are capacity-related — rotate key immediately so
+          // retries hit a different key that may have available capacity
+          const cooldownMs = 30_000;
+          keyPool.markSessionFailed("anthropic", this.sessionId, message, "rate_limit", cooldownMs);
+          const rotated = keyPool.rotateSession("anthropic", this.sessionId, `overloaded:${this.keyLabel ?? `key-${this.keyIndex}`}`);
+          console.warn(
+            `[AnthropicClient] Overloaded on key=${this.keyLabel ?? `key-${this.keyIndex ?? "unknown"}`} ` +
+            `rotated=${rotated} session=${this.sessionId.slice(0, 40)}`,
           );
         } else if (status && status >= 500 && status < 600 && this.keyIndex !== undefined) {
           const prev = anthropicServerErrorsBySession.get(this.sessionId);
@@ -899,11 +914,15 @@ class ResilientLLMClient implements LLMClient {
             }
           }
 
-          // Overloaded error — retry with backoff + jitter
-          if (message.includes("overloaded_error")) {
+          // Overloaded error — the inner AnthropicClient already rotated the key,
+          // so retry quickly with a new client (which will pick up the rotated key)
+          if (status === 529 || message.includes("overloaded_error")) {
             if (attempt < this.maxRetries) {
-              const waitTime = (15 + Math.random() * 20) * 1000; // 15-35s with jitter
-              console.warn(`[ResilientLLMClient] API overloaded, retrying in ${(waitTime / 1000).toFixed(1)}s (attempt ${attempt}/${this.maxRetries})`);
+              const waitTime = (2 + Math.random() * 3) * 1000; // 2-5s, just enough to not hammer
+              console.warn(
+                `[ResilientLLMClient] API overloaded, retrying with rotated key in ${(waitTime / 1000).toFixed(1)}s ` +
+                `(attempt ${attempt}/${this.maxRetries}) session=${this.sessionId?.slice(0, 40) ?? "none"}`,
+              );
               await this.sleep(waitTime);
               continue;
             }
