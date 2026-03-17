@@ -887,7 +887,7 @@ export const memoryComplianceIndex = sqliteTable("memory_compliance_index", {
 
 export const trainingData = sqliteTable("training_data", {
   id: id(),
-  taskType: text("task_type").notNull(),      // braindump | calendar_check | daily_brief | system_state | categorization | summary
+  taskType: text("task_type").notNull(),      // braindump | calendar_check | daily_brief | system_state | categorization | summary | chat_title | chat_summary
   systemPrompt: text("system_prompt").notNull(),
   userPrompt: text("user_prompt").notNull(),
   context: text("context", { mode: "json" }), // assembled context blob

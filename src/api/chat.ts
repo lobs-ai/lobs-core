@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentStreamEvent } from "../services/main-agent.js";
 import { getToolDefinitions } from "../runner/tools/index.js";
 import { getToolsForSession } from "../runner/tools/tool-sets.js";
+import { onAssistantMessage, forceSummarize } from "../services/chat-summarizer.js";
 
 // ─── Simple DB-backed chat (no gateway dependency) ─────────────────────
 
@@ -142,6 +143,9 @@ export async function handleChatRequest(
               .set({ lastMessageAt: new Date(event.timestamp).toISOString() })
               .where(eq(chatSessions.sessionKey, sessionKey))
               .run();
+
+            // Trigger async title generation + summary (doesn't block response)
+            onAssistantMessage(sessionKey);
           }
         } else if (event.type === "error") {
           // Persist error message so the frontend can display it
@@ -400,6 +404,26 @@ export async function handleChatRequest(
         key: sessionKey,
         compliance_required: body.compliance_required,
       });
+    }
+
+    // POST /api/chat/sessions/:key/summarize — force re-generate title + summary
+    if (sessionKey && action === "summarize" && method === "POST") {
+      const session = db.select().from(chatSessions)
+        .where(eq(chatSessions.sessionKey, sessionKey))
+        .get();
+      if (!session) return error(res, "Session not found", 404);
+
+      try {
+        const result = await forceSummarize(sessionKey);
+        return json(res, {
+          key: sessionKey,
+          title: result.title,
+          summary: result.summary,
+        });
+      } catch (err) {
+        log().error(`[chat] Force summarize failed: ${err}`);
+        return error(res, "Summarization failed", 500);
+      }
     }
 
     // GET /api/chat/sessions/:key/tools — list available tools with enabled/disabled status

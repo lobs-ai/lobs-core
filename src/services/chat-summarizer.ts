@@ -1,366 +1,362 @@
 /**
- * Chat Summarizer — generates and updates chat session summaries using a micro-tier model.
+ * Chat Summarizer & Namer — uses local LM Studio model for free, fast chat intelligence.
  *
- * Triggers after new messages, debounced so we don't summarize on every single message.
- * Uses the micro tier (claude-haiku) for low cost summarization.
+ * Two jobs:
+ * 1. Generate a short descriptive name for the chat (after first exchange)
+ * 2. Generate/update a running summary (after enough new messages)
+ *
+ * All inputs and outputs are saved as training data so we can later
+ * generate correct outputs with a larger model for fine-tuning.
+ *
+ * Uses qwen/qwen3.5-9b via LM Studio (non-fine-tuned).
  */
 
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
-import { chatSessions } from "../db/schema.js";
+import { chatSessions, chatMessages } from "../db/schema.js";
 import { log } from "../util/logger.js";
-import { getModelForTier } from "../config/models.js";
-import { getGatewayConfig } from "../config/lobs.js";
+import { getModelConfig } from "../config/models.js";
+import { logTrainingExample } from "./training-data.js";
 
 // ── Config ──────────────────────────────────────────────────────────────
 
 /** Minimum new messages before re-summarizing */
-const MIN_NEW_MESSAGES = 3;
+const SUMMARY_THRESHOLD = 6;
 
-/** Minimum seconds between summary updates for the same session */
-const MIN_INTERVAL_SECONDS = 60;
+/** Max chars of conversation to feed the model */
+const MAX_CONTEXT_CHARS = 12_000;
 
-/** Model to use for summarization (micro tier) */
-const SUMMARY_MODEL = getModelForTier("small");
+/** Timeout for local model calls */
+const TIMEOUT_MS = 30_000;
 
-// ── Gateway helpers ─────────────────────────────────────────────────────
+// ── Prompts ─────────────────────────────────────────────────────────────
 
-const SINK_SESSION_KEY = "agent:sink:paw-orchestrator-v2";
+const TITLE_SYSTEM_PROMPT = `You are a chat title generator. Given a conversation between a user and an AI assistant, generate a short, descriptive title (3-7 words). The title should capture the main topic or intent of the conversation.
 
-async function gatewayInvoke(tool: string, args: Record<string, unknown>, sessionKey?: string): Promise<any> {
-  const { port, token } = getGatewayConfig();
-  if (!token) throw new Error("No gateway auth token configured");
+Rules:
+- Output ONLY the title, nothing else
+- No quotes, no punctuation at the end
+- Be specific and descriptive, not generic
+- Use title case
 
-  const body: Record<string, unknown> = { tool, args };
-  if (sessionKey) body.sessionKey = sessionKey;
+Examples of good titles: "Debug PostgreSQL Connection Timeout", "Setting Up Docker Compose", "Weekly Schedule Planning", "Rust Lifetime Errors in Parser"
+Examples of bad titles: "Chat", "Help", "Question", "New Conversation", "AI Assistant Chat"`;
 
-  const res = await fetch(`http://127.0.0.1:${port}/tools/invoke`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${token}`,
-    },
-    body: JSON.stringify(body),
-  });
+const SUMMARY_SYSTEM_PROMPT = `You are a conversation summarizer. Given a chat between a user and an AI assistant, write a concise summary that captures:
+1. What the user wanted
+2. Key decisions or actions taken
+3. Current status / what's unresolved
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Gateway ${tool} failed (${res.status}): ${text}`);
-  }
-  const data = (await res.json()) as any;
-  return data?.result?.details ?? data?.result ?? data;
-}
+Rules:
+- 2-4 sentences max
+- Be specific — mention technologies, file names, concrete details
+- Focus on what matters for context if someone picks up this conversation later
+- Output ONLY the summary, nothing else`;
 
-// ── Noise filter (same as chat.ts) ──────────────────────────────────────
+const UPDATE_SUMMARY_SYSTEM_PROMPT = `You are a conversation summarizer. You're given the previous summary and new messages from a conversation. Update the summary to incorporate the new content.
 
-const NOISE_PATTERNS = [
-  /^Agent-to-agent announce/i,
-  /^ANNOUNCE_SKIP$/,
-  /^HEARTBEAT_OK$/,
-  /^REPLY_SKIP$/,
-  /^NO_REPLY$/,
-  /^\[System\]/,
-  /^PAW plugin restarted/,
-];
+Rules:
+- 2-4 sentences max
+- Keep important details from the previous summary
+- Add new developments
+- Focus on what matters for context if someone picks up this conversation later
+- Output ONLY the updated summary, nothing else`;
 
-function isNoise(text: string): boolean {
-  return NOISE_PATTERNS.some(p => p.test(text.trim()));
-}
-
-// ── Pending summarization tracking ──────────────────────────────────────
-
-/** Set of session keys with pending summarization (debounce in-flight) */
-const pendingSummarizations = new Set<string>();
-
-// ── Core ────────────────────────────────────────────────────────────────
+// ── Core Functions ──────────────────────────────────────────────────────
 
 /**
- * Called after a message is sent/received in a chat session.
- * Decides whether to trigger a summary update based on message count delta and time.
+ * Call the local LM Studio model directly.
  */
-export async function maybeSummarizeChat(sessionKey: string): Promise<void> {
-  if (pendingSummarizations.has(sessionKey)) return;
+async function callLocalModel(
+  systemPrompt: string,
+  userPrompt: string,
+  opts?: { maxTokens?: number; temperature?: number }
+): Promise<string> {
+  const config = getModelConfig();
+  const baseUrl = config.local?.baseUrl ?? "http://localhost:1234/v1";
+  const model = config.local?.chatModel ?? "qwen/qwen3.5-9b";
+  const maxTokens = opts?.maxTokens ?? 256;
+  const temperature = opts?.temperature ?? 0.3;
 
-  const db = getDb();
-  const session = db.select().from(chatSessions)
-    .where(eq(chatSessions.sessionKey, sessionKey))
-    .get();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
-  if (!session) return;
-
-  // Check time threshold
-  if (session.summaryUpdatedAt) {
-    const lastUpdate = new Date(session.summaryUpdatedAt).getTime();
-    const now = Date.now();
-    if ((now - lastUpdate) / 1000 < MIN_INTERVAL_SECONDS) return;
-  }
-
-  // Fetch current message count
-  let messageCount = 0;
-  let messages: Array<{ role: string; content: string }> = [];
   try {
-    const historyResult = await gatewayInvoke("sessions_history", {
-      sessionKey,
-      limit: 200,
-      includeTools: false,
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+          // Prefill with empty think block to skip Qwen3.5's reasoning tokens.
+          // This forces the model to jump straight to the answer.
+          { role: "assistant", content: "<think>\n\n</think>\n\n" },
+        ],
+        max_tokens: maxTokens,
+        temperature,
+        stream: false,
+      }),
+      signal: controller.signal,
     });
-    const rawMessages = historyResult?.messages ?? [];
-    messages = rawMessages
-      .filter((m: any) => {
-        if (m.role !== "user" && m.role !== "assistant") return false;
-        let text = "";
-        if (typeof m.content === "string") text = m.content;
-        else if (Array.isArray(m.content)) {
-          text = m.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n");
-        }
-        return text.trim() !== "" && !isNoise(text);
-      })
-      .map((m: any) => {
-        let text = "";
-        if (typeof m.content === "string") text = m.content;
-        else if (Array.isArray(m.content)) {
-          text = m.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n");
-        }
-        return { role: m.role as string, content: text };
-      });
-    messageCount = messages.length;
+
+    if (!response.ok) {
+      throw new Error(`LM Studio returned ${response.status}: ${await response.text()}`);
+    }
+
+    const data = await response.json() as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    let content = data.choices?.[0]?.message?.content?.trim() ?? "";
+
+    // Strip any remaining think blocks if the model still produces them
+    content = content.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+
+    return content;
   } catch (err) {
-    log().warn(`[CHAT-SUMMARY] Failed to fetch history for ${sessionKey.slice(0, 20)}: ${err}`);
-    return;
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`Local model timed out after ${TIMEOUT_MS}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
   }
-
-  // Check if enough new messages since last summary
-  const lastCount = session.messageCountAtSummary ?? 0;
-  const newMessages = messageCount - lastCount;
-
-  // First summary after 2 messages, subsequent updates after MIN_NEW_MESSAGES
-  const threshold = lastCount === 0 ? 2 : MIN_NEW_MESSAGES;
-  if (newMessages < threshold) return;
-
-  // Trigger async summarization + title generation
-  pendingSummarizations.add(sessionKey);
-  const currentLabel = session.label;
-  Promise.all([
-    generateSummaryFromMessages(sessionKey, messages, messageCount, session.summary ?? undefined),
-    generateTitle(sessionKey, messages, currentLabel ?? undefined),
-  ])
-    .catch(err => log().warn(`[CHAT-SUMMARY] Failed for ${sessionKey.slice(0, 20)}: ${err}`))
-    .finally(() => pendingSummarizations.delete(sessionKey));
 }
 
-async function generateSummaryFromMessages(
-  sessionKey: string,
-  messages: Array<{ role: string; content: string }>,
-  messageCount: number,
-  previousSummary?: string,
-): Promise<void> {
-  log().info(`[CHAT-SUMMARY] Generating summary for ${sessionKey.slice(0, 20)}... (${messageCount} messages)`);
-
-  if (messages.length < 2) return;
-
-  // Build the conversation text (truncate to ~4k chars for micro model context)
-  const conversationText = messages
+/**
+ * Format messages into a readable conversation transcript.
+ */
+function formatMessages(messages: Array<{ role: string; content: string }>): string {
+  return messages
     .map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
     .join("\n\n");
-  const truncated = conversationText.length > 4000
-    ? conversationText.slice(-4000)
-    : conversationText;
-
-  const previousContext = previousSummary
-    ? `\nPrevious summary: "${previousSummary}"\nUpdate this summary to incorporate the new messages.`
-    : "";
-
-  const prompt = `Summarize this chat conversation in 1-2 concise sentences that capture the main topic(s) and what was discussed/accomplished. This will be used as a label for the chat session. Be specific about the subject matter, not generic.${previousContext}
-
-Conversation:
-${truncated}
-
-Reply with ONLY the summary, nothing else.`;
-
-  try {
-    const result = await gatewayInvoke("sessions_spawn", {
-      task: prompt,
-      model: SUMMARY_MODEL,
-      mode: "run",
-      cleanup: "kill",
-      runTimeoutSeconds: 60,
-      maxTokens: 200,
-      metadata: { pawChatSummary: true, chatSessionKey: sessionKey },
-    }, SINK_SESSION_KEY);
-
-    let summary = result?.reply ?? result?.response ?? result?.text ?? "";
-
-    // Clean up: strip quotes, "Summary:" prefix, thinking tags, etc.
-    summary = summary
-      .replace(/<think>[\s\S]*?<\/think>/g, "")
-      .replace(/^["']|["']$/g, "")
-      .replace(/^Summary:\s*/i, "")
-      .trim();
-
-    if (!summary || summary.length < 5) {
-      log().info(`[CHAT-SUMMARY] Micro model returned empty, trying fallback`);
-      const fallbackResult = await gatewayInvoke("sessions_spawn", {
-        task: prompt,
-        model: getModelForTier("standard"),
-        mode: "run",
-        cleanup: "kill",
-        runTimeoutSeconds: 60,
-        maxTokens: 200,
-        metadata: { pawChatSummary: true, chatSessionKey: sessionKey },
-      }, SINK_SESSION_KEY);
-
-      summary = (fallbackResult?.reply ?? fallbackResult?.response ?? fallbackResult?.text ?? "")
-        .replace(/<think>[\s\S]*?<\/think>/g, "")
-        .replace(/^["']|["']$/g, "")
-        .replace(/^Summary:\s*/i, "")
-        .trim();
-    }
-
-    if (!summary || summary.length < 5) {
-      log().warn(`[CHAT-SUMMARY] Could not generate summary for ${sessionKey.slice(0, 20)}`);
-      return;
-    }
-
-    // Truncate if too long
-    if (summary.length > 300) summary = summary.slice(0, 297) + "...";
-
-    // Store in DB
-    const db = getDb();
-    db.update(chatSessions)
-      .set({
-        summary,
-        summaryUpdatedAt: new Date().toISOString(),
-        messageCountAtSummary: messageCount,
-      })
-      .where(eq(chatSessions.sessionKey, sessionKey))
-      .run();
-
-    log().info(`[CHAT-SUMMARY] Updated summary for ${sessionKey.slice(0, 20)}: "${summary.slice(0, 60)}..."`);
-  } catch (err) {
-    log().warn(`[CHAT-SUMMARY] Generation failed: ${err}`);
-  }
 }
 
 /**
- * Force-generate a summary for a session (e.g., via API call).
+ * Truncate a transcript to fit within the context window.
  */
-export async function forceSummarize(sessionKey: string): Promise<string | null> {
+function truncateTranscript(transcript: string): string {
+  if (transcript.length <= MAX_CONTEXT_CHARS) return transcript;
+  // Keep the end (most recent) and note truncation
+  return "... [earlier messages truncated]\n\n" + transcript.slice(-MAX_CONTEXT_CHARS);
+}
+
+// ── Public API ──────────────────────────────────────────────────────────
+
+/**
+ * Generate a title for a chat session. Called after the first assistant response.
+ * Returns the generated title, or null if it fails.
+ */
+export async function generateChatTitle(sessionKey: string): Promise<string | null> {
   const db = getDb();
-  const session = db.select().from(chatSessions)
-    .where(eq(chatSessions.sessionKey, sessionKey))
-    .get();
-  if (!session) return null;
-
-  // Fetch messages
-  let messages: Array<{ role: string; content: string }> = [];
-  try {
-    const historyResult = await gatewayInvoke("sessions_history", {
-      sessionKey,
-      limit: 200,
-      includeTools: false,
-    });
-    const rawMessages = historyResult?.messages ?? [];
-    messages = rawMessages
-      .filter((m: any) => (m.role === "user" || m.role === "assistant"))
-      .map((m: any) => {
-        let text = "";
-        if (typeof m.content === "string") text = m.content;
-        else if (Array.isArray(m.content)) {
-          text = m.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n");
-        }
-        return { role: m.role as string, content: text };
-      })
-      .filter((m: any) => m.content.trim() !== "" && !isNoise(m.content));
-  } catch (err) {
-    log().warn(`[CHAT-SUMMARY] Force summarize history fetch failed: ${err}`);
-    return null;
-  }
-
-  await generateSummaryFromMessages(sessionKey, messages, messages.length, session.summary ?? undefined);
-
-  const updated = db.select().from(chatSessions)
-    .where(eq(chatSessions.sessionKey, sessionKey))
-    .get();
-  return updated?.summary ?? null;
-}
-
-/**
- * Generate a short, descriptive title for a chat session.
- * 
- * Uses a micro-tier model to produce a 2-5 word title based on the conversation.
- * Re-generates as the conversation evolves — early titles are based on the first
- * few messages, later titles capture the broader theme.
- */
-async function generateTitle(
-  sessionKey: string,
-  messages: Array<{ role: string; content: string }>,
-  currentLabel?: string,
-): Promise<void> {
-  if (messages.length < 2) return;
-
-  // Skip if it already has a good title and not enough messages to warrant re-titling
-  const isDefaultTitle = !currentLabel || currentLabel === "New Chat" || currentLabel.startsWith("Chat ");
-  // Re-title: always on default titles, at 10+ messages for existing titles, then every 20 after
-  const shouldRetitle = isDefaultTitle
-    || (messages.length >= 10 && messages.length < 12)
-    || (messages.length >= 30 && messages.length % 20 < 2);
-  if (!shouldRetitle) return;
 
   try {
-    // Use recent messages for context (truncate to ~2k chars)
-    const recentMessages = messages.slice(-20);
-    const conversationText = recentMessages
-      .map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.content.slice(0, 200)}`)
-      .join("\n")
-      .slice(0, 2000);
+    // Get the session
+    const session = db.select().from(chatSessions)
+      .where(eq(chatSessions.sessionKey, sessionKey))
+      .get();
 
-    const prompt = currentLabel && !isDefaultTitle
-      ? `Here is a conversation that was previously titled "${currentLabel}". Based on the full conversation so far, generate an updated short title (2-5 words) that captures the main topic or theme. Be concise and natural — like how a person would name a chat thread.
-
-Conversation:
-${conversationText}
-
-Reply with ONLY the title, nothing else. No quotes, no punctuation at the end.`
-      : `Generate a short title (2-5 words) for this conversation. Capture the main topic or intent. Be concise and natural — like how a person would name a chat thread.
-
-Conversation:
-${conversationText}
-
-Reply with ONLY the title, nothing else. No quotes, no punctuation at the end.`;
-
-    const result = await gatewayInvoke("sessions_spawn", {
-      task: prompt,
-      model: SUMMARY_MODEL,
-      mode: "run",
-      cleanup: "kill",
-      runTimeoutSeconds: 30,
-      maxTokens: 30,
-      metadata: { chatTitleGeneration: true, chatSessionKey: sessionKey },
-    }, SINK_SESSION_KEY);
-
-    let title = result?.reply ?? result?.response ?? result?.text ?? "";
-
-    // Clean up: strip thinking tags, quotes, trailing punctuation
-    title = title
-      .replace(/<think>[\s\S]*?<\/think>/g, "")
-      .replace(/^["']|["']$/g, "")
-      .replace(/^Title:\s*/i, "")
-      .replace(/\.+$/, "")
-      .trim();
-
-    if (!title || title.length < 2 || title.length > 80) {
-      log().warn(`[CHAT-TITLE] Bad title generated: "${title?.slice(0, 100)}"`);
-      return;
+    if (!session) {
+      log().warn(`[chat-summarizer] Session not found: ${sessionKey}`);
+      return null;
     }
 
-    const db = getDb();
+    // If already titled (not default), skip
+    if (session.label && session.label !== "New Chat") {
+      return session.label;
+    }
+
+    // Get messages
+    const messages = db.select({ role: chatMessages.role, content: chatMessages.content })
+      .from(chatMessages)
+      .where(eq(chatMessages.sessionKey, sessionKey))
+      .orderBy(chatMessages.createdAt)
+      .all();
+
+    if (messages.length < 2) return null; // Need at least one exchange
+
+    const transcript = truncateTranscript(formatMessages(messages));
+    const userPrompt = `Generate a title for this conversation:\n\n${transcript}`;
+
+    const config = getModelConfig();
+    const model = config.local?.chatModel ?? "qwen/qwen3.5-9b";
+
+    // Call local model
+    const rawTitle = await callLocalModel(TITLE_SYSTEM_PROMPT, userPrompt, {
+      maxTokens: 32,
+      temperature: 0.3,
+    });
+
+    // Clean up: remove quotes, trailing punctuation
+    let title = rawTitle
+      .replace(/^["']|["']$/g, "")
+      .replace(/[.!?]+$/, "")
+      .trim();
+
+    // Sanity check
+    if (!title || title.length < 3 || title.length > 80) {
+      log().warn(`[chat-summarizer] Bad title generated: "${rawTitle}"`);
+      title = rawTitle.slice(0, 80).trim() || "New Chat";
+    }
+
+    // Save to DB
     db.update(chatSessions)
       .set({ label: title })
       .where(eq(chatSessions.sessionKey, sessionKey))
       .run();
 
-    log().info(`[CHAT-TITLE] Set title for ${sessionKey.slice(0, 20)}: "${title}"`);
+    // Log training data for later fine-tuning
+    logTrainingExample({
+      taskType: "chat_title",
+      systemPrompt: TITLE_SYSTEM_PROMPT,
+      userPrompt,
+      context: { sessionKey, messageCount: messages.length },
+      modelOutput: rawTitle,
+      modelUsed: model,
+    });
+
+    log().info(`[chat-summarizer] Named session ${sessionKey}: "${title}"`);
+    return title;
   } catch (err) {
-    log().warn(`[CHAT-TITLE] Title generation failed: ${err}`);
+    log().error(`[chat-summarizer] Title generation failed for ${sessionKey}: ${err}`);
+    return null;
   }
+}
+
+/**
+ * Maybe generate/update a summary for a chat session.
+ * Only runs if enough new messages have accumulated since last summary.
+ * Returns the summary, or null if skipped/failed.
+ */
+export async function maybeSummarizeChat(sessionKey: string): Promise<string | null> {
+  const db = getDb();
+
+  try {
+    const session = db.select().from(chatSessions)
+      .where(eq(chatSessions.sessionKey, sessionKey))
+      .get();
+
+    if (!session) return null;
+
+    // Count current messages
+    const countResult = db.select({ count: sql<number>`count(*)` })
+      .from(chatMessages)
+      .where(eq(chatMessages.sessionKey, sessionKey))
+      .get();
+
+    const messageCount = countResult?.count ?? 0;
+    const lastSummarizedAt = session.messageCountAtSummary ?? 0;
+    const newMessages = messageCount - lastSummarizedAt;
+
+    // Not enough new messages to bother
+    if (newMessages < SUMMARY_THRESHOLD) return session.summary ?? null;
+
+    // Get all messages
+    const messages = db.select({ role: chatMessages.role, content: chatMessages.content })
+      .from(chatMessages)
+      .where(eq(chatMessages.sessionKey, sessionKey))
+      .orderBy(chatMessages.createdAt)
+      .all();
+
+    const config = getModelConfig();
+    const model = config.local?.chatModel ?? "qwen/qwen3.5-9b";
+
+    let systemPrompt: string;
+    let userPrompt: string;
+
+    if (session.summary) {
+      // Update existing summary
+      systemPrompt = UPDATE_SUMMARY_SYSTEM_PROMPT;
+      // Only feed new messages + previous summary
+      const recentMessages = messages.slice(lastSummarizedAt);
+      const transcript = truncateTranscript(formatMessages(recentMessages));
+      userPrompt = `Previous summary:\n${session.summary}\n\nNew messages:\n${transcript}`;
+    } else {
+      // First summary
+      systemPrompt = SUMMARY_SYSTEM_PROMPT;
+      const transcript = truncateTranscript(formatMessages(messages));
+      userPrompt = `Summarize this conversation:\n\n${transcript}`;
+    }
+
+    const summary = await callLocalModel(systemPrompt, userPrompt, {
+      maxTokens: 256,
+      temperature: 0.3,
+    });
+
+    if (!summary || summary.length < 10) {
+      log().warn(`[chat-summarizer] Bad summary generated for ${sessionKey}: "${summary}"`);
+      return session.summary ?? null;
+    }
+
+    // Save to DB
+    const now = new Date().toISOString();
+    db.update(chatSessions)
+      .set({
+        summary,
+        summaryUpdatedAt: now,
+        messageCountAtSummary: messageCount,
+      })
+      .where(eq(chatSessions.sessionKey, sessionKey))
+      .run();
+
+    // Log training data
+    logTrainingExample({
+      taskType: "chat_summary",
+      systemPrompt,
+      userPrompt,
+      context: {
+        sessionKey,
+        messageCount,
+        hadPreviousSummary: !!session.summary,
+        previousSummary: session.summary ?? null,
+      },
+      modelOutput: summary,
+      modelUsed: model,
+    });
+
+    log().info(`[chat-summarizer] Summarized session ${sessionKey} (${messageCount} msgs)`);
+    return summary;
+  } catch (err) {
+    log().error(`[chat-summarizer] Summary failed for ${sessionKey}: ${err}`);
+    return null;
+  }
+}
+
+/**
+ * Force-generate both title and summary for a session.
+ * Used for manual triggers or backfilling.
+ */
+export async function forceSummarize(sessionKey: string): Promise<{ title: string | null; summary: string | null }> {
+  const db = getDb();
+
+  // Reset the label to force title regeneration
+  db.update(chatSessions)
+    .set({ label: "New Chat", messageCountAtSummary: 0 })
+    .where(eq(chatSessions.sessionKey, sessionKey))
+    .run();
+
+  const title = await generateChatTitle(sessionKey);
+  const summary = await maybeSummarizeChat(sessionKey);
+  return { title, summary };
+}
+
+/**
+ * Hook to call after an assistant message is saved.
+ * Handles both title generation (first exchange) and summary updates.
+ * Runs async — doesn't block the chat response.
+ */
+export function onAssistantMessage(sessionKey: string): void {
+  // Fire and forget — don't block the response
+  (async () => {
+    try {
+      // Always try title (it's a no-op if already titled)
+      await generateChatTitle(sessionKey);
+
+      // Try summary (it checks the threshold internally)
+      await maybeSummarizeChat(sessionKey);
+    } catch (err) {
+      log().error(`[chat-summarizer] onAssistantMessage hook failed: ${err}`);
+    }
+  })();
 }

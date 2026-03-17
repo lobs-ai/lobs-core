@@ -13,7 +13,7 @@ import { eq, desc, and, inArray } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { trainingData } from "../db/schema.js";
 
-export type TaskType = "braindump" | "calendar_check" | "daily_brief" | "system_state" | "categorization" | "summary";
+export type TaskType = "braindump" | "calendar_check" | "daily_brief" | "system_state" | "categorization" | "summary" | "chat_title" | "chat_summary";
 export type ReviewStatus = "pending" | "approved" | "corrected" | "rejected";
 
 export interface TrainingExample {
