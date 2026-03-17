@@ -1270,6 +1270,78 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
     `(task=${taskId?.slice(0, 8) ?? "none"}, model=${runnerModel})`
   );
 
+  // ── LM Studio model availability preflight ──────────────────────────────
+  // Check that the chosen model (and its fallbacks) are actually loaded in
+  // LM Studio before we invest in context assembly or agent execution.
+  // Catches model-ID drift early and prevents cascade failures on restart.
+  // Fail-open: diagnostic errors (network/timeout) must never block spawning.
+  try {
+    const fallbackChain = buildFallbackChain(orchestratorModel, "standard", req.agentType);
+    const modelsToCheck = [orchestratorModel, ...fallbackChain].map(
+      m => mapModelForRunner(m)
+    );
+    const lmsDiag = await checkModelsBeforeSpawn(modelsToCheck, { timeoutMs: 2500 });
+
+    if (!lmsDiag.ok) {
+      if (!lmsDiag.reachable) {
+        // Only block if the primary model is local — cloud models don't need LM Studio
+        const isLocalPrimary = orchestratorModel.startsWith("lmstudio/") ||
+          orchestratorModel.startsWith("local/") ||
+          !orchestratorModel.includes("/");
+        if (isLocalPrimary) {
+          log().error(
+            `[LM_STUDIO_DIAG] LM Studio unreachable — blocking native spawn of ${req.agentType} ` +
+            `(model=${runnerModel}). Start LM Studio and load the model, then retry.`
+          );
+          decrementPendingSpawns(projectId, req.agentType);
+          writeSpawnResult(req.runId, req.nodeId, {
+            status: "failed",
+            error:
+              `lmstudio_unreachable: LM Studio is not running. ` +
+              `Cannot spawn ${req.agentType} with local model ${runnerModel}. ` +
+              `Run 'lobs models' for details.`,
+          });
+          return;
+        }
+      } else if (lmsDiag.missingIds.length > 0) {
+        // LM Studio is up but the required model isn't loaded
+        const suggestionParts = Object.entries(lmsDiag.suggestions)
+          .map(([id, s]) => `${id} → ${s}`)
+          .join(", ");
+        const suggestionStr = suggestionParts ? ` Suggestions: ${suggestionParts}.` : "";
+        log().error(
+          `[LM_STUDIO_DIAG] Model(s) not loaded in LM Studio — blocking native spawn of ${req.agentType} ` +
+          `(missing=${lmsDiag.missingIds.join(", ")}, loaded=${lmsDiag.loadedModels.join(", ")}).${suggestionStr} ` +
+          `Run 'lobs models' for details.`
+        );
+        decrementPendingSpawns(projectId, req.agentType);
+        writeSpawnResult(req.runId, req.nodeId, {
+          status: "failed",
+          error:
+            `lmstudio_model_not_loaded: model(s) [${lmsDiag.missingIds.join(", ")}] not found in LM Studio. ` +
+            `Loaded: [${lmsDiag.loadedModels.join(", ") || "none"}].` +
+            (suggestionStr ? " " + suggestionStr : "") +
+            ` Update models.json or load the model in LM Studio, then retry. ` +
+            `Run 'lobs models' for details.`,
+        });
+        return;
+      }
+    } else {
+      // ok=true — log any model-ID drift caught by fuzzy matching
+      if (Object.keys(lmsDiag.suggestions).length > 0) {
+        const drifts = Object.entries(lmsDiag.suggestions)
+          .map(([id, s]) => `${id} → ${s}`)
+          .join(", ");
+        log().info(`[LM_STUDIO_DIAG] Model-ID drift detected but resolved via fuzzy match (${drifts})`);
+      } else if (lmsDiag.loadedModels.length > 0) {
+        log().debug?.(`[LM_STUDIO_DIAG] ✓ All required models loaded (${lmsDiag.loadedModels.length} in LM Studio)`);
+      }
+    }
+  } catch (diagErr) {
+    // Fail-open: diagnostic errors must never block spawning
+    log().warn(`[LM_STUDIO_DIAG] Preflight diagnostic failed (fail-open): ${diagErr}`);
+  }
+
   // Assemble intelligent context
   const assembledContext = await assembleContext({
     task: `${taskTitle}\n\n${taskNotes}`,

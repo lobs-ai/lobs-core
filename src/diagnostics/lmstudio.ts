@@ -59,15 +59,41 @@ function stripPrefix(modelId: string): string {
   return sep !== -1 ? modelId.slice(sep + 1) : modelId;
 }
 
-/** Detect if a model ID is intended for LM Studio (local). */
+/** Well-known cloud model name prefixes — never routed to LM Studio. */
+const CLOUD_PREFIXES = [
+  "claude-",
+  "gpt-",
+  "o1-",
+  "o3-",
+  "gemini-",
+  "mistral-",
+  "anthropic/",
+  "openai/",
+  "google/",
+  "cohere/",
+  "groq/",
+];
+
+/**
+ * Detect if a model ID is intended for LM Studio (local).
+ *
+ * Rules (in order):
+ * 1. Explicit local provider prefix → local
+ * 2. Explicit cloud provider prefix or well-known cloud slug → NOT local
+ * 3. Bare ID (no "/") with no cloud prefix → local (model name without provider)
+ * 4. Any other prefixed ID (unknown provider) → NOT local
+ */
 function isLocalModelId(id: string): boolean {
-  return (
+  if (
     id.startsWith("lmstudio/") ||
     id.startsWith("local/") ||
-    id.startsWith("ollama/") ||
-    // Non-prefixed IDs in the local config block are always local
-    !id.includes("/")
-  );
+    id.startsWith("ollama/")
+  ) return true;
+
+  if (CLOUD_PREFIXES.some(p => id.startsWith(p))) return false;
+
+  // Bare ID with no provider separator → treat as local model name
+  return !id.includes("/");
 }
 
 export interface ConfigModelRef {
@@ -350,17 +376,24 @@ export async function checkModelsBeforeSpawn(
   }
 
   const loadedIds = loaded.map(m => m.id);
-  const normalize = (s: string) => s.toLowerCase().replace(/[-_.\s]/g, "");
 
   const missingIds: string[] = [];
   const suggestions: Record<string, string> = {};
 
   for (const id of localIds) {
-    const found = loadedIds.some(lid => normalize(lid) === normalize(id));
-    if (!found) {
+    // Use findClosestMatch which handles exact, fuzzy-contains, and prefix
+    // strategies — a near-match (e.g. "qwen3.5-35b" → "qwen3.5-35b-mlx-instruct")
+    // counts as satisfied so the spawn is not blocked.
+    const match = findClosestMatch(id, loadedIds);
+    if (!match) {
       missingIds.push(id);
-      const suggestion = findClosestMatch(id, loadedIds);
-      if (suggestion) suggestions[id] = suggestion;
+    } else {
+      // Record suggestion whenever the matched ID differs from the config ID
+      // so the caller can surface the actual loaded name for logging / UI.
+      const normalize = (s: string) => s.toLowerCase().replace(/[-_.\s]/g, "");
+      if (normalize(match) !== normalize(id)) {
+        suggestions[id] = match;
+      }
     }
   }
 

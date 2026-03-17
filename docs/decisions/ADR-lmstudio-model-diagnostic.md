@@ -1,7 +1,8 @@
 # ADR: LM Studio Model Availability Diagnostic
 
-**Status:** Accepted  
-**Date:** 2026-03-17
+**Status:** Implemented  
+**Date:** 2026-03-17  
+**Updated:** 2026-03-17 — native runner path wired, two diagnostic bugs fixed
 
 ## Context
 
@@ -37,12 +38,29 @@ Core module with:
 
 ### `src/orchestrator/control-loop.ts`
 
-Pre-spawn guard inserted after spawn-count check, before `sessions_spawn` HTTP call:
-- Calls `checkModelsBeforeSpawn(buildFallbackChain(model, ...))`
+Pre-spawn guard inserted after model selection, before context assembly and agent execution.
+**Wired in both spawn paths:**
+
+- **`processSpawnWithRunner`** (active — `USE_NATIVE_RUNNER=true`): guard runs after `chooseModel`,
+  before `assembleContext`. Blocks with `writeSpawnResult(status="failed")` on failure.
+- **`processSpawnRequest`** (legacy — kept for reference): same guard pattern.
+
+Behaviour:
+- Calls `checkModelsBeforeSpawn(buildFallbackChain(model, tier, agentType), { timeoutMs: 2500 })`
 - On unreachable + local primary model → blocks spawn with `lmstudio_unreachable` error
 - On missing model + LM Studio reachable → blocks spawn with `lmstudio_model_not_loaded` error + suggestions
 - On diagnostic network/code error → fail-open (warns, proceeds)
-- On cloud model spawn → skips entirely (fast path)
+- On cloud model spawn → skips entirely (fast path, no fetch)
+
+**Bug fixes applied (2026-03-17):**
+1. `isLocalModelId`: cloud IDs like `claude-3-5-sonnet-20241022` (no `/`) were mistakenly treated as local.
+   Fixed by adding `CLOUD_PREFIXES` guard before the bare-ID fallback.
+2. `checkModelsBeforeSpawn`: used exact normalization only — missed fuzzy near-matches (e.g. `qwen3.5-35b`
+   with loaded `qwen3.5-35b-mlx-instruct`). Fixed by delegating to `findClosestMatch`.
+
+**Session startup:** the `/api/lm-studio` endpoints (`/api/lm-studio`, `/api/lm-studio/models`,
+`/api/lm-studio/latency`) can be called at session start for a full diagnostic overview. The
+`processSpawnWithRunner` preflight fires automatically per spawn — no manual session step needed.
 
 ### `src/cli/lobs.ts`
 
