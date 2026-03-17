@@ -1716,14 +1716,7 @@ export class MainAgent {
   private async compactIfNeeded(messages: LLMMessage[], channelId?: string): Promise<LLMMessage[]> {
     const COMPACT_THRESHOLD = 120000; // chars
     const HARD_CAP = 250000; // absolute maximum chars to send to API
-    const totalChars = messages.reduce(
-      (sum, m) =>
-        sum +
-        (typeof m.content === "string"
-          ? m.content.length
-          : JSON.stringify(m.content).length),
-      0,
-    );
+    const totalChars = calculateContextSize(messages);
 
     if (totalChars < COMPACT_THRESHOLD) return messages;
 
@@ -1732,90 +1725,54 @@ export class MainAgent {
     // For very large contexts, summarize more aggressively
     const summarizeRatio = totalChars > 200000 ? 0.85 : totalChars > 150000 ? 0.75 : 0.6;
 
-    // Take the first N% of messages and summarize them
-    // Use safe split to avoid orphaning tool_result blocks
-    const rawSplit = Math.floor(messages.length * summarizeRatio);
-    const splitPoint = findSafeSplitPoint(messages, rawSplit);
-    const toSummarize = messages.slice(0, splitPoint);
-    const toKeep = messages.slice(splitPoint);
-
-    // Build summary using a quick LLM call
-    const summaryText = toSummarize
-      .map(
-        (m) =>
-          `${m.role}: ${typeof m.content === "string" ? m.content.substring(0, 200) : "[tool content]"}`,
-      )
-      .join("\n");
-
-    // Use a cheap model for summarization
-    const compactModel = getModelForTier("small");
-    const config = parseModelString(compactModel);
-    const client = createResilientClient(compactModel, {
-      sessionId: "main-agent:compaction",
-      fallbackModels: buildFallbackChain(compactModel, "small", "main").slice(1),
-      maxRetries: 3,
-    });
-
     try {
-      const response = await client.createMessage({
-        model: config.modelId,
-        system:
-          "Summarize this conversation history concisely. Preserve: goals, decisions, constraints, key identifiers, and open questions. Output as bullet points.",
-        messages: [
-          { role: "user", content: summaryText.substring(0, 50000) },
-        ],
-        tools: [],
-        maxTokens: 2000,
+      // Use the shared compactMessages which has structured summaries,
+      // better content extraction, and preserves key findings from tool results
+      const result = await compactMessages(messages, {
+        summarizeRatio,
+        maxSummaryTokens: 3000,
+        preserveIdentifiers: true,
       });
 
-      const summary = response.content
-        .filter((b: any) => b.type === "text")
-        .map((b: any) => b.text)
-        .join("");
+      let compacted = result.messages;
 
-      let compacted: LLMMessage[] = [
-        {
-          role: "user" as const,
-          content: `[Conversation summary — earlier messages compacted]\n\n${summary}`,
-        },
-        {
-          role: "assistant" as const,
-          content: "Understood, I have the context from the summary. Continuing.",
-        },
-        ...toKeep,
-      ];
+      // Persist compaction summary to DB
+      if (channelId && result.compacted) {
+        const summary = typeof compacted[0]?.content === "string"
+          ? compacted[0].content.replace("[Conversation summary — earlier messages compacted]\n\n", "")
+          : "";
+        if (summary) {
+          this.persistCompaction(channelId, result.originalCount - result.newCount, summary);
+        }
+      }
 
-      // Second pass: if still over budget, aggressively truncate tool results in kept portion
-      let afterSize = calculateContextSize(compacted as LLMMessage[]);
+      // Second pass: if still over budget, truncate tool results in kept portion
+      let afterSize = calculateContextSize(compacted);
       if (afterSize > COMPACT_THRESHOLD) {
         console.log(`[main-agent] Post-compaction still ${afterSize} chars, truncating tool results...`);
-        compacted = pruneToolResults(compacted as LLMMessage[], 2, 200) as typeof compacted;
-        afterSize = calculateContextSize(compacted as LLMMessage[]);
+        compacted = pruneToolResults(compacted, 3, 400);
+        afterSize = calculateContextSize(compacted);
       }
 
       // Hard cap: if still over absolute limit, drop oldest messages until we fit
       if (afterSize > HARD_CAP) {
         console.warn(`[main-agent] Post-compaction STILL ${afterSize} chars (hard cap ${HARD_CAP}), dropping oldest messages...`);
-        while (compacted.length > 4 && calculateContextSize(compacted as LLMMessage[]) > HARD_CAP) {
+        while (compacted.length > 4 && calculateContextSize(compacted) > HARD_CAP) {
           compacted.shift();
         }
-        // Ensure first message is user role (API requirement)
         if (compacted.length > 0 && compacted[0].role !== "user") {
           compacted.shift();
         }
-        console.log(`[main-agent] After hard cap trim: ${calculateContextSize(compacted as LLMMessage[])} chars, ${compacted.length} messages`);
-      }
-
-      // Persist compaction to DB so old chats don't re-summarize every turn
-      if (channelId && toSummarize.length > 0) {
-        this.persistCompaction(channelId, toSummarize.length, summary);
+        console.log(`[main-agent] After hard cap trim: ${calculateContextSize(compacted)} chars, ${compacted.length} messages`);
       }
 
       return compacted;
     } catch (err) {
       console.error("[main-agent] Compaction failed:", err);
-      // Fall back to simple truncation
-      return toKeep;
+      // Fall back: keep recent messages only
+      const rawSplit = Math.floor(messages.length * summarizeRatio);
+      const splitPoint = findSafeSplitPoint(messages, rawSplit);
+      return messages.slice(splitPoint);
     }
   }
 
