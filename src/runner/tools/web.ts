@@ -1,5 +1,8 @@
 /**
  * Web tools — search and fetch using Playwright headless browser
+ *
+ * web_fetch uses browserService (Playwright) as the primary path.
+ * The legacy Python/Scrapling script (web_fetch.py) is no longer used.
  */
 
 import { browserService } from "../../services/browser.js";
@@ -71,15 +74,7 @@ export async function webSearchTool(
   }
 }
 
-// ── web_fetch via Scrapling (Python) ─────────────────────────────────────────
-
-import { execFile } from "child_process";
-import { promisify } from "util";
-import path from "path";
-import { fileURLToPath } from "url";
-
-const execFileAsync = promisify(execFile);
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// ── web_fetch via Playwright (browserService) ────────────────────────────────
 
 export const webFetchToolDefinition: ToolDefinition = {
   name: "web_fetch",
@@ -125,42 +120,19 @@ export async function webFetchTool(
     typeof params.maxChars === "number" ? params.maxChars : 6000;
 
   try {
-    // Call the Python Scrapling-based fetcher
-    const scriptPath = path.resolve(__dirname, "web_fetch.py");
-    const { stdout } = await execFileAsync(
-      "python3",
-      [scriptPath, url, "--max-chars", String(maxChars), "--mode", "markdown"],
-      { timeout: 30000 },
-    );
-
-    const result = JSON.parse(stdout.trim());
-
-    if (!result.ok) {
-      return `Failed to fetch ${url}: ${result.error}`;
-    }
+    // Primary path: Playwright via browserService (JS-rendered, no anti-bot issues)
+    const result = await browserService.fetch(url, maxChars);
 
     const parts: string[] = [];
     if (result.title) parts.push(`Title: ${result.title}`);
     parts.push(`URL: ${result.url}`);
-    parts.push(`Length: ${result.length} chars`);
+    parts.push(`Length: ${result.content.length} chars`);
     parts.push("");
     parts.push(result.content);
 
     return parts.join("\n");
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // Fall back to Playwright if Scrapling fails
-    try {
-      const result = await browserService.fetch(url, maxChars);
-      const parts: string[] = [];
-      if (result.title) parts.push(`Title: ${result.title}`);
-      parts.push(`URL: ${result.url}`);
-      parts.push(`Length: ${result.content.length} chars`);
-      parts.push("");
-      parts.push(result.content);
-      return parts.join("\n");
-    } catch {
-      return `Failed to fetch ${url}: ${message}`;
-    }
+    return `Failed to fetch ${url}: ${message}`;
   }
 }
