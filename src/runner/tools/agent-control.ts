@@ -178,7 +178,8 @@ export async function executeSpawnAgent(
   const extraTools = (input.extra_tools as string[]) ?? [];
 
   const model = getModelForTier(modelTier);
-  const tools = [...(AGENT_DEFAULT_TOOLS[agentType] ?? AGENT_DEFAULT_TOOLS.programmer)] as ToolName[];
+  const noDefaultTools = input.no_default_tools === true;
+  const tools = noDefaultTools ? [] : [...(AGENT_DEFAULT_TOOLS[agentType] ?? AGENT_DEFAULT_TOOLS.programmer)] as ToolName[];
 
   // Add extra tools
   for (const t of extraTools) {

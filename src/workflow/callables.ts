@@ -425,6 +425,7 @@ function reflectionSpawnAll(args: Record<string, unknown>, _ctx: CallableContext
         timeout: 300,
         max_turns: 5,
         extra_tools: [],  // no tools needed — data is in the prompt
+        no_default_tools: true,  // override default tool set — reflections are pure text
       },
       undefined, // cwd
       undefined, // channelId — no need to announce to Discord
