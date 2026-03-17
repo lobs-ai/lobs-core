@@ -143,6 +143,7 @@ class DiscordService {
       this.state = "ready";
       this.metrics.state = "ready";
       this.metrics.lastReady = Date.now();
+      this.metrics.lastHeartbeatAck = Date.now(); // Reset so health check doesn't immediately trigger
       this.reconnectAttempts = 0;
     });
 
@@ -199,9 +200,13 @@ class DiscordService {
       });
     }
 
-    // Track heartbeat acks via raw events
+    // Track heartbeat acks
+    // Note: HEARTBEAT_ACK is opcode 11, not a dispatch event, so the 'raw' event doesn't fire for it.
+    // Instead, we use the 'shardReady' and 'shardResume' events to reset the timestamp,
+    // and check ws.ping in the health check to detect zombie connections.
+    // The raw event only fires for dispatch events (opcode 0).
     this.client.on("raw", (packet: { t: string | null }) => {
-      if (packet.t === "HEARTBEAT_ACK" || packet.t === GatewayDispatchEvents.Resumed) {
+      if (packet.t === GatewayDispatchEvents.Resumed) {
         this.metrics.lastHeartbeatAck = Date.now();
       }
     });
@@ -234,13 +239,20 @@ class DiscordService {
         }
       }
 
-      // Check 3: No heartbeat ack in >90s (Discord heartbeat interval is ~41s)
-      if (this.metrics.lastHeartbeatAck && (now - this.metrics.lastHeartbeatAck) > 90_000) {
-        console.warn(`[discord] No heartbeat ack in ${Math.round((now - this.metrics.lastHeartbeatAck) / 1000)}s — connection may be dead`);
-        // Force reconnect if we haven't gotten a heartbeat ack in a very long time
-        if ((now - this.metrics.lastHeartbeatAck) > 180_000) {
-          console.error("[discord] No heartbeat ack in 3min — forcing reconnect");
-          this.handleFullReconnect();
+      // Check 3: Detect zombie connections via ws.ping
+      // discord.js tracks ws.ping as the latency of the last heartbeat ack.
+      // If ping is -1, we haven't received an ack yet (normal during startup).
+      // If we've been "ready" for a while but ping is -1, connection is likely dead.
+      if (this.state === "ready" && ws) {
+        const timeSinceReady = this.metrics.lastReady ? now - this.metrics.lastReady : 0;
+        // If we've been "ready" for >90s but ping is -1, connection is zombie
+        if (wsPing === -1 && timeSinceReady > 90_000) {
+          console.warn(`[discord] No heartbeat ack received — ping=-1 after ${Math.round(timeSinceReady / 1000)}s ready`);
+          if (timeSinceReady > 180_000) {
+            console.error("[discord] No heartbeat ack in 3min — forcing reconnect");
+            this.handleFullReconnect();
+            return; // Don't continue health check after triggering reconnect
+          }
         }
       }
 
