@@ -1174,6 +1174,7 @@ function autoCloseSucceededTasks(): void {
   const needsReviewStmt = db.prepare(`
     UPDATE tasks
     SET review_state = 'needs_review',
+        status = 'needs_review',
         updated_at = ?
     WHERE id = ?
   `);
@@ -1220,7 +1221,9 @@ function autoCloseSucceededTasks(): void {
     }
 
     if (validation.status === "no_artifacts") {
-      // Phantom completion detected — do NOT close; flag for human review
+      // Phantom completion detected — do NOT close; flag for human review.
+      // Set status='needs_review' so it exits the active pool and doesn't get
+      // re-evaluated every tick.
       needsReviewStmt.run(now, task.id);
       const warningTitle = `⚠️ Phantom completion: ${task.title.slice(0, 60)}`;
       const warningContent =

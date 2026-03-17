@@ -22,7 +22,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 
 /** Fallback: how far back to look if we don't have startedAt (10 minutes). */
 const FALLBACK_WINDOW_MINUTES = 10;
@@ -93,9 +93,27 @@ export function validatePostSuccessArtifacts(
   let artifactDetail = "";
 
   if (agent === "programmer" || agent === "reviewer" || agent === "architect") {
+    // Check the project repo first
     const result = checkRepoArtifacts(repoPath, cutoff);
     hasArtifacts = result.found;
     artifactDetail = result.detail;
+
+    // If no artifacts in project repo, check repos the agent actually worked in.
+    // Agents often work in a different repo than the project's declared repo_path
+    // (e.g., a task filed under PAW might fix code in lobs-core).
+    if (!hasArtifacts) {
+      const actualRepos = detectActualWorkingRepos(agent, startedAt);
+      for (const actualRepo of actualRepos) {
+        // Skip if same as project repo (already checked)
+        if (actualRepo === repoPath?.replace(/^~/, process.env["HOME"] ?? "")) continue;
+        const altResult = checkRepoArtifacts(actualRepo, cutoff);
+        if (altResult.found) {
+          hasArtifacts = true;
+          artifactDetail = `${altResult.detail} (in ${actualRepo}, not project repo ${repoPath})`;
+          break;
+        }
+      }
+    }
   } else if (agent === "writer") {
     // If the task declared expected_artifacts, verify those specific paths exist.
     // This catches false-success reports where git push failed (file may not be on remote,
@@ -279,4 +297,88 @@ function checkExpectedArtifactPaths(paths: string[]): { found: boolean; detail: 
     return { found: true, detail: `${present.length}/${paths.length} expected artifacts present; missing: ${missing.join(", ")}` };
   }
   return { found: true, detail: `all ${paths.length} expected artifact(s) present: ${present.join(", ")}` };
+}
+
+/**
+ * Detect the repos an agent actually worked in by scanning recent session transcripts.
+ *
+ * Looks at the most recent session for the given agent type, extracts git repo paths
+ * from exec commands (git commit, git add, etc.) and Write/Edit tool paths.
+ * Returns unique repo root directories.
+ */
+function detectActualWorkingRepos(agentType: string, startedAt: string | null): string[] {
+  const home = process.env["HOME"] ?? "";
+  const sessionsDir = `${home}/.lobs/agents/${agentType}/sessions`;
+
+  if (!existsSync(sessionsDir)) return [];
+
+  try {
+    // Find the most recent session file(s) — look for sessions modified around the startedAt time
+    const files = readdirSync(sessionsDir)
+      .filter(f => f.endsWith(".jsonl") && !f.startsWith("spawned-"))
+      .map(f => ({
+        name: f,
+        path: `${sessionsDir}/${f}`,
+        mtime: statSync(`${sessionsDir}/${f}`).mtimeMs,
+      }))
+      .sort((a, b) => b.mtime - a.mtime);
+
+    if (files.length === 0) return [];
+
+    // If we have a startedAt, find the session that was active during that time
+    // Otherwise just use the most recent session
+    let targetFile = files[0];
+    if (startedAt) {
+      const startMs = new Date(startedAt).getTime();
+      // Find session file whose mtime is closest to (and after) startedAt
+      const candidate = files.find(f => {
+        // Session mtime should be near or after task start (within 30 min)
+        return f.mtime >= startMs && f.mtime <= startMs + 30 * 60_000;
+      });
+      if (candidate) targetFile = candidate;
+    }
+
+    // Read the session and extract repo paths from tool calls
+    const content = readFileSync(targetFile.path, "utf-8");
+    const repoPaths = new Set<string>();
+
+    for (const line of content.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const record = JSON.parse(line);
+        const toolCalls: Array<{ name: string; input: Record<string, unknown> }> = record.toolCalls ?? [];
+        for (const tc of toolCalls) {
+          // Extract paths from exec commands that reference git
+          if (tc.name === "exec" && typeof tc.input?.["command"] === "string") {
+            const cmd = tc.input["command"] as string;
+            if (cmd.includes("git ")) {
+              // Look for cd /path && git ... or git -C /path ...
+              const cdMatch = cmd.match(/cd\s+(\/\S+|~\/\S+)/);
+              if (cdMatch) {
+                const p = cdMatch[1].replace(/^~/, home);
+                repoPaths.add(p);
+              }
+            }
+          }
+          // Extract paths from Write/Edit tool calls
+          if ((tc.name === "write" || tc.name === "Write" || tc.name === "edit" || tc.name === "Edit")
+              && typeof tc.input?.["path"] === "string") {
+            const filePath = (tc.input["path"] as string).replace(/^~/, home);
+            // Walk up to find git root
+            try {
+              const repoRoot = execSync(`git -C "${filePath.replace(/\/[^/]+$/, "")}" rev-parse --show-toplevel 2>/dev/null`, {
+                timeout: 2000,
+                encoding: "utf-8",
+              }).trim();
+              if (repoRoot) repoPaths.add(repoRoot);
+            } catch { /* not a git repo */ }
+          }
+        }
+      } catch { /* skip unparseable lines */ }
+    }
+
+    return [...repoPaths];
+  } catch {
+    return [];
+  }
 }
