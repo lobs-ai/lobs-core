@@ -3,7 +3,7 @@
  *
  * On each tick:
  * 1. Advance active workflow runs (one step per run)
- * 1b. Process pending spawn requests (drain queue → gateway /tools/invoke)
+ * 1b. Process pending spawn requests (drain queue → gateway /v2/invoke)
  * 2. Process workflow events (event-triggered workflows)
  * 3. Process schedule triggers (cron-triggered workflows)
  * 4. Scan for new ready tasks → match to workflows → start runs
@@ -1117,7 +1117,7 @@ function autoCloseSucceededTasks(): void {
     }
     let validation: ReturnType<typeof validatePostSuccessArtifacts>;
     try {
-      validation = validatePostSuccessArtifacts(task.agent, task.repo_path, durationMs, expectedArtifacts);
+      validation = validatePostSuccessArtifacts(task.agent, task.repo_path, durationMs, expectedArtifacts, task.last_started_at ?? null);
     } catch (e) {
       // Fail open: on error, close normally rather than blocking completions
       log().error(`[AUTO-CLOSE] Artifact validation error for task ${task.id.slice(0, 8)}: ${e}`);
@@ -2104,14 +2104,14 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
   );
 
   // Route through sink session so completions don't pollute main
-  const response = await fetch(`http://127.0.0.1:${gatewayPort}/tools/invoke`, {
+  const response = await fetch(`http://127.0.0.1:${gatewayPort}/v2/invoke`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${gatewayToken}`,
     },
     body: JSON.stringify({
-      tool: "sessions_spawn",
+      tool: "sessions/spawn",
       sessionKey: SINK_SESSION_KEY,
       args: {
         task: finalPrompt,
