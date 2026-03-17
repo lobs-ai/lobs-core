@@ -34,9 +34,11 @@ lobs-core/
 
 ```bash
 # 1. Clone and install
+#    NOTE: postinstall runs `npx playwright install --with-deps chromium`
+#    automatically — no manual browser install needed.
 git clone https://github.com/lobs-ai/lobs-core.git
 cd lobs-core
-npm install
+npm install       # ← also downloads Playwright's Chromium browser (~120MB)
 npm run build
 
 # 2. Initialize config (creates ~/.lobs/config/ with templates)

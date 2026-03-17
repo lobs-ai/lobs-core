@@ -9,26 +9,25 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+
+    # All steps share this path so postinstall and tests use the same browsers
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: /tmp/ms-playwright
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Setup Node
       uses: actions/setup-node@v4
       with:
         node-version: '20'
         cache: 'npm'
-    
-    - name: Install dependencies
+
+    - name: Install dependencies (includes Playwright browser install via postinstall)
       run: npm ci
-    
-    - name: Playwright install
-      run: npx playwright install
-      env:
-        PLAYWRIGHT_BROWSERS_PATH: /tmp/ms-playwright
-    
+
     - name: Build
       run: npm run build
-    
+
     - name: Run tests
       run: npm test

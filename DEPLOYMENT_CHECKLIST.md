@@ -6,6 +6,15 @@
 - [x] Implementation summary documented
 - [x] Verification script created and tested
 
+## Playwright Browsers (automatic)
+Playwright Chromium is installed automatically via `npm install` (postinstall hook).
+No manual `npx playwright install` step needed on any host — local dev or CI.
+
+If browsers are missing after install (e.g., `PLAYWRIGHT_BROWSERS_PATH` override):
+```bash
+npx playwright install --with-deps chromium
+```
+
 ## Deployment Steps
 
 ### 1. Build

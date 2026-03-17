@@ -13,7 +13,7 @@
     "lint": "eslint src/",
     "sync-addons": "bin/sync-addons",
     "start": "node dist/main.js",
-    "postinstall": "npx playwright install"
+    "postinstall": "npx playwright install --with-deps chromium"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.79.0",
