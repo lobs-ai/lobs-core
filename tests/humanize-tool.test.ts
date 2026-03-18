@@ -6,19 +6,21 @@ import { humanizeTool } from "../src/runner/tools/humanize.js";
 
 describe("humanizeTool", () => {
   it("accepts raw text input", async () => {
-    const result = await humanizeTool({ action: "score", text: "This is a short paragraph." }, "/tmp");
+    const result = await humanizeTool({ text: "This is a short paragraph." }, "/tmp");
     expect(result).toContain("Score:");
+    expect(result).toContain("Summary:");
+    expect(result).toContain("AI Score:");
     expect(result).toContain("Revision instructions:");
     expect(result).toContain("Do not use em dashes at all.");
   });
 
   it("strips html from raw text input", async () => {
     const result = await humanizeTool(
-      { action: "humanize", text: "<div>Hello <strong>world</strong><script>ignored()</script></div>" },
+      { text: "<div>Hello <strong>world</strong><script>ignored()</script></div>" },
       "/tmp",
     );
 
-    expect(result).toContain("AI Score:");
+    expect(result).toContain("Score:");
     expect(result).not.toContain("<strong>");
     expect(result).not.toContain("ignored()");
   });
@@ -29,10 +31,11 @@ describe("humanizeTool", () => {
       const path = join(dir, "draft.txt");
       writeFileSync(path, "This is a plain text draft for testing.", "utf-8");
 
-      const result = await humanizeTool({ action: "analyze", path }, dir);
+      const result = await humanizeTool({ path }, dir);
 
       expect(result).toContain("Score:");
       expect(result).toContain("Words:");
+      expect(result).toContain("Revision instructions:");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -48,9 +51,10 @@ describe("humanizeTool", () => {
         "utf-8",
       );
 
-      const result = await humanizeTool({ action: "humanize", path }, dir);
+      const result = await humanizeTool({ path }, dir);
 
       expect(result).toContain("AI Score:");
+      expect(result).toContain("Findings:");
       expect(result).not.toContain("<html>");
       expect(result).not.toContain("ignored()");
       expect(result).toContain("Revision instructions:");
@@ -61,7 +65,7 @@ describe("humanizeTool", () => {
   });
 
   it("requires either text or path", async () => {
-    await expect(humanizeTool({ action: "score" }, "/tmp")).rejects.toThrow(
+    await expect(humanizeTool({}, "/tmp")).rejects.toThrow(
       /Provide either text or path/,
     );
   });
