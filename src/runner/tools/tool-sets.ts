@@ -23,6 +23,7 @@ const NEXUS_TOOLS: ToolName[] = [
   "memory_write",
   "spawn_agent",
   "process",
+  "humanize",
 ];
 
 // Discord channel sessions — add message + react

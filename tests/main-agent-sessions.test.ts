@@ -231,6 +231,60 @@ describe("MainAgent Session Management", () => {
     expect(session.model_override).toBeNull();
   });
 
+  it("should reject a user tool_result as the first message", () => {
+    const invalidMessages = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_123",
+            content: "ok",
+          },
+        ],
+      },
+      {
+        role: "assistant",
+        content: "follow-up",
+      },
+      {
+        role: "user",
+        content: "next user turn",
+      },
+    ];
+
+    const validation = (agent as any).validateMessages(invalidMessages);
+    expect(validation).toBe("tool_result at index 0 cannot be first message");
+  });
+
+  it("should repair a user tool_result that became the first message", () => {
+    const repaired = (agent as any).emergencyRepairToolPairs([
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_123",
+            content: "ok",
+          },
+        ],
+      },
+      {
+        role: "assistant",
+        content: "follow-up",
+      },
+      {
+        role: "user",
+        content: "next user turn",
+      },
+    ]);
+
+    expect(repaired[0]).toEqual({
+      role: "user",
+      content: "[Earlier tool results — matching tool calls were compacted]",
+    });
+  });
+
   it("should get last assistant message for a channel", () => {
     // Add some messages
     db.prepare(`

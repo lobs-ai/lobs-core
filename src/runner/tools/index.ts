@@ -17,6 +17,7 @@ import { cronToolDefinition, executeCronTool } from "./cron.js";
 import { messageToolDefinition, executeMessageTool } from "./message.js";
 import { reactToolDefinition, executeReactTool, setDiscordService as setReactDiscord } from "./react.js";
 import { processToolDefinition, processTool } from "./process.js";
+import { humanizeToolDefinition, humanizeTool } from "./humanize.js";
 
 export { setReactDiscord };
 
@@ -124,6 +125,10 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   process: {
     definition: processToolDefinition,
     execute: (params, cwd) => processTool(params, cwd),
+  },
+  humanize: {
+    definition: humanizeToolDefinition,
+    execute: (params) => humanizeTool(params),
   },
 };
 

@@ -1693,7 +1693,11 @@ export class MainAgent {
       const m = messages[i];
       if (m.role === "user" && Array.isArray(m.content)) {
         const toolResults = (m.content as any[]).filter((b: any) => b.type === "tool_result");
-        if (toolResults.length > 0 && i > 0) {
+        if (toolResults.length > 0) {
+          if (i === 0) {
+            return "tool_result at index 0 cannot be first message";
+          }
+
           const prev = messages[i - 1];
           if (prev.role !== "assistant") {
             return `tool_result at index ${i} not preceded by assistant`;
