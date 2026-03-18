@@ -760,8 +760,9 @@ export class MainAgent {
       // 1. Get history for this channel
       let history = this.getRecentHistory(replyChannelId);
 
-      // 2. Prune old tool outputs
+      // 2. Prune old tool outputs and sanitize tool call/result text
       history = this.pruneHistory(history);
+      history = this.sanitizeToolHistory(history);
       const historyChars = history.reduce((sum, msg) => sum + msg.content.length, 0);
       console.log(
         `[main-agent.context] channel=${this.channelTag(replyChannelId)} session=${sessionId} ` +
@@ -1305,11 +1306,14 @@ export class MainAgent {
         console.log(`[main-agent] Transient error, scheduling retry in ${(retryDelay / 1000).toFixed(0)}s (retry ${retryNum}/2) for channel ${replyChannelId.slice(0, 12)}`);
 
         // Emit a temporary status so frontend knows we're retrying, not dead
+        const isOverloaded = errStr.includes("overloaded");
         this.events.emit("stream", {
           type: "error",
           channelId: replyChannelId,
           result: isRateLimit
             ? `⏳ Rate limited — retrying in ${Math.round(retryDelay / 1000)}s...`
+            : isOverloaded
+            ? `⏳ API overloaded — retrying in ${Math.round(retryDelay / 1000)}s...`
             : `⏳ API error — retrying in ${Math.round(retryDelay / 1000)}s...`,
           timestamp: Date.now(),
         } satisfies AgentStreamEvent);
@@ -1617,14 +1621,28 @@ export class MainAgent {
       const runMessages = run.indices.map(i => messages[i]);
       
       if (runMessages.length <= MAX_FULL_KEEP) {
-        // Short run — just concatenate
-        let content = "";
-        for (const m of runMessages) {
-          if (typeof m.content === "string") {
-            content += (content ? "\n\n" : "") + m.content;
+        // Short run — concatenate, handling both string and array content
+        const hasArrayContent = runMessages.some(m => Array.isArray(m.content));
+        if (hasArrayContent) {
+          // Flatten all content into a single array of content blocks
+          const blocks: Array<Record<string, unknown>> = [];
+          for (const m of runMessages) {
+            if (Array.isArray(m.content)) {
+              blocks.push(...(m.content as Array<Record<string, unknown>>));
+            } else if (typeof m.content === "string" && m.content) {
+              blocks.push({ type: "text", text: m.content });
+            }
           }
+          merged.push({ role: run.role as "user" | "assistant", content: blocks });
+        } else {
+          let content = "";
+          for (const m of runMessages) {
+            if (typeof m.content === "string") {
+              content += (content ? "\n\n" : "") + m.content;
+            }
+          }
+          merged.push({ role: run.role as "user" | "assistant", content });
         }
-        merged.push({ role: run.role as "user" | "assistant", content });
         continue;
       }
 
@@ -1662,6 +1680,100 @@ export class MainAgent {
       merged.push({ role: run.role as "user" | "assistant", content });
     }
     return merged;
+  }
+
+  /**
+   * Sanitize tool call/result text in DB history so the model doesn't confuse
+   * persisted text-format tool records with actual structured tool_use blocks.
+   *
+   * Problem: During the agent loop, tool calls use structured tool_use/tool_result
+   * blocks (the Claude API's native format). But when persisted to DB, they're stored
+   * as plain text like "[Tool calls]\n[exec] {\"command\": \"ls\"}". When loaded back
+   * in subsequent turns, the model sees its own prior tool usage as TEXT output, which
+   * teaches it to emit tool calls as text instead of using the structured API. After a
+   * few turns of this, the agent loop breaks — the model outputs tool call text instead
+   * of tool_use blocks, so no tools get executed.
+   *
+   * Fix: Rewrite these patterns into natural language summaries that the model won't
+   * try to imitate as a tool-calling format.
+   */
+  private sanitizeToolHistory(
+    messages: Array<{ role: string; content: string; created_at: string; metadata?: string | null }>,
+  ): Array<{ role: string; content: string; created_at: string; metadata?: string | null }> {
+    return messages.map((m) => {
+      let content = m.content;
+
+      if (m.role === "assistant" && content.includes("[Tool calls]")) {
+        // Rewrite "[Tool calls]\n[tool_name] {input}" → natural language summary
+        // Extract tool names from lines like "[exec] {\"command\": ...}"
+        const lines = content.split("\n");
+        const toolCallLines: string[] = [];
+        const textLines: string[] = [];
+        let inToolSection = false;
+
+        for (const line of lines) {
+          if (line.trim() === "[Tool calls]") {
+            inToolSection = true;
+            continue;
+          }
+          if (inToolSection) {
+            const toolMatch = line.match(/^\[(\w+)\]\s*(.*)/);
+            if (toolMatch) {
+              const toolName = toolMatch[1];
+              // Extract just the key parameter for context
+              let paramHint = "";
+              try {
+                const inputStr = toolMatch[2];
+                const parsed = JSON.parse(inputStr.replace(/\.\.\.$/,""));
+                // Pick the most informative param
+                if (parsed.command) paramHint = `: ${parsed.command.substring(0, 80)}`;
+                else if (parsed.path) paramHint = `: ${parsed.path}`;
+                else if (parsed.pattern) paramHint = `: pattern "${parsed.pattern}"`;
+                else if (parsed.query) paramHint = `: "${parsed.query.substring(0, 60)}"`;
+                else if (parsed.url) paramHint = `: ${parsed.url.substring(0, 80)}`;
+                else if (parsed.content) paramHint = ` (writing content)`;
+              } catch {
+                // Can't parse — just use tool name
+              }
+              toolCallLines.push(`${toolName}${paramHint}`);
+            }
+          } else {
+            textLines.push(line);
+          }
+        }
+
+        // Reconstruct: keep the text the model said, then summarize tool usage
+        const textPart = textLines.join("\n").trim();
+        const toolSummary = toolCallLines.length > 0
+          ? `[Used tools: ${toolCallLines.join(", ")}]`
+          : "";
+        content = [textPart, toolSummary].filter(Boolean).join("\n\n");
+      }
+
+      if (m.role === "user" && content.startsWith("[Tool results]")) {
+        // Rewrite tool result messages into a brief summary
+        // These are the text-format persisted versions of tool_result blocks
+        const lines = content.split("\n").slice(1); // skip the "[Tool results]" header
+        const resultSummaries: string[] = [];
+
+        for (const line of lines) {
+          // Lines look like: [toolu_xxx] result text... or [toolu_xxx] ERROR: ...
+          const resultMatch = line.match(/^\[toolu_\w+\]\s*(ERROR:\s*)?(.*)/);
+          if (resultMatch) {
+            const isError = Boolean(resultMatch[1]);
+            const preview = resultMatch[2].substring(0, 150);
+            resultSummaries.push(isError ? `Error: ${preview}` : preview);
+          }
+        }
+
+        content = resultSummaries.length > 0
+          ? `[Tool outputs: ${resultSummaries.join(" | ")}]`
+          : "[Tool execution completed]";
+      }
+
+      if (content === m.content) return m;
+      return { ...m, content };
+    });
   }
 
   private pruneHistory(
@@ -1759,6 +1871,11 @@ export class MainAgent {
         console.log(`[main-agent] After hard cap trim: ${calculateContextSize(compacted)} chars, ${compacted.length} messages`);
       }
 
+      // Ensure proper role alternation after compaction — compaction can
+      // produce consecutive same-role messages when the kept portion starts
+      // with the same role as the synthetic ack message.
+      compacted = this.mergeConsecutiveRoles(compacted);
+
       return compacted;
     } catch (err) {
       console.error("[main-agent] Compaction failed:", err);
@@ -1788,6 +1905,16 @@ export class MainAgent {
 
       const ids = oldestRows.map(r => r.id);
 
+      // Check the role of the first message that will remain after deletion,
+      // so we can decide whether to include the assistant ack (avoid consecutive assistants)
+      const firstRemainingRow = this.db.prepare(
+        `SELECT role FROM main_agent_messages
+         WHERE channel_id = ?
+         ORDER BY created_at ASC
+         LIMIT 1 OFFSET ?`
+      ).get(channelId, summarizedCount) as { role: string } | undefined;
+      const firstRemainingRole = firstRemainingRow?.role;
+
       // Use better-sqlite3's transaction() for safe atomic operation
       const doCompaction = this.db.transaction(() => {
         // Delete in batches (SQLite has a limit on placeholders)
@@ -1800,9 +1927,8 @@ export class MainAgent {
           ).run(...batch);
         }
 
-        // Insert summary as a user message + assistant ack
+        // Insert summary as a user message (+ optional assistant ack)
         const summaryId = randomUUID();
-        const ackId = randomUUID();
         // Use a very old timestamp so the summary sorts before remaining messages
         const summaryTime = "2000-01-01T00:00:00.000Z";
 
@@ -1811,10 +1937,15 @@ export class MainAgent {
            VALUES (?, 'user', ?, ?, ?, ?)`
         ).run(summaryId, `[Conversation summary — earlier messages compacted]\n\n${summary}`, channelId, summaryTime, Math.ceil(summary.length / 4));
 
-        this.db.prepare(
-          `INSERT INTO main_agent_messages (id, role, content, channel_id, created_at, token_estimate)
-           VALUES (?, 'assistant', ?, ?, ?, ?)`
-        ).run(ackId, "Understood, I have the context from the summary. Continuing.", channelId, summaryTime, 15);
+        // Only insert assistant ack if the first remaining message is NOT assistant
+        // to avoid creating consecutive assistant messages in the DB
+        if (firstRemainingRole !== "assistant") {
+          const ackId = randomUUID();
+          this.db.prepare(
+            `INSERT INTO main_agent_messages (id, role, content, channel_id, created_at, token_estimate)
+             VALUES (?, 'assistant', ?, ?, ?, ?)`
+          ).run(ackId, "Understood, I have the context from the summary. Continuing.", channelId, summaryTime, 15);
+        }
       });
 
       doCompaction();

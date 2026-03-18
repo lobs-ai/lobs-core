@@ -144,17 +144,27 @@ Output format:
       .map(b => b.text || "")
       .join("");
 
+    // Build compacted message list, ensuring proper role alternation.
+    // If toKeep starts with an assistant message, omit the synthetic ack
+    // to avoid consecutive assistant messages (ack + kept assistant).
     const compactedMessages: LLMMessage[] = [
       {
         role: "user",
         content: `[Conversation compacted — ${splitPoint} messages summarized]\n\n${summary}`,
       },
-      {
+    ];
+
+    const firstKeptRole = toKeep.length > 0 ? toKeep[0].role : null;
+    if (firstKeptRole !== "assistant") {
+      // Safe to add the ack — next message is user (or empty)
+      compactedMessages.push({
         role: "assistant",
         content: "Understood. I have the full context from the summary and will continue from where we left off.",
-      },
-      ...toKeep,
-    ];
+      });
+    }
+    // else: skip the ack to avoid consecutive assistant messages
+
+    compactedMessages.push(...toKeep);
 
     const newSize = calculateContextSize(compactedMessages);
     console.log(`[compaction] Compacted ${splitPoint} messages into summary (${totalChars} → ${newSize} chars)`);
