@@ -123,6 +123,11 @@ The runner calls LLM APIs directly with in-process tool execution:
 
 `exec`, `read`, `write`, `edit`, `web_search`, `web_fetch`, `memory_search`, `memory_read`
 
+`read` behavior:
+- Default `read` returns a preview capped to about 500 lines / 50KB.
+- Use `full: true` when the agent needs the entire text file in one call.
+- For larger files, use `offset` and `limit` to page through content.
+
 ### Draft Generation
 
 Nexus plugin affordances support local-first draft generation for boilerplate work:

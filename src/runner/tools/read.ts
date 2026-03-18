@@ -15,8 +15,8 @@ export const readToolDefinition: ToolDefinition = {
   name: "read",
   description:
     "Read the contents of a file. For text files, output is truncated to 500 lines or 50KB by default " +
-    "(whichever is hit first). Use offset/limit for large files. " +
-    "Prefer reading whole files — most source files fit in 500 lines. Don't read small chunks.",
+    "(whichever is hit first). Use full=true when you need the entire file in one call, " +
+    "or offset/limit for large files. Prefer reading whole files when they are reasonably sized.",
   input_schema: {
     type: "object",
     properties: {
@@ -32,6 +32,10 @@ export const readToolDefinition: ToolDefinition = {
         type: "number",
         description: "Maximum number of lines to read",
       },
+      full: {
+        type: "boolean",
+        description: "Return the entire text file without preview truncation",
+      },
     },
     required: ["path"],
   },
@@ -44,6 +48,7 @@ const DEFAULT_LINES = 500;
 const MAX_BYTES = 50 * 1024; // 50KB
 const DEFAULT_BYTES = 50000;
 const BINARY_CHECK_BYTES = 8192;
+const MAX_FULL_FILE_BYTES = 200 * 1024; // 200KB
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -85,6 +90,16 @@ export async function readTool(
 
   const content = buffer.toString("utf-8");
   const lines = content.split("\n");
+  const full = params.full === true;
+
+  if (full) {
+    if (stat.size > MAX_FULL_FILE_BYTES) {
+      throw new Error(
+        `File too large for full read (${stat.size} bytes). Use offset/limit for large files.`,
+      );
+    }
+    return content;
+  }
 
   const hasExplicitRange = typeof params.offset === "number" || typeof params.limit === "number";
   const offset = typeof params.offset === "number" ? Math.max(1, params.offset) : 1;
