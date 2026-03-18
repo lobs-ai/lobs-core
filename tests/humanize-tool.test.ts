@@ -54,7 +54,7 @@ describe("humanizeTool", () => {
       const result = await humanizeTool({ path }, dir);
 
       expect(result).toContain("AI Score:");
-      expect(result).toContain("Findings:");
+      expect(result).toContain("Summary:");
       expect(result).not.toContain("<html>");
       expect(result).not.toContain("ignored()");
       expect(result).toContain("Revision instructions:");

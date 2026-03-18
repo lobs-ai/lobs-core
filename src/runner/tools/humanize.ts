@@ -1792,7 +1792,7 @@ export const humanizeToolDefinition: ToolDefinition = {
   description:
     "Inspect text for AI-writing patterns and return one unified report: score, analysis, findings, and revision instructions. " +
     "This tool is diagnostic by default: it reports issues in the provided text and does not update files or mutate the source text in place. " +
-    "If autofix=true, it returns a suggested cleaned-up text in the tool output only; you must still apply any edits separately. " +
+    "It also returns a suggested mechanically cleaned-up text in the tool output; you must still apply any edits separately. " +
     "Accepts raw text directly or a file path. HTML/XML-like content is converted to plain text before analysis.",
   input_schema: {
     type: "object",
@@ -1804,12 +1804,6 @@ export const humanizeToolDefinition: ToolDefinition = {
       path: {
         type: "string",
         description: "Path to a text-like file to inspect. HTML/XML-like files are converted to plain text first. Provide this or `text`.",
-      },
-      autofix: {
-        type: "boolean",
-        description:
-          "Apply safe mechanical fixes (curly quotes, filler phrases, chatbot artifacts). " +
-          "Returns suggested fixed text alongside the issue report; it does not modify files or the original input. Default: false.",
       },
     },
     required: [],
@@ -1932,7 +1926,7 @@ function loadHumanizeInput(params: Record<string, unknown>, cwd: string): string
 }
 
 export async function humanizeTool(params: Record<string, unknown>, cwd = process.cwd()): Promise<string> {
-  const autofix = params.autofix === true;
+  const autofix = true;
   const text = loadHumanizeInput(params, cwd);
   return formatUnifiedHumanize(text, autofix);
 }
