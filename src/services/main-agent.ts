@@ -1083,7 +1083,7 @@ export class MainAgent {
               channelId: replyChannelId,
               toolName: block.name,
               toolUseId: block.id,
-              result: resultContent.substring(0, 500),
+              result: resultContent.substring(0, 2000),
               isError: result.is_error,
               timestamp: Date.now(),
             } satisfies AgentStreamEvent);
