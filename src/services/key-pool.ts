@@ -296,17 +296,25 @@ export class KeyPoolService {
 
   private findLeastBadKey(provider: Provider, poolSize: number, excludeIndex?: number): number | undefined {
     let bestIndex: number | undefined;
-    let bestTimestamp = Number.POSITIVE_INFINITY;
+    let bestRecoverAt = Number.POSITIVE_INFINITY;
 
     for (let i = 0; i < poolSize; i++) {
       if (i === excludeIndex) continue;
       const health = this.health.get(`${provider}:${i}`);
+
+      // Skip permanently-failed auth keys
       if (health?.failureType === "auth") continue;
-      if (health?.healthy === false) continue;
-      const ts = health?.lastFailure?.getTime() ?? 0;
-      if (bestIndex === undefined || ts < bestTimestamp) {
+
+      // Healthy keys are always best (shouldn't normally reach here, but be safe)
+      if (!health || health.healthy !== false) {
+        return i;
+      }
+
+      // Among unhealthy keys, pick the one that recovers soonest
+      const recoverTime = health.recoverAt?.getTime() ?? Number.POSITIVE_INFINITY;
+      if (recoverTime < bestRecoverAt) {
         bestIndex = i;
-        bestTimestamp = ts;
+        bestRecoverAt = recoverTime;
       }
     }
 

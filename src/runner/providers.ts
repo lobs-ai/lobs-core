@@ -869,11 +869,12 @@ class ResilientLLMClient implements LLMClient {
       let attempt = 0;
       while (attempt < this.maxRetries) {
         attempt++;
-        const client = attempt === 1 && !isFallback
-          ? this.primaryClient
-          : createClient(parseModelString(model), this.sessionId);
 
         try {
+          const client = attempt === 1 && !isFallback
+            ? this.primaryClient
+            : createClient(parseModelString(model), this.sessionId);
+
           return await client.createMessage(modelParams);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);

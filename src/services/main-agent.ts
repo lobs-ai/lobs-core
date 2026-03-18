@@ -763,7 +763,7 @@ export class MainAgent {
       // 2. Prune old tool outputs and sanitize tool call/result text
       history = this.pruneHistory(history);
       history = this.sanitizeToolHistory(history);
-      const historyChars = history.reduce((sum, msg) => sum + msg.content.length, 0);
+      const historyChars = history.reduce((sum, msg) => sum + (typeof msg.content === 'string' ? msg.content.length : JSON.stringify(msg.content).length), 0);
       console.log(
         `[main-agent.context] channel=${this.channelTag(replyChannelId)} session=${sessionId} ` +
         `history_messages=${history.length} history_chars=${historyChars} queued=${this.getChannelQueueDepth(replyChannelId)}`,
@@ -803,6 +803,11 @@ export class MainAgent {
       let messages: LLMMessage[] = history.map((m) => {
         const role = m.role as "user" | "assistant";
 
+        // If content is already structured (reconstructed from metadata), pass through
+        if (Array.isArray(m.content)) {
+          return { role, content: m.content };
+        }
+
         // Check for image metadata on user messages
         if (role === "user" && m.metadata) {
           try {
@@ -822,14 +827,14 @@ export class MainAgent {
               }
               // Add text content if any
               if (m.content) {
-                contentBlocks.push({ type: "text", text: m.content });
+                contentBlocks.push({ type: "text", text: m.content as string });
               }
               return { role, content: contentBlocks };
             }
           } catch { /* invalid metadata, fall through */ }
         }
 
-        return { role, content: m.content };
+        return { role, content: m.content as string };
       });
 
       // 3b. Merge consecutive same-role messages (DB can have runs of
@@ -1112,17 +1117,29 @@ export class MainAgent {
             ? `${assistantText}\n\n[Tool calls]\n${toolSummary}`
             : `[Tool calls]\n${toolSummary}`;
 
+          // Store structured tool_use blocks in metadata for faithful reconstruction
+          const toolUseMetadata = JSON.stringify({
+            toolUseBlocks: toolUseBlocks.map(b => ({
+              id: b.id,
+              name: b.name,
+              input: b.input,
+            })),
+            // Preserve any text the model said alongside tool calls
+            textContent: assistantText || null,
+          });
+
           this.db
             .prepare(
               `INSERT INTO main_agent_messages
-                 (id, role, content, channel_id, token_estimate)
-               VALUES (?, 'assistant', ?, ?, ?)`,
+                 (id, role, content, channel_id, token_estimate, metadata)
+               VALUES (?, 'assistant', ?, ?, ?, ?)`,
             )
             .run(
               randomUUID(),
               fullToolSummary,
               replyChannelId,
               Math.ceil(fullToolSummary.length / 4),
+              toolUseMetadata,
             );
 
           // Feed tool results back as a user turn
@@ -1136,17 +1153,28 @@ export class MainAgent {
                 : tr.content;
             return `[${tr.tool_use_id}] ${tr.is_error ? "ERROR: " : ""}${resultPreview}`;
           }).join("\n");
+
+          // Store structured tool_result blocks in metadata for faithful reconstruction
+          const toolResultMetadata = JSON.stringify({
+            toolResults: toolResults.map(tr => ({
+              tool_use_id: tr.tool_use_id,
+              content: tr.content,
+              is_error: tr.is_error || false,
+            })),
+          });
+
           this.db
             .prepare(
               `INSERT INTO main_agent_messages
-                 (id, role, content, channel_id, token_estimate)
-               VALUES (?, 'user', ?, ?, ?)`,
+                 (id, role, content, channel_id, token_estimate, metadata)
+               VALUES (?, 'user', ?, ?, ?, ?)`,
             )
             .run(
               randomUUID(),
               `[Tool results]\n${toolResultSummary}`,
               replyChannelId,
               Math.ceil(toolResultSummary.length / 4),
+              toolResultMetadata,
             );
 
           // Inject any queued messages that arrived while we were working.
@@ -1467,7 +1495,7 @@ export class MainAgent {
 
   private getRecentHistory(channelId: string): Array<{
     role: string;
-    content: string;
+    content: string | Array<Record<string, unknown>>;
     created_at: string;
     metadata?: string | null;
   }> {
@@ -1503,7 +1531,45 @@ export class MainAgent {
       trimmed.unshift(rows[i]);
     }
 
-    return trimmed;
+    // Reconstruct structured content blocks from metadata when available
+    const reconstructed = trimmed.map(row => {
+      if (row.metadata) {
+        try {
+          const meta = JSON.parse(row.metadata);
+
+          // Reconstruct assistant tool_use blocks
+          if (meta.toolUseBlocks && row.role === 'assistant') {
+            const contentBlocks: Array<Record<string, unknown>> = [];
+            if (meta.textContent) {
+              contentBlocks.push({ type: 'text', text: meta.textContent });
+            }
+            for (const block of meta.toolUseBlocks) {
+              contentBlocks.push({
+                type: 'tool_use',
+                id: block.id,
+                name: block.name,
+                input: block.input,
+              });
+            }
+            return { ...row, content: contentBlocks as string | Array<Record<string, unknown>> };
+          }
+
+          // Reconstruct user tool_result blocks
+          if (meta.toolResults && row.role === 'user') {
+            const contentBlocks: Array<Record<string, unknown>> = meta.toolResults.map((tr: any) => ({
+              type: 'tool_result',
+              tool_use_id: tr.tool_use_id,
+              content: tr.content,
+              is_error: tr.is_error || false,
+            }));
+            return { ...row, content: contentBlocks as string | Array<Record<string, unknown>> };
+          }
+        } catch { /* invalid metadata, fall through to text */ }
+      }
+      return row as { role: string; content: string | Array<Record<string, unknown>>; created_at: string; metadata: string | null };
+    });
+
+    return reconstructed;
   }
 
   /**
@@ -1649,35 +1715,51 @@ export class MainAgent {
       // Long run — keep last MAX_FULL_KEEP, truncate or drop older ones
       const oldMessages = runMessages.slice(0, -MAX_FULL_KEEP);
       const recentMessages = runMessages.slice(-MAX_FULL_KEEP);
-      
-      let content = `[${oldMessages.length} earlier ${run.role} messages merged — tool call summaries from before restart]\n`;
-      // Add a brief excerpt from the old messages (just first 200 chars each, max 2000 total)
-      let oldContent = "";
-      for (const m of oldMessages) {
-        if (typeof m.content === "string") {
-          const excerpt = m.content.slice(0, 200);
+
+      // Check if recent messages have structured content blocks
+      const recentHasArrayContent = recentMessages.some(m => Array.isArray(m.content));
+
+      if (recentHasArrayContent) {
+        // Preserve structured content: build summary text for old + flatten recent as blocks
+        const summaryText = `[${oldMessages.length} earlier ${run.role} messages merged — tool call summaries from before restart]`;
+        const blocks: Array<Record<string, unknown>> = [{ type: "text", text: summaryText }];
+        for (const m of recentMessages) {
+          if (Array.isArray(m.content)) {
+            blocks.push(...(m.content as Array<Record<string, unknown>>));
+          } else if (typeof m.content === "string" && m.content) {
+            blocks.push({ type: "text", text: m.content });
+          }
+        }
+        merged.push({ role: run.role as "user" | "assistant", content: blocks });
+      } else {
+        let content = `[${oldMessages.length} earlier ${run.role} messages merged — tool call summaries from before restart]\n`;
+        // Add a brief excerpt from the old messages (just first 200 chars each, max 2000 total)
+        let oldContent = "";
+        for (const m of oldMessages) {
+          const mText = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+          const excerpt = mText.slice(0, 200);
           if (oldContent.length + excerpt.length < 2000) {
             oldContent += excerpt + "\n";
           }
         }
-      }
-      if (oldContent) {
-        content += oldContent;
-      }
-      
-      // Add recent messages fully
-      for (const m of recentMessages) {
-        if (typeof m.content === "string") {
-          content += "\n\n" + m.content;
+        if (oldContent) {
+          content += oldContent;
         }
-      }
+        
+        // Add recent messages fully
+        for (const m of recentMessages) {
+          if (typeof m.content === "string") {
+            content += "\n\n" + m.content;
+          }
+        }
 
-      // Hard cap on total merged content
-      if (content.length > MAX_MERGED_CHARS) {
-        content = content.slice(-MAX_MERGED_CHARS);
-      }
+        // Hard cap on total merged content
+        if (content.length > MAX_MERGED_CHARS) {
+          content = content.slice(-MAX_MERGED_CHARS);
+        }
 
-      merged.push({ role: run.role as "user" | "assistant", content });
+        merged.push({ role: run.role as "user" | "assistant", content });
+      }
     }
     return merged;
   }
@@ -1698,9 +1780,12 @@ export class MainAgent {
    * try to imitate as a tool-calling format.
    */
   private sanitizeToolHistory(
-    messages: Array<{ role: string; content: string; created_at: string; metadata?: string | null }>,
-  ): Array<{ role: string; content: string; created_at: string; metadata?: string | null }> {
+    messages: Array<{ role: string; content: string | Array<Record<string, unknown>>; created_at: string; metadata?: string | null }>,
+  ): Array<{ role: string; content: string | Array<Record<string, unknown>>; created_at: string; metadata?: string | null }> {
     return messages.map((m) => {
+      // Skip non-string content (already structured tool blocks reconstructed from metadata)
+      if (typeof m.content !== 'string') return m;
+
       let content = m.content;
 
       if (m.role === "assistant" && content.includes("[Tool calls]")) {
@@ -1777,8 +1862,8 @@ export class MainAgent {
   }
 
   private pruneHistory(
-    messages: Array<{ role: string; content: string; created_at: string; metadata?: string | null }>,
-  ): Array<{ role: string; content: string; created_at: string; metadata?: string | null }> {
+    messages: Array<{ role: string; content: string | Array<Record<string, unknown>>; created_at: string; metadata?: string | null }>,
+  ): Array<{ role: string; content: string | Array<Record<string, unknown>>; created_at: string; metadata?: string | null }> {
     const KEEP_RECENT = 8; // Keep last 8 assistant turns fully intact
     const MAX_TOOL_OUTPUT = 500; // Truncate old tool outputs to this many chars
     const PLACEHOLDER =
@@ -1805,12 +1890,14 @@ export class MainAgent {
 
       // For old messages, strip image metadata (don't resend multi-MB base64 for old turns)
       // and truncate large content (likely tool outputs)
-      if (m.content.length > MAX_TOOL_OUTPUT * 3 && m.role === "user") {
-        // This is probably a tool result
+      const contentSize = typeof m.content === 'string' ? m.content.length : JSON.stringify(m.content).length;
+      if (contentSize > MAX_TOOL_OUTPUT * 3 && m.role === "user") {
+        // This is probably a tool result — convert to text summary for old turns
+        const textContent = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
         return {
           role: m.role,
           content:
-            m.content.substring(0, MAX_TOOL_OUTPUT) + "\n\n" + PLACEHOLDER,
+            textContent.substring(0, MAX_TOOL_OUTPUT) + "\n\n" + PLACEHOLDER,
           created_at: m.created_at,
         };
       }
