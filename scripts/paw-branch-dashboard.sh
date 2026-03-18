@@ -425,7 +425,7 @@ main() {
   echo "[paw-branch-dashboard] scanning at $generated_at ..."
 
   local tmp_entries
-  tmp_entries="$(mktemp -t paw-branch-ndjson)"
+  tmp_entries="$(mktemp -t "${TMPDIR:-/tmp}/paw-branch-ndjson.XXXXXX")"
 
   for entry in "${REPOS[@]}"; do
     local rname="${entry%%:*}"
