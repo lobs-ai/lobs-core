@@ -17,6 +17,7 @@ import { getGatewayConfig } from "../config/lobs.js";
 import { assembleBrainDumpContext, formatBrainDumpContext } from "../services/context-assembler.js";
 import { logTrainingExample } from "../services/training-data.js";
 import { findDuplicateTask } from "../util/task-dedup.js";
+import { triageIncomingItem } from "../services/intake-triage.js";
 
 const learningSvc = new LearningService();
 
@@ -465,6 +466,11 @@ Return ONLY valid JSON in this exact format with no other text:
     if (!body.title) return error(res, "title is required");
     const taskId = (body.id as string) ?? randomUUID();
     const now = new Date().toISOString();
+    const triage = await triageIncomingItem({
+      kind: "task",
+      title: body.title as string,
+      content: (body.notes as string) ?? "",
+    });
 
     // ── Deduplication (24h window) ─────────────────────────────────────────
     // Skip if caller explicitly opts out via ?force=true or body.force=true.
@@ -472,8 +478,8 @@ Return ONLY valid JSON in this exact format with no other text:
     if (!forceCreate) {
       const dup = findDuplicateTask({
         title: (body.title as string).trim(),
-        agent: body.agent as string | undefined,
-        modelTier: (body.model_tier as string | undefined) ?? "standard",
+        agent: (body.agent as string | undefined) ?? triage.agent,
+        modelTier: (body.model_tier as string | undefined) ?? triage.modelTier,
       });
       if (dup) {
         return json(res, {
@@ -501,9 +507,10 @@ Return ONLY valid JSON in this exact format with no other text:
       owner: body.owner as string,
       projectId: (body.project_id as string) || inferProjectId(body.title as string, body.notes as string | null),
       notes: body.notes as string,
-      agent: body.agent as string,
-      modelTier: (body.model_tier as string) ?? "standard",
+      agent: (body.agent as string) ?? triage.agent,
+      modelTier: (body.model_tier as string) ?? triage.modelTier,
       blockedBy: Array.isArray(body.blocked_by) ? body.blocked_by as string[] : null,
+      priority: (body.priority as string) ?? triage.urgency,
       complianceRequired: Boolean(body.compliance_required),
       isCompliant: autoIsCompliant,
       expectedArtifacts: body.expected_artifacts != null ? JSON.stringify(body.expected_artifacts) : undefined,

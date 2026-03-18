@@ -191,6 +191,12 @@ export const inboxItems = sqliteTable("inbox_items", {
   type: text("type").notNull().default("notice"),
   requiresAction: integer("requires_action", { mode: "boolean" }).notNull().default(false),
   actionStatus: text("action_status").notNull().default("pending"),
+  triageCategory: text("triage_category"),
+  triageUrgency: text("triage_urgency"),
+  triageRoute: text("triage_route"),
+  triageConfidence: real("triage_confidence"),
+  triageReasoning: text("triage_reasoning"),
+  triagedAt: text("triaged_at"),
   sourceAgent: text("source_agent"),
   sourceReflectionId: text("source_reflection_id"),
 });

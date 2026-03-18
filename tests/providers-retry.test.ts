@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -68,9 +68,67 @@ describe("shouldRetryProviderError", () => {
       keyPool.markSessionFailed("anthropic", "session-1", "429 rate limited", "rate_limit");
 
       expect(() => createClient({ provider: "anthropic", modelId: "claude-sonnet-4-6" }, "session-1"))
-        .toThrow("No Anthropic credentials found");
+        .toThrow("all_anthropic_keys_unavailable");
     } finally {
       shutdownKeyPool();
     }
+  });
+});
+
+describe("OpenAI-compatible tool parsing", () => {
+  const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  test("treats JSON tool call text from LM Studio as tool_use", async () => {
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        choices: [{
+          message: {
+            role: "assistant",
+            content: '```json\n{"tool":"read","input":{"path":"README.md"}}\n```',
+          },
+          finish_reason: "stop",
+        }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    ) as any;
+
+    const { createClient } = await import("../src/runner/providers.js");
+    const client = createClient({ provider: "lmstudio", modelId: "qwen/qwen3.5-9b" }, "session-local");
+    const response = await client.createMessage({
+      model: "qwen/qwen3.5-9b",
+      system: "test system",
+      messages: [{ role: "user", content: "Read README.md" }],
+      tools: [{
+        name: "read",
+        description: "Read a file",
+        input_schema: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"],
+        },
+      }],
+      maxTokens: 256,
+    });
+
+    expect(response.stopReason).toBe("tool_use");
+    expect(response.content).toEqual([
+      {
+        type: "tool_use",
+        id: expect.stringMatching(/^toolu_/),
+        name: "read",
+        input: { path: "README.md" },
+      },
+    ]);
   });
 });

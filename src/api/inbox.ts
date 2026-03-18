@@ -5,6 +5,7 @@ import { and, desc, eq, like } from "drizzle-orm";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getDb } from "../db/connection.js";
 import { inboxItems, inboxThreads, inboxMessages, tasks } from "../db/schema.js";
+import { triageIncomingItem, type IntakeKind } from "../services/intake-triage.js";
 import { json, error, parseBody } from "./index.js";
 
 function normalizeTitle(title: string): string {
@@ -15,6 +16,20 @@ function normalizeTitle(title: string): string {
     if (right) return right;
   }
   return cleaned;
+}
+
+function inferInboxKind(type: string | undefined): IntakeKind {
+  switch ((type ?? "").toLowerCase()) {
+    case "email":
+      return "email";
+    case "notification":
+    case "alert":
+      return "notification";
+    case "task":
+      return "task";
+    default:
+      return "message";
+  }
 }
 
 function findRelatedProposedTask(inboxTitle: string) {
@@ -182,15 +197,28 @@ export async function handleInboxRequest(
   if (req.method === "POST") {
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.title) return error(res, "title required");
+    const itemType = (body.type as string) ?? "notice";
+    const triage = await triageIncomingItem({
+      kind: inferInboxKind(itemType),
+      title: body.title as string,
+      content: (body.content as string) ?? "",
+    });
     const iid = randomUUID();
     db.insert(inboxItems).values({
       id: iid,
       title: body.title as string,
       content: (body.content as string) ?? null,
       isRead: false,
-      type: (body.type as string) ?? "notice",
-      requiresAction: Boolean(body.requires_action ?? body.requiresAction ?? false),
+      summary: (body.summary as string) ?? triage.summary,
+      type: itemType,
+      requiresAction: Boolean(body.requires_action ?? body.requiresAction ?? triage.requiresAction),
       actionStatus: (body.action_status as string) ?? "pending",
+      triageCategory: triage.category,
+      triageUrgency: triage.urgency,
+      triageRoute: triage.route,
+      triageConfidence: triage.confidence,
+      triageReasoning: triage.reasoning,
+      triagedAt: new Date().toISOString(),
       sourceAgent: (body.source_agent as string) ?? null,
       sourceReflectionId: (body.source_reflection_id as string) ?? null,
     }).run();

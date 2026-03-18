@@ -8,6 +8,8 @@ import {
   parseMemoryFrontmatter,
   stripFrontmatter,
   isMemoryCompliant,
+  formatMemoryFrontmatter,
+  upsertMemoryFrontmatter,
 } from "../src/util/memory-frontmatter.js";
 
 describe("parseMemoryFrontmatter", () => {
@@ -104,6 +106,42 @@ Some text.`;
   it("is a no-op when no frontmatter", () => {
     const content = "# Just content\nNo frontmatter here.";
     expect(stripFrontmatter(content)).toBe(content);
+  });
+});
+
+describe("formatMemoryFrontmatter", () => {
+  it("normalizes and sorts tags", () => {
+    const formatted = formatMemoryFrontmatter({
+      complianceRequired: true,
+      tags: ["zeta", "alpha", "alpha", "Beta "],
+    });
+    expect(formatted).toContain("compliance_required: true");
+    expect(formatted).toContain("tags: [alpha, beta, zeta]");
+  });
+});
+
+describe("upsertMemoryFrontmatter", () => {
+  it("adds frontmatter when none exists", () => {
+    const updated = upsertMemoryFrontmatter("# Memory\nBody", {
+      tags: ["lobs-core", "memory"],
+    });
+    expect(updated).toContain("tags: [lobs-core, memory]");
+    expect(updated).toContain("# Memory");
+  });
+
+  it("preserves compliance flag while replacing tags", () => {
+    const updated = upsertMemoryFrontmatter(`---
+compliance_required: true
+tags: [old]
+---
+# Memory
+Body`, {
+      tags: ["new-tag"],
+    });
+    const parsed = parseMemoryFrontmatter(updated);
+    expect(parsed.complianceRequired).toBe(true);
+    expect(parsed.tags).toEqual(["new-tag"]);
+    expect(updated).toContain("# Memory");
   });
 });
 

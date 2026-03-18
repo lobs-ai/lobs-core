@@ -79,6 +79,37 @@ export function stripFrontmatter(content: string): string {
 }
 
 /**
+ * Build a normalized YAML frontmatter block for memory files.
+ */
+export function formatMemoryFrontmatter(frontmatter: {
+  complianceRequired: boolean;
+  tags: string[];
+}): string {
+  const uniqueTags = Array.from(
+    new Set(frontmatter.tags.map((tag) => tag.trim().toLowerCase()).filter(Boolean)),
+  ).sort();
+  const tagList = uniqueTags.length > 0 ? `[${uniqueTags.join(", ")}]` : "[]";
+  return `---\ncompliance_required: ${frontmatter.complianceRequired}\ntags: ${tagList}\n---\n`;
+}
+
+/**
+ * Rewrite a file's frontmatter while preserving its markdown body.
+ */
+export function upsertMemoryFrontmatter(
+  content: string,
+  updates: Partial<Pick<MemoryFrontmatter, "complianceRequired" | "tags">>,
+): string {
+  const current = parseMemoryFrontmatter(content);
+  const body = stripFrontmatter(content).trimStart();
+  return (
+    formatMemoryFrontmatter({
+      complianceRequired: updates.complianceRequired ?? current.complianceRequired,
+      tags: updates.tags ?? current.tags,
+    }) + body
+  );
+}
+
+/**
  * Determine if a memory file is compliant (local-model-only) based on:
  * 1. Its directory placement (`memory-compliant/` → always compliant)
  * 2. Its frontmatter (as fallback/metadata)

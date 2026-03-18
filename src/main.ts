@@ -16,7 +16,6 @@ import { resolve } from "node:path";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, renameSync, statSync, appendFileSync } from "node:fs";
 import { initToolGate } from "./runner/tool-gate.js";
 import { runHeartbeat } from "./orchestrator/heartbeat.js";
-import { runCondensationIfNeeded } from "./services/memory-condenser.js";
 import { initCronService } from "./services/cron.js";
 import { runSentinelCheck } from "./services/system-sentinel.js";
 import { runCalendarSentinel } from "./services/calendar-sentinel.js";
@@ -34,6 +33,8 @@ import { memoryServer } from "./services/memory-server.js";
 import { countActiveWorkers, getActiveWorkers } from "./orchestrator/worker-manager.js";
 import { runStartupTelemetry, startDiskSpaceMonitor } from "./services/restart-telemetry.js";
 import { getGatewayConfig } from "./config/lobs.js";
+import { WorkerRegistry } from "./workers/index.js";
+import { MemoryProcessorWorker } from "./workers/memory-processor.js";
 
 const HOME = process.env.HOME ?? "";
 const DB_PATH = resolve(HOME, ".lobs/lobs.db");
@@ -277,6 +278,8 @@ async function main() {
   console.log("Setting up cron service...");
   const cronService = initCronService(getRawDb());
   cronService.seedDefaults();
+  const workerRegistry = new WorkerRegistry(getRawDb(), cronService);
+  workerRegistry.register(new MemoryProcessorWorker());
 
   // Register system jobs (code handlers, not DB-backed)
   cronService.registerSystemJob({
@@ -293,19 +296,6 @@ async function main() {
           const alertText = `[HEARTBEAT ALERT] ${result.alerts.join("; ")}`;
           await mainAgent.handleSystemEvent(alertText);
         }
-      }
-    },
-  });
-
-  cronService.registerSystemJob({
-    id: "memory-condensation",
-    name: "Memory Condensation",
-    schedule: "0 4 * * *", // daily at 4am
-    enabled: true,
-    handler: async () => {
-      const result = runCondensationIfNeeded();
-      if (result) {
-        console.log(`[memory-condensation] Condensed ${result.filesCondensed} files, promoted ${result.entriesPromoted} entries`);
       }
     },
   });

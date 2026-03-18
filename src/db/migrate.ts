@@ -125,6 +125,12 @@ export function runMigrations(db: PawDB): void {
     type TEXT NOT NULL DEFAULT 'notice',
     requires_action INTEGER NOT NULL DEFAULT 0,
     action_status TEXT NOT NULL DEFAULT 'pending',
+    triage_category TEXT,
+    triage_urgency TEXT,
+    triage_route TEXT,
+    triage_confidence REAL,
+    triage_reasoning TEXT,
+    triaged_at TEXT,
     source_agent TEXT,
     source_reflection_id TEXT
   )`);
@@ -607,6 +613,12 @@ export function runMigrations(db: PawDB): void {
   try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN type TEXT NOT NULL DEFAULT 'notice'`); } catch {}
   try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN requires_action INTEGER NOT NULL DEFAULT 0`); } catch {}
   try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN action_status TEXT NOT NULL DEFAULT 'pending'`); } catch {}
+  try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN triage_category TEXT`); } catch {}
+  try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN triage_urgency TEXT`); } catch {}
+  try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN triage_route TEXT`); } catch {}
+  try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN triage_confidence REAL`); } catch {}
+  try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN triage_reasoning TEXT`); } catch {}
+  try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN triaged_at TEXT`); } catch {}
   try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN source_agent TEXT`); } catch {}
   try { db.run(sql`ALTER TABLE inbox_items ADD COLUMN source_reflection_id TEXT`); } catch {}
 
@@ -1422,5 +1434,4 @@ export function runMigrations(db: PawDB): void {
   // Added: 2026-03-15 — Tracks when user last viewed a session for unread badges.
   try { db.run(sql`ALTER TABLE chat_sessions ADD COLUMN last_read_at TEXT`); } catch {}
 }
-
 

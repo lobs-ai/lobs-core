@@ -20,6 +20,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { ToolDefinition, TokenUsage } from "./types.js";
 import { getKeyPool } from "../services/key-pool.js";
+import { randomUUID } from "node:crypto";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -584,6 +585,103 @@ interface OpenAIResponse {
   };
 }
 
+interface ParsedToolCallFromText {
+  name: string;
+  input: Record<string, unknown>;
+}
+
+function stripCodeFence(text: string): string {
+  return text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+}
+
+function tryParseToolCallPayload(payload: unknown): ParsedToolCallFromText[] | null {
+  const normalizeOne = (entry: any): ParsedToolCallFromText | null => {
+    if (!entry || typeof entry !== "object") return null;
+    const name = typeof entry.tool === "string" ? entry.tool
+      : typeof entry.name === "string" ? entry.name
+      : typeof entry.tool_name === "string" ? entry.tool_name
+      : typeof entry.function?.name === "string" ? entry.function.name
+      : null;
+    const input = entry.input && typeof entry.input === "object" ? entry.input
+      : entry.arguments && typeof entry.arguments === "object" ? entry.arguments
+      : entry.function?.arguments && typeof entry.function.arguments === "object" ? entry.function.arguments
+      : {};
+    if (!name) return null;
+    return { name, input: input as Record<string, unknown> };
+  };
+
+  if (Array.isArray(payload)) {
+    const calls = payload.map(normalizeOne).filter(Boolean) as ParsedToolCallFromText[];
+    return calls.length > 0 ? calls : null;
+  }
+
+  if (payload && typeof payload === "object") {
+    const obj = payload as Record<string, unknown>;
+    if (Array.isArray(obj.tool_calls)) return tryParseToolCallPayload(obj.tool_calls);
+    if (Array.isArray(obj.calls)) return tryParseToolCallPayload(obj.calls);
+    const single = normalizeOne(obj);
+    return single ? [single] : null;
+  }
+
+  return null;
+}
+
+function extractToolCallsFromText(content: string, allowedTools: ToolDefinition[]): {
+  toolCalls: ParsedToolCallFromText[];
+  remainingText: string;
+} {
+  const candidates: Array<{ raw: string; parsed: unknown }> = [];
+  const trimmed = content.trim();
+  if (!trimmed) return { toolCalls: [], remainingText: "" };
+
+  const fencedMatches = [...content.matchAll(/```json\s*([\s\S]*?)```/gi)];
+  for (const match of fencedMatches) {
+    try {
+      candidates.push({ raw: match[0], parsed: JSON.parse(stripCodeFence(match[0])) });
+    } catch { /* ignore */ }
+  }
+
+  try {
+    candidates.push({ raw: trimmed, parsed: JSON.parse(stripCodeFence(trimmed)) });
+  } catch { /* ignore */ }
+
+  const firstJsonMatch = content.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+  if (firstJsonMatch) {
+    try {
+      candidates.push({ raw: firstJsonMatch[0], parsed: JSON.parse(firstJsonMatch[0]) });
+    } catch { /* ignore */ }
+  }
+
+  const allowed = new Set(allowedTools.map((t) => t.name));
+  for (const candidate of candidates) {
+    const parsed = tryParseToolCallPayload(candidate.parsed);
+    if (!parsed?.length) continue;
+    if (!parsed.every((call) => allowed.has(call.name))) continue;
+    const remainingText = content.replace(candidate.raw, "").trim();
+    return { toolCalls: parsed, remainingText };
+  }
+
+  return { toolCalls: [], remainingText: content };
+}
+
+function buildOpenAIToolFallbackInstruction(tools: ToolDefinition[]): string {
+  if (tools.length === 0) return "";
+  const toolList = tools.map((tool) => `- ${tool.name}`).join("\n");
+  return [
+    "Tool usage is enabled.",
+    "If the model/API supports native tool calling, use it.",
+    "If native tool calling is unavailable, respond with ONLY valid JSON in one of these forms:",
+    '{"tool":"tool_name","input":{"arg":"value"}}',
+    '{"tool_calls":[{"tool":"tool_name","input":{"arg":"value"}}]}',
+    "Do not wrap the JSON in prose. Do not describe the tool call. Emit the JSON directly.",
+    `Allowed tools:\n${toolList}`,
+  ].join("\n");
+}
+
+function providerHasNativeToolCalling(provider: Provider): boolean {
+  return provider === "anthropic" || provider === "openai" || provider === "openrouter" || provider === "lmstudio";
+}
+
 class OpenAICompatibleClient implements LLMClient {
   private baseUrl: string;
   private apiKey: string;
@@ -616,9 +714,13 @@ class OpenAICompatibleClient implements LLMClient {
       budgetTokens: number;
     };
   }): Promise<LLMResponse> {
+    const effectiveSystem = params.tools.length > 0 && !providerHasNativeToolCalling(this.provider)
+      ? `${params.system}\n\n${buildOpenAIToolFallbackInstruction(params.tools)}`
+      : params.system;
+
     // Convert to OpenAI format
     const messages: Array<Record<string, unknown>> = [
-      { role: "system", content: params.system },
+      { role: "system", content: effectiveSystem },
     ];
 
     for (const msg of params.messages) {
@@ -770,9 +872,8 @@ class OpenAICompatibleClient implements LLMClient {
     // Convert OpenAI response to our format
     const content: LLMResponse["content"] = [];
 
-    if (choice.message.content) {
-      content.push({ type: "text", text: choice.message.content });
-    }
+    let parsedFromText: ParsedToolCallFromText[] = [];
+    let remainingText = choice.message.content ?? "";
 
     if (choice.message.tool_calls) {
       for (const tc of choice.message.tool_calls) {
@@ -788,10 +889,26 @@ class OpenAICompatibleClient implements LLMClient {
           input,
         });
       }
+    } else if (choice.message.content && params.tools.length > 0) {
+      const extracted = extractToolCallsFromText(choice.message.content, params.tools);
+      parsedFromText = extracted.toolCalls;
+      remainingText = extracted.remainingText;
+      for (const tc of parsedFromText) {
+        content.push({
+          type: "tool_use",
+          id: `toolu_${randomUUID().replace(/-/g, "")}`,
+          name: tc.name,
+          input: tc.input,
+        });
+      }
+    }
+
+    if (remainingText && remainingText.trim()) {
+      content.unshift({ type: "text", text: remainingText });
     }
 
     const stopReason: LLMResponse["stopReason"] =
-      choice.finish_reason === "tool_calls" ? "tool_use"
+      choice.finish_reason === "tool_calls" || parsedFromText.length > 0 ? "tool_use"
       : choice.finish_reason === "length" ? "max_tokens"
       : "end_turn";
 
