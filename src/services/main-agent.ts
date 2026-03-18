@@ -950,6 +950,15 @@ export class MainAgent {
               console.error(`[main-agent] msg[${vi}] role=${m.role} content_type=array blocks=${Array.isArray(m.content) ? m.content.map((b: any) => b.type).join(',') : typeof m.content}`);
             }
           }
+
+          // Emergency repair: strip any orphaned tool_result blocks to avoid 400 errors
+          messages = this.emergencyRepairToolPairs(messages);
+          const revalidation = this.validateMessages(messages);
+          if (revalidation) {
+            console.error(`[main-agent] Emergency repair failed, still invalid: ${revalidation}`);
+          } else {
+            console.warn(`[main-agent] Emergency repair succeeded for ${replyChannelId.slice(0, 12)}`);
+          }
         }
 
         const response = await this.createMessageWithTimeout(client, {
@@ -1500,11 +1509,8 @@ export class MainAgent {
     created_at: string;
     metadata?: string | null;
   }> {
-    const MAX_CONTEXT_TOKENS = 80000;
-    const CHARS_PER_TOKEN = 4;
-    const MAX_CHARS = MAX_CONTEXT_TOKENS * CHARS_PER_TOKEN;
-
-    // Load more than we need, then trim — filter by channel
+    // Load recent messages — compactIfNeeded() handles context sizing,
+    // so we just load and reconstruct here. No budget trimming.
     const rows = this.db
       .prepare(
         `SELECT role, content, created_at, metadata FROM main_agent_messages
@@ -1515,25 +1521,8 @@ export class MainAgent {
 
     rows.reverse(); // chronological
 
-    // Calculate system prompt size — reload fresh to match what processConversation() will inject
-    const freshPrompt = buildSystemPrompt();
-    const freshCtx = loadWorkspaceContext();
-    const systemChars = freshPrompt.length + freshCtx.length;
-    let budget = MAX_CHARS - systemChars;
-
-    // Trim from oldest until we fit
-    const trimmed: typeof rows = [];
-    let totalChars = 0;
-
-    for (let i = rows.length - 1; i >= 0; i--) {
-      const msgChars = rows[i].content.length;
-      if (totalChars + msgChars > budget) break;
-      totalChars += msgChars;
-      trimmed.unshift(rows[i]);
-    }
-
     // Reconstruct structured content blocks from metadata when available
-    const reconstructed = trimmed.map(row => {
+    const reconstructed = rows.map(row => {
       if (row.metadata) {
         try {
           const meta = JSON.parse(row.metadata);
@@ -1634,6 +1623,73 @@ export class MainAgent {
     }
 
     return null;
+  }
+
+  /**
+   * Emergency repair: strip orphaned tool_use and tool_result blocks
+   * that would cause 400 errors from the API. This is a last-resort
+   * safety net — the upstream pipeline should ideally prevent this.
+   */
+  private emergencyRepairToolPairs(messages: LLMMessage[]): LLMMessage[] {
+    const result: LLMMessage[] = [];
+
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+
+      // Fix orphaned tool_use: assistant has tool_use but next user has no matching tool_result
+      if (msg.role === "assistant" && Array.isArray(msg.content)) {
+        const toolUseBlocks = (msg.content as any[]).filter((b: any) => b.type === "tool_use");
+        if (toolUseBlocks.length > 0) {
+          const next = messages[i + 1];
+          const nextToolResultIds = new Set<string>();
+          if (next?.role === "user" && Array.isArray(next.content)) {
+            for (const b of next.content as any[]) {
+              if ((b as any).type === "tool_result") nextToolResultIds.add((b as any).tool_use_id);
+            }
+          }
+          const orphaned = toolUseBlocks.filter((b: any) => !nextToolResultIds.has(b.id));
+          if (orphaned.length > 0) {
+            const orphanedIds = new Set(orphaned.map((b: any) => b.id));
+            const kept = (msg.content as any[]).filter((b: any) => b.type !== "tool_use" || !orphanedIds.has(b.id));
+            if (kept.length > 0) {
+              result.push({ ...msg, content: kept as any });
+            } else {
+              result.push({ ...msg, content: "[Tool calls were interrupted and results are unavailable]" });
+            }
+            continue;
+          }
+        }
+      }
+
+      // Fix orphaned tool_result: user has tool_result but prev assistant has no matching tool_use
+      if (msg.role === "user" && Array.isArray(msg.content)) {
+        const toolResultBlocks = (msg.content as any[]).filter((b: any) => b.type === "tool_result");
+        if (toolResultBlocks.length > 0) {
+          const prev = result[result.length - 1];
+          const prevToolUseIds = new Set<string>();
+          if (prev?.role === "assistant" && Array.isArray(prev.content)) {
+            for (const b of prev.content as any[]) {
+              if ((b as any).type === "tool_use") prevToolUseIds.add((b as any).id);
+            }
+          }
+          const orphaned = toolResultBlocks.filter((b: any) => !prevToolUseIds.has(b.tool_use_id));
+          if (orphaned.length > 0) {
+            const orphanedIds = new Set(orphaned.map((b: any) => b.tool_use_id));
+            const kept = (msg.content as any[]).filter((b: any) => b.type !== "tool_result" || !orphanedIds.has(b.tool_use_id));
+            if (kept.length > 0) {
+              result.push({ ...msg, content: kept as any });
+            } else {
+              result.push({ ...msg, content: "[Earlier tool results — matching tool calls were compacted]" });
+            }
+            continue;
+          }
+        }
+      }
+
+      result.push(msg);
+    }
+
+    return result;
   }
 
   private mergeConsecutiveRoles(messages: LLMMessage[]): LLMMessage[] {
@@ -1896,7 +1952,67 @@ export class MainAgent {
       result.push(msg);
     }
 
-    return result;
+    // Second pass: fix orphaned tool_result blocks (user message has tool_results
+    // but the preceding assistant message has no matching tool_use blocks).
+    // This can happen when budget trimming drops the assistant but keeps the user,
+    // or when the assistant's metadata was lost/corrupted.
+    const finalResult: typeof result = [];
+    for (let i = 0; i < result.length; i++) {
+      const msg = result[i];
+
+      if (msg.role === "user" && Array.isArray(msg.content)) {
+        const toolResultBlocks = (msg.content as any[]).filter((b: any) => b.type === "tool_result");
+
+        if (toolResultBlocks.length > 0) {
+          const prev = finalResult[finalResult.length - 1];
+          const prevToolUseIds = new Set<string>();
+
+          if (prev?.role === "assistant" && Array.isArray(prev.content)) {
+            for (const b of prev.content as any[]) {
+              if (b.type === "tool_use") prevToolUseIds.add(b.id);
+            }
+          }
+
+          // Find tool_results that have no matching tool_use
+          const orphanedResults = toolResultBlocks.filter(
+            (b: any) => !prevToolUseIds.has(b.tool_use_id)
+          );
+
+          if (orphanedResults.length > 0) {
+            console.warn(
+              `[main-agent.repair] Fixing ${orphanedResults.length} orphaned tool_result block(s) at message ${i}: ` +
+              orphanedResults.map((b: any) => b.tool_use_id).join(", ")
+            );
+
+            const orphanedIds = new Set(orphanedResults.map((b: any) => b.tool_use_id));
+            const keptContent = (msg.content as any[]).filter(
+              (b: any) => b.type !== "tool_result" || !orphanedIds.has(b.tool_use_id)
+            );
+
+            if (keptContent.length > 0) {
+              finalResult.push({ ...msg, content: keptContent });
+            } else {
+              // All content was orphaned tool_results — convert to a text summary
+              const summary = orphanedResults.map((b: any) => {
+                const preview = typeof b.content === "string"
+                  ? b.content.substring(0, 200)
+                  : "[tool output]";
+                return `${b.is_error ? "Error: " : ""}${preview}`;
+              }).join("\n");
+              finalResult.push({
+                ...msg,
+                content: `[Earlier tool results — matching tool calls were compacted]\n${summary}`,
+              });
+            }
+            continue;
+          }
+        }
+      }
+
+      finalResult.push(msg);
+    }
+
+    return finalResult;
   }
 
   private sanitizeToolHistory(
@@ -2012,7 +2128,34 @@ export class MainAgent {
       // and truncate large content (likely tool outputs)
       const contentSize = typeof m.content === 'string' ? m.content.length : JSON.stringify(m.content).length;
       if (contentSize > MAX_TOOL_OUTPUT * 3 && m.role === "user") {
-        // This is probably a tool result — convert to text summary for old turns
+        // If content has structured tool_result blocks, truncate the output
+        // WITHIN each block rather than destroying the block structure
+        if (Array.isArray(m.content)) {
+          const hasToolResults = (m.content as any[]).some((b: any) => b.type === "tool_result");
+          if (hasToolResults) {
+            const truncatedBlocks = (m.content as any[]).map((block: any) => {
+              if (block.type === "tool_result") {
+                const outputText = typeof block.content === "string"
+                  ? block.content
+                  : JSON.stringify(block.content);
+                return {
+                  ...block,
+                  content: outputText.length > MAX_TOOL_OUTPUT
+                    ? outputText.substring(0, MAX_TOOL_OUTPUT) + "\n" + PLACEHOLDER
+                    : block.content,
+                };
+              }
+              return block;
+            });
+            return {
+              role: m.role,
+              content: truncatedBlocks,
+              created_at: m.created_at,
+            };
+          }
+        }
+
+        // Plain text content — safe to truncate directly
         const textContent = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
         return {
           role: m.role,
