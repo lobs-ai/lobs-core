@@ -168,8 +168,10 @@ export class ReflectionService {
       runSummary = "No recent worker runs for this agent.";
     }
 
-    // All recent runs across ALL agents for system-wide awareness
+    // All recent runs across ALL agents for system-wide awareness (6h window)
+    const recentSince = new Date(Date.now() - 6 * 3600 * 1000).toISOString();
     const allRecentRuns = db.select().from(workerRuns)
+      .where(gte(workerRuns.startedAt, recentSince))
       .orderBy(desc(workerRuns.startedAt))
       .limit(15)
       .all();
@@ -609,21 +611,27 @@ Reflection ID: ${reflectionId}`;
 
   private _getFailureSummary(agentType: string): string {
     const db = getDb();
-    // Get failed runs for this agent (last 30 days)
-    const since = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+    // Only look at last 6 hours — older failures are stale and cause reflections to rehash resolved issues
+    const since = new Date(Date.now() - 6 * 3600 * 1000).toISOString();
     const failed = db.select().from(workerRuns)
       .where(and(
         eq(workerRuns.agentType, agentType),
         gte(workerRuns.startedAt, since),
       ))
       .orderBy(desc(workerRuns.startedAt))
-      .limit(30)
+      .limit(10)
       .all()
-      .filter(r => r.succeeded === false || r.succeeded === null);
+      .filter(r => r.succeeded === false || r.succeeded === null)
+      // Filter out reflection timeouts — not actionable
+      .filter(r => {
+        const summary = (r.summary as string ?? "").toLowerCase();
+        const taskLog = (r.taskLog as string ?? "").toLowerCase();
+        return !summary.includes("reflect") && !taskLog.includes("reflect");
+      });
 
     if (failed.length === 0) return "No recent failures for this agent.";
 
-    const lines = failed.slice(0, 10).map(r => {
+    const lines = failed.slice(0, 5).map(r => {
       let taskTitle = "untitled";
       if (r.taskId) {
         const task = db.select().from(tasksTable).where(eq(tasksTable.id, r.taskId)).get();
