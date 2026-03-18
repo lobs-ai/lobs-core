@@ -760,8 +760,9 @@ export class MainAgent {
       // 1. Get history for this channel
       let history = this.getRecentHistory(replyChannelId);
 
-      // 2. Prune old tool outputs and sanitize tool call/result text
+      // 2. Prune old tool outputs, repair orphaned tool_use blocks, and sanitize
       history = this.pruneHistory(history);
+      history = this.repairOrphanedToolUse(history);
       history = this.sanitizeToolHistory(history);
       const historyChars = history.reduce((sum, msg) => sum + (typeof msg.content === 'string' ? msg.content.length : JSON.stringify(msg.content).length), 0);
       console.log(
@@ -1779,6 +1780,125 @@ export class MainAgent {
    * Fix: Rewrite these patterns into natural language summaries that the model won't
    * try to imitate as a tool-calling format.
    */
+
+  /**
+   * Repair orphaned tool_use blocks that don't have matching tool_result blocks.
+   * This happens when the agent crashes or restarts mid-tool-loop — tool_use gets
+   * persisted but tool_result never does. The Anthropic API rejects these with:
+   * "tool_use ids were found without tool_result blocks immediately after"
+   *
+   * Strategy: For each assistant message with tool_use blocks, check if the next
+   * message is a user message with matching tool_result blocks. If not, either:
+   * - Strip the tool_use blocks (keeping any text content)
+   * - Or if the message would be empty, inject a synthetic tool_result
+   */
+  private repairOrphanedToolUse(
+    messages: Array<{ role: string; content: string | Array<Record<string, unknown>>; created_at: string; metadata?: string | null }>,
+  ): Array<{ role: string; content: string | Array<Record<string, unknown>>; created_at: string; metadata?: string | null }> {
+    const result: typeof messages = [];
+
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+
+      // Only check assistant messages with structured content containing tool_use
+      if (msg.role === "assistant" && Array.isArray(msg.content)) {
+        const toolUseBlocks = (msg.content as any[]).filter((b: any) => b.type === "tool_use");
+
+        if (toolUseBlocks.length > 0) {
+          // Check if the next message has matching tool_results
+          const next = messages[i + 1];
+          const nextToolResultIds = new Set<string>();
+
+          if (next?.role === "user" && Array.isArray(next.content)) {
+            for (const b of next.content as any[]) {
+              if (b.type === "tool_result") {
+                nextToolResultIds.add(b.tool_use_id);
+              }
+            }
+          } else if (next?.role === "user" && typeof next.content === "string" && next.content.startsWith("[Tool results]")) {
+            // Text-format tool results — extract tool_use_ids from [toolu_xxx] lines
+            const lines = next.content.split("\n");
+            for (const line of lines) {
+              const match = line.match(/^\[(toolu_\w+)\]/);
+              if (match) nextToolResultIds.add(match[1]);
+            }
+          }
+
+          // Find orphaned tool_use blocks (no matching tool_result)
+          const orphanedIds = toolUseBlocks
+            .filter((b: any) => !nextToolResultIds.has(b.id))
+            .map((b: any) => b.id);
+
+          if (orphanedIds.length > 0) {
+            const orphanedSet = new Set(orphanedIds);
+            const orphanedBlocks = toolUseBlocks.filter((b: any) => orphanedSet.has(b.id));
+            console.warn(
+              `[main-agent.repair] Fixing ${orphanedIds.length} orphaned tool_use block(s) at message ${i}: ` +
+              orphanedBlocks.map((b: any) => `${b.name}(${b.id})`).join(", ")
+            );
+
+            // Keep non-tool_use content (text blocks)
+            const nonToolContent = (msg.content as any[]).filter(
+              (b: any) => b.type !== "tool_use" || !orphanedSet.has(b.id)
+            );
+
+            if (nonToolContent.length > 0) {
+              // Strip orphaned tool_use blocks, keep the rest
+              result.push({ ...msg, content: nonToolContent });
+            } else {
+              // Entire message was tool_use blocks — replace with a text note
+              result.push({
+                ...msg,
+                content: "[Tool calls were interrupted by a restart and their results are unavailable]",
+              });
+            }
+
+            // If ALL tool_use blocks are orphaned, we also need to handle the case
+            // where the next message is a partial tool_result (some matched, some didn't)
+            // That case is handled naturally since we only strip orphaned ones.
+            continue;
+          }
+        }
+      }
+
+      // Also handle text-format tool calls in assistant messages
+      if (msg.role === "assistant" && typeof msg.content === "string" && msg.content.includes("[Tool calls]")) {
+        const next = messages[i + 1];
+        const hasToolResults = next?.role === "user" && (
+          (typeof next.content === "string" && next.content.startsWith("[Tool results]")) ||
+          (Array.isArray(next.content) && (next.content as any[]).some((b: any) => b.type === "tool_result"))
+        );
+
+        if (!hasToolResults) {
+          // Text-format tool calls with no results — strip the tool call section
+          const lines = msg.content.split("\n");
+          const textLines: string[] = [];
+          let inToolSection = false;
+          for (const line of lines) {
+            if (line.trim() === "[Tool calls]") {
+              inToolSection = true;
+              continue;
+            }
+            if (inToolSection && line.match(/^\[[\w]+\]/)) continue;
+            if (inToolSection && !line.match(/^\[[\w]+\]/)) inToolSection = false;
+            if (!inToolSection) textLines.push(line);
+          }
+          const remaining = textLines.join("\n").trim();
+          console.warn(`[main-agent.repair] Stripping orphaned text-format tool calls at message ${i}`);
+          result.push({
+            ...msg,
+            content: remaining || "[Tool calls were interrupted by a restart and their results are unavailable]",
+          });
+          continue;
+        }
+      }
+
+      result.push(msg);
+    }
+
+    return result;
+  }
+
   private sanitizeToolHistory(
     messages: Array<{ role: string; content: string | Array<Record<string, unknown>>; created_at: string; metadata?: string | null }>,
   ): Array<{ role: string; content: string | Array<Record<string, unknown>>; created_at: string; metadata?: string | null }> {
