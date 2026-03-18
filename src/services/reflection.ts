@@ -10,6 +10,7 @@ import { getDb } from "../db/connection.js";
 import { agentReflections, agentIdentityVersions, systemSweeps, inboxItems, workerRuns, tasks as tasksTable, projects as projectsTable, orchestratorSettings } from "../db/schema.js";
 import { inferProjectId } from "../util/project-inference.js";
 import { buildTaskContext } from "../util/task-context.js";
+import { classifyApprovalTier } from "../util/approval-tier.js";
 import { log } from "../util/logger.js";
 
 const REFLECTION_AGENTS = ["programmer", "researcher", "writer", "architect", "reviewer"];
@@ -326,28 +327,48 @@ Reflection ID: ${reflectionId}`;
         routed++;
       }
 
-      // Route new ideas to inbox as proposals needing approval
+      // Route new ideas — apply approval tier to auto-approve A/B
       if (hasNewIdeas) {
         const ideas = result.newIdeas as string[];
         for (const idea of ideas) {
-          this._routeSuggestionToInbox(r.agentType, r.id, `[NEW IDEA] ${idea}`, "approval");
-          routed++;
+          const tier = classifyApprovalTier(r.agentType, idea);
+          if (tier === "A" || tier === "B") {
+            // Auto-approve: create as active task directly
+            const created = this._proposeTask(r.agentType, idea, "small", true);
+            if (created !== "skipped") {
+              tasksCreated++;
+              log().info(`[REFLECTION] Auto-approved new idea (tier ${tier}): "${idea.slice(0, 60)}"`);
+            }
+          } else {
+            // Tier C: needs Rafe's approval
+            this._routeSuggestionToInbox(r.agentType, r.id, `[NEW IDEA] ${idea}`, "approval");
+            routed++;
+          }
         }
       }
 
-      // Process each suggestion individually: size it, then route accordingly
+      // Process each suggestion individually: size it, classify tier, then route
       if (hasSuggestions) {
         const suggestions = result.concreteSuggestions as string[];
         for (const suggestion of suggestions) {
           const size = this._sizeSuggestion(suggestion);
+          const tier = classifyApprovalTier(r.agentType, suggestion);
+
           if (size === "large") {
-            // Large items need explicit human approval
+            // Large items always need explicit human approval regardless of tier
             this._routeSuggestionToInbox(r.agentType, r.id, suggestion, "approval");
             routed++;
+          } else if (tier === "A" || tier === "B") {
+            // Tier A/B small/medium: auto-approve → active task, no inbox item
+            const created = this._proposeTask(r.agentType, suggestion, size, true);
+            if (created !== "skipped") {
+              tasksCreated++;
+              log().info(`[REFLECTION] Auto-approved suggestion (tier ${tier}, size=${size}): "${suggestion.slice(0, 60)}"`);
+            }
           } else {
-            // Small/medium items become proposed tasks + inbox suggestions for approval/reject
-            const proposed = this._proposeTask(r.agentType, suggestion, size);
-            if (proposed === "proposed") {
+            // Tier C: proposed task + inbox item for Rafe
+            const proposed = this._proposeTask(r.agentType, suggestion, size, false);
+            if (proposed !== "skipped") {
               tasksCreated++;
               this._routeSuggestionToInbox(r.agentType, r.id, suggestion, "suggestion");
               routed++;
@@ -511,7 +532,12 @@ Reflection ID: ${reflectionId}`;
     return { identityText, changedHeuristics: [], removedRules: [] };
   }
 
-  private _proposeTask(agentType: string, suggestion: string, size: "small" | "medium"): "proposed" | "skipped" {
+  /**
+   * Create a task from a reflection suggestion.
+   * @param autoApprove If true, task is created as 'active' (tier A/B auto-approval).
+   *                    If false, task is created as 'proposed' (tier C, needs Rafe).
+   */
+  private _proposeTask(agentType: string, suggestion: string, size: "small" | "medium", autoApprove = false): "proposed" | "active" | "skipped" {
     const db = getDb();
     try {
       const title = suggestion.split(/[.!?]/)[0].trim().slice(0, 100) || suggestion.slice(0, 100);
@@ -531,19 +557,22 @@ Reflection ID: ${reflectionId}`;
         return "skipped";
       }
 
+      const status = autoApprove ? "active" : "proposed";
+      const tier = classifyApprovalTier(agentType, suggestion);
+
       db.insert(tasksTable).values({
         id: randomUUID(),
         title,
-        status: "proposed",
+        status,
         agent: agentType,
         modelTier: "standard",
         projectId: inferProjectId(title, suggestion),
-        notes: `## Problem\n${suggestion}\n\n## Acceptance Criteria\n- [ ] (to be defined when activated)\n\n## Context\nProposed by ${agentType} reflection (size=${size})`,
+        notes: `## Problem\n${suggestion}\n\n## Acceptance Criteria\n- [ ] (to be defined when activated)\n\n## Context\nProposed by ${agentType} reflection (size=${size}, tier=${tier}, auto=${autoApprove})`,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       }).run();
-      log().info(`[REFLECTION] Proposed task "${title.slice(0, 40)}" from ${agentType} (size=${size})`);
-      return "proposed";
+      log().info(`[REFLECTION] ${autoApprove ? "Auto-created" : "Proposed"} task "${title.slice(0, 40)}" from ${agentType} (size=${size}, tier=${tier})`);
+      return status as "proposed" | "active";
     } catch (e) {
       log().warn(`[REFLECTION] Failed to propose task: ${String(e)}`);
       return "skipped";

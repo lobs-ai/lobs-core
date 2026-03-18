@@ -136,6 +136,19 @@ export class MainAgent {
         model_override TEXT    -- per-channel model override
       );
 
+      -- Compaction summaries — summarize old messages without deleting them
+      CREATE TABLE IF NOT EXISTS compaction_summaries (
+        id TEXT PRIMARY KEY,
+        channel_id TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        messages_summarized INTEGER NOT NULL,  -- count of messages covered
+        up_to_rowid TEXT NOT NULL,              -- last message ID covered by this summary
+        up_to_created_at TEXT NOT NULL,         -- timestamp of last message covered
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_compaction_channel
+        ON compaction_summaries(channel_id, created_at);
+
       -- Persistent message queue — survives restarts
       CREATE TABLE IF NOT EXISTS message_queue (
         id TEXT PRIMARY KEY,
@@ -1509,17 +1522,36 @@ export class MainAgent {
     created_at: string;
     metadata?: string | null;
   }> {
-    // Load recent messages — compactIfNeeded() handles context sizing,
-    // so we just load and reconstruct here. No budget trimming.
-    const rows = this.db
-      .prepare(
-        `SELECT role, content, created_at, metadata FROM main_agent_messages
-         WHERE channel_id = ?
-         ORDER BY created_at DESC LIMIT 200`,
-      )
-      .all(channelId) as Array<{ role: string; content: string; created_at: string; metadata: string | null }>;
+    // Check for existing compaction summary
+    const compaction = this.db.prepare(
+      `SELECT id, summary, up_to_created_at FROM compaction_summaries
+       WHERE channel_id = ?
+       ORDER BY created_at DESC LIMIT 1`
+    ).get(channelId) as { id: string; summary: string; up_to_created_at: string } | undefined;
 
-    rows.reverse(); // chronological
+    let rows: Array<{ role: string; content: string; created_at: string; metadata: string | null }>;
+
+    if (compaction) {
+      // Load only messages AFTER the compaction boundary
+      rows = this.db
+        .prepare(
+          `SELECT role, content, created_at, metadata FROM main_agent_messages
+           WHERE channel_id = ? AND created_at > ?
+           ORDER BY created_at ASC LIMIT 200`,
+        )
+        .all(channelId, compaction.up_to_created_at) as typeof rows;
+    } else {
+      // No compaction — load all (up to 200)
+      rows = this.db
+        .prepare(
+          `SELECT role, content, created_at, metadata FROM main_agent_messages
+           WHERE channel_id = ?
+           ORDER BY created_at DESC LIMIT 200`,
+        )
+        .all(channelId) as typeof rows;
+
+      rows.reverse(); // chronological
+    }
 
     // Reconstruct structured content blocks from metadata when available
     const reconstructed = rows.map(row => {
@@ -1558,6 +1590,33 @@ export class MainAgent {
       }
       return row as { role: string; content: string | Array<Record<string, unknown>>; created_at: string; metadata: string | null };
     });
+
+    // Prepend compaction summary if we have one
+    if (compaction) {
+      const summaryMessages: Array<{
+        role: string;
+        content: string | Array<Record<string, unknown>>;
+        created_at: string;
+        metadata?: string | null;
+      }> = [
+        {
+          role: "user",
+          content: `[Conversation summary — earlier messages compacted]\n\n${compaction.summary}`,
+          created_at: compaction.up_to_created_at,
+          metadata: null,
+        },
+      ];
+      // Add assistant ack if the first real message isn't assistant (avoid consecutive same-role)
+      if (reconstructed.length === 0 || reconstructed[0].role !== "assistant") {
+        summaryMessages.push({
+          role: "assistant",
+          content: "Understood, I have the context from the summary. Continuing.",
+          created_at: compaction.up_to_created_at,
+          metadata: null,
+        });
+      }
+      return [...summaryMessages, ...reconstructed];
+    }
 
     return reconstructed;
   }
@@ -2203,7 +2262,21 @@ export class MainAgent {
           ? compacted[0].content.replace("[Conversation summary — earlier messages compacted]\n\n", "")
           : "";
         if (summary) {
-          this.persistCompaction(channelId, result.originalCount - result.newCount, summary);
+          // Count how many synthetic messages (compaction summary + ack) were at the start
+          // of the input — these aren't real DB rows and shouldn't be counted
+          let syntheticPrefix = 0;
+          for (const m of messages) {
+            const txt = typeof m.content === "string" ? m.content : "";
+            if (txt.startsWith("[Conversation summary") || txt === "Understood, I have the context from the summary. Continuing.") {
+              syntheticPrefix++;
+            } else {
+              break;
+            }
+          }
+          const realMessagesSummarized = (result.originalCount - result.newCount) - syntheticPrefix;
+          if (realMessagesSummarized > 0) {
+            this.persistCompaction(channelId, realMessagesSummarized, summary);
+          }
         }
       }
 
@@ -2237,69 +2310,65 @@ export class MainAgent {
   }
 
   /**
-   * Persist compaction to DB: delete the oldest N messages for a channel
-   * and replace them with a single summary message.
-   * This prevents old chats from re-compacting the same history every turn.
+   * Persist compaction to DB: store a summary in compaction_summaries table
+   * and record which messages it covers. Messages are NOT deleted — Nexus
+   * and other consumers still need the full history. getRecentHistory() uses
+   * the compaction boundary to skip old messages when loading for the LLM.
    */
   private persistCompaction(channelId: string, summarizedCount: number, summary: string): void {
     try {
-      // Get the IDs of the oldest N messages for this channel
-      const oldestRows = this.db.prepare(
-        `SELECT id FROM main_agent_messages
+      // Check if there's an existing compaction boundary to start counting from
+      const existingCompaction = this.db.prepare(
+        `SELECT up_to_created_at, messages_summarized FROM compaction_summaries
          WHERE channel_id = ?
-         ORDER BY created_at ASC
-         LIMIT ?`
-      ).all(channelId, summarizedCount) as Array<{ id: string }>;
+         ORDER BY created_at DESC LIMIT 1`
+      ).get(channelId) as { up_to_created_at: string; messages_summarized: number } | undefined;
 
-      if (oldestRows.length === 0) return;
+      let lastSummarized: { id: string; created_at: string } | undefined;
 
-      const ids = oldestRows.map(r => r.id);
+      if (existingCompaction) {
+        // Count from after the old compaction boundary
+        lastSummarized = this.db.prepare(
+          `SELECT id, created_at FROM main_agent_messages
+           WHERE channel_id = ? AND created_at > ?
+           ORDER BY created_at ASC
+           LIMIT 1 OFFSET ?`
+        ).get(channelId, existingCompaction.up_to_created_at, summarizedCount - 1) as typeof lastSummarized;
+      } else {
+        // Count from the beginning
+        lastSummarized = this.db.prepare(
+          `SELECT id, created_at FROM main_agent_messages
+           WHERE channel_id = ?
+           ORDER BY created_at ASC
+           LIMIT 1 OFFSET ?`
+        ).get(channelId, summarizedCount - 1) as typeof lastSummarized;
+      }
 
-      // Check the role of the first message that will remain after deletion,
-      // so we can decide whether to include the assistant ack (avoid consecutive assistants)
-      const firstRemainingRow = this.db.prepare(
-        `SELECT role FROM main_agent_messages
-         WHERE channel_id = ?
-         ORDER BY created_at ASC
-         LIMIT 1 OFFSET ?`
-      ).get(channelId, summarizedCount) as { role: string } | undefined;
-      const firstRemainingRole = firstRemainingRow?.role;
+      if (!lastSummarized) return;
 
-      // Use better-sqlite3's transaction() for safe atomic operation
-      const doCompaction = this.db.transaction(() => {
-        // Delete in batches (SQLite has a limit on placeholders)
-        const BATCH_SIZE = 100;
-        for (let i = 0; i < ids.length; i += BATCH_SIZE) {
-          const batch = ids.slice(i, i + BATCH_SIZE);
-          const placeholders = batch.map(() => "?").join(",");
-          this.db.prepare(
-            `DELETE FROM main_agent_messages WHERE id IN (${placeholders})`
-          ).run(...batch);
-        }
+      // Total messages now covered by compaction
+      const totalSummarized = (existingCompaction?.messages_summarized ?? 0) + summarizedCount;
 
-        // Insert summary as a user message (+ optional assistant ack)
-        const summaryId = randomUUID();
-        // Use a very old timestamp so the summary sorts before remaining messages
-        const summaryTime = "2000-01-01T00:00:00.000Z";
-
+      // Delete old compaction — new one supersedes it
+      if (existingCompaction) {
         this.db.prepare(
-          `INSERT INTO main_agent_messages (id, role, content, channel_id, created_at, token_estimate)
-           VALUES (?, 'user', ?, ?, ?, ?)`
-        ).run(summaryId, `[Conversation summary — earlier messages compacted]\n\n${summary}`, channelId, summaryTime, Math.ceil(summary.length / 4));
+          `DELETE FROM compaction_summaries WHERE channel_id = ?`
+        ).run(channelId);
+      }
 
-        // Only insert assistant ack if the first remaining message is NOT assistant
-        // to avoid creating consecutive assistant messages in the DB
-        if (firstRemainingRole !== "assistant") {
-          const ackId = randomUUID();
-          this.db.prepare(
-            `INSERT INTO main_agent_messages (id, role, content, channel_id, created_at, token_estimate)
-             VALUES (?, 'assistant', ?, ?, ?, ?)`
-          ).run(ackId, "Understood, I have the context from the summary. Continuing.", channelId, summaryTime, 15);
-        }
-      });
+      this.db.prepare(
+        `INSERT INTO compaction_summaries (id, channel_id, summary, messages_summarized, up_to_rowid, up_to_created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      ).run(
+        randomUUID(),
+        channelId,
+        summary,
+        totalSummarized,
+        lastSummarized.id,
+        lastSummarized.created_at,
+      );
 
-      doCompaction();
-      console.log(`[main-agent] Persisted compaction for ${channelId.slice(0, 12)}: deleted ${ids.length} messages, inserted summary`);
+      console.log(`[main-agent] Persisted compaction for ${channelId.slice(0, 12)}: ${summarizedCount} new messages summarized (${totalSummarized} total), boundary at ${lastSummarized.created_at}`);
     } catch (err) {
       console.error(`[main-agent] Failed to persist compaction for ${channelId.slice(0, 12)}:`, err);
       // Non-fatal — compaction still works in-memory for this turn

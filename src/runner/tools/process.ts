@@ -169,7 +169,7 @@ function startProcess(params: Record<string, unknown>, defaultCwd: string): stri
         if (child.exitCode === null) {
           child.kill("SIGKILL");
         }
-      }, 3000);
+      }, 200); // 200ms grace before SIGKILL
     }, timeoutMs);
 
     // Capture output line-buffered
@@ -373,7 +373,7 @@ async function killProcess(params: Record<string, unknown>): Promise<string> {
     throw new Error("Process not available");
   }
 
-  // Send SIGTERM, wait 3s, then SIGKILL
+  // Send SIGTERM, wait 200ms, then SIGKILL if still alive
   bgProc.process.kill("SIGTERM");
 
   return new Promise<string>((resolve) => {
@@ -381,7 +381,7 @@ async function killProcess(params: Record<string, unknown>): Promise<string> {
       if (bgProc.process && bgProc.exitCode === null) {
         bgProc.process.kill("SIGKILL");
       }
-    }, 3000);
+    }, 200);
 
     // Wait for process to exit
     const checkInterval = setInterval(() => {
@@ -395,9 +395,9 @@ async function killProcess(params: Record<string, unknown>): Promise<string> {
           signal: bgProc.signal,
         }, null, 2));
       }
-    }, 100);
+    }, 20);
 
-    // Timeout after 5s total
+    // Give up after 500ms — process should have exited by then
     setTimeout(() => {
       clearInterval(checkInterval);
       clearTimeout(killTimer);
@@ -406,7 +406,7 @@ async function killProcess(params: Record<string, unknown>): Promise<string> {
         status: "kill_sent",
         note: "Process may still be terminating",
       }, null, 2));
-    }, 5000);
+    }, 500);
   });
 }
 
