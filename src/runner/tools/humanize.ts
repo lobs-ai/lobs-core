@@ -1790,26 +1790,13 @@ function humanize(text: string, opts: { autofix?: boolean; includeStats?: boolea
 export const humanizeToolDefinition: ToolDefinition = {
   name: "humanize",
   description:
-    "Detect and fix AI writing patterns in text. Scores text 0-100 (higher = more AI-like), " +
-    "identifies specific patterns (AI vocabulary, chatbot artifacts, filler phrases, etc.), " +
-    "and can auto-fix mechanical issues.\n\n" +
-    "Actions:\n" +
-    "- score: Quick 0-100 AI score with summary\n" +
-    "- analyze: Full analysis — pattern matches, text statistics, category breakdown\n" +
-    "- humanize: Prioritized suggestions (critical/important/minor) with optional returned autofix text\n\n" +
+    "Inspect text for AI-writing patterns and return one unified report: score, analysis, findings, and revision instructions. " +
     "This tool is diagnostic by default: it reports issues in the provided text and does not update files or mutate the source text in place. " +
     "If autofix=true, it returns a suggested cleaned-up text in the tool output only; you must still apply any edits separately. " +
     "Accepts raw text directly or a file path. HTML/XML-like content is converted to plain text before analysis.",
   input_schema: {
     type: "object",
     properties: {
-      action: {
-        type: "string",
-        enum: ["score", "analyze", "humanize"],
-        description:
-          "Action to perform. 'score' = quick 0-100 number. 'analyze' = detailed pattern report. " +
-          "'humanize' = issue report with rewrite suggestions; it does not edit the source input.",
-      },
       text: {
         type: "string",
         description: "The text to inspect. HTML in pasted text is stripped before analysis. Provide this or `path`.",
@@ -1821,11 +1808,11 @@ export const humanizeToolDefinition: ToolDefinition = {
       autofix: {
         type: "boolean",
         description:
-          "For 'humanize' action only: apply safe mechanical fixes (curly quotes, filler phrases, " +
-          "chatbot artifacts). Returns suggested fixed text alongside the issue report; it does not modify files or the original input. Default: false.",
+          "Apply safe mechanical fixes (curly quotes, filler phrases, chatbot artifacts). " +
+          "Returns suggested fixed text alongside the issue report; it does not modify files or the original input. Default: false.",
       },
     },
-    required: ["action"],
+    required: [],
   },
 };
 
@@ -1945,24 +1932,9 @@ function loadHumanizeInput(params: Record<string, unknown>, cwd: string): string
 }
 
 export async function humanizeTool(params: Record<string, unknown>, cwd = process.cwd()): Promise<string> {
-  const action = params.action as string;
   const autofix = params.autofix === true;
   const text = loadHumanizeInput(params, cwd);
-
-  if (!action || !["score", "analyze", "humanize"].includes(action)) {
-    throw new Error("action must be one of: score, analyze, humanize");
-  }
-
-  switch (action) {
-    case "score":
-      return formatScore(text);
-    case "analyze":
-      return formatAnalysis(text);
-    case "humanize":
-      return formatHumanize(text, autofix);
-    default:
-      throw new Error(`Unknown action: ${action}`);
-  }
+  return formatUnifiedHumanize(text, autofix);
 }
 
 function scoreLabel(score: number): string {
@@ -2000,25 +1972,9 @@ function appendRevisionInstructions(
   }
 }
 
-function formatScore(text: string): string {
-  const result = analyze(text);
-  const lines = [
-    `Score: ${result.score}/100 ${scoreLabel(result.score)}`,
-    `Pattern: ${result.patternScore} | Uniformity: ${result.uniformityScore} | Matches: ${result.totalMatches} | Words: ${result.wordCount}`,
-    "",
-    result.summary,
-    "",
-  ];
-  appendRevisionInstructions(lines, buildGuidance(result));
-  return lines.join("\n");
-}
-
-function formatAnalysis(text: string): string {
-  const result = analyze(text, { verbose: false, includeStats: true });
-  const lines: string[] = [];
-
+function appendAnalysisSection(lines: string[], result: AnalysisResult): void {
   lines.push(`Score: ${result.score}/100 ${scoreLabel(result.score)}`);
-  lines.push(`Pattern: ${result.patternScore} | Uniformity: ${result.uniformityScore} | Words: ${result.wordCount}`);
+  lines.push(`Pattern: ${result.patternScore} | Uniformity: ${result.uniformityScore} | Matches: ${result.totalMatches} | Words: ${result.wordCount}`);
   lines.push("");
 
   if (result.stats) {
@@ -2050,19 +2006,15 @@ function formatAnalysis(text: string): string {
       }
       if (finding.matchCount > 3) lines.push(`    ... and ${finding.matchCount - 3} more`);
     }
+    lines.push("");
   }
 
-  lines.push("");
+  lines.push("Summary:");
   lines.push(result.summary);
-  lines.push("");
-  appendRevisionInstructions(lines, buildGuidance(result), result.stats ? buildStyleTips(result.stats) : []);
-  return lines.join("\n");
 }
 
-function formatHumanize(text: string, autofix: boolean): string {
-  const result = humanize(text, { autofix, includeStats: true });
-  const lines: string[] = [];
-
+function appendHumanizeSection(lines: string[], result: HumanizeResult, autofix: boolean): void {
+  lines.push("");
   lines.push(`AI Score: ${result.score}/100 ${scoreLabel(result.score)}`);
   lines.push(`Issues: ${result.totalIssues} | Pattern: ${result.patternScore} | Uniformity: ${result.uniformityScore}`);
   lines.push("");
@@ -2093,15 +2045,23 @@ function formatHumanize(text: string, autofix: boolean): string {
   }
 
   if (result.autofix && result.autofix.fixes.length > 0) {
-    lines.push("AUTO-FIXES APPLIED:");
+    lines.push("AUTO-FIX SUGGESTIONS:");
     for (const fix of result.autofix.fixes) lines.push(`  ✓ ${fix}`);
     lines.push("");
-    lines.push("Fixed text:");
+    lines.push("Suggested fixed text:");
     lines.push(result.autofix.text);
     lines.push("");
   }
 
   appendRevisionInstructions(lines, result.guidance, result.styleTips, { includeAutofixNote: autofix });
+}
 
+function formatUnifiedHumanize(text: string, autofix: boolean): string {
+  const result = analyze(text, { verbose: false, includeStats: true });
+  const lines: string[] = [];
+  const humanized = humanize(text, { autofix, includeStats: true });
+
+  appendAnalysisSection(lines, result);
+  appendHumanizeSection(lines, humanized, autofix);
   return lines.join("\n");
 }
