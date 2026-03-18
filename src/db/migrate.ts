@@ -259,6 +259,46 @@ export function runMigrations(db: PawDB): void {
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
 
+  db.run(sql`CREATE TABLE IF NOT EXISTS research_queue (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    source_url TEXT,
+    source_text TEXT,
+    topic TEXT,
+    tags TEXT NOT NULL DEFAULT '[]',
+    priority INTEGER NOT NULL DEFAULT 100,
+    status TEXT NOT NULL DEFAULT 'queued',
+    project_id TEXT,
+    error TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  db.run(sql`CREATE INDEX IF NOT EXISTS idx_research_queue_status
+    ON research_queue(status, priority DESC, created_at ASC)`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS research_briefs (
+    id TEXT PRIMARY KEY,
+    queue_item_id TEXT NOT NULL REFERENCES research_queue(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    key_points TEXT NOT NULL DEFAULT '[]',
+    follow_ups TEXT NOT NULL DEFAULT '[]',
+    source_type TEXT NOT NULL,
+    source_url TEXT,
+    source_title TEXT,
+    source_excerpt TEXT,
+    model TEXT,
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  db.run(sql`CREATE INDEX IF NOT EXISTS idx_research_briefs_queue_item
+    ON research_briefs(queue_item_id, created_at DESC)`);
+
   db.run(sql`CREATE TABLE IF NOT EXISTS scheduled_events (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -1185,8 +1225,8 @@ export function runMigrations(db: PawDB): void {
       },
       {
         id: "commit-message-gen",
-        name: "Commit Message Generator",
-        description: "Generates conventional commit messages from staged diffs.",
+        name: "Draft Generation",
+        description: "Local-first draft generation for commit messages, PR descriptions, doc stubs, and test scaffolding.",
         category: "dev",
         enabled: 0,
         uiAffordances: [
@@ -1197,6 +1237,50 @@ export function runMigrations(db: PawDB): void {
             label: "Generate commit message",
             icon: "commit",
             aiAction: "generate",
+            config: {
+              template: "commit-message",
+              modelTier: "micro",
+              refinementTier: "standard",
+            },
+          },
+          {
+            id: "pr-description-draft",
+            type: "button",
+            target: "pr-widget",
+            label: "Draft PR description",
+            icon: "edit",
+            aiAction: "generate",
+            config: {
+              template: "pr-description",
+              modelTier: "micro",
+              refinementTier: "standard",
+            },
+          },
+          {
+            id: "doc-stub-draft",
+            type: "button",
+            target: "task-card",
+            label: "Draft doc stub",
+            icon: "edit",
+            aiAction: "generate",
+            config: {
+              template: "doc-stub",
+              modelTier: "micro",
+              refinementTier: "strong",
+            },
+          },
+          {
+            id: "test-scaffold-draft",
+            type: "button",
+            target: "task-card",
+            label: "Draft test scaffold",
+            icon: "test",
+            aiAction: "generate",
+            config: {
+              template: "test-scaffold",
+              modelTier: "micro",
+              refinementTier: "standard",
+            },
           },
         ],
       },
@@ -1420,6 +1504,20 @@ export function runMigrations(db: PawDB): void {
           ${now}
         )`);
     }
+
+    // Keep the draft-generation plugin definition current on existing installs
+    // without changing the user's enabled/disabled choice.
+    const draftGen = seedPlugins.find((p) => p.id === "commit-message-gen");
+    if (draftGen) {
+      db.run(sql`UPDATE plugins
+        SET
+          name = ${draftGen.name},
+          description = ${draftGen.description},
+          category = ${draftGen.category},
+          ui_affordances = ${JSON.stringify(draftGen.uiAffordances)},
+          updated_at = ${now}
+        WHERE id = ${draftGen.id}`);
+    }
   } catch (e) {
     console.warn("[PLUGINS] Seed insert failed (non-fatal):", e);
   }
@@ -1434,4 +1532,3 @@ export function runMigrations(db: PawDB): void {
   // Added: 2026-03-15 — Tracks when user last viewed a session for unread badges.
   try { db.run(sql`ALTER TABLE chat_sessions ADD COLUMN last_read_at TEXT`); } catch {}
 }
-

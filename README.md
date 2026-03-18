@@ -123,6 +123,17 @@ The runner calls LLM APIs directly with in-process tool execution:
 
 `exec`, `read`, `write`, `edit`, `web_search`, `web_fetch`, `memory_search`, `memory_read`
 
+### Draft Generation
+
+Nexus plugin affordances support local-first draft generation for boilerplate work:
+
+- commit messages
+- PR descriptions
+- doc stubs
+- test scaffolding
+
+The intended flow is fast local draft first, then optional refinement by a stronger model or manual editing.
+
 ### Context Engine
 
 Before each agent run, the context engine:

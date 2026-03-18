@@ -13,6 +13,21 @@ import { getGatewayConfig } from "../config/lobs.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+type InvokeRequestBody = {
+  affordanceId?: string;
+  context?: string;
+  refine?: boolean;
+  refinementNotes?: string;
+};
+
+type PromptPlan = {
+  prompt: string;
+  modelTier: string;
+  refinementTier?: string;
+  mode: "draft" | "single-pass";
+  draftKind?: string;
+};
+
 function rowToPlugin(row: typeof plugins.$inferSelect): PawPlugin {
   return {
     id: row.id,
@@ -119,7 +134,7 @@ async function handleInvoke(
   if (!row) return error(res, "Plugin not found", 404);
   if (!row.enabled) return error(res, "Plugin is disabled", 400);
 
-  const body = await parseBody(req) as { affordanceId?: string; context?: string };
+  const body = await parseBody(req) as InvokeRequestBody;
   const { affordanceId, context } = body;
 
   if (!affordanceId || !context) {
@@ -130,47 +145,233 @@ async function handleInvoke(
   const affordance = affordances.find((a) => a.id === affordanceId);
   if (!affordance) return error(res, "Affordance not found", 404);
 
-  const prompt = buildPrompt(affordance.aiAction, context);
-  if (!prompt) return error(res, `Unknown aiAction: ${affordance.aiAction}`, 400);
-
-  // Simple model call via spawn — using a minimal approach
-  // For now, return a descriptive placeholder since we don't have a sync model call
-  // The task spec says sessions_spawn with mode:"run" — but that's async.
-  // We'll use a simple direct approach: invoke via the orchestrator settings / model
-  // In practice the Nexus client can use streaming; here we return synchronously
-  // with a stub and let a future PR wire in the actual model gateway.
-  const result = await callModel(prompt);
-  return json(res, { result, pluginId, affordanceId });
+  const payload = await invokeAffordance(affordance, context, {
+    pluginId,
+    affordanceId,
+    refine: body.refine,
+    refinementNotes: body.refinementNotes,
+  });
+  return json(res, payload);
 }
 
-function buildPrompt(aiAction: string, context: string): string | null {
+export async function invokeAffordance(
+  affordance: UIAffordance,
+  context: string,
+  options?: {
+    pluginId?: string;
+    affordanceId?: string;
+    refine?: boolean;
+    refinementNotes?: string;
+  },
+): Promise<Record<string, unknown>> {
+  const plan = buildPromptPlan(affordance, context);
+  if (!plan) throw new Error(`Unknown aiAction: ${affordance.aiAction}`);
+
+  const draft = await callModel(plan.prompt, { modelTier: plan.modelTier });
+  if (plan.mode === "draft" && options?.refine) {
+    const refinementPrompt = buildRefinementPrompt(plan, context, draft, options.refinementNotes);
+    const refined = await callModel(refinementPrompt, {
+      modelTier: plan.refinementTier ?? "standard",
+    });
+    return {
+      result: refined,
+      draft,
+      pluginId: options?.pluginId,
+      affordanceId: options?.affordanceId,
+      mode: "refined",
+      draftModelTier: plan.modelTier,
+      refinementModelTier: plan.refinementTier ?? "standard",
+      draftKind: plan.draftKind ?? "generic",
+    };
+  }
+
+  return {
+    result: draft,
+    pluginId: options?.pluginId,
+    affordanceId: options?.affordanceId,
+    mode: plan.mode,
+    modelTier: plan.modelTier,
+    draftKind: plan.draftKind ?? "generic",
+    nextStep: plan.mode === "draft"
+      ? "Use a stronger model or edit manually if the draft needs refinement."
+      : undefined,
+  };
+}
+
+export function buildPromptPlan(affordance: UIAffordance, context: string): PromptPlan | null {
+  const aiAction = affordance.aiAction;
   switch (aiAction) {
     case "summarize":
-      return `Summarize this concisely in 2-3 sentences:\n\n${context}`;
+      return {
+        prompt: `Summarize this concisely in 2-3 sentences:\n\n${context}`,
+        modelTier: "small",
+        mode: "single-pass",
+      };
     case "suggest-reply":
-      return `Suggest 3 short, contextually appropriate replies to this message. Return each on a new line, no numbering:\n\n${context}`;
+      return {
+        prompt: `Suggest 3 short, contextually appropriate replies to this message. Return each on a new line, no numbering:\n\n${context}`,
+        modelTier: "small",
+        mode: "single-pass",
+      };
     case "explain":
-      return `Explain this simply and clearly in 2-3 sentences:\n\n${context}`;
+      return {
+        prompt: `Explain this simply and clearly in 2-3 sentences:\n\n${context}`,
+        modelTier: "small",
+        mode: "single-pass",
+      };
     case "rewrite":
-      return `Rewrite this more concisely while keeping the meaning:\n\n${context}`;
+      return {
+        prompt: `Rewrite this more concisely while keeping the meaning:\n\n${context}`,
+        modelTier: "small",
+        mode: "single-pass",
+      };
     case "generate":
-      return `Generate a conventional commit message for these changes. Return ONLY the commit message:\n\n${context}`;
+      return buildDraftPrompt(affordance, context);
     case "assess":
-      return `Give a brief health assessment (1-2 sentences) of this project/system based on the data:\n\n${context}`;
+      return {
+        prompt: `Give a brief health assessment (1-2 sentences) of this project/system based on the data:\n\n${context}`,
+        modelTier: "small",
+        mode: "single-pass",
+      };
     case "extract-actions":
-      return `Extract actionable items from this content. Return each as a bullet point:\n\n${context}`;
+      return {
+        prompt: `Extract actionable items from this content. Return each as a bullet point:\n\n${context}`,
+        modelTier: "small",
+        mode: "single-pass",
+      };
     case "optimize":
-      return `Suggest optimizations or improvements based on this data. Be specific and actionable:\n\n${context}`;
+      return {
+        prompt: `Suggest optimizations or improvements based on this data. Be specific and actionable:\n\n${context}`,
+        modelTier: "small",
+        mode: "single-pass",
+      };
     case "insights":
-      return `What are the key insights from this data? Return 2-3 bullet points:\n\n${context}`;
+      return {
+        prompt: `What are the key insights from this data? Return 2-3 bullet points:\n\n${context}`,
+        modelTier: "small",
+        mode: "single-pass",
+      };
     case "daily-summary":
-      return `Generate a concise daily summary from this activity data. Include highlights, completions, and anything needing attention:\n\n${context}`;
+      return {
+        prompt: `Generate a concise daily summary from this activity data. Include highlights, completions, and anything needing attention:\n\n${context}`,
+        modelTier: "small",
+        mode: "single-pass",
+      };
     default:
       return null;
   }
 }
 
-async function callModel(prompt: string): Promise<string> {
+function buildDraftPrompt(affordance: UIAffordance, context: string): PromptPlan {
+  const cfg = (affordance.config ?? {}) as Record<string, unknown>;
+  const template = typeof cfg.template === "string" ? cfg.template : "commit-message";
+  const modelTier = typeof cfg.modelTier === "string" ? cfg.modelTier : "micro";
+  const refinementTier = typeof cfg.refinementTier === "string" ? cfg.refinementTier : "standard";
+
+  const commonPrefix = [
+    "Produce a fast first draft only.",
+    "This draft is boilerplate and may be refined later by a stronger model or a human.",
+    "Prefer a useful structure over polish.",
+  ].join(" ");
+
+  switch (template) {
+    case "pr-description":
+      return {
+        prompt: `${commonPrefix}
+
+Write a pull request description using these sections:
+- Summary
+- Changes
+- Testing
+- Risks / Follow-ups
+
+Keep it concise, concrete, and easy to edit.
+
+Context:
+${context}`,
+        modelTier,
+        refinementTier,
+        mode: "draft",
+        draftKind: template,
+      };
+    case "doc-stub":
+      return {
+        prompt: `${commonPrefix}
+
+Write a documentation stub with these sections:
+- Title
+- Purpose
+- Scope
+- Current status
+- Open questions
+
+Do not invent deep details. Leave clear placeholders where needed.
+
+Context:
+${context}`,
+        modelTier,
+        refinementTier,
+        mode: "draft",
+        draftKind: template,
+      };
+    case "test-scaffold":
+      return {
+        prompt: `${commonPrefix}
+
+Generate test scaffolding only. Return a concise skeleton with:
+- test suite name
+- core test cases
+- TODO placeholders for setup/assertions
+
+Do not claim tests already pass. Keep implementation details minimal.
+
+Context:
+${context}`,
+        modelTier,
+        refinementTier,
+        mode: "draft",
+        draftKind: template,
+      };
+    case "commit-message":
+    default:
+      return {
+        prompt: `${commonPrefix}
+
+Generate a conventional commit message for these changes.
+Return ONLY the commit message on one line.
+
+Context:
+${context}`,
+        modelTier,
+        refinementTier,
+        mode: "draft",
+        draftKind: "commit-message",
+      };
+  }
+}
+
+export function buildRefinementPrompt(
+  plan: PromptPlan,
+  context: string,
+  draft: string,
+  refinementNotes?: string,
+): string {
+  const notesBlock = refinementNotes?.trim()
+    ? `\nRefinement notes:\n${refinementNotes.trim()}\n`
+    : "";
+
+  return `Refine this ${plan.draftKind ?? "generated"} draft created by a smaller local model.
+Improve clarity, correctness, and completeness without changing the underlying intent unless the context requires it.${notesBlock}
+Original context:
+${context}
+
+Draft to refine:
+${draft}
+
+Return only the refined final text.`;
+}
+
+async function callModel(prompt: string, options?: { modelTier?: string }): Promise<string> {
   // Fast path: call the local gateway API directly via HTTP.
   const cfg = getGatewayConfig();
   let gatewayPort = cfg.port;
@@ -188,7 +389,7 @@ async function callModel(prompt: string): Promise<string> {
         sessionKey: "agent:sink:paw-orchestrator-v2",
         args: {
           task: prompt,
-          model: getModelForTier("small"),
+          model: getModelForTier(options?.modelTier ?? "small"),
           mode: "run",
           cleanup: "delete",
           runTimeoutSeconds: 30,

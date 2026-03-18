@@ -38,6 +38,7 @@ import { handleGitHubRequest } from "./github.js";
 import { handleDailyBriefRequest } from "./daily-brief.js";
 import { handleSkillsRequest } from "./skills.js";
 import { handleHealthRequest } from "./health.js";
+import { handleExtractionRequest } from "./extraction.js";
 import { handleTrainingRequest } from "./training.js";
 import { handleTrainingPipelineRequest } from "./training-pipeline.js";
 import { handleLmStudioRequest } from "./lm-studio.js";
@@ -61,6 +62,7 @@ export function registerPawRouter(api: LobsPluginApi): void {
     try {
       switch (resource) {
         case "health":          await handleHealthRequest(req, res); return true;
+        case "extraction":      await handleExtractionRequest(req, res, parts[1]); return true;
         case "tasks":           await handleTaskRequest(req, res, parts[1], parts); return true;
         case "projects":        await handleProjectRequest(req, res, parts[1], parts); return true;
         case "agents":          await handleAgentRequest(req, res, parts[1]); return true;
@@ -139,6 +141,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
   try {
     switch (resource) {
       case "health":          await handleHealthRequest(req, res); return;
+      case "extraction":      await handleExtractionRequest(req, res, parts[1]); return;
       case "tasks":           await handleTaskRequest(req, res, parts[1], parts); return;
       case "projects":        await handleProjectRequest(req, res, parts[1], parts); return;
       case "agents":          await handleAgentRequest(req, res, parts[1]); return;

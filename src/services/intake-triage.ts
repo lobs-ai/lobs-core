@@ -1,4 +1,5 @@
-import { classifyAgent, extract, isLocalModelAvailable } from "../runner/local-classifier.js";
+import { classifyAgent, isLocalModelAvailable } from "../runner/local-classifier.js";
+import { extractStructuredData } from "./data-extraction.js";
 
 export type IntakeKind = "task" | "email" | "notification" | "message";
 export type IntakeUrgency = "critical" | "high" | "medium" | "low";
@@ -171,28 +172,52 @@ function shouldSkipLocalModel(): boolean {
 
 async function maybeRunLocalTriage(kind: IntakeKind, title: string, content: string): Promise<LocalTriageShape | null> {
   if (shouldSkipLocalModel()) return null;
-  if (!await isLocalModelAvailable()) return null;
+  const result = await extractStructuredData<LocalTriageShape>({
+    text: `Title: ${title}\n\nContent:\n${content}`,
+    instructions: `Classify this incoming ${kind} for triage and routing.`,
+    schema: {
+      category: {
+        type: "string",
+        enum: TRIAGE_CATEGORY_VALUES,
+        description: "best fitting category",
+      },
+      urgency: {
+        type: "string",
+        enum: TRIAGE_URGENCY_VALUES,
+        description: "urgency level",
+      },
+      route: {
+        type: "string",
+        enum: TRIAGE_ROUTE_VALUES,
+        description: "routing decision",
+      },
+      modelTier: {
+        type: "string",
+        enum: TRIAGE_MODEL_VALUES,
+        description: "model strength required",
+      },
+      requiresAction: {
+        type: "boolean",
+        description: "whether a human or agent should act on this",
+      },
+      shouldNotify: {
+        type: "boolean",
+        description: "whether this should actively notify the user",
+      },
+      summary: {
+        type: "string",
+        description: "short summary",
+      },
+      reasoning: {
+        type: "string",
+        description: "brief reason",
+      },
+    },
+  }, {
+    isAvailable: isLocalModelAvailable,
+  });
 
-  const schema = `{
-  "category": "${TRIAGE_CATEGORY_VALUES.join('" | "')}",
-  "urgency": "${TRIAGE_URGENCY_VALUES.join('" | "')}",
-  "route": "${TRIAGE_ROUTE_VALUES.join('" | "')}",
-  "modelTier": "${TRIAGE_MODEL_VALUES.join('" | "')}",
-  "requiresAction": boolean,
-  "shouldNotify": boolean,
-  "summary": "short summary",
-  "reasoning": "brief reason"
-}`;
-
-  return extract<LocalTriageShape>(
-    `Classify this incoming ${kind} for triage and routing.
-
-Title: ${title}
-
-Content:
-${content}`,
-    schema,
-  );
+  return result.data;
 }
 
 export async function triageIncomingItem(input: {

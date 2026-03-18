@@ -40,6 +40,16 @@ export interface ModelConfig {
     embeddingModel: string;  // For vector embeddings
   };
 
+  /** Scheduler intelligence settings */
+  scheduler?: {
+    enabled?: boolean;
+    localOnly?: boolean;
+    tier?: "micro" | "small" | "medium" | "standard" | "strong";
+    overrideModel?: string | null;
+    temperature?: number;
+    maxTokens?: number;
+  };
+
   /** Cost per 1M tokens (for cost tracking) */
   costs: Record<string, {
     input: number;
@@ -81,6 +91,15 @@ const DEFAULT_CONFIG: ModelConfig = {
     baseUrl: "http://localhost:1234/v1",
     chatModel: "qwen3-4b",
     embeddingModel: "text-embedding-qwen3-embedding-4b",
+  },
+
+  scheduler: {
+    enabled: true,
+    localOnly: true,
+    tier: "micro",
+    overrideModel: null,
+    temperature: 0.2,
+    maxTokens: 900,
   },
 
   costs: {
@@ -132,6 +151,7 @@ export function getModelConfig(): ModelConfig {
         }
       }
       if (fileData.local) _config.local = { ..._config.local, ...fileData.local };
+      if (fileData.scheduler) _config.scheduler = { ..._config.scheduler, ...fileData.scheduler };
       if (fileData.costs) _config.costs = { ..._config.costs, ...fileData.costs };
       if (fileData.contextLimits) _config.contextLimits = { ..._config.contextLimits, ...fileData.contextLimits };
     } catch { /* use defaults */ }

@@ -35,6 +35,8 @@ import { runStartupTelemetry, startDiskSpaceMonitor } from "./services/restart-t
 import { getGatewayConfig } from "./config/lobs.js";
 import { WorkerRegistry } from "./workers/index.js";
 import { MemoryProcessorWorker } from "./workers/memory-processor.js";
+import { ResearchProcessorWorker } from "./workers/research-processor.js";
+import { initResearchQueueService } from "./services/research-queue.js";
 
 const HOME = process.env.HOME ?? "";
 const DB_PATH = resolve(HOME, ".lobs/lobs.db");
@@ -278,8 +280,10 @@ async function main() {
   console.log("Setting up cron service...");
   const cronService = initCronService(getRawDb());
   cronService.seedDefaults();
+  const researchQueue = initResearchQueueService(getRawDb());
   const workerRegistry = new WorkerRegistry(getRawDb(), cronService);
   workerRegistry.register(new MemoryProcessorWorker());
+  workerRegistry.register(new ResearchProcessorWorker(researchQueue));
 
   // Register system jobs (code handlers, not DB-backed)
   cronService.registerSystemJob({

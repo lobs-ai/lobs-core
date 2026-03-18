@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { json, error, parseBody } from "./index.js";
 import { getCronService } from "../services/cron.js";
+import { getSchedulerIntelligenceSnapshot } from "../services/scheduler-intelligence.js";
 
 /**
  * Scheduler endpoint — manage cron jobs via the CronService.
@@ -23,6 +24,15 @@ export async function handleSchedulerRequest(
 
   if (!cronService) {
     return error(res, "Cron service not initialized", 500);
+  }
+
+  if (jobName === "intelligence" && method === "GET") {
+    try {
+      const snapshot = await getSchedulerIntelligenceSnapshot();
+      return json(res, snapshot);
+    } catch (err) {
+      return error(res, `Failed to compute scheduler intelligence: ${String(err)}`, 500);
+    }
   }
 
   // GET /api/scheduler — list all jobs
