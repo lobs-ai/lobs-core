@@ -41,6 +41,7 @@ import { handleHealthRequest } from "./health.js";
 import { handleTrainingRequest } from "./training.js";
 import { handleTrainingPipelineRequest } from "./training-pipeline.js";
 import { handleLmStudioRequest } from "./lm-studio.js";
+import { handleModelsRequest } from "./models.js";
 import { error } from "./index.js";
 
 const PREFIXES = ["/paw/api/", "/api/"];
@@ -103,6 +104,7 @@ export function registerPawRouter(api: LobsPluginApi): void {
         case "training":        await handleTrainingRequest(req, res, parts[1], parts[2]); return true;
         case "training-pipeline": await handleTrainingPipelineRequest(req, res, parts[1], parts); return true;
         case "lm-studio":       await handleLmStudioRequest(req, res, parts.slice(1)); return true;
+        case "models":          await handleModelsRequest(req, res); return true;
         default:                error(res, `Unknown resource: ${resource}`, 404); return true;
       }
     } catch (err) {
@@ -169,6 +171,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       case "training":        await handleTrainingRequest(req, res, parts[1], parts[2]); return;
       case "training-pipeline": await handleTrainingPipelineRequest(req, res, parts[1], parts); return;
       case "lm-studio":       await handleLmStudioRequest(req, res, parts.slice(1)); return;
+      case "models":          await handleModelsRequest(req, res); return;
       default:                error(res, `Unknown resource: ${resource}`, 404); return;
     }
   } catch (err) {

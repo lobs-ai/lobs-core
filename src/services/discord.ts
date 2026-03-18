@@ -1,5 +1,5 @@
 import { Client, GatewayIntentBits, Partials, TextChannel, EmbedBuilder, GatewayDispatchEvents } from "discord.js";
-import { registerSlashCommands, handleSlashCommand } from "./discord-commands.js";
+import { registerSlashCommands, handleSlashCommand, handleAutocompleteInteraction } from "./discord-commands.js";
 
 export interface DiscordConfig {
   botToken: string;
@@ -115,6 +115,8 @@ class DiscordService {
         this.client!.on("interactionCreate", async (interaction) => {
           if (interaction.isChatInputCommand()) {
             await handleSlashCommand(interaction);
+          } else if (interaction.isAutocomplete()) {
+            await handleAutocompleteInteraction(interaction);
           }
         });
 
@@ -326,6 +328,8 @@ class DiscordService {
           this.client!.on("interactionCreate", async (interaction) => {
             if (interaction.isChatInputCommand()) {
               await handleSlashCommand(interaction);
+            } else if (interaction.isAutocomplete()) {
+              await handleAutocompleteInteraction(interaction);
             }
           });
 

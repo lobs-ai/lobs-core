@@ -5,11 +5,12 @@
  * Commands: /new, /status, /tasks, /model, /clear, /help
  */
 
-import { Client, REST, Routes, SlashCommandBuilder, EmbedBuilder, CommandInteraction, ChatInputCommandInteraction } from "discord.js";
+import { Client, REST, Routes, SlashCommandBuilder, EmbedBuilder, ChatInputCommandInteraction, AutocompleteInteraction } from "discord.js";
 import type { DiscordConfig } from "./discord.js";
 import type { MainAgent } from "./main-agent.js";
 import { getRawDb } from "../db/connection.js";
 import { getModelForTier } from "../config/models.js";
+import { getChannelModelOverride, getDefaultChatModel, getModelCatalog, isLoadedLocalModel, normalizeModelSelection, setChannelModelOverride } from "./model-catalog.js";
 
 let mainAgentRef: MainAgent | null = null;
 
@@ -36,10 +37,27 @@ export async function registerSlashCommands(client: Client, config: DiscordConfi
     new SlashCommandBuilder()
       .setName('model')
       .setDescription('Show or set the AI model for this channel')
-      .addStringOption(opt =>
-        opt.setName('name')
-          .setDescription('Model to use (haiku/sonnet/opus or full model string)')
-          .setRequired(false)
+      .addSubcommand(sub =>
+        sub.setName('show')
+          .setDescription('Show the current model for this channel')
+      )
+      .addSubcommand(sub =>
+        sub.setName('set')
+          .setDescription('Set a model for this channel')
+          .addStringOption(opt =>
+            opt.setName('name')
+              .setDescription('Model to use')
+              .setRequired(true)
+              .setAutocomplete(true)
+          )
+      )
+      .addSubcommand(sub =>
+        sub.setName('reset')
+          .setDescription('Clear the channel model override and use the default')
+      )
+      .addSubcommand(sub =>
+        sub.setName('lmstudio')
+          .setDescription('List models currently loaded in LM Studio')
       ),
     
     new SlashCommandBuilder()
@@ -121,6 +139,26 @@ export async function handleSlashCommand(interaction: ChatInputCommandInteractio
       }
     } catch {}
   }
+}
+
+export async function handleAutocompleteInteraction(interaction: AutocompleteInteraction): Promise<void> {
+  if (interaction.commandName !== 'model') return;
+  const focused = interaction.options.getFocused().toLowerCase();
+  const catalog = await getModelCatalog(1500);
+
+  const choices = catalog.options
+    .filter(option =>
+      !focused ||
+      option.id.toLowerCase().includes(focused) ||
+      option.label.toLowerCase().includes(focused)
+    )
+    .slice(0, 25)
+    .map(option => ({
+      name: option.id.length > 100 ? option.id.slice(0, 97) + '...' : option.id,
+      value: option.id,
+    }));
+
+  await interaction.respond(choices);
 }
 
 /** /new - Start a new session */
@@ -225,35 +263,56 @@ async function handleTasksCommand(interaction: ChatInputCommandInteraction): Pro
 /** /model - Show or set model for this channel */
 async function handleModelCommand(interaction: ChatInputCommandInteraction): Promise<void> {
   const channelId = interaction.channelId;
-  const db = getRawDb();
-  const modelName = interaction.options.get('name')?.value as string | undefined;
-  
-  if (!modelName) {
-    // Show current model
-    const session = db.prepare('SELECT model_override FROM channel_sessions WHERE channel_id = ?')
-      .get(channelId) as { model_override: string | null } | undefined;
-    
-    const currentModel = session?.model_override || process.env.LOBS_MODEL || getModelForTier('strong');
-    
+  const subcommand = interaction.options.getSubcommand();
+
+  if (subcommand === 'show') {
+    const overrideModel = getChannelModelOverride(channelId);
+    const currentModel = overrideModel || getDefaultChatModel();
     await interaction.reply({
-      content: `**Current model for this channel:** \`${currentModel}\`\n\nTo change: \`/model name:<model>\``,
+      content: `**Current model for this channel:** \`${currentModel}\`\nOverride: ${overrideModel ? `\`${overrideModel}\`` : '`none`'}\n\nUse \`/model set\`, \`/model reset\`, or \`/model lmstudio\`.`,
       ephemeral: true,
     });
     return;
   }
-  
-  // Set model override
-  // Normalize short names
-  const normalizedModel = normalizeModelName(modelName);
-  
+
+  if (subcommand === 'lmstudio') {
+    const catalog = await getModelCatalog(1500);
+    const content = catalog.lmstudio.reachable
+      ? (catalog.lmstudio.loadedModels.length > 0
+          ? catalog.lmstudio.loadedModels.map(id => `- \`lmstudio/${id}\``).join('\n')
+          : 'LM Studio is reachable but no models are currently loaded.')
+      : `LM Studio is unreachable at \`${catalog.lmstudio.baseUrl}\``;
+    await interaction.reply({
+      content: `**LM Studio models**\n${content}`,
+      ephemeral: true,
+    });
+    return;
+  }
+
   if (!mainAgentRef) {
     await interaction.reply({ content: 'Main agent not available', ephemeral: true });
     return;
   }
-  
+
+  if (subcommand === 'reset') {
+    mainAgentRef.setChannelModel(channelId, null);
+    setChannelModelOverride(channelId, null);
+    await interaction.reply({ content: `✅ Model override cleared. Using default: \`${getDefaultChatModel()}\``, ephemeral: true });
+    return;
+  }
+
+  const modelName = interaction.options.getString('name', true);
+  const normalizedModel = await normalizeModelSelection(modelName);
   mainAgentRef.setChannelModel(channelId, normalizedModel);
-  
-  await interaction.reply({ content: `✅ Model for this channel set to: \`${normalizedModel}\``, ephemeral: true });
+  setChannelModelOverride(channelId, normalizedModel);
+
+  let note = '';
+  if (normalizedModel.startsWith('lmstudio/')) {
+    const loaded = await isLoadedLocalModel(normalizedModel);
+    note = loaded ? '\nLM Studio reports this model is currently loaded.' : '\nWarning: LM Studio does not currently report this model as loaded.';
+  }
+
+  await interaction.reply({ content: `✅ Model for this channel set to: \`${normalizedModel}\`${note}`, ephemeral: true });
 }
 
 /** /clear - Clear conversation history */
@@ -285,7 +344,10 @@ async function handleHelpCommand(interaction: ChatInputCommandInteraction): Prom
       { name: '/new', value: 'Start a fresh conversation (clears history)', inline: false },
       { name: '/status', value: 'Show bot and system status', inline: false },
       { name: '/tasks', value: 'List active and recent tasks', inline: false },
-      { name: '/model [name]', value: 'Show or set the AI model for this channel', inline: false },
+      { name: '/model show', value: 'Show the active model for this channel', inline: false },
+      { name: '/model set name:<model>', value: 'Set a model for this channel with autocomplete', inline: false },
+      { name: '/model lmstudio', value: 'List currently loaded LM Studio models', inline: false },
+      { name: '/model reset', value: 'Clear the channel override and use the default model', inline: false },
       { name: '/toolsteps [mode]', value: 'Control tool step visibility (on/compact/off)', inline: false },
       { name: '/clear', value: 'Clear conversation history', inline: false },
       { name: '/help', value: 'Show this help message', inline: false },
@@ -329,27 +391,4 @@ async function handleToolStepsCommand(interaction: ChatInputCommandInteraction):
   };
 
   await interaction.reply({ content: labels[mode] || `Tool steps set to: ${mode}`, ephemeral: true });
-}
-
-/** Normalize short model names to tier names or full identifiers */
-function normalizeModelName(name: string): string {
-  const lower = name.toLowerCase();
-  // Map friendly names to tiers
-  const tierAliases: Record<string, string> = {
-    'haiku': 'small',
-    'sonnet': 'medium',
-    'opus': 'strong',
-    'micro': 'micro',
-    'small': 'small',
-    'medium': 'medium',
-    'standard': 'standard',
-    'strong': 'strong',
-  };
-  
-  // If it's a known alias or tier name, resolve to the actual model from config
-  if (tierAliases[lower]) {
-    return getModelForTier(tierAliases[lower]);
-  }
-  
-  return name;
 }

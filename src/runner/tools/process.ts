@@ -166,7 +166,9 @@ function startProcess(params: Record<string, unknown>, defaultCwd: string): stri
       bgProc.timedOut = true;
       child.kill("SIGTERM");
       setTimeout(() => {
-        if (child.exitCode === null) {
+        // bgProc.exitCode is set to a non-null sentinel (-1) on exit,
+        // even for signal-killed processes (where child.exitCode would be null).
+        if (bgProc.exitCode === null) {
           child.kill("SIGKILL");
         }
       }, 200); // 200ms grace before SIGKILL
@@ -200,9 +202,11 @@ function startProcess(params: Record<string, unknown>, defaultCwd: string): stri
       }
     });
 
-    // exit fires immediately when process terminates (before stdio closes)
+    // exit fires immediately when process terminates (before stdio closes).
+    // When killed by a signal, code is null — use -1 as sentinel so
+    // `exitCode !== null` reliably indicates the process has terminated.
     child.on("exit", (code, signal) => {
-      bgProc.exitCode = code;
+      bgProc.exitCode = code ?? -1;
       bgProc.signal = signal;
       if (bgProc.timeoutTimer) {
         clearTimeout(bgProc.timeoutTimer);

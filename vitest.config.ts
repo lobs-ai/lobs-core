@@ -6,5 +6,14 @@ export default defineConfig({
     environment: "node",
     include: ["tests/**/*.test.ts"],
     setupFiles: ["tests/setup.ts"],
+
+    // --- CI Safety Limits ---
+    // Default per-test timeout: 5s (tests needing more must declare it explicitly)
+    // This catches slow tests early and forces authors to justify long timeouts.
+    testTimeout: 5000,
+
+    // afterEach/beforeEach hook timeout: 5s
+    // process-tool cleanup (parallel kills) should complete well within this.
+    hookTimeout: 5000,
   },
 });

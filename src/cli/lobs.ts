@@ -17,6 +17,12 @@
  *   lobs tasks [list|view]    Manage tasks
  *   lobs workers              Show active/recent worker runs
  *
+ * Chat:
+ *   lobs chat                 Start a new interactive chat
+ *   lobs chat list            List saved chat sessions
+ *   lobs chat show <key>      Show a saved transcript
+ *   lobs chat resume <key>    Resume an existing chat
+ *
  * Cron:
  *   lobs cron [list]           List all cron jobs
  *   lobs cron add <n> <s> <p>  Add an agent cron job
@@ -36,6 +42,8 @@
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { execSync, spawn } from "node:child_process";
+import { createInterface } from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
 import { validateAllConfigs, printValidationResults } from "../config/validator.js";
 import { getModelConfig } from "../config/models.js";
 import { runLmStudioDiagnostic, formatDiagnosticReport } from "../diagnostics/lmstudio.js";
@@ -75,6 +83,13 @@ function formatUptime(seconds: number): string {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+function formatTimestamp(iso?: string | null): string {
+  if (!iso) return "unknown";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleString();
 }
 
 // ── Fetch Helpers ────────────────────────────────────────────────────────────
@@ -117,6 +132,182 @@ async function deleteApi(endpoint: string): Promise<any> {
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}: ${res.statusText}`);
     }
+    return await res.json();
+  } catch (err) {
+    console.error(colorize(`Error: ${String(err)}`, "red"));
+    console.log(colorize("\nIs lobs-core running? Try: npm start", "dim"));
+    process.exit(1);
+  }
+}
+
+type ChatSessionSummary = {
+  id: string;
+  key: string;
+  title: string;
+  summary: string | null;
+  createdAt: string;
+  updatedAt: string;
+  isActive: boolean;
+  compliance_required: boolean;
+  disabled_tools: string[];
+  unreadCount: number;
+  processing: boolean;
+  currentModel?: string;
+  overrideModel?: string | null;
+};
+
+type ChatMessage = {
+  role: string;
+  content: string;
+  timestamp: string;
+  metadata?: string | Record<string, unknown> | null;
+};
+
+async function getChatSessions(): Promise<ChatSessionSummary[]> {
+  const data = await fetchApi("/chat/sessions");
+  return Array.isArray(data?.sessions) ? data.sessions : [];
+}
+
+async function getChatSession(sessionKey: string): Promise<ChatSessionSummary | null> {
+  const sessions = await getChatSessions();
+  return sessions.find((session) => session.key === sessionKey) ?? null;
+}
+
+async function getChatMessages(sessionKey: string): Promise<ChatMessage[]> {
+  const data = await fetchApi(`/chat/sessions/${sessionKey}/messages`);
+  return Array.isArray(data?.messages) ? data.messages : [];
+}
+
+function parseChatMetadata(metadata: ChatMessage["metadata"]): Record<string, unknown> | null {
+  if (!metadata) return null;
+  if (typeof metadata === "string") {
+    try {
+      return JSON.parse(metadata) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+  return metadata;
+}
+
+function printChatMessage(message: ChatMessage): void {
+  const stamp = colorize(`[${formatTimestamp(message.timestamp)}]`, "gray");
+  if (message.role === "user") {
+    console.log(`${stamp} ${colorize("You", "cyan")}: ${message.content}`);
+    return;
+  }
+  if (message.role === "assistant") {
+    const cleaned = message.content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+    console.log(`${stamp} ${colorize("Assistant", "green")}: ${cleaned}`);
+    return;
+  }
+  if (message.role === "tool") {
+    const meta = parseChatMetadata(message.metadata);
+    const toolName = typeof meta?.toolName === "string" ? meta.toolName : "tool";
+    const status = meta?.status === "complete" ? "done" : "running";
+    console.log(`${stamp} ${colorize("Tool", "yellow")} ${toolName} (${status})`);
+    return;
+  }
+  console.log(`${stamp} ${message.role}: ${message.content}`);
+}
+
+function printChatTranscript(messages: ChatMessage[]): void {
+  if (messages.length === 0) {
+    console.log(colorize("No messages yet.", "dim"));
+    return;
+  }
+  for (const message of messages) printChatMessage(message);
+}
+
+async function waitForChatTurn(sessionKey: string, since: string): Promise<void> {
+  const seen = new Set<string>();
+  const timeoutAt = Date.now() + 5 * 60_000;
+
+  while (Date.now() < timeoutAt) {
+    const poll = await fetchApi(`/chat/sessions/${sessionKey}/poll?since=${encodeURIComponent(since)}`);
+    const messages: ChatMessage[] = Array.isArray(poll?.messages) ? poll.messages : [];
+    let printedAssistant = false;
+
+    for (const message of messages) {
+      const id = `${message.timestamp}:${message.role}:${message.content}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      printChatMessage(message);
+      if (message.role === "assistant") printedAssistant = true;
+    }
+
+    const status = await fetchApi(`/chat/sessions/${sessionKey}/status`);
+    const idle = !status?.processing && (status?.queueDepth ?? 0) === 0;
+    if (printedAssistant && idle) return;
+    if (messages.length > 0 && idle) return;
+
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  console.log(colorize("Timed out waiting for the assistant response.", "yellow"));
+}
+
+async function createChatSession(title?: string): Promise<ChatSessionSummary> {
+  const created = await postApi("/chat/sessions", { title: title?.trim() || "New Chat" });
+  return {
+    id: created.id,
+    key: created.key,
+    title: created.title,
+    summary: null,
+    createdAt: created.createdAt,
+    updatedAt: created.createdAt,
+    isActive: true,
+    compliance_required: Boolean(created.compliance_required),
+    disabled_tools: [],
+    unreadCount: 0,
+    processing: false,
+    currentModel: created.currentModel,
+    overrideModel: created.overrideModel ?? null,
+  };
+}
+
+async function markChatRead(sessionKey: string): Promise<void> {
+  await postApi(`/chat/sessions/${sessionKey}/read`, {});
+}
+
+type ApiModelOption = {
+  id: string;
+  label: string;
+  provider: string;
+  source: string;
+  tier?: string;
+  loaded?: boolean;
+};
+
+type ModelCatalogResponse = {
+  defaultModel: string;
+  currentModel: string;
+  overrideModel: string | null;
+  options: ApiModelOption[];
+  lmstudio: {
+    baseUrl: string;
+    reachable: boolean;
+    loadedModels: string[];
+  };
+};
+
+async function getModelCatalog(sessionKey?: string): Promise<ModelCatalogResponse> {
+  const suffix = sessionKey ? `?sessionKey=${encodeURIComponent(sessionKey)}` : "";
+  return await fetchApi(`/models${suffix}`);
+}
+
+async function setChatSessionModel(sessionKey: string, model: string | null): Promise<{ currentModel: string; overrideModel: string | null }> {
+  return await postOrPatchApi(`/chat/sessions/${sessionKey}/model`, "PATCH", { model });
+}
+
+async function postOrPatchApi(endpoint: string, method: "POST" | "PATCH", body: any): Promise<any> {
+  try {
+    const res = await fetch(`${API_BASE}${endpoint}`, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
     return await res.json();
   } catch (err) {
     console.error(colorize(`Error: ${String(err)}`, "red"));
@@ -528,11 +719,36 @@ async function cmdHealth() {
   console.log("");
 }
 
-async function cmdModels() {
+async function cmdModelsDiagnostic() {
   const report = await runLmStudioDiagnostic();
   const lines = formatDiagnosticReport(report, { color: process.stdout.isTTY });
   for (const line of lines) console.log(line);
   process.exit(report.ok ? 0 : 1);
+}
+
+async function cmdModelsAvailable(): Promise<void> {
+  const catalog = await getModelCatalog();
+  console.log(colorize("\n=== Model Catalog ===\n", "bright"));
+  console.log(`Default chat model: ${colorize(catalog.defaultModel, "cyan")}`);
+  console.log(`LM Studio: ${catalog.lmstudio.reachable ? colorize("reachable", "green") : colorize("unreachable", "red")} ${colorize(catalog.lmstudio.baseUrl, "dim")}`);
+  console.log("");
+
+  if (catalog.lmstudio.loadedModels.length > 0) {
+    console.log(colorize("LM Studio Loaded Models", "cyan"));
+    for (const model of catalog.lmstudio.loadedModels) {
+      console.log(`  ${colorize(`lmstudio/${model}`, "green")}`);
+    }
+    console.log("");
+  }
+
+  console.log(colorize("Selectable Models", "cyan"));
+  for (const option of catalog.options) {
+    const meta = [option.tier ? `tier:${option.tier}` : null, option.loaded ? "loaded" : null, option.source]
+      .filter(Boolean)
+      .join(", ");
+    console.log(`  ${colorize(option.id, "bright")}${meta ? colorize(`  [${meta}]`, "dim") : ""}`);
+  }
+  console.log("");
 }
 
 /**
@@ -694,6 +910,196 @@ function cmdInit() {
   console.log("  2. Update secrets/discord-token.json with your Discord bot token");
   console.log("  3. Run 'lobs config check' to validate");
   console.log("");
+}
+
+// ── Chat ─────────────────────────────────────────────────────────────────────
+
+function printChatSessionList(sessions: ChatSessionSummary[]): void {
+  console.log(colorize("\n=== Chat Sessions ===\n", "bright"));
+
+  if (sessions.length === 0) {
+    console.log(colorize("No chat sessions yet. Start one with `lobs chat`.", "dim"));
+    return;
+  }
+
+  for (const session of sessions) {
+    const key = colorize(session.key, "gray");
+    const title = colorize(session.title || "New Chat", "bright");
+    const updated = colorize(formatTimestamp(session.updatedAt), "dim");
+    const flags = [
+      session.processing ? colorize("processing", "yellow") : null,
+      session.unreadCount > 0 ? colorize(`${session.unreadCount} unread`, "cyan") : null,
+      session.compliance_required ? colorize("compliance", "magenta") : null,
+    ].filter(Boolean).join(", ");
+
+    console.log(`${title} ${key}`);
+    console.log(`  Updated: ${updated}${flags ? `  ${flags}` : ""}`);
+    if (session.summary) {
+      console.log(`  ${colorize(session.summary, "dim")}`);
+    }
+  }
+  console.log("");
+}
+
+async function cmdChatList(): Promise<void> {
+  const sessions = await getChatSessions();
+  printChatSessionList(sessions);
+}
+
+async function cmdChatShow(sessionKey?: string): Promise<void> {
+  if (!sessionKey) {
+    console.log(colorize("Usage: lobs chat show <session-key>", "yellow"));
+    return;
+  }
+
+  const session = await getChatSession(sessionKey);
+  if (!session) {
+    console.log(colorize(`Chat session not found: ${sessionKey}`, "red"));
+    return;
+  }
+
+  console.log(colorize(`\n=== ${session.title} ===\n`, "bright"));
+  console.log(colorize(`Session: ${session.key}`, "dim"));
+  console.log(colorize(`Updated: ${formatTimestamp(session.updatedAt)}`, "dim"));
+  if (session.currentModel) console.log(colorize(`Model: ${session.currentModel}`, "dim"));
+  if (session.summary) console.log(colorize(`Summary: ${session.summary}`, "dim"));
+  console.log("");
+
+  const messages = await getChatMessages(sessionKey);
+  printChatTranscript(messages);
+  console.log("");
+  await markChatRead(sessionKey);
+}
+
+async function runChatSession(session: ChatSessionSummary, showHistory = false): Promise<void> {
+  console.log(colorize(`\n=== ${session.title || "New Chat"} ===\n`, "bright"));
+  console.log(colorize(`Session key: ${session.key}`, "dim"));
+  if (session.currentModel) console.log(colorize(`Model: ${session.currentModel}`, "dim"));
+  console.log(colorize("Commands: /exit, /quit, /history, /sessions, /models, /model <id|default>, /help", "dim"));
+  console.log("");
+
+  if (showHistory) {
+    const messages = await getChatMessages(session.key);
+    printChatTranscript(messages);
+    if (messages.length > 0) console.log("");
+  }
+
+  await markChatRead(session.key);
+
+  const rl = createInterface({ input, output });
+  try {
+    while (true) {
+      const line = (await rl.question(colorize("you> ", "cyan"))).trim();
+      if (!line) continue;
+
+      if (line === "/exit" || line === "/quit") break;
+      if (line === "/help") {
+        console.log(colorize("Commands: /exit, /quit, /history, /sessions, /models, /model <id|default>, /help", "dim"));
+        continue;
+      }
+      if (line === "/models") {
+        const catalog = await getModelCatalog(session.key);
+        console.log(colorize(`Current model: ${catalog.currentModel}`, "cyan"));
+        if (catalog.lmstudio.loadedModels.length > 0) {
+          console.log(colorize("LM Studio loaded:", "dim"));
+          for (const model of catalog.lmstudio.loadedModels) {
+            console.log(`  ${colorize(`lmstudio/${model}`, "green")}`);
+          }
+        }
+        console.log(colorize("Available picks:", "dim"));
+        for (const option of catalog.options.slice(0, 25)) {
+          console.log(`  ${option.id}`);
+        }
+        continue;
+      }
+      if (line.startsWith("/model")) {
+        const requested = line.replace(/^\/model\s*/, "").trim();
+        if (!requested) {
+          const catalog = await getModelCatalog(session.key);
+          console.log(colorize(`Current model: ${catalog.currentModel}`, "cyan"));
+          continue;
+        }
+        const nextModel = requested === "default" ? null : requested;
+        const result = await setChatSessionModel(session.key, nextModel);
+        session.currentModel = result.currentModel;
+        session.overrideModel = result.overrideModel;
+        console.log(colorize(`Model set to ${result.currentModel}`, "green"));
+        continue;
+      }
+      if (line === "/sessions") {
+        const sessions = await getChatSessions();
+        printChatSessionList(sessions);
+        continue;
+      }
+      if (line === "/history") {
+        const messages = await getChatMessages(session.key);
+        printChatTranscript(messages);
+        continue;
+      }
+
+      const sentAt = new Date().toISOString();
+      await postApi(`/chat/sessions/${session.key}/messages`, { content: line });
+      console.log(colorize("assistant> thinking...", "dim"));
+      await waitForChatTurn(session.key, sentAt);
+      await markChatRead(session.key);
+      console.log("");
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+async function cmdChat(subCmd?: string, extraArgs: string[] = []): Promise<void> {
+  if (!subCmd || subCmd === "new") {
+    const title = extraArgs.join(" ").trim() || undefined;
+    const session = await createChatSession(title);
+    await runChatSession(session, false);
+    return;
+  }
+
+  if (subCmd === "list") {
+    await cmdChatList();
+    return;
+  }
+
+  if (subCmd === "show") {
+    await cmdChatShow(extraArgs[0]);
+    return;
+  }
+
+  if (subCmd === "resume") {
+    const sessionKey = extraArgs[0];
+    if (!sessionKey) {
+      console.log(colorize("Usage: lobs chat resume <session-key>", "yellow"));
+      return;
+    }
+    const session = await getChatSession(sessionKey);
+    if (!session) {
+      console.log(colorize(`Chat session not found: ${sessionKey}`, "red"));
+      return;
+    }
+    await runChatSession(session, true);
+    return;
+  }
+
+  if (subCmd === "model") {
+    const sessionKey = extraArgs[0];
+    const requested = extraArgs.slice(1).join(" ").trim();
+    if (!sessionKey) {
+      console.log(colorize("Usage: lobs chat model <session-key> [model|default]", "yellow"));
+      return;
+    }
+    if (!requested) {
+      const catalog = await getModelCatalog(sessionKey);
+      console.log(colorize(`Current model: ${catalog.currentModel}`, "cyan"));
+      return;
+    }
+    const result = await setChatSessionModel(sessionKey, requested === "default" ? null : requested);
+    console.log(colorize(`Model for ${sessionKey} set to ${result.currentModel}`, "green"));
+    return;
+  }
+
+  console.log(colorize("Usage: lobs chat [new [title]|list|show <key>|resume <key>|model <key> [model|default]]", "yellow"));
 }
 
 // ── Cron ─────────────────────────────────────────────────────────────────────
@@ -859,6 +1265,10 @@ const subcommand = args[1];
     case "workers":
       await cmdWorkers();
       break;
+
+    case "chat":
+      await cmdChat(subcommand, args.slice(2));
+      break;
     
     case "config":
       if (subcommand === "check") {
@@ -887,7 +1297,11 @@ const subcommand = args[1];
       break;
 
     case "models":
-      await cmdModels();
+      if (subcommand === "available" || subcommand === "list") {
+        await cmdModelsAvailable();
+      } else {
+        await cmdModelsDiagnostic();
+      }
       break;
 
     case "cron":
@@ -915,6 +1329,13 @@ const subcommand = args[1];
       console.log("  lobs tasks [list|view]   Manage tasks");
       console.log("  lobs workers             Show active/recent worker runs");
       console.log("");
+      console.log(colorize("Chat:", "cyan"));
+      console.log("  lobs chat                Start a new interactive chat");
+      console.log("  lobs chat list           List saved chat sessions");
+      console.log("  lobs chat show <key>     Show a saved transcript");
+      console.log("  lobs chat resume <key>   Resume an existing chat");
+      console.log("  lobs chat model <k> [m]  Show or set a chat session model");
+      console.log("");
       console.log(colorize("Cron:", "cyan"));
       console.log("  lobs cron [list]         List all cron jobs");
       console.log("  lobs cron add <n> <s> <p>  Add an agent cron job");
@@ -924,6 +1345,7 @@ const subcommand = args[1];
       console.log("");
       console.log(colorize("Models:", "cyan"));
       console.log("  lobs models              Diagnose LM Studio model availability");
+      console.log("  lobs models available    List selectable models + loaded LM Studio models");
       console.log("");
       console.log(colorize("Config:", "cyan"));
       console.log("  lobs config check        Validate all config files");

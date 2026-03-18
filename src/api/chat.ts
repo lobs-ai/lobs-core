@@ -9,6 +9,7 @@ import type { AgentStreamEvent } from "../services/main-agent.js";
 import { getToolDefinitions } from "../runner/tools/index.js";
 import { getToolsForSession } from "../runner/tools/tool-sets.js";
 import { onAssistantMessage, forceSummarize } from "../services/chat-summarizer.js";
+import { getDefaultChatModel, getChannelModelOverride, getModelCatalog, normalizeModelSelection, setChannelModelOverride } from "../services/model-catalog.js";
 
 // ─── Simple DB-backed chat (no gateway dependency) ─────────────────────
 
@@ -54,7 +55,15 @@ export async function handleChatRequest(
         lastReadAt: now,
       }).run();
 
-      return json(res, { id, key: sessionKey, title, createdAt: now, compliance_required: complianceRequired }, 201);
+      return json(res, {
+        id,
+        key: sessionKey,
+        title,
+        createdAt: now,
+        compliance_required: complianceRequired,
+        currentModel: getDefaultChatModel(),
+        overrideModel: null,
+      }, 201);
     }
 
     // POST /api/chat/sessions/:key/messages — send a message (async with polling)
@@ -357,6 +366,8 @@ export async function handleChatRequest(
             disabled_tools: s.disabledTools ? JSON.parse(s.disabledTools) : [],
             unreadCount,
             processing: processingChannels.has(channelId),
+            currentModel: getChannelModelOverride(channelId) ?? getDefaultChatModel(),
+            overrideModel: getChannelModelOverride(channelId),
           };
         }),
       });
@@ -448,6 +459,50 @@ export async function handleChatRequest(
       }));
 
       return json(res, { tools });
+    }
+
+    // GET /api/chat/sessions/:key/model — current model + available options
+    if (sessionKey && action === "model" && method === "GET") {
+      const sessionRow = db.select()
+        .from(chatSessions)
+        .where(eq(chatSessions.sessionKey, sessionKey))
+        .get();
+      if (!sessionRow) return error(res, "Session not found", 404);
+
+      const channelId = `nexus:${sessionKey}`;
+      const catalog = await getModelCatalog();
+      const overrideModel = getChannelModelOverride(channelId);
+      return json(res, {
+        key: sessionKey,
+        currentModel: overrideModel ?? catalog.defaultModel,
+        overrideModel,
+        options: catalog.options,
+        lmstudio: catalog.lmstudio,
+      });
+    }
+
+    // PATCH /api/chat/sessions/:key/model — set/clear model override
+    if (sessionKey && action === "model" && method === "PATCH") {
+      const body = (await parseBody(req)) as { model?: string | null };
+      const sessionRow = db.select()
+        .from(chatSessions)
+        .where(eq(chatSessions.sessionKey, sessionKey))
+        .get();
+      if (!sessionRow) return error(res, "Session not found", 404);
+
+      const channelId = `nexus:${sessionKey}`;
+      const normalized = typeof body.model === "string" && body.model.trim()
+        ? await normalizeModelSelection(body.model)
+        : null;
+
+      setChannelModelOverride(channelId, normalized);
+      log().info(`[chat] session ${sessionKey} model override set to ${normalized ?? "default"}`);
+
+      return json(res, {
+        key: sessionKey,
+        currentModel: normalized ?? getDefaultChatModel(),
+        overrideModel: normalized,
+      });
     }
 
     // PATCH /api/chat/sessions/:key/tools — update disabled tools list

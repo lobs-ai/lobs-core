@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc && npm run copy-skills && npm run copy-python-tools",
+    "build": "tsc && chmod +x dist/cli/lobs.js && npm run copy-skills && npm run copy-python-tools",
     "copy-skills": "mkdir -p dist/skills && cp -r src/skills/* dist/skills/",
     "copy-python-tools": "cp src/runner/tools/web_fetch.py dist/runner/tools/web_fetch.py 2>/dev/null || true",
     "dev": "tsc --watch",

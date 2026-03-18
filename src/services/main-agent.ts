@@ -35,6 +35,34 @@ const TYPING_HANDLER_TIMEOUT_MS = 5_000;
 /** Tools that mutate state and must run sequentially (not parallelizable) */
 const SEQUENTIAL_TOOLS = new Set(["exec", "process", "write", "edit", "memory_write", "spawn_agent"]);
 
+function stripThinkBlocks(text: string): string {
+  return text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+}
+
+function sanitizeAssistantBlocks(
+  blocks: Array<
+    | { type: "text"; text: string }
+    | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
+  >,
+): Array<
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
+> {
+  const sanitized: Array<
+    | { type: "text"; text: string }
+    | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
+  > = [];
+  for (const block of blocks) {
+    if (block.type !== "text") {
+      sanitized.push(block);
+      continue;
+    }
+    const text = stripThinkBlocks(block.text);
+    if (text) sanitized.push({ ...block, text });
+  }
+  return sanitized;
+}
+
 /** Image attachment data (base64-encoded) */
 export interface ImageAttachment {
   data: string;          // base64-encoded image data
@@ -986,6 +1014,11 @@ export class MainAgent {
           `llm_response blocks=${response.content.length} stop=${response.stopReason}`,
         );
 
+        const sanitizedContent = sanitizeAssistantBlocks(response.content as Array<
+          | { type: "text"; text: string }
+          | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
+        >);
+
         let textResponse = "";
         let hasToolUse = false;
         const toolResults: Array<{
@@ -997,7 +1030,7 @@ export class MainAgent {
 
         // Separate text blocks from tool_use blocks
         const toolUseBlocks: Array<{ type: "tool_use"; id: string; name: string; input: Record<string, unknown> }> = [];
-        for (const block of response.content) {
+        for (const block of sanitizedContent) {
           if (block.type === "text") {
             textResponse += block.text;
           } else if (block.type === "tool_use") {
@@ -1113,7 +1146,7 @@ export class MainAgent {
         }
 
         // Append assistant turn
-        messages.push({ role: "assistant", content: response.content });
+        messages.push({ role: "assistant", content: sanitizedContent });
 
         if (hasToolUse) {
           console.debug(
