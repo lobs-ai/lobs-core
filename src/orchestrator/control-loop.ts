@@ -593,6 +593,19 @@ async function runTick(): Promise<void> {
     log().error(`orchestrator: watchdog error: ${e}`);
   }
 
+  // ── 8b. Safety net: sweep orphaned in_progress tasks ─────────────────────────
+  // Catches tasks stuck in work_state='in_progress' with NO open worker_runs
+  // and NO running workflow_runs. This can happen when async watchdog closures
+  // race: the worker_run gets closed but the task reset inside closeGhostRun
+  // doesn't execute (e.g., CAS failure, error in the .then() callback, or
+  // another watchdog closing the worker_run first without resetting the task).
+  // Runs every tick but the query is cheap and idempotent.
+  try {
+    sweepOrphanedInProgressTasks();
+  } catch (e) {
+    log().error(`orchestrator: orphaned task sweep error: ${e}`);
+  }
+
   // ── 9. Meeting analysis recovery ────────────────────────────────────────────
   // Pick up meetings stuck in 'pending' (e.g. after restart reset from processing).
   // Only processes one per tick to avoid blocking the loop.
@@ -968,6 +981,72 @@ async function closeStartupOrphans(): Promise<void> {
  *
  * Safe on every tick (query is cheap and idempotent).
  */
+
+// ── Safety net: sweep orphaned in_progress tasks ─────────────────────────────
+
+/**
+ * Find tasks stuck in work_state='in_progress' that have NO open worker_runs
+ * and NO running/pending workflow_runs. These are orphans: their worker died
+ * and was cleaned up, but the task state was never reset.
+ *
+ * This is the last-resort safety net. The primary paths (closeGhostRun,
+ * forceTerminateWorker, stall watchdog) all try to reset the task, but if
+ * they race or error, this sweep catches the stragglers.
+ *
+ * Only resets tasks that have been in_progress with no worker for at least 3
+ * minutes, to avoid racing with a spawn that's still setting up its worker_run.
+ */
+function sweepOrphanedInProgressTasks(): void {
+  const db = getRawDb();
+
+  // Find active+in_progress tasks with zero open worker_runs AND zero
+  // running/pending workflow_runs, updated more than 3 min ago.
+  const cutoff = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+
+  const orphans = db.prepare(`
+    SELECT t.id, t.title, t.agent, t.spawn_count, t.crash_count
+    FROM tasks t
+    WHERE t.status = 'active'
+      AND t.work_state = 'in_progress'
+      AND t.updated_at < ?
+      AND NOT EXISTS (
+        SELECT 1 FROM worker_runs wr
+        WHERE wr.task_id = t.id AND wr.ended_at IS NULL
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_runs wf
+        WHERE wf.task_id = t.id AND wf.status IN ('running', 'pending')
+      )
+  `).all(cutoff) as Array<{
+    id: string;
+    title: string;
+    agent: string | null;
+    spawn_count: number | null;
+    crash_count: number | null;
+  }>;
+
+  if (orphans.length === 0) return;
+
+  const now = new Date().toISOString();
+
+  for (const orphan of orphans) {
+    db.prepare(`
+      UPDATE tasks
+      SET work_state = 'not_started',
+          crash_count = COALESCE(crash_count, 0) + 1,
+          updated_at = ?
+      WHERE id = ? AND work_state = 'in_progress'
+    `).run(now, orphan.id);
+
+    log().warn(
+      `[ORPHAN_SWEEP] Reset task ${orphan.id.slice(0, 8)} "${orphan.title.slice(0, 50)}" ` +
+      `to not_started (was in_progress with no worker/workflow — crash_count++)`
+    );
+  }
+
+  log().warn(`[ORPHAN_SWEEP] Reset ${orphans.length} orphaned in_progress task(s)`);
+}
+
 function runWatchdog(): void {
   const db = getRawDb();
   // IMPORTANT: use toISOString() — not SQLite's datetime("now","-5 minutes").
