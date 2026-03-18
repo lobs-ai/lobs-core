@@ -929,6 +929,19 @@ class ResilientLLMClient implements LLMClient {
             }
           }
 
+          // All keys unavailable — wait for recovery then retry with fresh client
+          if (message.includes("all_anthropic_keys_unavailable") || message.includes("all_openai_keys_unavailable") || message.includes("all_openrouter_keys_unavailable")) {
+            if (attempt < this.maxRetries) {
+              const waitTime = this.exponentialBackoff(attempt) * 1000;
+              console.warn(
+                `[ResilientLLMClient] All keys unavailable for ${model}, waiting ${(waitTime / 1000).toFixed(1)}s for recovery ` +
+                `(attempt ${attempt}/${this.maxRetries}) session=${this.sessionId?.slice(0, 40) ?? "none"}`,
+              );
+              await this.sleep(waitTime);
+              continue;
+            }
+          }
+
           // All retries exhausted for this model
           if (isFallback || modelIdx === modelsToTry.length - 1) {
             // Last model — propagate error
