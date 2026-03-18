@@ -666,7 +666,9 @@ function extractToolCallsFromText(content: string, allowedTools: ToolDefinition[
 
 function buildOpenAIToolFallbackInstruction(tools: ToolDefinition[]): string {
   if (tools.length === 0) return "";
-  const toolList = tools.map((tool) => `- ${tool.name}`).join("\n");
+  const toolList = tools
+    .map((tool) => `- ${tool.name}: ${tool.description.replace(/\s+/g, " ").trim()}`)
+    .join("\n");
   return [
     "Tool usage is enabled.",
     "If the model/API supports native tool calling, use it.",
@@ -674,7 +676,7 @@ function buildOpenAIToolFallbackInstruction(tools: ToolDefinition[]): string {
     '{"tool":"tool_name","input":{"arg":"value"}}',
     '{"tool_calls":[{"tool":"tool_name","input":{"arg":"value"}}]}',
     "Do not wrap the JSON in prose. Do not describe the tool call. Emit the JSON directly.",
-    `Allowed tools:\n${toolList}`,
+    `Allowed tools and descriptions:\n${toolList}`,
   ].join("\n");
 }
 
