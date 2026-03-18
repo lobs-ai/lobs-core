@@ -128,7 +128,7 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   },
   humanize: {
     definition: humanizeToolDefinition,
-    execute: (params) => humanizeTool(params),
+    execute: (params, cwd) => humanizeTool(params, cwd),
   },
 };
 

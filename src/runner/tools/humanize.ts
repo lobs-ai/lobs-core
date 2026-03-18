@@ -10,7 +10,10 @@
  *   - humanize: Prioritized rewrite suggestions + optional auto-fix
  */
 
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { extname } from "node:path";
 import type { ToolDefinition } from "../types.js";
+import { resolveToCwd } from "./path-utils.js";
 
 type Confidence = "high" | "medium" | "low";
 type Category = "content" | "language" | "style" | "communication" | "filler";
@@ -1793,8 +1796,10 @@ export const humanizeToolDefinition: ToolDefinition = {
     "Actions:\n" +
     "- score: Quick 0-100 AI score with summary\n" +
     "- analyze: Full analysis — pattern matches, text statistics, category breakdown\n" +
-    "- humanize: Prioritized suggestions (critical/important/minor) + auto-fix option\n\n" +
-    "Use after writing content to check and improve it, or to evaluate text quality.",
+    "- humanize: Prioritized suggestions (critical/important/minor) with optional returned autofix text\n\n" +
+    "This tool is diagnostic by default: it reports issues in the provided text and does not update files or mutate the source text in place. " +
+    "If autofix=true, it returns a suggested cleaned-up text in the tool output only; you must still apply any edits separately. " +
+    "Accepts raw text directly or a file path. HTML/XML-like content is converted to plain text before analysis.",
   input_schema: {
     type: "object",
     properties: {
@@ -1803,31 +1808,147 @@ export const humanizeToolDefinition: ToolDefinition = {
         enum: ["score", "analyze", "humanize"],
         description:
           "Action to perform. 'score' = quick 0-100 number. 'analyze' = detailed pattern report. " +
-          "'humanize' = rewrite suggestions with optional auto-fix.",
+          "'humanize' = issue report with rewrite suggestions; it does not edit the source input.",
       },
       text: {
         type: "string",
-        description: "The text to analyze or humanize.",
+        description: "The text to inspect. HTML in pasted text is stripped before analysis. Provide this or `path`.",
+      },
+      path: {
+        type: "string",
+        description: "Path to a text-like file to inspect. HTML/XML-like files are converted to plain text first. Provide this or `text`.",
       },
       autofix: {
         type: "boolean",
         description:
           "For 'humanize' action only: apply safe mechanical fixes (curly quotes, filler phrases, " +
-          "chatbot artifacts). Returns the fixed text alongside suggestions. Default: false.",
+          "chatbot artifacts). Returns suggested fixed text alongside the issue report; it does not modify files or the original input. Default: false.",
       },
     },
-    required: ["action", "text"],
+    required: ["action"],
   },
 };
 
-export async function humanizeTool(params: Record<string, unknown>): Promise<string> {
-  const action = params.action as string;
-  const text = params.text as string;
-  const autofix = params.autofix === true;
+const MARKUP_EXTENSIONS = new Set([
+  ".html",
+  ".htm",
+  ".xhtml",
+  ".xml",
+  ".svg",
+]);
 
-  if (!text || typeof text !== "string") {
-    throw new Error("text is required and must be a string");
+const MAX_INPUT_FILE_BYTES = 200 * 1024;
+
+function decodeHtmlEntities(input: string): string {
+  return input.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (match, entity: string) => {
+    const normalized = entity.toLowerCase();
+    const named: Record<string, string> = {
+      amp: "&",
+      lt: "<",
+      gt: ">",
+      quot: "\"",
+      apos: "'",
+      nbsp: " ",
+      ndash: "-",
+      mdash: "-",
+      hellip: "...",
+      rsquo: "'",
+      lsquo: "'",
+      rdquo: "\"",
+      ldquo: "\"",
+    };
+
+    if (normalized in named) return named[normalized];
+    if (normalized.startsWith("#x")) {
+      const code = Number.parseInt(normalized.slice(2), 16);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+    }
+    if (normalized.startsWith("#")) {
+      const code = Number.parseInt(normalized.slice(1), 10);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+    }
+    return match;
+  });
+}
+
+function stripMarkup(input: string): string {
+  return decodeHtmlEntities(
+    input
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+      .replace(/<!--[\s\S]*?-->/g, " ")
+      .replace(/<(?:br|\/p|\/div|\/section|\/article|\/li|\/tr|\/h[1-6])\b[^>]*>/gi, "\n")
+      .replace(/<li\b[^>]*>/gi, "\n- ")
+      .replace(/<[^>]+>/g, " "),
+  );
+}
+
+function normalizeWhitespace(input: string): string {
+  return input
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function looksLikeMarkup(input: string): boolean {
+  return /<[a-z!/][^>]*>/i.test(input);
+}
+
+function preprocessHumanizeText(input: string): string {
+  const normalized = looksLikeMarkup(input) ? stripMarkup(input) : decodeHtmlEntities(input);
+  return normalizeWhitespace(normalized);
+}
+
+function loadHumanizeInput(params: Record<string, unknown>, cwd: string): string {
+  const text = typeof params.text === "string" ? params.text : "";
+  const filePath = typeof params.path === "string" ? params.path : "";
+
+  if (!text && !filePath) {
+    throw new Error("Provide either text or path");
   }
+  if (text) {
+    const textContent = preprocessHumanizeText(text);
+    if (!textContent) {
+      throw new Error("No analyzable text found in text input");
+    }
+    return textContent;
+  }
+
+  const resolved = resolveToCwd(filePath, cwd);
+  if (!existsSync(resolved)) {
+    throw new Error(`File not found: ${filePath}`);
+  }
+
+  const stat = statSync(resolved);
+  if (stat.isDirectory()) {
+    throw new Error(`${filePath} is a directory, not a file`);
+  }
+  if (stat.size > MAX_INPUT_FILE_BYTES) {
+    throw new Error(
+      `File too large for humanize (${stat.size} bytes). Limit is ${MAX_INPUT_FILE_BYTES} bytes.`,
+    );
+  }
+
+  const raw = readFileSync(resolved, "utf-8");
+  const extension = extname(resolved).toLowerCase();
+  const textContent = MARKUP_EXTENSIONS.has(extension)
+    ? preprocessHumanizeText(raw)
+    : normalizeWhitespace(raw);
+
+  if (!textContent) {
+    throw new Error(`No analyzable text found in ${filePath}`);
+  }
+
+  return textContent;
+}
+
+export async function humanizeTool(params: Record<string, unknown>, cwd = process.cwd()): Promise<string> {
+  const action = params.action as string;
+  const autofix = params.autofix === true;
+  const text = loadHumanizeInput(params, cwd);
+
   if (!action || !["score", "analyze", "humanize"].includes(action)) {
     throw new Error("action must be one of: score, analyze, humanize");
   }
