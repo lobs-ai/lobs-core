@@ -8,6 +8,8 @@ describe("humanizeTool", () => {
   it("accepts raw text input", async () => {
     const result = await humanizeTool({ action: "score", text: "This is a short paragraph." }, "/tmp");
     expect(result).toContain("Score:");
+    expect(result).toContain("Revision instructions:");
+    expect(result).toContain("Do not use em dashes at all.");
   });
 
   it("strips html from raw text input", async () => {
@@ -51,6 +53,8 @@ describe("humanizeTool", () => {
       expect(result).toContain("AI Score:");
       expect(result).not.toContain("<html>");
       expect(result).not.toContain("ignored()");
+      expect(result).toContain("Revision instructions:");
+      expect(result).toContain("Do not use em dashes at all.");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

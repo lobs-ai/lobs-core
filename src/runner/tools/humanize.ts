@@ -1686,7 +1686,7 @@ function buildGuidance(analysis: AnalysisResult): string[] {
   if (ids.has(8)) tips.push('Use "is" and "has" freely. "Serves as" and "boasts" are usually worse.');
   if (ids.has(9)) tips.push('Drop "not just X, it is Y" frames. Just say what the thing is.');
   if (ids.has(10)) tips.push("Break up triads. You do not need three items every time.");
-  if (ids.has(13)) tips.push("Ease up on em dashes. Use commas, periods, or parentheses for variation.");
+  if (ids.has(13)) tips.push("Do not use em dashes. Replace every em dash with a period, comma, colon, semicolon, or parentheses.");
   if (ids.has(14) || ids.has(15)) tips.push("Strip mechanical bold formatting and inline-header lists. Let the prose do the work.");
   if (ids.has(17)) tips.push("Remove emojis from professional text. They read like chatbot decoration.");
   if (ids.has(19) || ids.has(21)) tips.push('Remove chatbot filler like "I hope this helps" and "Great question".');
@@ -1972,14 +1972,45 @@ function scoreLabel(score: number): string {
   return "🟢 Mostly human-sounding";
 }
 
+function appendRevisionInstructions(
+  lines: string[],
+  guidance: string[],
+  styleTips: StyleTip[] = [],
+  options: { includeAutofixNote?: boolean } = {},
+): void {
+  lines.push("Revision instructions:");
+  lines.push("  - This tool reports issues in the text. It does not update files or change the source input for you.");
+  if (options.includeAutofixNote) {
+    lines.push("  - If fixed text is returned above, treat it as a suggestion only. You still need to apply any edits separately.");
+  }
+  lines.push("  - Do not use em dashes at all. Replace them with a period, comma, colon, semicolon, or parentheses.");
+  lines.push("  - Prefer direct, specific wording over inflated, generic, or formulaic phrasing.");
+  lines.push("  - After revising, run the tool again on the updated text.");
+
+  if (guidance.length > 0) {
+    lines.push("");
+    lines.push("Targeted guidance:");
+    for (const tip of guidance) lines.push(`  - ${tip}`);
+  }
+
+  if (styleTips.length > 0) {
+    lines.push("");
+    lines.push("Style tips:");
+    for (const tip of styleTips) lines.push(`  - ${tip.tip}`);
+  }
+}
+
 function formatScore(text: string): string {
   const result = analyze(text);
-  return [
+  const lines = [
     `Score: ${result.score}/100 ${scoreLabel(result.score)}`,
     `Pattern: ${result.patternScore} | Uniformity: ${result.uniformityScore} | Matches: ${result.totalMatches} | Words: ${result.wordCount}`,
     "",
     result.summary,
-  ].join("\n");
+    "",
+  ];
+  appendRevisionInstructions(lines, buildGuidance(result));
+  return lines.join("\n");
 }
 
 function formatAnalysis(text: string): string {
@@ -2023,6 +2054,8 @@ function formatAnalysis(text: string): string {
 
   lines.push("");
   lines.push(result.summary);
+  lines.push("");
+  appendRevisionInstructions(lines, buildGuidance(result), result.stats ? buildStyleTips(result.stats) : []);
   return lines.join("\n");
 }
 
@@ -2068,16 +2101,7 @@ function formatHumanize(text: string, autofix: boolean): string {
     lines.push("");
   }
 
-  if (result.guidance.length > 0) {
-    lines.push("Guidance:");
-    for (const tip of result.guidance) lines.push(`  • ${tip}`);
-    lines.push("");
-  }
-
-  if (result.styleTips.length > 0) {
-    lines.push("Style tips:");
-    for (const tip of result.styleTips) lines.push(`  • ${tip.tip}`);
-  }
+  appendRevisionInstructions(lines, result.guidance, result.styleTips, { includeAutofixNote: autofix });
 
   return lines.join("\n");
 }
