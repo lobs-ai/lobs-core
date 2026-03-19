@@ -25,6 +25,20 @@ describe("humanizeTool", () => {
     expect(result).not.toContain("ignored()");
   });
 
+  it("returns rewrite priorities beyond general house rules", async () => {
+    const result = await humanizeTool(
+      {
+        text: "Furthermore, this comprehensive solution serves as a testament to best practices — it is not just efficient, it is impactful. I hope this helps.",
+      },
+      "/tmp",
+    );
+
+    expect(result).toContain("Rewrite priorities:");
+    expect(result).toContain('Replace "Furthermore"');
+    expect(result).toContain("mechanical cleanup");
+    expect(result).toContain("Do not use em dashes at all.");
+  });
+
   it("reads plain text files from path", async () => {
     const dir = mkdtempSync(join(tmpdir(), "lobs-humanize-tool-"));
     try {

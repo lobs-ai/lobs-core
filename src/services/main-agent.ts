@@ -1085,6 +1085,7 @@ export class MainAgent {
               block.input as Record<string, unknown>,
               block.id,
               this.cwd,
+              { channelId: replyChannelId },
             );
             if (sideEffects?.newCwd) {
               this.cwd = sideEffects.newCwd;

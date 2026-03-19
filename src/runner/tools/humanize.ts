@@ -1938,8 +1938,30 @@ function scoreLabel(score: number): string {
   return "🟢 Mostly human-sounding";
 }
 
+function buildRewritePriorities(result: HumanizeResult): string[] {
+  const priorities: string[] = [];
+  const seen = new Set<string>();
+  const ranked = [...result.critical, ...result.important];
+
+  for (const suggestion of ranked) {
+    const fix = suggestion.suggestion?.trim();
+    const text = suggestion.text.replace(/\s+/g, " ").trim();
+    if (!fix || !text) continue;
+
+    const key = `${suggestion.patternId}:${fix}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    priorities.push(`Replace "${text.slice(0, 70)}" with ${fix}.`);
+    if (priorities.length >= 6) break;
+  }
+
+  return priorities;
+}
+
 function appendRevisionInstructions(
   lines: string[],
+  rewritePriorities: string[],
   guidance: string[],
   styleTips: StyleTip[] = [],
   options: { includeAutofixNote?: boolean } = {},
@@ -1947,11 +1969,17 @@ function appendRevisionInstructions(
   lines.push("Revision instructions:");
   lines.push("  - This tool reports issues in the text. It does not update files or change the source input for you.");
   if (options.includeAutofixNote) {
-    lines.push("  - If fixed text is returned above, treat it as a suggestion only. You still need to apply any edits separately.");
+    lines.push("  - The suggested fixed text above is only mechanical cleanup. It does not fully rewrite weak structure, vague claims, or AI-sounding phrasing.");
   }
   lines.push("  - Do not use em dashes at all. Replace them with a period, comma, colon, semicolon, or parentheses.");
   lines.push("  - Prefer direct, specific wording over inflated, generic, or formulaic phrasing.");
   lines.push("  - After revising, run the tool again on the updated text.");
+
+  if (rewritePriorities.length > 0) {
+    lines.push("");
+    lines.push("Rewrite priorities:");
+    for (const tip of rewritePriorities) lines.push(`  - ${tip}`);
+  }
 
   if (guidance.length > 0) {
     lines.push("");
@@ -2047,7 +2075,13 @@ function appendHumanizeSection(lines: string[], result: HumanizeResult, autofix:
     lines.push("");
   }
 
-  appendRevisionInstructions(lines, result.guidance, result.styleTips, { includeAutofixNote: autofix });
+  appendRevisionInstructions(
+    lines,
+    buildRewritePriorities(result),
+    result.guidance,
+    result.styleTips,
+    { includeAutofixNote: autofix },
+  );
 }
 
 function formatUnifiedHumanize(text: string, autofix: boolean): string {
