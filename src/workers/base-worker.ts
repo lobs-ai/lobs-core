@@ -94,7 +94,9 @@ export async function callLocalModel(
   options?: LocalCallOptions,
 ): Promise<{ text: string; tokensUsed: number }> {
   const localCfg = getLocalConfig();
-  const model = options?.model ?? localCfg.chatModel;
+  // Strip lmstudio/ prefix — LM Studio API expects the bare model ID
+  const rawModel = options?.model ?? localCfg.chatModel;
+  const model = rawModel.replace(/^lmstudio\//, "");
   const baseUrl = options?.baseUrl ?? localCfg.baseUrl;
   const maxTokens = options?.maxTokens ?? 1024;
   const temperature = options?.temperature ?? 0.2;

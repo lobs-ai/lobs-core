@@ -370,11 +370,13 @@ async function maybeGenerateAiSummary(
   snapshot: Omit<SchedulerIntelligenceSnapshot, "briefing" | "model">,
 ): Promise<{ summary: string; topActions: string[]; available: boolean; selectedModel: string; source: "local" | "tier" | "override" }> {
   const localCfg = getLocalConfig();
-  const selectedModel = settings.overrideModel?.trim()
+  const rawSelectedModel = settings.overrideModel?.trim()
     ? settings.overrideModel.trim()
     : settings.localOnly
       ? localCfg.chatModel
       : getModelForTier(settings.tier);
+  // Strip lmstudio/ prefix — LM Studio API expects the bare model ID
+  const selectedModel = rawSelectedModel.replace(/^lmstudio\//, "");
   const source = settings.overrideModel?.trim()
     ? "override"
     : settings.localOnly

@@ -53,10 +53,14 @@ export interface LmStudioDiagnosticReport {
 
 // ── Model ID extraction ───────────────────────────────────────────────────────
 
-/** Strip provider prefix: "lmstudio/qwen3-4b" → "qwen3-4b" */
+/** Strip known routing prefixes: "lmstudio/qwen/qwen3-4b" → "qwen/qwen3-4b" */
+const LOCAL_ROUTING_PREFIXES = ["lmstudio/"];
+
 function stripPrefix(modelId: string): string {
-  const sep = modelId.indexOf("/");
-  return sep !== -1 ? modelId.slice(sep + 1) : modelId;
+  for (const prefix of LOCAL_ROUTING_PREFIXES) {
+    if (modelId.startsWith(prefix)) return modelId.slice(prefix.length);
+  }
+  return modelId;
 }
 
 /** Well-known cloud model name prefixes — never routed to LM Studio. */

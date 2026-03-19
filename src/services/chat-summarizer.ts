@@ -74,7 +74,9 @@ async function callLocalModel(
 ): Promise<string> {
   const config = getModelConfig();
   const baseUrl = config.local?.baseUrl ?? "http://localhost:1234/v1";
-  const model = config.local?.chatModel ?? "qwen/qwen3.5-9b";
+  // Strip lmstudio/ prefix — LM Studio API expects the bare model ID
+  const rawModel = config.local?.chatModel ?? "qwen/qwen3.5-9b";
+  const model = rawModel.replace(/^lmstudio\//, "");
   const maxTokens = opts?.maxTokens ?? 256;
   const temperature = opts?.temperature ?? 0.3;
 

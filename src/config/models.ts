@@ -219,7 +219,12 @@ export function getContextLimit(model: string): number {
   return 128_000; // safe default
 }
 
-/** Get local model settings */
+/** Get local model settings (strips lmstudio/ prefix from model IDs) */
 export function getLocalConfig(): ModelConfig["local"] {
-  return getModelConfig().local;
+  const local = getModelConfig().local;
+  return {
+    ...local,
+    // LM Studio API expects bare model IDs — strip the routing prefix
+    chatModel: local.chatModel.replace(/^lmstudio\//, ""),
+  };
 }
