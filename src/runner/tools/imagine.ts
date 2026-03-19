@@ -6,9 +6,11 @@
 import type { ToolDefinition, ToolExecutorResult } from "../types.js";
 import { writeFileSync, mkdirSync, existsSync } from "fs";
 import { join } from "path";
+import { randomUUID } from "crypto";
 
 const IMAGINE_URL = "http://localhost:7421";
 const OUTPUT_DIR = join(process.env.HOME || "/tmp", "lobs/lobs-imagine/outputs");
+const MEDIA_DIR = join(process.env.HOME || "/tmp", ".lobs/media");
 
 export const imagineToolDefinition: ToolDefinition = {
   name: "imagine",
@@ -96,7 +98,7 @@ export async function imagineTool(
       height: number;
     };
 
-    // Save to file
+    // Save to outputs dir (archive)
     if (!existsSync(OUTPUT_DIR)) {
       mkdirSync(OUTPUT_DIR, { recursive: true });
     }
@@ -104,8 +106,17 @@ export async function imagineTool(
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const filename = `imagine-${timestamp}-${result.seed}.png`;
     const filepath = join(OUTPUT_DIR, filename);
+    const imageBuffer = Buffer.from(result.image, "base64");
+    writeFileSync(filepath, imageBuffer);
 
-    writeFileSync(filepath, Buffer.from(result.image, "base64"));
+    // Save to media dir for web serving
+    if (!existsSync(MEDIA_DIR)) {
+      mkdirSync(MEDIA_DIR, { recursive: true });
+    }
+    const mediaId = randomUUID();
+    const mediaFilename = `${mediaId}.png`;
+    const mediaPath = join(MEDIA_DIR, mediaFilename);
+    writeFileSync(mediaPath, imageBuffer);
 
     return [
       `Image generated successfully!`,
@@ -114,6 +125,8 @@ export async function imagineTool(
       `Seed: ${result.seed}`,
       `Time: ${result.elapsed}s`,
       `Prompt: ${prompt}`,
+      ``,
+      `![Generated image](/api/media/${mediaFilename})`,
     ].join("\n");
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);

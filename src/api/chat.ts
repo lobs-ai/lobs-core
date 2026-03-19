@@ -163,12 +163,22 @@ export async function handleChatRequest(
           // the frontend's SSE-triggered reloadMessages() fires.
           if (event.result) {
             log().info(`[chat] assistant reply session=${sessionKey} channel=${channelId} len=${event.result.length}`);
+
+            // Detect media references (![alt](/api/media/uuid.ext)) in the reply
+            const mediaPattern = /!\[[^\]]*\]\(\/api\/media\/([\w\-\.]+)\)/g;
+            const mediaFiles: string[] = [];
+            let match;
+            while ((match = mediaPattern.exec(event.result)) !== null) {
+              mediaFiles.push(match[1]);
+            }
+
             db.insert(chatMessages).values({
               id: randomUUID().replace(/-/g, ""),
               sessionKey,
               role: "assistant",
               content: event.result,
               createdAt: new Date(event.timestamp).toISOString(),
+              ...(mediaFiles.length > 0 ? { messageMetadata: JSON.stringify({ mediaFiles }) } : {}),
             }).run();
 
             db.update(chatSessions)
