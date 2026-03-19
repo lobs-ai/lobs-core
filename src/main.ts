@@ -31,6 +31,7 @@ import { setDiscordService as setMessageDiscord } from "./runner/tools/message.j
 import { setReactDiscord } from "./runner/tools/index.js";
 import { validateAllConfigs } from "./config/validator.js";
 import { memoryServer } from "./services/memory-server.js";
+import { imagineService } from "./services/imagine.js";
 import { countActiveWorkers, getActiveWorkers } from "./orchestrator/worker-manager.js";
 import { runStartupTelemetry, startDiskSpaceMonitor } from "./services/restart-telemetry.js";
 import { getGatewayConfig } from "./config/lobs.js";
@@ -368,6 +369,9 @@ async function main() {
 
   // Start memory server (supervised child process)
   await memoryServer.start();
+
+  // Start imagine service (background, non-blocking)
+  imagineService.start();
   
   // Create and configure the main agent (always available — for Discord and/or Nexus chat)
   const rawDb = getRawDb();
@@ -549,6 +553,7 @@ async function main() {
     }
     
     stopDiskMonitor();
+    imagineService.stop();
     await memoryServer.shutdown();
     await browserService.shutdown();
     await discordService.shutdown();
