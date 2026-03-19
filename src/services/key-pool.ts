@@ -186,6 +186,23 @@ export class KeyPoolService {
     console.warn(`[KeyPool] Marked ${provider}/${label} as unhealthy (${errorType})${cooldownSuffix}: ${error}`);
   }
 
+  markHealthy(provider: Provider, keyIndex: number): void {
+    this.refreshConfigIfChanged();
+
+    const keys = this.pools.get(provider);
+    const key = keys?.[keyIndex]?.key;
+    if (!key) return;
+
+    const healthKey = this.getKeyIdentity(provider, key);
+    const health = this.health.get(healthKey);
+    if (!health || health.healthy) return;
+
+    health.healthy = true;
+    health.recoverAt = undefined;
+    const label = keys?.[keyIndex]?.label ?? `key-${keyIndex}`;
+    console.log(`[KeyPool] Marked ${provider}/${label} healthy after successful request`);
+  }
+
   /**
    * Get OAuth token (for Anthropic) or API key for the given provider and session.
    * Returns { apiKey?, authToken?, isOAuth } or undefined if no keys configured.

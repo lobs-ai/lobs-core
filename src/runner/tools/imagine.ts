@@ -73,9 +73,8 @@ export async function imagineTool(
     }
 
     const health = (await healthRes.json()) as { model_loaded: boolean };
-    if (!health.model_loaded) {
-      return "Error: lobs-imagine model is still loading. Try again in a moment.";
-    }
+    // Model loading happens lazily on first generate request.
+    // The 5-minute timeout on the generate call covers model load time.
 
     // Generate image
     const res = await fetch(`${IMAGINE_URL}/generate`, {

@@ -231,6 +231,25 @@ function annotateRetryAfter(error: unknown, retryAfterSeconds?: number): Error {
   return base;
 }
 
+type RateLimitErrorMeta = {
+  provider: "anthropic" | "openai" | "openrouter";
+  sessionId?: string;
+  keyIndex?: number;
+  keyLabel?: string;
+  cooldownMs?: number;
+};
+
+function annotateRateLimitMeta(error: unknown, meta: RateLimitErrorMeta): Error {
+  const base = error instanceof Error ? error : new Error(String(error));
+  Object.assign(base, { __lobsRateLimitMeta: meta });
+  return base;
+}
+
+function getRateLimitMeta(error: unknown): RateLimitErrorMeta | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  return (error as { __lobsRateLimitMeta?: RateLimitErrorMeta }).__lobsRateLimitMeta;
+}
+
 export function shouldRetryProviderError(error: unknown): boolean | undefined {
   if (error && typeof error === "object" && "headers" in error) {
     const headers = (error as { headers?: unknown }).headers;
