@@ -1,4 +1,4 @@
-import { eq, desc, and, gt, isNull, isNotNull, lt, sql } from "drizzle-orm";
+import { eq, desc, and, gt, isNull, isNotNull, lt, sql, count } from "drizzle-orm";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getDb } from "../db/connection.js";
 import { chatSessions, chatMessages } from "../db/schema.js";
@@ -749,15 +749,22 @@ export async function handleChatRequest(
 
     // DELETE /api/chat/sessions/:key — archive a session (soft-delete)
     // Pass ?permanent=true to hard-delete immediately
+    // Empty sessions (no messages) are always hard-deleted immediately.
     if (sessionKey && method === "DELETE") {
       const url = new URL(req.url ?? "", "http://localhost");
       const permanent = url.searchParams.get("permanent") === "true";
 
-      if (permanent) {
+      // Check if the session has any messages
+      const msgCount = db.select({ count: count() }).from(chatMessages)
+        .where(eq(chatMessages.sessionKey, sessionKey))
+        .get();
+      const isEmpty = !msgCount || msgCount.count === 0;
+
+      if (permanent || isEmpty) {
         cleanupSessionMedia(sessionKey);
         db.delete(chatMessages).where(eq(chatMessages.sessionKey, sessionKey)).run();
         db.delete(chatSessions).where(eq(chatSessions.sessionKey, sessionKey)).run();
-        log().info(`[chat] permanently deleted session ${sessionKey}`);
+        log().info(`[chat] permanently deleted session ${sessionKey}${isEmpty ? " (empty)" : ""}`);
       } else {
         const now = new Date().toISOString();
         db.update(chatSessions)
