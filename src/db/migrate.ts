@@ -1522,6 +1522,24 @@ export function runMigrations(db: PawDB): void {
     console.warn("[PLUGINS] Seed insert failed (non-fatal):", e);
   }
 
+  // ── Training data table ──────────────────────────────────────────────────
+  // Stores input/output pairs from LLM tasks for fine-tuning.
+  db.run(sql`CREATE TABLE IF NOT EXISTS training_data (
+    id TEXT PRIMARY KEY,
+    task_type TEXT NOT NULL,
+    system_prompt TEXT NOT NULL,
+    user_prompt TEXT NOT NULL,
+    context TEXT,
+    model_output TEXT NOT NULL,
+    corrected_output TEXT,
+    review_status TEXT NOT NULL DEFAULT 'pending',
+    model_used TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS training_data_task_type_idx ON training_data(task_type)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS training_data_review_status_idx ON training_data(review_status)`);
+
   // ── Per-session disabled tools (idempotent) ───────────────────────────────
   // Added: 2026-03-15 — JSON array of tool names to disable for a nexus session,
   // e.g. '["exec","write"]'. null = no overrides (all tools enabled).
