@@ -5,11 +5,45 @@ import { chatSessions, chatMessages } from "../db/schema.js";
 import { json, error, parseBody } from "./index.js";
 import { log } from "../util/logger.js";
 import { randomUUID } from "node:crypto";
+import { unlinkSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentStreamEvent } from "../services/main-agent.js";
 import { getToolDefinitions } from "../runner/tools/index.js";
 import { getToolsForSession } from "../runner/tools/tool-sets.js";
 import { onAssistantMessage, forceSummarize } from "../services/chat-summarizer.js";
 import { getDefaultChatModel, getChannelModelOverride, getModelCatalog, normalizeModelSelection, setChannelModelOverride } from "../services/model-catalog.js";
+
+const MEDIA_DIR = join(process.env.HOME || "/tmp", ".lobs/media");
+
+/** Delete media files referenced by messages in a session */
+function cleanupSessionMedia(sessionKey: string) {
+  const db = getDb();
+  const messages = db.select({ messageMetadata: chatMessages.messageMetadata })
+    .from(chatMessages)
+    .where(eq(chatMessages.sessionKey, sessionKey))
+    .all();
+
+  let cleaned = 0;
+  for (const msg of messages) {
+    if (!msg.messageMetadata) continue;
+    const meta = typeof msg.messageMetadata === "string"
+      ? JSON.parse(msg.messageMetadata)
+      : msg.messageMetadata;
+    if (meta?.mediaFiles && Array.isArray(meta.mediaFiles)) {
+      for (const file of meta.mediaFiles) {
+        try {
+          unlinkSync(join(MEDIA_DIR, file));
+          cleaned++;
+        } catch {
+          // File already gone — fine
+        }
+      }
+    }
+  }
+  if (cleaned > 0) {
+    log().info(`[chat] cleaned up ${cleaned} media file(s) for session ${sessionKey}`);
+  }
+}
 
 // ─── Auto-purge archived sessions older than 30 days ────────────────────
 const ARCHIVE_RETENTION_DAYS = 30;
@@ -25,6 +59,7 @@ export function purgeOldArchivedSessions() {
 
   if (old.length > 0) {
     for (const s of old) {
+      cleanupSessionMedia(s.sessionKey);
       db.delete(chatMessages).where(eq(chatMessages.sessionKey, s.sessionKey)).run();
       db.delete(chatSessions).where(eq(chatSessions.sessionKey, s.sessionKey)).run();
     }
@@ -576,6 +611,7 @@ export async function handleChatRequest(
       const permanent = url.searchParams.get("permanent") === "true";
 
       if (permanent) {
+        cleanupSessionMedia(sessionKey);
         db.delete(chatMessages).where(eq(chatMessages.sessionKey, sessionKey)).run();
         db.delete(chatSessions).where(eq(chatSessions.sessionKey, sessionKey)).run();
         log().info(`[chat] permanently deleted session ${sessionKey}`);
