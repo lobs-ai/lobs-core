@@ -555,6 +555,9 @@ export const chatSessions = sqliteTable("chat_sessions", {
   disabledTools: text("disabled_tools"),
   // Tracks when the user last viewed this session (for unread badges)
   lastReadAt: text("last_read_at"),
+  // Soft-delete: when set, session is archived (hidden from default list)
+  // Hard-deleted after 30 days by cleanup routine
+  archivedAt: text("archived_at"),
 });
 
 export const chatMessages = sqliteTable("chat_messages", {

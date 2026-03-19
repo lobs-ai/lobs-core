@@ -104,4 +104,36 @@ describe("key rotation", () => {
       shutdownKeyPool();
     }
   });
+
+  test("reloads key config so newly added keys enter rotation without restart", async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), "lobs-keypool-reload-"));
+    process.env.HOME = homeDir;
+    writeKeysConfig(homeDir, {
+      anthropic: {
+        keys: ["sk-ant-a", "sk-ant-b"],
+        strategy: "sticky-failover",
+      },
+    });
+
+    vi.resetModules();
+    const { getKeyPool, shutdownKeyPool } = await import("../src/services/key-pool.js");
+
+    try {
+      const keyPool = getKeyPool();
+      keyPool.markSessionFailed("anthropic", "session-reload", "401 unauthorized", "auth");
+
+      writeKeysConfig(homeDir, {
+        anthropic: {
+          keys: ["sk-ant-a", "sk-ant-b", "sk-ant-c"],
+          strategy: "sticky-failover",
+        },
+      });
+
+      const selection = keyPool.getAuth("anthropic", "a");
+      expect(selection?.apiKey).toBe("sk-ant-c");
+      expect(selection?.keyIndex).toBe(2);
+    } finally {
+      shutdownKeyPool();
+    }
+  });
 });

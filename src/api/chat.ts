@@ -1,4 +1,4 @@
-import { eq, desc, and, gt, sql } from "drizzle-orm";
+import { eq, desc, and, gt, isNull, isNotNull, lt, sql } from "drizzle-orm";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getDb } from "../db/connection.js";
 import { chatSessions, chatMessages } from "../db/schema.js";
@@ -10,6 +10,27 @@ import { getToolDefinitions } from "../runner/tools/index.js";
 import { getToolsForSession } from "../runner/tools/tool-sets.js";
 import { onAssistantMessage, forceSummarize } from "../services/chat-summarizer.js";
 import { getDefaultChatModel, getChannelModelOverride, getModelCatalog, normalizeModelSelection, setChannelModelOverride } from "../services/model-catalog.js";
+
+// ─── Auto-purge archived sessions older than 30 days ────────────────────
+const ARCHIVE_RETENTION_DAYS = 30;
+
+export function purgeOldArchivedSessions() {
+  const db = getDb();
+  const cutoff = new Date(Date.now() - ARCHIVE_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  
+  const old = db.select({ sessionKey: chatSessions.sessionKey })
+    .from(chatSessions)
+    .where(and(isNotNull(chatSessions.archivedAt), lt(chatSessions.archivedAt, cutoff)))
+    .all();
+
+  if (old.length > 0) {
+    for (const s of old) {
+      db.delete(chatMessages).where(eq(chatMessages.sessionKey, s.sessionKey)).run();
+      db.delete(chatSessions).where(eq(chatSessions.sessionKey, s.sessionKey)).run();
+    }
+    log().info(`[chat] purged ${old.length} archived session(s) older than ${ARCHIVE_RETENTION_DAYS} days`);
+  }
+}
 
 // ─── Simple DB-backed chat (no gateway dependency) ─────────────────────
 
@@ -329,9 +350,14 @@ export async function handleChatRequest(
       return json(res, status);
     }
 
-    // GET /api/chat/sessions — list sessions
+    // GET /api/chat/sessions — list sessions (excludes archived by default)
+    // ?archived=true — list only archived sessions
     if (!sessionKey && method === "GET") {
+      const url = new URL(req.url ?? "", "http://localhost");
+      const showArchived = url.searchParams.get("archived") === "true";
+
       const sessions = db.select().from(chatSessions)
+        .where(showArchived ? isNotNull(chatSessions.archivedAt) : isNull(chatSessions.archivedAt))
         .orderBy(desc(chatSessions.lastMessageAt))
         .all();
       
@@ -373,6 +399,7 @@ export async function handleChatRequest(
             processing: processingChannels.has(channelId),
             currentModel: getChannelModelOverride(channelId) ?? getDefaultChatModel(),
             overrideModel: getChannelModelOverride(channelId),
+            archivedAt: s.archivedAt ?? null,
           };
         }),
       });
@@ -532,11 +559,41 @@ export async function handleChatRequest(
       return json(res, { key: sessionKey, disabled_tools: body.disabled_tools });
     }
 
-    // DELETE /api/chat/sessions/:key — delete a session
+    // DELETE /api/chat/sessions/:key — archive a session (soft-delete)
+    // Pass ?permanent=true to hard-delete immediately
     if (sessionKey && method === "DELETE") {
-      db.delete(chatMessages).where(eq(chatMessages.sessionKey, sessionKey)).run();
-      db.delete(chatSessions).where(eq(chatSessions.sessionKey, sessionKey)).run();
+      const url = new URL(req.url ?? "", "http://localhost");
+      const permanent = url.searchParams.get("permanent") === "true";
+
+      if (permanent) {
+        db.delete(chatMessages).where(eq(chatMessages.sessionKey, sessionKey)).run();
+        db.delete(chatSessions).where(eq(chatSessions.sessionKey, sessionKey)).run();
+        log().info(`[chat] permanently deleted session ${sessionKey}`);
+      } else {
+        const now = new Date().toISOString();
+        db.update(chatSessions)
+          .set({ archivedAt: now })
+          .where(eq(chatSessions.sessionKey, sessionKey))
+          .run();
+        log().info(`[chat] archived session ${sessionKey}`);
+      }
       return json(res, { ok: true });
+    }
+
+    // POST /api/chat/sessions/:key/unarchive — restore an archived session
+    if (sessionKey && action === "unarchive" && method === "POST") {
+      const session = db.select().from(chatSessions)
+        .where(eq(chatSessions.sessionKey, sessionKey))
+        .get();
+      if (!session) return error(res, "Session not found", 404);
+
+      db.update(chatSessions)
+        .set({ archivedAt: null })
+        .where(eq(chatSessions.sessionKey, sessionKey))
+        .run();
+      log().info(`[chat] unarchived session ${sessionKey}`);
+
+      return json(res, { ok: true, key: sessionKey });
     }
   }
 

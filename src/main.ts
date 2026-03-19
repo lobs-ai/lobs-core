@@ -11,6 +11,7 @@ import { runMigrations } from "./db/migrate.js";
 import { seedDefaultWorkflows } from "./workflow/seeds.js";
 import { startControlLoop, stopControlLoop } from "./orchestrator/control-loop.js";
 import { startServer } from "./server.js";
+import { purgeOldArchivedSessions } from "./api/chat.js";
 import { setLogger, log } from "./util/logger.js";
 import { resolve } from "node:path";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, renameSync, statSync, appendFileSync } from "node:fs";
@@ -361,6 +362,9 @@ async function main() {
 
   // Start HTTP server (Nexus dashboard + API)
   startServer(HTTP_PORT);
+
+  // Purge archived chat sessions older than 30 days on startup
+  purgeOldArchivedSessions();
 
   // Start memory server (supervised child process)
   await memoryServer.start();

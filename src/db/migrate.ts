@@ -1531,4 +1531,9 @@ export function runMigrations(db: PawDB): void {
   // ── Unread tracking for nexus sessions ────────────────────────────────────
   // Added: 2026-03-15 — Tracks when user last viewed a session for unread badges.
   try { db.run(sql`ALTER TABLE chat_sessions ADD COLUMN last_read_at TEXT`); } catch {}
+
+  // ── Soft-delete (archive) for chat sessions ─────────────────────────────
+  // Added: 2026-03-19 — "Delete" now archives. Sessions with archived_at set are
+  // hidden from the default list but can be unarchived. Hard-deleted after 30 days.
+  try { db.run(sql`ALTER TABLE chat_sessions ADD COLUMN archived_at TEXT`); } catch {}
 }

@@ -80,7 +80,7 @@ export async function imagineTool(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120000), // 2 minute timeout for generation
+      signal: AbortSignal.timeout(300000), // 5 minute timeout for generation
     });
 
     if (!res.ok) {

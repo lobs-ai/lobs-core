@@ -36,15 +36,17 @@ const DEFAULT_UNKNOWN_COOLDOWN_MS = 60 * 1000;
 
 export class KeyPoolService {
   private pools: Map<Provider, KeyEntry[]> = new Map();
-  private assignments: Map<string, number> = new Map(); // "provider:sessionId" -> keyIndex
-  private health: Map<string, KeyHealth> = new Map();   // "provider:keyIndex" -> health
+  private assignments: Map<string, string> = new Map(); // "provider:sessionId" -> key identity
+  private health: Map<string, KeyHealth> = new Map();   // "provider:keyIdentity" -> health
 
   private config: KeyConfig;
+  private configSignature = "";
   private recoveryCheckInterval: NodeJS.Timeout | undefined;
 
   constructor() {
     this.config = loadKeyConfig();
     this.initializePools();
+    this.configSignature = this.computeConfigSignature(this.config);
     this.startRecoveryLoop();
   }
 
@@ -73,6 +75,8 @@ export class KeyPoolService {
    * Return the current session's selected key and index.
    */
   getKeySelection(provider: Provider, sessionId: string): KeySelection | undefined {
+    this.refreshConfigIfChanged();
+
     const keys = this.pools.get(provider);
     if (!keys || keys.length === 0) return undefined;
 
@@ -87,12 +91,13 @@ export class KeyPoolService {
 
     // Multi-key — sticky assignment
     const assignmentKey = `${provider}:${sessionId}`;
-    let keyIndex = this.assignments.get(assignmentKey);
+    const assignedIdentity = this.assignments.get(assignmentKey);
+    let keyIndex = assignedIdentity ? keys.findIndex((entry) => this.getKeyIdentity(provider, entry.key) === assignedIdentity) : -1;
 
     // First time for this session — hash to initial key
-    if (keyIndex === undefined) {
+    if (keyIndex < 0) {
       keyIndex = this.hashSessionToKey(sessionId, keys.length);
-      this.assignments.set(assignmentKey, keyIndex);
+      this.assignments.set(assignmentKey, this.getKeyIdentity(provider, keys[keyIndex].key));
     }
 
     // Check if current assignment is healthy
@@ -109,7 +114,7 @@ export class KeyPoolService {
       // recovered). If we find one, recover it inline and use it.
       const recoveredIndex = this.tryInlineRecovery(provider, keys.length);
       if (recoveredIndex !== undefined) {
-        this.assignments.set(assignmentKey, recoveredIndex);
+        this.assignments.set(assignmentKey, this.getKeyIdentity(provider, keys[recoveredIndex].key));
         const label = keys[recoveredIndex]?.label ?? `key-${recoveredIndex}`;
         console.log(`[KeyPool] Inline-recovered ${provider}/${label} for session=${sessionId.slice(0, 24)}`);
         return { key: keys[recoveredIndex].key, keyIndex: recoveredIndex, label };
@@ -121,7 +126,7 @@ export class KeyPoolService {
     }
 
     // Reassign to healthy key
-    this.assignments.set(assignmentKey, nextIndex);
+    this.assignments.set(assignmentKey, this.getKeyIdentity(provider, keys[nextIndex].key));
     const oldLabel = keys[keyIndex]?.label ?? `key-${keyIndex}`;
     const newLabel = keys[nextIndex]?.label ?? `key-${nextIndex}`;
     console.warn(`[KeyPool] Reassigned ${provider} session=${sessionId.slice(0, 24)} from ${oldLabel} -> ${newLabel}`);
@@ -139,7 +144,13 @@ export class KeyPoolService {
     errorType: "auth" | "rate_limit" | "unknown",
     cooldownMs?: number,
   ): void {
-    const healthKey = `${provider}:${keyIndex}`;
+    this.refreshConfigIfChanged();
+
+    const keys = this.pools.get(provider);
+    const key = keys?.[keyIndex]?.key;
+    if (!key) return;
+
+    const healthKey = this.getKeyIdentity(provider, key);
     const now = Date.now();
     const effectiveCooldownMs =
       errorType === "rate_limit"
@@ -169,7 +180,6 @@ export class KeyPoolService {
       failureType: errorType,
     });
 
-    const keys = this.pools.get(provider);
     const label = keys?.[keyIndex]?.label ?? `key-${keyIndex}`;
     const cooldownSuffix =
       errorType === "auth" ? "" : ` cooldown_ms=${effectiveCooldownMs}`;
@@ -203,6 +213,8 @@ export class KeyPoolService {
     rateLimited: number;
     providerFailed: number;
   } {
+    this.refreshConfigIfChanged();
+
     const keys = this.pools.get(provider) ?? [];
     const summary = {
       total: keys.length,
@@ -213,7 +225,7 @@ export class KeyPoolService {
     };
 
     for (let i = 0; i < keys.length; i++) {
-      const health = this.health.get(`${provider}:${i}`);
+      const health = this.health.get(this.getKeyIdentity(provider, keys[i].key));
       if (!health || health.healthy) {
         summary.healthy += 1;
         continue;
@@ -240,10 +252,14 @@ export class KeyPoolService {
     const keys = this.pools.get(provider);
     if (!keys || keys.length === 0) return false;
 
-    let keyIndex = this.assignments.get(assignmentKey);
-    if (keyIndex === undefined) {
+    let keyIndex = -1;
+    const assignedIdentity = this.assignments.get(assignmentKey);
+    if (assignedIdentity) {
+      keyIndex = keys.findIndex((entry) => this.getKeyIdentity(provider, entry.key) === assignedIdentity);
+    }
+    if (keyIndex < 0) {
       keyIndex = keys.length === 1 ? 0 : this.hashSessionToKey(sessionId, keys.length);
-      this.assignments.set(assignmentKey, keyIndex);
+      this.assignments.set(assignmentKey, this.getKeyIdentity(provider, keys[keyIndex].key));
     }
 
     this.markFailed(provider, keyIndex, error, errorType, cooldownMs);
@@ -251,17 +267,23 @@ export class KeyPoolService {
   }
 
   rotateSession(provider: Provider, sessionId: string, reason: string): boolean {
+    this.refreshConfigIfChanged();
+
     const keys = this.pools.get(provider);
     if (!keys || keys.length <= 1) return false;
 
     const assignmentKey = `${provider}:${sessionId}`;
-    const currentIndex = this.assignments.get(assignmentKey) ?? this.hashSessionToKey(sessionId, keys.length);
-    const nextIndex = this.findNextHealthyKey(provider, currentIndex, keys.length);
-    const targetIndex = nextIndex ?? this.findLeastBadKey(provider, keys.length, currentIndex);
-    if (targetIndex === undefined || targetIndex === currentIndex) return false;
+    const assignedIdentity = this.assignments.get(assignmentKey);
+    const currentIndex = assignedIdentity
+      ? keys.findIndex((entry) => this.getKeyIdentity(provider, entry.key) === assignedIdentity)
+      : this.hashSessionToKey(sessionId, keys.length);
+    const effectiveCurrentIndex = currentIndex >= 0 ? currentIndex : this.hashSessionToKey(sessionId, keys.length);
+    const nextIndex = this.findNextHealthyKey(provider, effectiveCurrentIndex, keys.length);
+    const targetIndex = nextIndex ?? this.findLeastBadKey(provider, keys.length, effectiveCurrentIndex);
+    if (targetIndex === undefined || targetIndex === effectiveCurrentIndex) return false;
 
-    this.assignments.set(assignmentKey, targetIndex);
-    const oldLabel = keys[currentIndex]?.label ?? `key-${currentIndex}`;
+    this.assignments.set(assignmentKey, this.getKeyIdentity(provider, keys[targetIndex].key));
+    const oldLabel = keys[effectiveCurrentIndex]?.label ?? `key-${effectiveCurrentIndex}`;
     const newLabel = keys[targetIndex]?.label ?? `key-${targetIndex}`;
     console.warn(
       `[KeyPool] Rotated ${provider} session=${sessionId.slice(0, 24)} from ${oldLabel} -> ${newLabel} (${reason})`,
@@ -300,7 +322,9 @@ export class KeyPoolService {
   }
 
   private isHealthy(provider: Provider, keyIndex: number): boolean {
-    const healthKey = `${provider}:${keyIndex}`;
+    const key = this.pools.get(provider)?.[keyIndex]?.key;
+    if (!key) return false;
+    const healthKey = this.getKeyIdentity(provider, key);
     const health = this.health.get(healthKey);
     return health?.healthy !== false;
   }
@@ -352,7 +376,9 @@ export class KeyPoolService {
   private tryInlineRecovery(provider: Provider, poolSize: number): number | undefined {
     const now = Date.now();
     for (let i = 0; i < poolSize; i++) {
-      const healthKey = `${provider}:${i}`;
+      const key = this.pools.get(provider)?.[i]?.key;
+      if (!key) continue;
+      const healthKey = this.getKeyIdentity(provider, key);
       const health = this.health.get(healthKey);
       if (!health || health.healthy) return i; // already healthy
       if (health.failureType === "auth") continue; // permanently down
@@ -395,10 +421,7 @@ export class KeyPoolService {
       if (health.failureType === "rate_limit") {
         health.healthy = true;
         health.recoverAt = undefined;
-        const [provider, indexStr] = healthKey.split(":");
-        const keyIndex = parseInt(indexStr, 10);
-        const keys = this.pools.get(provider as Provider);
-        const label = keys?.[keyIndex]?.label ?? `key-${keyIndex}`;
+        const { provider, label } = this.getHealthKeyMeta(healthKey);
         console.log(`[KeyPool] Recovered ${provider}/${label} after rate limit cooldown`);
         continue;
       }
@@ -406,13 +429,42 @@ export class KeyPoolService {
       if (health.failureType === "unknown") {
         health.healthy = true;
         health.recoverAt = undefined;
-        const [provider, indexStr] = healthKey.split(":");
-        const keyIndex = parseInt(indexStr, 10);
-        const keys = this.pools.get(provider as Provider);
-        const label = keys?.[keyIndex]?.label ?? `key-${keyIndex}`;
+        const { provider, label } = this.getHealthKeyMeta(healthKey);
         console.log(`[KeyPool] Recovered ${provider}/${label} after cooldown`);
       }
     }
+  }
+
+  private refreshConfigIfChanged(): void {
+    const nextConfig = loadKeyConfig();
+    const nextSignature = this.computeConfigSignature(nextConfig);
+    if (nextSignature === this.configSignature) return;
+
+    this.config = nextConfig;
+    this.initializePools();
+    this.configSignature = nextSignature;
+    console.log("[KeyPool] Reloaded key configuration");
+  }
+
+  private computeConfigSignature(config: KeyConfig): string {
+    const serializePool = (provider?: { keys: KeyEntry[] }) =>
+      provider?.keys.map((entry) => `${entry.label ?? ""}:${entry.key}`).join("|") ?? "";
+    return [
+      `anthropic=${serializePool(config.anthropic)}`,
+      `openai=${serializePool(config.openai)}`,
+      `openrouter=${serializePool(config.openrouter)}`,
+    ].join(";");
+  }
+
+  private getKeyIdentity(provider: Provider, key: string): string {
+    return `${provider}:${createHash("sha256").update(key).digest("hex")}`;
+  }
+
+  private getHealthKeyMeta(healthKey: string): { provider: Provider; label: string } {
+    const [provider] = healthKey.split(":", 1) as [Provider];
+    const keys = this.pools.get(provider) ?? [];
+    const entry = keys.find((item) => this.getKeyIdentity(provider, item.key) === healthKey);
+    return { provider, label: entry?.label ?? "unknown-key" };
   }
 }
 
