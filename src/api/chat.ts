@@ -68,9 +68,10 @@ export async function handleChatRequest(
 
     // POST /api/chat/sessions/:key/messages — send a message (async with polling)
     if (sessionKey && action === "messages" && method === "POST") {
-      const body = (await parseBody(req)) as { content?: string };
+      const body = (await parseBody(req)) as { content?: string; images?: Array<{ base64: string; mediaType: string }> };
       const content = body?.content?.trim();
-      if (!content) return error(res, "content is required", 400);
+      const images = body?.images?.length ? body.images : undefined;
+      if (!content && !images?.length) return error(res, "content or images required", 400);
 
       const mainAgent = (globalThis as any).__lobsMainAgent;
       if (!mainAgent) return error(res, "Agent not initialized", 503);
@@ -78,15 +79,16 @@ export async function handleChatRequest(
       const channelId = `nexus:${sessionKey}`;
       const messageId = randomUUID();
       const now = new Date().toISOString();
-      log().info(`[chat] inbound nexus message session=${sessionKey} channel=${channelId} len=${content.length}`);
+      log().info(`[chat] inbound nexus message session=${sessionKey} channel=${channelId} len=${content?.length ?? 0}${images ? ` images=${images.length}` : ''}`);
 
       // Store user message immediately
       db.insert(chatMessages).values({
         id: randomUUID().replace(/-/g, ""),
         sessionKey,
         role: "user",
-        content,
+        content: content || "(image)",
         createdAt: now,
+        ...(images ? { messageMetadata: JSON.stringify({ images: images.map(img => ({ mediaType: img.mediaType })) }) } : {}),
       }).run();
 
       // Listen for agent events and persist them as chat messages.
@@ -184,11 +186,14 @@ export async function handleChatRequest(
       // The toolListener above handles persisting all messages (tools + assistant replies).
       mainAgent.handleMessage({
         id: messageId,
-        content,
+        content: content || "(image)",
         authorId: "nexus-user",
         authorName: "Rafe",
         channelId,
         timestamp: Date.now(),
+        chatType: "nexus" as const,
+        isDm: true,
+        ...(images ? { images: images.map(img => ({ data: img.base64, mediaType: img.mediaType })) } : {}),
       }).catch((err: unknown) => {
         log().error(`[chat] Message handling failed: ${err}`);
       });
