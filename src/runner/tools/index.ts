@@ -27,6 +27,7 @@ export type { ToolSideEffects, ToolExecutorResult };
 /** Optional context passed to tools from the conversation loop */
 export interface ToolContext {
   channelId?: string;
+  toolUseId?: string;
 }
 
 export type ToolExecutor = (params: Record<string, unknown>, cwd: string, context?: ToolContext) => Promise<ToolExecutorResult>;
@@ -133,7 +134,7 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   },
   imagine: {
     definition: imagineToolDefinition,
-    execute: (params) => imagineTool(params),
+    execute: (params, _cwd, context) => imagineTool(params, { toolUseId: context?.toolUseId }),
   },
 };
 
@@ -170,7 +171,8 @@ export async function executeTool(
   }
 
   try {
-    const raw = await entry.execute(params, cwd, context);
+    const enrichedContext: ToolContext = { ...context, toolUseId };
+    const raw = await entry.execute(params, cwd, enrichedContext);
     
     // Extract side effects if the tool returned them
     const output = typeof raw === "string" ? raw : raw.output;

@@ -50,6 +50,7 @@ export const imagineToolDefinition: ToolDefinition = {
 
 export async function imagineTool(
   params: Record<string, unknown>,
+  context?: { toolUseId?: string },
 ): Promise<ToolExecutorResult> {
   const prompt = params.prompt as string;
   if (!prompt) return "Error: prompt is required";
@@ -61,6 +62,8 @@ export async function imagineTool(
   if (params.height) body.height = params.height;
   if (params.steps) body.steps = params.steps;
   if (params.seed !== undefined) body.seed = params.seed;
+  // Idempotency key prevents duplicate generations on retry
+  if (context?.toolUseId) body.request_id = context.toolUseId;
 
   try {
     // Check if service is running
