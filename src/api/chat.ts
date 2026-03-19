@@ -15,6 +15,130 @@ import { getDefaultChatModel, getChannelModelOverride, getModelCatalog, normaliz
 
 const MEDIA_DIR = join(process.env.HOME || "/tmp", ".lobs/media");
 
+/**
+ * Track which channelIds have an active per-request toolListener.
+ * The global fallback listener (for subagent completions, system events, etc.)
+ * only persists events for channels NOT in this set, avoiding double-writes.
+ */
+const activeRequestListeners = new Set<string>();
+
+/**
+ * Install a global event listener on the main agent that persists assistant_reply,
+ * tool_start, tool_result, and error events for nexus channels that DON'T have
+ * an active per-request listener. This catches system-event-triggered conversations
+ * (e.g., subagent completion notifications) that fire after the original request's
+ * toolListener has been cleaned up.
+ */
+let globalListenerInstalled = false;
+function ensureGlobalNexusListener() {
+  if (globalListenerInstalled) return;
+  const mainAgent = (globalThis as any).__lobsMainAgent;
+  if (!mainAgent) return;
+
+  globalListenerInstalled = true;
+  const db = getDb();
+
+  mainAgent.events.on("stream", (event: AgentStreamEvent) => {
+    // Only handle nexus channels
+    if (!event.channelId?.startsWith("nexus:")) return;
+    // Skip if a per-request listener is already handling this channel
+    if (activeRequestListeners.has(event.channelId)) return;
+
+    const sessionKey = event.channelId.replace("nexus:", "");
+
+    // Verify session exists and is not archived
+    const session = db.select({ id: chatSessions.id, archivedAt: chatSessions.archivedAt })
+      .from(chatSessions)
+      .where(eq(chatSessions.sessionKey, sessionKey))
+      .get();
+    if (!session || session.archivedAt) return;
+
+    if (event.type === "tool_start") {
+      db.insert(chatMessages).values({
+        id: randomUUID().replace(/-/g, ""),
+        sessionKey,
+        role: "tool",
+        content: `🔧 ${event.toolName}`,
+        createdAt: new Date(event.timestamp).toISOString(),
+        messageMetadata: JSON.stringify({
+          toolName: event.toolName,
+          toolInput: event.toolInput,
+          toolUseId: event.toolUseId,
+          status: "running",
+        }),
+      }).run();
+    } else if (event.type === "tool_result") {
+      const existing = db.select().from(chatMessages)
+        .where(eq(chatMessages.sessionKey, sessionKey))
+        .all()
+        .filter((m: any) => {
+          if (m.role !== "tool") return false;
+          try {
+            const meta = typeof m.messageMetadata === "string" ? JSON.parse(m.messageMetadata) : m.messageMetadata;
+            return meta?.toolUseId === event.toolUseId;
+          } catch { return false; }
+        })
+        .pop();
+      if (existing) {
+        const mediaPattern = /!\[[^\]]*\]\(\/api\/media\/([\w\-\.]+)\)/g;
+        const mediaFiles: string[] = [];
+        if (event.result) {
+          let m;
+          while ((m = mediaPattern.exec(event.result)) !== null) {
+            mediaFiles.push(m[1]);
+          }
+        }
+        db.update(chatMessages)
+          .set({
+            messageMetadata: JSON.stringify({
+              toolName: event.toolName,
+              toolUseId: event.toolUseId,
+              result: event.result,
+              isError: event.isError,
+              status: "complete",
+              ...(mediaFiles.length > 0 ? { mediaFiles } : {}),
+            }),
+          })
+          .where(eq(chatMessages.id, existing.id))
+          .run();
+      }
+    } else if (event.type === "assistant_reply" && event.result) {
+      log().info(`[chat:global] system-event reply session=${sessionKey} len=${event.result.length}`);
+      const mediaPattern = /!\[[^\]]*\]\(\/api\/media\/([\w\-\.]+)\)/g;
+      const mediaFiles: string[] = [];
+      let match;
+      while ((match = mediaPattern.exec(event.result)) !== null) {
+        mediaFiles.push(match[1]);
+      }
+      db.insert(chatMessages).values({
+        id: randomUUID().replace(/-/g, ""),
+        sessionKey,
+        role: "assistant",
+        content: event.result,
+        createdAt: new Date(event.timestamp).toISOString(),
+        ...(mediaFiles.length > 0 ? { messageMetadata: JSON.stringify({ mediaFiles }) } : {}),
+      }).run();
+      db.update(chatSessions)
+        .set({ lastMessageAt: new Date(event.timestamp).toISOString() })
+        .where(eq(chatSessions.sessionKey, sessionKey))
+        .run();
+      onAssistantMessage(sessionKey);
+    } else if (event.type === "error" && event.result) {
+      log().warn(`[chat:global] system-event error session=${sessionKey}: ${event.result.slice(0, 160)}`);
+      db.insert(chatMessages).values({
+        id: randomUUID().replace(/-/g, ""),
+        sessionKey,
+        role: "assistant",
+        content: event.result,
+        createdAt: new Date(event.timestamp).toISOString(),
+        messageMetadata: JSON.stringify({ isError: true }),
+      }).run();
+    }
+  });
+
+  log().info("[chat] Global nexus event listener installed (catches subagent completions & system events)");
+}
+
 /** Delete media files referenced by messages in a session */
 function cleanupSessionMedia(sessionKey: string) {
   const db = getDb();
@@ -86,6 +210,9 @@ export async function handleChatRequest(
   const db = getDb();
   const method = req.method?.toUpperCase() ?? "GET";
 
+  // Ensure the global nexus listener is installed (idempotent, runs once)
+  ensureGlobalNexusListener();
+
   if (sub === "sessions") {
     const sessionKey = parts[2];
     const action = parts[3];
@@ -150,6 +277,9 @@ export async function handleChatRequest(
       // Listen for agent events and persist them as chat messages.
       // Crucially, assistant_reply is handled HERE so the message is in the DB
       // BEFORE the frontend's SSE-triggered reloadMessages() query hits.
+      // Mark this channel as having an active per-request listener so the
+      // global fallback listener doesn't double-persist events.
+      activeRequestListeners.add(channelId);
       const toolListener = (event: AgentStreamEvent) => {
         if (event.channelId !== channelId) return;
         if (event.type === "tool_start") {
@@ -249,10 +379,12 @@ export async function handleChatRequest(
             }).run();
           }
           // Cleanup listener
+          activeRequestListeners.delete(channelId);
           mainAgent.events.off("stream", toolListener);
         } else if (event.type === "done") {
           log().info(`[chat] completed session=${sessionKey} channel=${channelId}`);
-          // Cleanup listener when done
+          // Cleanup listener when done — global fallback takes over for system events
+          activeRequestListeners.delete(channelId);
           mainAgent.events.off("stream", toolListener);
         }
       };
