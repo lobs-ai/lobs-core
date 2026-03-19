@@ -18,6 +18,7 @@ import { messageToolDefinition, executeMessageTool } from "./message.js";
 import { reactToolDefinition, executeReactTool, setDiscordService as setReactDiscord } from "./react.js";
 import { processToolDefinition, processTool } from "./process.js";
 import { humanizeToolDefinition, humanizeTool } from "./humanize.js";
+import { imagineToolDefinition, imagineTool } from "./imagine.js";
 
 export { setReactDiscord };
 
@@ -129,6 +130,10 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   humanize: {
     definition: humanizeToolDefinition,
     execute: (params, cwd) => humanizeTool(params, cwd),
+  },
+  imagine: {
+    definition: imagineToolDefinition,
+    execute: (params) => imagineTool(params),
   },
 };
 

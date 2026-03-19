@@ -24,6 +24,7 @@ const NEXUS_TOOLS: ToolName[] = [
   "spawn_agent",
   "process",
   "humanize",
+  "imagine",
 ];
 
 // Discord channel sessions — add message + react
