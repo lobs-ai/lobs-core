@@ -103,16 +103,21 @@ export class KeyPoolService {
     // Current key unhealthy — find next healthy key
     const nextIndex = this.findNextHealthyKey(provider, keyIndex, keys.length);
     if (nextIndex === undefined) {
-      const fallbackIndex = this.findLeastBadKey(provider, keys.length);
-      if (fallbackIndex === undefined) {
-        return undefined;
+      // All keys unhealthy — DON'T return a rate-limited key just to hammer it.
+      // Instead, check if any key's cooldown has already expired (recovery loop
+      // runs every 60s, so there's a window where a key is eligible but not yet
+      // recovered). If we find one, recover it inline and use it.
+      const recoveredIndex = this.tryInlineRecovery(provider, keys.length);
+      if (recoveredIndex !== undefined) {
+        this.assignments.set(assignmentKey, recoveredIndex);
+        const label = keys[recoveredIndex]?.label ?? `key-${recoveredIndex}`;
+        console.log(`[KeyPool] Inline-recovered ${provider}/${label} for session=${sessionId.slice(0, 24)}`);
+        return { key: keys[recoveredIndex].key, keyIndex: recoveredIndex, label };
       }
-      const fallbackLabel = keys[fallbackIndex]?.label ?? `key-${fallbackIndex}`;
-      console.warn(
-        `[KeyPool] All ${provider} keys unhealthy; falling back to ${fallbackLabel} for session=${sessionId.slice(0, 24)}`,
-      );
-      this.assignments.set(assignmentKey, fallbackIndex);
-      return { key: keys[fallbackIndex].key, keyIndex: fallbackIndex, label: fallbackLabel };
+
+      // No keys available — return undefined so callers get clean "no keys" error
+      // instead of retrying against rate-limited endpoints
+      return undefined;
     }
 
     // Reassign to healthy key
@@ -135,14 +140,31 @@ export class KeyPoolService {
     cooldownMs?: number,
   ): void {
     const healthKey = `${provider}:${keyIndex}`;
+    const now = Date.now();
     const effectiveCooldownMs =
       errorType === "rate_limit"
         ? Math.max(cooldownMs ?? DEFAULT_RATE_LIMIT_COOLDOWN_MS, DEFAULT_RATE_LIMIT_COOLDOWN_MS)
         : cooldownMs ?? DEFAULT_UNKNOWN_COOLDOWN_MS;
+
+    // If the key is already in cooldown, don't reset the timer — extend if needed
+    // but never shorten. This prevents "thundering herd resets" where retries
+    // against a rate-limited key keep pushing back its recovery time.
+    const existing = this.health.get(healthKey);
+    let recoverAt: Date | undefined;
+    if (errorType === "auth") {
+      recoverAt = undefined; // auth failures stay down permanently
+    } else if (existing && !existing.healthy && existing.recoverAt) {
+      // Key already in cooldown — only extend, never reset backwards
+      const newRecoverAt = new Date(now + effectiveCooldownMs);
+      recoverAt = newRecoverAt > existing.recoverAt ? newRecoverAt : existing.recoverAt;
+    } else {
+      recoverAt = new Date(now + effectiveCooldownMs);
+    }
+
     this.health.set(healthKey, {
       healthy: false,
-      lastFailure: new Date(),
-      recoverAt: errorType === "auth" ? undefined : new Date(Date.now() + effectiveCooldownMs),
+      lastFailure: new Date(now),
+      recoverAt,
       failureReason: error,
       failureType: errorType,
     });
@@ -319,6 +341,32 @@ export class KeyPoolService {
     }
 
     return bestIndex;
+  }
+
+  /**
+   * Check if any key's cooldown has expired and recover it inline.
+   * The periodic recovery loop runs every 60s, but there's a window where
+   * a key is eligible for recovery but hasn't been recovered yet. This method
+   * handles that case on-demand when we need a key now.
+   */
+  private tryInlineRecovery(provider: Provider, poolSize: number): number | undefined {
+    const now = Date.now();
+    for (let i = 0; i < poolSize; i++) {
+      const healthKey = `${provider}:${i}`;
+      const health = this.health.get(healthKey);
+      if (!health || health.healthy) return i; // already healthy
+      if (health.failureType === "auth") continue; // permanently down
+      if (health.recoverAt && now >= health.recoverAt.getTime()) {
+        // Cooldown expired — recover this key
+        health.healthy = true;
+        health.recoverAt = undefined;
+        const keys = this.pools.get(provider);
+        const label = keys?.[i]?.label ?? `key-${i}`;
+        console.log(`[KeyPool] Inline-recovered ${provider}/${label} (cooldown expired)`);
+        return i;
+      }
+    }
+    return undefined;
   }
 
   private startRecoveryLoop(): void {
