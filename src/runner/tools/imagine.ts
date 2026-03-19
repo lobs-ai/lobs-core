@@ -29,11 +29,11 @@ export const imagineToolDefinition: ToolDefinition = {
       },
       width: {
         type: "number",
-        description: "Image width in pixels (256-2048, default 768). Must be divisible by 8.",
+        description: "Image width in pixels (256-1024, default 512). Must be divisible by 8. Use 512 for drafts, regenerate at 768-1024 for final versions.",
       },
       height: {
         type: "number",
-        description: "Image height in pixels (256-2048, default 768). Must be divisible by 8.",
+        description: "Image height in pixels (256-1024, default 512). Must be divisible by 8. Use 512 for drafts, regenerate at 768-1024 for final versions.",
       },
       steps: {
         type: "number",
