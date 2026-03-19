@@ -180,6 +180,16 @@ export async function handleChatRequest(
             })
             .pop();
           if (existing) {
+            // Extract media references from tool results
+            const mediaPattern = /!\[[^\]]*\]\(\/api\/media\/([\w\-\.]+)\)/g;
+            const mediaFiles: string[] = [];
+            if (event.result) {
+              let m;
+              while ((m = mediaPattern.exec(event.result)) !== null) {
+                mediaFiles.push(m[1]);
+              }
+            }
+
             db.update(chatMessages)
               .set({
                 messageMetadata: JSON.stringify({
@@ -188,6 +198,7 @@ export async function handleChatRequest(
                   result: event.result,
                   isError: event.isError,
                   status: "complete",
+                  ...(mediaFiles.length > 0 ? { mediaFiles } : {}),
                 }),
               })
               .where(eq(chatMessages.id, existing.id))
