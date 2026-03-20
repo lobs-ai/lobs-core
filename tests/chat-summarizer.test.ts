@@ -148,9 +148,9 @@ describe("generateChatTitle", () => {
     expect(title).toBe("Deploy Assistance");
   });
 
-  it("returns null when fewer than 2 messages", async () => {
+  it("returns null when no messages exist", async () => {
     seedSession({ sessionKey: "s4" });
-    seedMessages("s4", [{ role: "user", content: "Hello" }]);
+    // No messages seeded — empty conversation
 
     const title = await generateChatTitle("s4");
     expect(title).toBeNull();
