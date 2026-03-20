@@ -16,6 +16,8 @@ const NEXUS_TOOLS: ToolName[] = [
   "ls",
   "grep",
   "glob",
+  "find_files",
+  "code_search",
   "web_search",
   "web_fetch",
   "memory_search",

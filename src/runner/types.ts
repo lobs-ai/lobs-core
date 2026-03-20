@@ -34,7 +34,7 @@ export interface AgentSpec {
   };
 }
 
-export type ToolName = "exec" | "read" | "write" | "edit" | "ls" | "grep" | "glob" | "web_search" | "web_fetch" | "memory_search" | "memory_read" | "memory_write" | "spawn_agent" | "run_pipeline" | "list_agents" | "cron" | "message" | "react" | "process" | "humanize" | "imagine" | "html_to_pdf";
+export type ToolName = "exec" | "read" | "write" | "edit" | "ls" | "grep" | "glob" | "find_files" | "code_search" | "web_search" | "web_fetch" | "memory_search" | "memory_read" | "memory_write" | "spawn_agent" | "run_pipeline" | "list_agents" | "cron" | "message" | "react" | "process" | "humanize" | "imagine" | "html_to_pdf";
 
 export interface AgentContext {
   taskId?: string;

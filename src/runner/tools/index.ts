@@ -10,6 +10,8 @@ import { editToolDefinition, editTool } from "./edit.js";
 import { lsToolDefinition, lsTool } from "./ls.js";
 import { grepToolDefinition, grepTool } from "./grep.js";
 import { globToolDefinition, globTool } from "./glob.js";
+import { findFilesToolDefinition, findFilesTool } from "./find-files.js";
+import { codeSearchToolDefinition, codeSearchTool } from "./code-search.js";
 import { webSearchToolDefinition, webSearchTool, webFetchToolDefinition, webFetchTool } from "./web.js";
 import { memorySearchToolDefinition, memorySearchTool, memoryReadToolDefinition, memoryReadTool, memoryWriteToolDefinition, memoryWriteTool } from "./memory.js";
 import { AGENT_CONTROL_TOOLS, executeSpawnAgent, executeRunPipeline, executeListAgents } from "./agent-control.js";
@@ -80,6 +82,14 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   glob: {
     definition: globToolDefinition,
     execute: globTool,
+  },
+  find_files: {
+    definition: findFilesToolDefinition,
+    execute: findFilesTool,
+  },
+  code_search: {
+    definition: codeSearchToolDefinition,
+    execute: codeSearchTool,
   },
   web_search: {
     definition: webSearchToolDefinition,
