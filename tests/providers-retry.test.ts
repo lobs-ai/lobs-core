@@ -279,10 +279,16 @@ describe("OpenAI-compatible tool parsing", () => {
       maxTokens: 32,
     });
 
-    await vi.runAllTimersAsync();
+    // Advance timers enough for the retry backoff (up to ~60s) without runAllTimers
+    // which can hit infinite loop with recurring timers
+    for (let i = 0; i < 10; i++) {
+      await vi.advanceTimersByTimeAsync(10_000);
+    }
     const response = await responsePromise;
 
     expect(response.content).toEqual([{ type: "text", text: "ok" }]);
     expect(callCount).toBe(2);
+
+    vi.useRealTimers();
   });
 });
