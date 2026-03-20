@@ -31,7 +31,7 @@ const TIMEOUT_MS = 60_000;
 
 // ── Prompts ─────────────────────────────────────────────────────────────
 
-const TITLE_SYSTEM_PROMPT = `You are a chat title generator. Given a conversation between a user and an AI assistant, generate a short, descriptive title (3-7 words). The title should capture the main topic or intent of the conversation.
+const TITLE_SYSTEM_PROMPT = `You are a chat title generator. Given a user's message (or a short conversation), generate a short, descriptive title (3-7 words) capturing the main topic or intent.
 
 Rules:
 - Output ONLY the title, nothing else
@@ -179,12 +179,20 @@ export async function generateChatTitle(sessionKey: string): Promise<string | nu
       .all();
 
     const messages = allMessages.filter(m => m.role === "user" || m.role === "assistant");
-    if (messages.length < 2) return null; // Need at least one exchange
+    if (messages.length < 1) return null; // Need at least one message
 
     // For title generation, first few messages are usually enough
     const titleMessages = messages.slice(0, 6);
-    const transcript = truncateTranscript(formatMessages(titleMessages));
-    const userPrompt = `Generate a title for this conversation:\n\n${transcript}`;
+    let userPrompt: string;
+
+    if (titleMessages.length === 1 && titleMessages[0].role === "user") {
+      // Fast path: generate title from just the first user message
+      const content = titleMessages[0].content.slice(0, MAX_CONTEXT_CHARS);
+      userPrompt = `Generate a title for a conversation that starts with this message:\n\n${content}`;
+    } else {
+      const transcript = truncateTranscript(formatMessages(titleMessages));
+      userPrompt = `Generate a title for this conversation:\n\n${transcript}`;
+    }
 
     const config = getModelConfig();
     const model = config.local?.chatModel ?? "qwen/qwen3.5-9b";
@@ -366,6 +374,22 @@ export async function forceSummarize(sessionKey: string): Promise<{ title: strin
   }
   const summary = await maybeSummarizeChat(sessionKey);
   return { title, summary };
+}
+
+/**
+ * Hook to call when the user sends a message.
+ * Generates a title immediately from the first message — no need to wait
+ * for the assistant to respond.
+ * Runs async — doesn't block the chat response.
+ */
+export function onUserMessage(sessionKey: string): void {
+  (async () => {
+    try {
+      await generateChatTitle(sessionKey);
+    } catch (err) {
+      log().error(`[chat-summarizer] onUserMessage hook failed: ${err}`);
+    }
+  })();
 }
 
 /**

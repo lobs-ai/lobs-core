@@ -16,6 +16,16 @@ import { log } from "../util/logger.js";
 const REFLECTION_AGENTS = ["programmer", "researcher", "writer", "architect", "reviewer", "main"];
 const QUALITY_MIN_LENGTH = 50;
 
+/** Slice a string without splitting surrogate pairs (avoids invalid JSON errors) */
+function safeSlice(str: string, maxLen: number): string {
+  if (str.length <= maxLen) return str;
+  let end = maxLen;
+  const code = str.charCodeAt(end - 1);
+  // If we're splitting a high surrogate, back up one
+  if (code >= 0xD800 && code <= 0xDBFF) end--;
+  return str.slice(0, end);
+}
+
 export interface ReflectionResult {
   agentsProcessed: number;
   reflectionsCreated: number;
@@ -161,11 +171,11 @@ export class ReflectionService {
           ? `${Math.round((new Date(r.endedAt).getTime() - new Date(r.startedAt).getTime()) / 1000)}s`
           : "?";
         let detail = `- "${taskTitle}" (model=${r.model ?? "unknown"}, succeeded=${r.succeeded}, duration=${duration}, ${r.startedAt})`;
-        if (r.summary) detail += `\n  Summary: ${(r.summary as string).slice(0, 200)}`;
+        if (r.summary) detail += `\n  Summary: ${safeSlice(r.summary as string, 200)}`;
         if (r.succeeded === false || r.succeeded === null) {
           if (r.timeoutReason) detail += `\n  Timeout: ${r.timeoutReason}`;
-          if (r.validityResult) detail += `\n  Validation: ${(r.validityResult as string).slice(0, 200)}`;
-          if (r.taskLog) detail += `\n  Log: ${(r.taskLog as string).slice(0, 300)}`;
+          if (r.validityResult) detail += `\n  Validation: ${safeSlice(r.validityResult as string, 200)}`;
+          if (r.taskLog) detail += `\n  Log: ${safeSlice(r.taskLog as string, 300)}`;
         }
         return detail;
       }).join("\n");
@@ -191,7 +201,7 @@ export class ReflectionService {
           let line = `- [${r.agentType}] "${title}" (succeeded=${r.succeeded}, ${r.startedAt})`;
           if (r.succeeded === false || r.succeeded === null) {
             if (r.timeoutReason) line += ` [TIMEOUT: ${r.timeoutReason}]`;
-            if (r.validityResult) line += `\n    Validation: ${(r.validityResult as string).slice(0, 150)}`;
+            if (r.validityResult) line += `\n    Validation: ${safeSlice(r.validityResult as string, 150)}`;
           }
           return line;
         }).join("\n")
@@ -204,7 +214,7 @@ export class ReflectionService {
       .all();
     const taskList = activeTasks.length > 0
       ? activeTasks.map((t: Record<string, unknown>) =>
-          `- [${t.status}] "${t.title}" (agent=${t.agent ?? "unassigned"}, tier=${t.model_tier ?? "?"})${t.notes ? ` — ${(t.notes as string).slice(0, 100)}` : ""}`
+          `- [${t.status}] "${t.title}" (agent=${t.agent ?? "unassigned"}, tier=${t.model_tier ?? "?"})${t.notes ? ` — ${safeSlice(t.notes as string, 100)}` : ""}`
         ).join("\n")
       : "No active tasks.";
 
@@ -215,7 +225,7 @@ export class ReflectionService {
       .all();
     const projectList = activeProjects.length > 0
       ? activeProjects.map((p: Record<string, unknown>) =>
-          `- "${p.title}" (type=${p.type})${p.notes ? ` — ${(p.notes as string).slice(0, 100)}` : ""}`
+          `- "${p.title}" (type=${p.type})${p.notes ? ` — ${safeSlice(p.notes as string, 100)}` : ""}`
         ).join("\n")
       : "No active projects.";
 
@@ -672,9 +682,9 @@ Reflection ID: ${reflectionId}`;
       }
       let line = `- FAILED: "${taskTitle}" (model=${r.model ?? "?"}, ${r.startedAt})`;
       if (r.timeoutReason) line += `\n  Reason: ${r.timeoutReason}`;
-      if (r.validityResult) line += `\n  Validation: ${(r.validityResult as string).slice(0, 200)}`;
-      if (r.summary) line += `\n  Summary: ${(r.summary as string).slice(0, 200)}`;
-      if (r.taskLog) line += `\n  Log excerpt: ${(r.taskLog as string).slice(0, 300)}`;
+      if (r.validityResult) line += `\n  Validation: ${safeSlice(r.validityResult as string, 200)}`;
+      if (r.summary) line += `\n  Summary: ${safeSlice(r.summary as string, 200)}`;
+      if (r.taskLog) line += `\n  Log excerpt: ${safeSlice(r.taskLog as string, 300)}`;
       return line;
     });
 
@@ -737,7 +747,7 @@ Reflection ID: ${reflectionId}`;
         id: randomUUID(),
         title: fullTitle,
         content: `**Agent:** ${agentType}\n**Type:** ${type}\n\n${suggestion}`,
-        summary: suggestion.slice(0, 200),
+        summary: safeSlice(suggestion, 200),
         isRead: false,
         modifiedAt: now,
         type,
@@ -775,7 +785,7 @@ Reflection ID: ${reflectionId}`;
 
       db.insert(inboxItems).values({
         id: randomUUID(),
-        title: `🔍 ${agentType} reflection: ${summary.slice(0, 80)}`,
+        title: `🔍 ${agentType} reflection: ${safeSlice(summary, 80)}`,
         content: `**Agent:** ${agentType}\n**Reflection:** ${reflectionId.slice(0, 8)}\n\n${parts.join("\n\n")}`,
         summary,
         isRead: false,

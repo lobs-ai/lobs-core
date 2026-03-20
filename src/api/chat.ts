@@ -10,7 +10,7 @@ import { join } from "node:path";
 import type { AgentStreamEvent } from "../services/main-agent.js";
 import { getToolDefinitions } from "../runner/tools/index.js";
 import { getToolsForSession } from "../runner/tools/tool-sets.js";
-import { onAssistantMessage, forceSummarize } from "../services/chat-summarizer.js";
+import { onAssistantMessage, onUserMessage, forceSummarize } from "../services/chat-summarizer.js";
 import { getDefaultChatModel, getChannelModelOverride, getModelCatalog, normalizeModelSelection, setChannelModelOverride } from "../services/model-catalog.js";
 
 const MEDIA_DIR = join(process.env.HOME || "/tmp", ".lobs/media");
@@ -273,6 +273,10 @@ export async function handleChatRequest(
         createdAt: now,
         ...(images ? { messageMetadata: JSON.stringify({ images: images.map(img => ({ mediaType: img.mediaType })) }) } : {}),
       }).run();
+
+      // Fire title generation immediately from the first user message
+      // (async, doesn't block — title appears while agent is still thinking)
+      onUserMessage(sessionKey);
 
       // Listen for agent events and persist them as chat messages.
       // Crucially, assistant_reply is handled HERE so the message is in the DB
