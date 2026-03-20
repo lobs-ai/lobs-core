@@ -24,6 +24,7 @@ import { registerCompactionHooks } from "./hooks/compaction.js";
 import { startControlLoop, stopControlLoop } from "./orchestrator/control-loop.js";
 import { YouTubeService } from "./services/youtube.js";
 import { ensureCompliantMemoryDirs } from "./api/memories-fs.js";
+import { ensureScheduleSeeded } from "./services/schedule-seed.js";
 import { startMemoryScanner, stopMemoryScanner } from "./services/memory-scanner.js";
 import { setLogger, log } from "./util/logger.js";
 import type { PawConfig } from "./util/types.js";
@@ -113,6 +114,12 @@ const pawPlugin = {
     if (seeded > 0) {
       log().info(`paw: seeded ${seeded} default workflows`);
     }
+
+    // ── Seed Recurring Schedule Blocks ───────────────────────────────
+    // Idempotent — inserts Rafe's weekly schedule into scheduledEvents if not present.
+    ensureScheduleSeeded().catch(e =>
+      log().warn(`paw: ensureScheduleSeeded error: ${e}`)
+    );
 
     // ── API Routes ────────────────────────────────────────────────────
     registerAllRoutes(api);

@@ -1,6 +1,6 @@
-import { and, asc, desc, inArray, lte, gte } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lte, gte } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
-import { tasks, scheduledEvents } from "../db/schema.js";
+import { tasks, scheduledEvents, orchestratorSettings } from "../db/schema.js";
 import {
   getLocalConfig,
   getModelConfig,
@@ -17,13 +17,7 @@ const DAY_END_HOUR = 23;
 const MIN_SLOT_MINUTES = 30;
 const SLOT_BUFFER_MINUTES = 10;
 
-const FIXED_BLOCKS = [
-  { days: [1, 3, 5], startHour: 10, startMinute: 0, endHour: 11, endMinute: 30, label: "Class" },
-  { days: [2, 4], startHour: 14, startMinute: 0, endHour: 15, endMinute: 30, label: "Class" },
-  { days: [2], startHour: 17, startMinute: 0, endHour: 19, endMinute: 0, label: "GSI Office Hours" },
-  { days: [4], startHour: 16, startMinute: 0, endHour: 18, endMinute: 0, label: "Esports" },
-  { days: [5], startHour: 20, startMinute: 0, endHour: 22, endMinute: 0, label: "Esports Match Window" },
-];
+const SNAPSHOT_KEY = "scheduler_last_event_snapshot";
 
 export interface SchedulerModelSettings {
   enabled: boolean;
@@ -101,6 +95,13 @@ export interface SchedulerIntelligenceSnapshot {
     headline: string;
     summary: string;
     topActions: string[];
+  };
+  changeAnalysis?: {
+    detectedAt: string;
+    changes: Array<{ type: "NEW" | "REMOVED" | "MODIFIED"; description: string }>;
+    analysis: string;
+    actionItems: string[];
+    rescheduleSuggestions: string[];
   };
 }
 
@@ -261,16 +262,60 @@ function toBusyBlockFromDb(event: typeof scheduledEvents.$inferSelect): BusyBloc
   };
 }
 
+/**
+ * Query recurring blocks from the DB for a given day-of-week.
+ * Replaces the old FIXED_BLOCKS hardcoded constant.
+ * Falls back to an empty array on any DB error.
+ */
+function getRecurringBlocksFromDb(dayOfWeek: number, baseDate: Date): BusyBlock[] {
+  try {
+    const db = getDb();
+    const rulePattern = `WEEKLY:${dayOfWeek}`;
+
+    const rows = db
+      .select()
+      .from(scheduledEvents)
+      .where(
+        and(
+          eq(scheduledEvents.eventType, "recurring_block"),
+          eq(scheduledEvents.status, "pending"),
+          eq(scheduledEvents.recurrenceRule, rulePattern),
+        )
+      )
+      .all();
+
+    return rows
+      .filter(row => row.scheduledAt && row.endAt)
+      .map(row => {
+        // Parse HH:MM from the stored reference-date ISO string
+        // The reference date encodes the correct local time in the ISO offset
+        const startRef = new Date(row.scheduledAt!);
+        const endRef   = new Date(row.endAt!);
+
+        // Extract local hours/minutes from the reference (stored as EST = UTC-5)
+        // We read back the offset-adjusted values using UTC methods since the offset is baked in
+        // The ISO string format is "2000-01-DDThh:mm:00-05:00" → parse as-is gives correct local time
+        const startHour   = startRef.getHours();
+        const startMinute = startRef.getMinutes();
+        const endHour     = endRef.getHours();
+        const endMinute   = endRef.getMinutes();
+
+        return {
+          title: row.title,
+          start: dateAt(baseDate, startHour, startMinute),
+          end:   dateAt(baseDate, endHour, endMinute),
+          source: "fixed" as const,
+        };
+      });
+  } catch (err) {
+    log().warn(`[scheduler-intelligence] Failed to load recurring blocks from DB: ${err}`);
+    return [];
+  }
+}
+
 function getFixedBusyBlocks(baseDate: Date): BusyBlock[] {
   const dayOfWeek = baseDate.getDay();
-  return FIXED_BLOCKS
-    .filter(block => block.days.includes(dayOfWeek))
-    .map(block => ({
-      title: block.label,
-      start: dateAt(baseDate, block.startHour, block.startMinute),
-      end: dateAt(baseDate, block.endHour, block.endMinute),
-      source: "fixed" as const,
-    }));
+  return getRecurringBlocksFromDb(dayOfWeek, baseDate);
 }
 
 function mergeBusyBlocks(blocks: BusyBlock[]): BusyBlock[] {
@@ -469,6 +514,211 @@ function buildFallbackActions(suggestions: PlannerSuggestion[], conflicts: Plann
   return actions.slice(0, 4);
 }
 
+// ─── Event change detection ───────────────────────────────────────────────────
+
+interface EventSnapshot {
+  id: string;
+  title: string;
+  start: string;
+  end?: string;
+  source: "google" | "db";
+}
+
+interface ChangeAnalysisResult {
+  detectedAt: string;
+  changes: Array<{ type: "NEW" | "REMOVED" | "MODIFIED"; description: string }>;
+  analysis: string;
+  actionItems: string[];
+  rescheduleSuggestions: string[];
+}
+
+function buildEventSnapshot(
+  googleEvents: CalendarEvent[],
+  dbEventsRaw: Array<{ id: string; title: string; scheduledAt: string | null; endAt: string | null; eventType?: string | null }>,
+): EventSnapshot[] {
+  const googleSnaps: EventSnapshot[] = googleEvents.map(e => ({
+    id: e.id,
+    title: e.summary || "(untitled)",
+    start: e.start.dateTime ?? e.start.date ?? "",
+    end: e.end.dateTime ?? e.end.date ?? undefined,
+    source: "google" as const,
+  }));
+
+  const dbSnaps: EventSnapshot[] = dbEventsRaw
+    .filter(e => e.eventType !== "recurring_block")
+    .map(e => ({
+      id: e.id,
+      title: e.title,
+      start: e.scheduledAt ?? "",
+      end: e.endAt ?? undefined,
+      source: "db" as const,
+    }));
+
+  return [...googleSnaps, ...dbSnaps];
+}
+
+function detectChanges(
+  prev: EventSnapshot[],
+  curr: EventSnapshot[],
+): Array<{ type: "NEW" | "REMOVED" | "MODIFIED"; description: string }> {
+  const changes: Array<{ type: "NEW" | "REMOVED" | "MODIFIED"; description: string }> = [];
+  const prevMap = new Map(prev.map(e => [e.id, e]));
+  const currMap = new Map(curr.map(e => [e.id, e]));
+
+  // New or modified
+  for (const event of curr) {
+    const old = prevMap.get(event.id);
+    if (!old) {
+      const startLabel = event.start ? new Date(event.start).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "unknown time";
+      changes.push({ type: "NEW", description: `"${event.title}" on ${startLabel}` });
+    } else if (old.title !== event.title || old.start !== event.start) {
+      const startLabel = event.start ? new Date(event.start).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "unknown time";
+      changes.push({ type: "MODIFIED", description: `"${event.title}" moved/renamed to ${startLabel}` });
+    }
+  }
+
+  // Removed
+  for (const event of prev) {
+    if (!currMap.has(event.id)) {
+      const startLabel = event.start ? new Date(event.start).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "unknown time";
+      changes.push({ type: "REMOVED", description: `"${event.title}" was on ${startLabel}` });
+    }
+  }
+
+  return changes;
+}
+
+export async function analyzeScheduleChanges(
+  googleEvents: CalendarEvent[],
+  dbEventsRaw: Array<{ id: string; title: string; scheduledAt: string | null; endAt: string | null; eventType?: string | null }>,
+  rankedTasks: PlannerTask[],
+  freeSlots: PlannerSlot[],
+): Promise<ChangeAnalysisResult | null> {
+  try {
+    const db = getDb();
+    const settings = getSchedulerModelSettings();
+
+    const currentSnapshot = buildEventSnapshot(googleEvents, dbEventsRaw);
+
+    // Load previously stored snapshot
+    const stored = db
+      .select()
+      .from(orchestratorSettings)
+      .where(eq(orchestratorSettings.key, SNAPSHOT_KEY))
+      .get();
+
+    const prevSnapshot: EventSnapshot[] = stored
+      ? (JSON.parse(stored.value as string) as EventSnapshot[])
+      : [];
+
+    const changes = detectChanges(prevSnapshot, currentSnapshot);
+
+    // Save updated snapshot regardless
+    const snapshotValue = JSON.stringify(currentSnapshot);
+    db.insert(orchestratorSettings)
+      .values({ key: SNAPSHOT_KEY, value: snapshotValue, updatedAt: new Date().toISOString() })
+      .onConflictDoUpdate({ target: orchestratorSettings.key, set: { value: snapshotValue, updatedAt: new Date().toISOString() } })
+      .run();
+
+    if (changes.length === 0) return null;
+
+    const localCfg = getLocalConfig();
+    const localAvailable = await isLocalModelAvailable();
+
+    if (!settings.enabled || !localAvailable) {
+      // Return analysis-free result listing just the changes
+      return {
+        detectedAt: new Date().toISOString(),
+        changes,
+        analysis: `${changes.length} schedule change(s) detected. AI analysis unavailable (model offline).`,
+        actionItems: [],
+        rescheduleSuggestions: [],
+      };
+    }
+
+    const rawSelectedModel = settings.overrideModel?.trim()
+      ? settings.overrideModel.trim()
+      : settings.localOnly
+        ? localCfg.chatModel
+        : getModelForTier(settings.tier);
+    const selectedModel = rawSelectedModel.replace(/^lmstudio\//, "");
+
+    const changeLines = changes.map(c => `- ${c.type}: ${c.description}`).join("\n");
+    const taskLines = rankedTasks.slice(0, 8).map(t => `  • ${t.title} (priority ${t.score})`).join("\n");
+    const slotLines = freeSlots.slice(0, 6).map(s => `  • ${s.start} – ${s.end} (${s.minutes}m)`).join("\n");
+
+    const prompt = [
+      "You are a scheduling assistant. Be concise and practical.",
+      "The following schedule changes were detected:",
+      changeLines,
+      "",
+      "Current tasks in queue:",
+      taskLines || "  (none)",
+      "",
+      "Current free time slots:",
+      slotLines || "  (none)",
+      "",
+      "Analyze: Do any of these changes require action? Should any tasks be rescheduled?",
+      "What work might the new events require (preparation, follow-up)?",
+      "",
+      'Return JSON only: {"analysis":"...","actionItems":["..."],"rescheduleSuggestions":["..."]}',
+    ].join("\n");
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20_000);
+
+    try {
+      const response = await fetch(`${localCfg.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: selectedModel,
+          messages: [{ role: "user", content: prompt }],
+          max_tokens: settings.maxTokens,
+          temperature: settings.temperature,
+          stream: false,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (!response.ok) throw new Error(`LM Studio returned ${response.status}`);
+
+      const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+      const raw = data.choices?.[0]?.message?.content?.trim() ?? "";
+      const match = raw.match(/\{[\s\S]*\}/);
+      if (!match) throw new Error("non-JSON change analysis");
+
+      const parsed = JSON.parse(match[0]) as {
+        analysis?: string;
+        actionItems?: string[];
+        rescheduleSuggestions?: string[];
+      };
+
+      return {
+        detectedAt: new Date().toISOString(),
+        changes,
+        analysis: parsed.analysis?.trim() || `${changes.length} schedule change(s) detected.`,
+        actionItems: Array.isArray(parsed.actionItems) ? parsed.actionItems : [],
+        rescheduleSuggestions: Array.isArray(parsed.rescheduleSuggestions) ? parsed.rescheduleSuggestions : [],
+      };
+    } catch (innerErr) {
+      clearTimeout(timeout);
+      log().warn(`[scheduler-intelligence] Change analysis LLM call failed: ${innerErr}`);
+      return {
+        detectedAt: new Date().toISOString(),
+        changes,
+        analysis: `${changes.length} schedule change(s) detected. AI analysis failed.`,
+        actionItems: [],
+        rescheduleSuggestions: [],
+      };
+    }
+  } catch (err) {
+    log().warn(`[scheduler-intelligence] analyzeScheduleChanges failed: ${err}`);
+    return null;
+  }
+}
+
 export async function getSchedulerIntelligenceSnapshot(): Promise<SchedulerIntelligenceSnapshot> {
   const db = getDb();
   const now = new Date();
@@ -633,7 +883,10 @@ export async function getSchedulerIntelligenceSnapshot(): Promise<SchedulerIntel
     conflicts,
   };
 
-  const ai = await maybeGenerateAiSummary(settings, baseSnapshot);
+  const [ai, changeAnalysis] = await Promise.all([
+    maybeGenerateAiSummary(settings, baseSnapshot),
+    analyzeScheduleChanges(googleEvents, dbEvents, rankedTasks, freeSlots),
+  ]);
 
   return {
     ...baseSnapshot,
@@ -654,5 +907,6 @@ export async function getSchedulerIntelligenceSnapshot(): Promise<SchedulerIntel
       summary: ai.summary,
       topActions: ai.topActions,
     },
+    ...(changeAnalysis ? { changeAnalysis } : {}),
   };
 }
