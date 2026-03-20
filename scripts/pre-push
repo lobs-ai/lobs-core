@@ -1,0 +1,24 @@
+#!/bin/sh
+# Pre-push hook — runs type check and tests before pushing.
+# Installed via: npm run setup-hooks
+
+set -e
+
+echo "🔍 Running type check..."
+if ! npx tsc --noEmit; then
+  echo "❌ Type check failed. Push aborted."
+  exit 1
+fi
+echo "✅ Type check passed."
+
+echo ""
+echo "🧪 Running tests with coverage..."
+if ! npx vitest run --coverage; then
+  echo "❌ Tests failed or coverage thresholds not met. Push aborted."
+  exit 1
+fi
+echo "✅ Tests passed, coverage thresholds met."
+
+echo ""
+echo "🚀 All checks passed — pushing."
+exit 0

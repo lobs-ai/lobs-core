@@ -222,7 +222,9 @@ describe("getDailyCosts", () => {
 
     const costs = getDailyCosts(7);
     expect(costs).toHaveLength(2);
-    const today = costs.find(c => c.date === new Date().toISOString().slice(0, 10));
+    // daysAgo(0) uses local hour=12 → find the date by matching the inserted startedAt
+    const todayDate = daysAgo(0).slice(0, 10);
+    const today = costs.find(c => c.date === todayDate);
     expect(today?.runs).toBe(2);
     expect(today?.cost).toBeCloseTo(0.03, 4);
     expect(today?.tokens).toBe(300);

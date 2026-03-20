@@ -7,10 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  build:
+  quality:
     runs-on: ubuntu-latest
-
-    # All steps share this path so postinstall and tests use the same browsers
     env:
       PLAYWRIGHT_BROWSERS_PATH: /tmp/ms-playwright
 
@@ -20,14 +18,44 @@ jobs:
     - name: Setup Node
       uses: actions/setup-node@v4
       with:
-        node-version: '20'
+        node-version: '22'
         cache: 'npm'
 
-    - name: Install dependencies (includes Playwright browser install via postinstall)
+    - name: Install dependencies
       run: npm ci
+
+    - name: Type check
+      run: npx tsc --noEmit
+
+    - name: Lint
+      run: npm run lint --if-present
 
     - name: Build
       run: npm run build
 
-    - name: Run tests
-      run: npm test
+    - name: Run tests with coverage
+      run: npx vitest run --coverage
+
+    - name: Coverage summary
+      if: always()
+      run: |
+        if [ -f coverage/coverage-summary.json ]; then
+          echo "### Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          node -e "
+            const c = require('./coverage/coverage-summary.json').total;
+            console.log('Lines:      ' + c.lines.pct + '%');
+            console.log('Branches:   ' + c.branches.pct + '%');
+            console.log('Functions:  ' + c.functions.pct + '%');
+            console.log('Statements: ' + c.statements.pct + '%');
+          " >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: Upload coverage
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: coverage/
+        retention-days: 14

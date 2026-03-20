@@ -17,6 +17,7 @@ describe("shouldRetryProviderError", () => {
   afterEach(async () => {
     process.env.HOME = originalHome;
     process.env.ANTHROPIC_API_KEY = originalAnthropicApiKey;
+    vi.useRealTimers();
     vi.resetModules();
   });
 
@@ -45,6 +46,14 @@ describe("shouldRetryProviderError", () => {
     };
 
     expect(shouldRetryProviderError(err)).toBeUndefined();
+  });
+
+  test("returns true for timeout-like provider errors", () => {
+    const err = Object.assign(new Error("anthropic_stream_timeout after 240s"), {
+      name: "AbortError",
+    });
+
+    expect(shouldRetryProviderError(err)).toBe(true);
   });
 
   test("does not fall back to ANTHROPIC_API_KEY when a configured pool has no healthy key", async () => {
@@ -237,4 +246,43 @@ describe("OpenAI-compatible tool parsing", () => {
       shutdownKeyPool();
     }
   }, 8000);
+
+  test("retries timeout-like provider failures", async () => {
+    vi.useFakeTimers();
+
+    let callCount = 0;
+    global.fetch = vi.fn(async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        throw Object.assign(new Error("socket timed out"), { name: "AbortError" });
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as any;
+
+    const { createResilientClient } = await import("../src/runner/providers.js");
+    const client = createResilientClient("openai/gpt-4o", {
+      sessionId: "session-timeout",
+      maxRetries: 2,
+    });
+
+    const responsePromise = client.createMessage({
+      model: "gpt-4o",
+      system: "system",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [],
+      maxTokens: 32,
+    });
+
+    await vi.runAllTimersAsync();
+    const response = await responsePromise;
+
+    expect(response.content).toEqual([{ type: "text", text: "ok" }]);
+    expect(callCount).toBe(2);
+  });
 });
