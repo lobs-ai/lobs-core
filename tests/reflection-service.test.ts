@@ -34,14 +34,14 @@ describe("ReflectionService", () => {
   });
 
   describe("createReflectionBatch", () => {
-    test("creates 5 records — one per agent", () => {
+    test("creates 6 records — one per agent (includes main)", () => {
       const result = svc.createReflectionBatch();
-      expect(result.reflectionsCreated).toBe(5);
-      expect(result.agentsProcessed).toBe(5);
+      expect(result.reflectionsCreated).toBe(6);
+      expect(result.agentsProcessed).toBe(6);
 
       const db = getDb();
       const rows = db.select().from(agentReflections).all();
-      expect(rows.length).toBe(5);
+      expect(rows.length).toBe(6);
     });
 
     test("creates a sweep record", () => {
@@ -66,7 +66,7 @@ describe("ReflectionService", () => {
       }
     });
 
-    test("all 5 agent types are covered", () => {
+    test("all 6 agent types are covered (includes main)", () => {
       svc.createReflectionBatch();
       const db = getDb();
       const rows = db.select().from(agentReflections).all();
@@ -76,11 +76,12 @@ describe("ReflectionService", () => {
       expect(agents).toContain("writer");
       expect(agents).toContain("architect");
       expect(agents).toContain("reviewer");
+      expect(agents).toContain("main");
     });
 
     test("windowHours parameter affects window size", () => {
       const result = svc.createReflectionBatch(6);
-      expect(result.reflectionsCreated).toBe(5);
+      expect(result.reflectionsCreated).toBe(6);
       const db = getDb();
       const row = db.select().from(agentReflections).get();
       expect(row).toBeDefined();
@@ -478,14 +479,15 @@ describe("ReflectionService", () => {
   });
 
   describe("listAgents", () => {
-    test("returns 5 agent types", () => {
+    test("returns 6 agent types (includes main)", () => {
       const agents = svc.listAgents();
-      expect(agents.length).toBe(5);
+      expect(agents.length).toBe(6);
       expect(agents).toContain("programmer");
       expect(agents).toContain("researcher");
       expect(agents).toContain("writer");
       expect(agents).toContain("architect");
       expect(agents).toContain("reviewer");
+      expect(agents).toContain("main");
     });
   });
 
