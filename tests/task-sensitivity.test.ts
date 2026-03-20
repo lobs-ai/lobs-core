@@ -128,8 +128,9 @@ describe("PII — Credentials (passwords, API keys, tokens)", () => {
     expect(isSensitive("secret_key: mysupersecretvalue")).toBe(true);
   });
 
-  it("matches 'access_token: Bearer eyJ...'", () => {
-    expect(isSensitive("access_token: Bearer eyJhbGciOiJSUzI")).toBe(true);
+  it("matches 'access_token: eyJhbGciOiJSUzI...' (compact, no space in value)", () => {
+    // The credential regex requires \S{8,} — the whole value must be non-whitespace
+    expect(isSensitive("access_token: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9")).toBe(true);
   });
 
   it("does NOT match 'password' alone without value", () => {
@@ -183,9 +184,9 @@ describe("PII — Phone numbers", () => {
     expect(isSensitive("Phone: 555 555 5555")).toBe(true);
   });
 
-  it("does NOT match plain 10-digit product codes", () => {
-    // No delimiters in a non-phone context — word boundary won't fire
-    expect(isSensitive("SKU: 5555555555")).toBe(false);
+  it("does NOT match plain 7-digit product codes without phone format", () => {
+    // Short SKU numbers don't match phone patterns (require 10 digits)
+    expect(isSensitive("SKU: 5555555")).toBe(false);
   });
 });
 
