@@ -173,10 +173,10 @@ describe("ReflectionService", () => {
       expect(prompt).toContain("concreteSuggestions");
     });
 
-    test("prompt includes workspace path", () => {
+    test("prompt includes the reflection ID at the end", () => {
       const { reflectionId } = svc.pickNextAgent()!;
       const prompt = svc.buildReflectionPrompt("writer", reflectionId);
-      expect(prompt).toContain("workspace");
+      expect(prompt).toContain(`Reflection ID: ${reflectionId}`);
     });
   });
 

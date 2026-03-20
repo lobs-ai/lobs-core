@@ -131,4 +131,110 @@ describe("OpenAI-compatible tool parsing", () => {
       },
     ]);
   });
+
+  test("does not globally quarantine a key on transient 429s that later succeed", async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), "lobs-openai-429-retry-"));
+    process.env.HOME = homeDir;
+    writeKeysConfig(homeDir, {
+      openai: {
+        keys: ["sk-openai-a"],
+        strategy: "sticky-failover",
+      },
+    });
+
+    let callCount = 0;
+    global.fetch = vi.fn(async () => {
+      callCount += 1;
+      if (callCount < 3) {
+        return new Response("rate limited retry_after 1", { status: 429 });
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as any;
+
+    const { createResilientClient } = await import("../src/runner/providers.js");
+    const { getKeyPool, shutdownKeyPool } = await import("../src/services/key-pool.js");
+
+    try {
+      const client = createResilientClient("openai/gpt-4o", {
+        sessionId: "session-rate-limit",
+        maxRetries: 3,
+      });
+
+      const response = await client.createMessage({
+        model: "gpt-4o",
+        system: "system",
+        messages: [{ role: "user", content: "hello" }],
+        tools: [],
+        maxTokens: 32,
+      });
+
+      expect(response.content).toEqual([{ type: "text", text: "ok" }]);
+      expect(getKeyPool().getPoolHealthSummary("openai")).toMatchObject({ healthy: 1, rateLimited: 0 });
+    } finally {
+      shutdownKeyPool();
+    }
+  }, 8000);
+
+  test("quarantines and rotates immediately when retry_after is too large for inline waiting", async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), "lobs-openai-429-rotate-"));
+    process.env.HOME = homeDir;
+    writeKeysConfig(homeDir, {
+      openai: {
+        keys: ["sk-openai-a", "sk-openai-b"],
+        strategy: "sticky-failover",
+      },
+    });
+
+    const authHeaders: string[] = [];
+    global.fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const auth = String((init?.headers as Record<string, string>)?.Authorization ?? "");
+      authHeaders.push(auth);
+
+      if (authHeaders.length === 1) {
+        return new Response("rate limited retry_after 3600", { status: 429 });
+      }
+
+      return new Response(JSON.stringify({
+        choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as any;
+
+    vi.resetModules();
+    const { getKeyPool, shutdownKeyPool } = await import("../src/services/key-pool.js");
+    const { createResilientClient } = await import("../src/runner/providers.js");
+
+    try {
+      const client = createResilientClient("openai/gpt-4o", {
+        sessionId: "session-long-retry",
+        maxRetries: 3,
+      });
+
+      const response = await client.createMessage({
+        model: "gpt-4o",
+        system: "system",
+        messages: [{ role: "user", content: "hello" }],
+        tools: [],
+        maxTokens: 32,
+      });
+
+      expect(response.content).toEqual([{ type: "text", text: "ok" }]);
+      expect(authHeaders).toHaveLength(2);
+      expect(authHeaders[0]).toMatch(/^Bearer sk-openai-/);
+      expect(authHeaders[1]).toMatch(/^Bearer sk-openai-/);
+      expect(authHeaders[1]).not.toBe(authHeaders[0]);
+      expect(getKeyPool().getPoolHealthSummary("openai")).toMatchObject({ healthy: 1, rateLimited: 1 });
+    } finally {
+      shutdownKeyPool();
+    }
+  }, 8000);
 });

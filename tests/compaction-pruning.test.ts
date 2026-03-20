@@ -138,7 +138,7 @@ describe("Compaction Service", () => {
       const pruned = pruneToolResults(messages, 1, 300);
 
       // First message should be truncated
-      expect(pruned[0].content).toContain("[Earlier output truncated");
+      expect(pruned[0].content).toContain("[...truncated");
       expect((pruned[0].content as string).length).toBeLessThan(longOutput.length);
       
       // Recent messages should be intact
@@ -163,7 +163,7 @@ describe("Compaction Service", () => {
 
       // Old tool result should be truncated
       const oldContent = pruned[0].content as Array<{ type: string; content: string }>;
-      expect(oldContent[0].content).toContain("[Truncated]");
+      expect(oldContent[0].content).toContain("[...truncated");
       expect(oldContent[0].content.length).toBeLessThan(longResult.length);
     });
 
@@ -233,7 +233,7 @@ describe("Compaction Service", () => {
 
       // Should truncate to ~100 chars (maxOldToolOutputChars)
       expect((pruned[0].content as string).length).toBeLessThan(200);
-      expect(pruned[0].content).toContain("[Earlier output truncated");
+      expect(pruned[0].content).toContain("[...truncated");
     });
 
     it("should handle messages with multiple tool_result blocks", () => {
@@ -256,8 +256,8 @@ describe("Compaction Service", () => {
       const oldContent = pruned[0].content as Array<{ type: string; content?: string; text?: string }>;
       
       // Both tool results should be truncated
-      expect(oldContent[0].content).toContain("[Truncated]");
-      expect(oldContent[1].content).toContain("[Truncated]");
+      expect(oldContent[0].content).toContain("[...truncated");
+      expect(oldContent[1].content).toContain("[...truncated");
       
       // Text block should be unchanged
       expect(oldContent[2].text).toBe("Some text");

@@ -129,9 +129,124 @@ describe("key rotation", () => {
         },
       });
 
-      const selection = keyPool.getAuth("anthropic", "a");
+      const first = keyPool.getAuth("anthropic", "a");
+      const second = keyPool.getAuth("anthropic", "b");
+      const third = keyPool.getAuth("anthropic", "c");
+
+      const indices = [first?.keyIndex, second?.keyIndex, third?.keyIndex];
+      expect(indices).toContain(2);
+      expect(indices).not.toContain(0);
+    } finally {
+      shutdownKeyPool();
+    }
+  });
+
+  test("successful request heals a previously unhealthy key", async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), "lobs-keypool-heal-"));
+    process.env.HOME = homeDir;
+    writeKeysConfig(homeDir, {
+      openai: {
+        keys: ["sk-openai-a", "sk-openai-b"],
+        strategy: "sticky-failover",
+      },
+    });
+
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    ) as typeof fetch;
+
+    vi.resetModules();
+    const { getKeyPool, shutdownKeyPool } = await import("../src/services/key-pool.js");
+    const { createResilientClient } = await import("../src/runner/providers.js");
+
+    try {
+      const keyPool = getKeyPool();
+      const client = createResilientClient("openai/gpt-4o", {
+        sessionId: "session-rotate",
+        maxRetries: 1,
+      });
+
+      keyPool.markSessionFailed("openai", "session-rotate", "429 rate limited", "rate_limit", 60_000);
+      expect(keyPool.getPoolHealthSummary("openai")).toMatchObject({ healthy: 1, rateLimited: 1 });
+
+      await client.createMessage({
+        model: "gpt-4o",
+        system: "system",
+        messages: [{ role: "user", content: "hello" }],
+        tools: [],
+        maxTokens: 32,
+      });
+
+      expect(keyPool.getPoolHealthSummary("openai")).toMatchObject({ healthy: 2, rateLimited: 0 });
+    } finally {
+      shutdownKeyPool();
+    }
+  });
+
+  test("prefers the last successful key for new sessions", async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), "lobs-keypool-prefer-success-"));
+    process.env.HOME = homeDir;
+    writeKeysConfig(homeDir, {
+      anthropic: {
+        keys: [
+          { key: "sk-ant-a", label: "personal" },
+          { key: "sk-ant-b", label: "umich" },
+          { key: "sk-ant-c", label: "lobsbot" },
+        ],
+        strategy: "sticky-failover",
+      },
+    });
+
+    vi.resetModules();
+    const { getKeyPool, shutdownKeyPool } = await import("../src/services/key-pool.js");
+
+    try {
+      const keyPool = getKeyPool();
+      keyPool.markSessionFailed("anthropic", "session-a", "401 unauthorized", "auth");
+      keyPool.markSessionFailed("anthropic", "session-b", "401 unauthorized", "auth");
+      keyPool.markHealthy("anthropic", 2);
+
+      const selection = keyPool.getAuth("anthropic", "fresh-session");
       expect(selection?.apiKey).toBe("sk-ant-c");
       expect(selection?.keyIndex).toBe(2);
+      expect(selection?.label).toBe("lobsbot");
+    } finally {
+      shutdownKeyPool();
+    }
+  });
+
+  test("uses the bootstrap preferred key before any success is recorded", async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), "lobs-keypool-balance-"));
+    process.env.HOME = homeDir;
+    writeKeysConfig(homeDir, {
+      anthropic: {
+        keys: [
+          { key: "sk-ant-a", label: "personal" },
+          { key: "sk-ant-b", label: "umich" },
+          { key: "sk-ant-c", label: "lobsbot" },
+        ],
+        strategy: "sticky-failover",
+      },
+    });
+
+    vi.resetModules();
+    const { getKeyPool, shutdownKeyPool } = await import("../src/services/key-pool.js");
+
+    try {
+      const keyPool = getKeyPool();
+      const a = keyPool.getAuth("anthropic", "session-a");
+      const b = keyPool.getAuth("anthropic", "session-b");
+      const c = keyPool.getAuth("anthropic", "session-c");
+
+      expect(a?.keyIndex).toBe(2);
+      expect(b?.keyIndex).toBe(2);
+      expect(c?.keyIndex).toBe(2);
     } finally {
       shutdownKeyPool();
     }

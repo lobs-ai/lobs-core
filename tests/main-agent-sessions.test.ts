@@ -285,6 +285,79 @@ describe("MainAgent Session Management", () => {
     });
   });
 
+  it("should keep tool_result blocks first when merging restart user-message runs", () => {
+    const merged = (agent as any).mergeConsecutiveRoles([
+      {
+        role: "user",
+        content: "Please check the change",
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Checking now." },
+          { type: "tool_use", id: "toolu_123", name: "exec", input: { command: "git diff --stat" } },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "toolu_123", content: "diff output" },
+        ],
+      },
+      {
+        role: "user",
+        content: "[System] lobs-core restarted. Continue where you left off.",
+      },
+      {
+        role: "user",
+        content: "[System] lobs-core restarted. Continue where you left off again.",
+      },
+      {
+        role: "user",
+        content: "[System] lobs-core restarted. One more time.",
+      },
+    ]);
+
+    expect(merged).toHaveLength(3);
+    expect(merged[2].role).toBe("user");
+    expect(Array.isArray(merged[2].content)).toBe(true);
+
+    const blocks = merged[2].content as Array<Record<string, unknown>>;
+    expect(blocks[0]).toMatchObject({
+      type: "tool_result",
+      tool_use_id: "toolu_123",
+    });
+
+    const validation = (agent as any).validateMessages(merged);
+    expect(validation).toBeNull();
+  });
+
+  it("should reject user content placed before tool_result blocks", () => {
+    const invalidMessages = [
+      {
+        role: "user",
+        content: "Please check the change",
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Checking now." },
+          { type: "tool_use", id: "toolu_123", name: "exec", input: { command: "git diff --stat" } },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "[System] lobs-core restarted." },
+          { type: "tool_result", tool_use_id: "toolu_123", content: "diff output" },
+        ],
+      },
+    ];
+
+    const validation = (agent as any).validateMessages(invalidMessages);
+    expect(validation).toBe("tool_result blocks at index 2 must come before any other user content");
+  });
+
   it("should get last assistant message for a channel", () => {
     // Add some messages
     db.prepare(`
@@ -391,6 +464,178 @@ describe("MainAgent Session Management", () => {
 
     expect(session.status).toBe("processing");
     expect(session.last_author_name).toBe("Alice");
+  });
+
+  it("should mark delayed restart resumes as queued until processing actually begins", async () => {
+    vi.useFakeTimers();
+
+    db.prepare(`
+      INSERT INTO channel_sessions (channel_id, status, last_activity)
+      VALUES ('channel-resume', 'processing', datetime('now'))
+    `).run();
+
+    const processSpy = vi
+      .spyOn(agent as any, "processConversation")
+      .mockResolvedValue(undefined);
+
+    await agent.resumeAfterRestart();
+
+    const queuedSession = db.prepare(`
+      SELECT status FROM channel_sessions WHERE channel_id = ?
+    `).get("channel-resume") as { status: string };
+    expect(queuedSession.status).toBe("queued");
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(processSpy).toHaveBeenCalledWith("channel-resume");
+
+    const processingSession = db.prepare(`
+      SELECT status FROM channel_sessions WHERE channel_id = ?
+    `).get("channel-resume") as { status: string };
+    expect(processingSession.status).toBe("processing");
+  });
+
+  it("should preserve queued follow-up messages when a conversation times out", async () => {
+    vi.useFakeTimers();
+
+    const channelId = "channel-timeout";
+    db.prepare(`
+      INSERT INTO main_agent_messages (id, role, content, author_id, author_name, channel_id, token_estimate)
+      VALUES ('start-msg', 'user', 'Start work', 'user-1', 'Alice', ?, 3)
+    `).run(channelId);
+
+    (agent as any).channelChatType.set(channelId, "nexus");
+
+    let rejectTurn: ((reason?: unknown) => void) | undefined;
+    const hangingTurn = new Promise((_, reject) => {
+      rejectTurn = reject;
+    });
+
+    vi.spyOn(agent as any, "createMessageWithTimeout").mockReturnValue(hangingTurn);
+
+    const processingPromise = (agent as any).processConversation(channelId).catch(() => {});
+
+    await Promise.resolve();
+
+    await agent.handleMessage({
+      id: "queued-msg",
+      content: "keep working on this",
+      authorId: "user-1",
+      authorName: "Alice",
+      channelId,
+      timestamp: Date.now(),
+      chatType: "nexus",
+    });
+
+    await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+
+    const queueRow = db.prepare(`
+      SELECT processed FROM message_queue WHERE channel_id = ? AND id = 'queued-msg'
+    `).get(channelId) as { processed: number };
+    expect(queueRow.processed).toBe(1);
+
+    const queuedHistory = db.prepare(`
+      SELECT content FROM main_agent_messages
+      WHERE channel_id = ? AND content LIKE '[Queued messages while agent was busy]%'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(channelId) as { content: string } | undefined;
+    expect(queuedHistory?.content).toContain("keep working on this");
+
+    const session = db.prepare(`
+      SELECT status FROM channel_sessions WHERE channel_id = ?
+    `).get(channelId) as { status: string };
+    expect(session.status).toBe("idle");
+
+    rejectTurn?.(new Error("synthetic stop"));
+    await processingPromise;
+  });
+
+  it("should recover a stale processing channel when a new user message arrives", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-19T23:30:00Z"));
+
+    const channelId = "nexus:chat-stale";
+    db.prepare(`
+      INSERT INTO channel_sessions (channel_id, status, last_activity)
+      VALUES (?, 'processing', datetime('now'))
+    `).run(channelId);
+
+    (agent as any).processingChannels.add(channelId);
+    (agent as any).channelLastProgressAt.set(channelId, Date.now() - (4 * 60_000));
+    (agent as any).channelRunIds.set(channelId, 3);
+
+    const processSpy = vi
+      .spyOn(agent as any, "processConversation")
+      .mockResolvedValue(undefined);
+
+    await agent.handleMessage({
+      id: "fresh-msg",
+      content: "please continue",
+      authorId: "user-1",
+      authorName: "Alice",
+      channelId,
+      timestamp: Date.now(),
+      chatType: "nexus",
+    });
+
+    expect((agent as any).processingChannels.has(channelId)).toBe(false);
+    expect((agent as any).channelQueues.get(channelId)?.length ?? 0).toBe(0);
+    expect(processSpy).toHaveBeenCalledWith(channelId);
+
+    const recoveryNote = db.prepare(`
+      SELECT content FROM main_agent_messages
+      WHERE channel_id = ? AND role = 'assistant'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(channelId) as { content: string };
+    expect(recoveryNote.content).toContain("Previous run was interrupted");
+
+    const userMsg = db.prepare(`
+      SELECT content FROM main_agent_messages
+      WHERE channel_id = ? AND role = 'user'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(channelId) as { content: string };
+    expect(userMsg.content).toBe("please continue");
+  });
+
+  it("should automatically recover stale processing channels and dispatch queued work", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-19T23:30:00Z"));
+
+    const channelId = "nexus:chat-auto-stale";
+    db.prepare(`
+      INSERT INTO channel_sessions (channel_id, status, last_activity)
+      VALUES (?, 'processing', datetime('now'))
+    `).run(channelId);
+
+    (agent as any).processingChannels.add(channelId);
+    (agent as any).channelLastProgressAt.set(channelId, Date.now() - (11 * 60_000));
+    (agent as any).channelRunIds.set(channelId, 7);
+    (agent as any).channelQueues.set(channelId, [{
+      id: "queued-1",
+      content: "resume this chat",
+      authorId: "user-1",
+      authorName: "Alice",
+      channelId,
+      timestamp: Date.now(),
+    }]);
+
+    const processSpy = vi
+      .spyOn(agent as any, "processConversation")
+      .mockResolvedValue(undefined);
+
+    (agent as any).recoverStaleProcessingChannels();
+    (agent as any).recoverQueuedChannels();
+
+    expect((agent as any).processingChannels.has(channelId)).toBe(false);
+    expect(processSpy).toHaveBeenCalledWith(channelId);
+    expect(agent.getChannelQueueDepth(channelId)).toBe(0);
+
+    const session = db.prepare(`
+      SELECT status FROM channel_sessions WHERE channel_id = ?
+    `).get(channelId) as { status: string };
+    expect(session.status).toBe("processing");
   });
 
   it("should handle empty message history gracefully", () => {

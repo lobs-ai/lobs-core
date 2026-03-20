@@ -15,5 +15,24 @@ export default defineConfig({
     // afterEach/beforeEach hook timeout: 5s
     // process-tool cleanup (parallel kills) should complete well within this.
     hookTimeout: 5000,
+
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "lcov", "json-summary"],
+      reportsDirectory: "coverage",
+      include: ["src/**/*.ts"],
+      exclude: [
+        "src/skills/**",
+        "src/cli/**",
+        "dist/**",
+        "node_modules/**",
+      ],
+      thresholds: {
+        statements: 38,
+        lines: 38,
+        branches: 60,
+        functions: 40,
+      },
+    },
   },
 });

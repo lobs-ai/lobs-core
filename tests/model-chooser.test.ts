@@ -54,7 +54,7 @@ describe("Model Chooser", () => {
 
   describe("AGENT_FALLBACK_CHAINS", () => {
     test("all major agent types have fallback chains", () => {
-      const agents = ["programmer", "architect", "reviewer", "researcher", "writer", "inbox-responder"];
+      const agents = ["programmer", "architect", "reviewer", "researcher", "writer", "suggester"];
       for (const agent of agents) {
         expect(AGENT_FALLBACK_CHAINS[agent], `Missing fallback chain for ${agent}`).toBeDefined();
         expect(AGENT_FALLBACK_CHAINS[agent].length).toBeGreaterThan(0);
@@ -92,9 +92,9 @@ describe("Model Chooser", () => {
       expect(result.model).toBeTruthy();
     });
 
-    test("micro tier returns Claude Haiku", () => {
+    test("micro tier returns lmstudio model", () => {
       const result = chooseModel("micro", undefined);
-      expect(result.model).toContain("haiku");
+      expect(result.model).toContain("lmstudio");
     });
 
     test("strong tier returns Opus or Sonnet", () => {
