@@ -374,8 +374,8 @@ Return only the refined final text.`;
 async function callModel(prompt: string, options?: { modelTier?: string }): Promise<string> {
   // Fast path: call the local gateway API directly via HTTP.
   const cfg = getGatewayConfig();
-  let gatewayPort = cfg.port;
-  let gatewayToken = cfg.token;
+  const gatewayPort = cfg.port;
+  const gatewayToken = cfg.token;
 
   try {
     const response = await fetch(`http://127.0.0.1:${gatewayPort}/v2/invoke`, {

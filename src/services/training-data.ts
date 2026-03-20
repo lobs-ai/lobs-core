@@ -152,7 +152,7 @@ export function getTrainingStats(): Record<string, { total: number; approved: nu
 export function exportAsJsonl(taskType?: TaskType): string {
   const db = getDb();
   
-  let query = db.select().from(trainingData)
+  const query = db.select().from(trainingData)
     .where(inArray(trainingData.reviewStatus, ["approved", "corrected"]));
 
   const rows = taskType

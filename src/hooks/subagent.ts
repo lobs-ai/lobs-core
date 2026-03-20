@@ -350,8 +350,8 @@ function insertModelUsageEvent(opts: {
 
 async function invokeGatewayTool(tool: string, args: Record<string, unknown>): Promise<unknown> {
   const cfg = getGatewayConfig();
-  let gatewayPort = cfg.port;
-  let gatewayToken = cfg.token;
+  const gatewayPort = cfg.port;
+  const gatewayToken = cfg.token;
   if (!gatewayToken) throw new Error("No gateway token configured");
 
   const resp = await fetch(`http://127.0.0.1:${gatewayPort}/v2/invoke`, {

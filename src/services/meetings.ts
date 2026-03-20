@@ -87,7 +87,7 @@ export class MeetingsService {
   /** List meetings, newest first. */
   list(opts: { projectId?: string; meetingType?: string; limit?: number } = {}) {
     const db = getDb();
-    let q = db.select().from(meetings).orderBy(desc(meetings.createdAt));
+    const q = db.select().from(meetings).orderBy(desc(meetings.createdAt));
     // Filtering done post-query for simplicity (small dataset)
     const rows = q.all();
     let filtered = rows;

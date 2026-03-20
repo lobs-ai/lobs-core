@@ -425,7 +425,7 @@ export async function processPendingResumes(): Promise<void> {
   // hung send that ultimately produces an 'orphaned on restart' timeout record.
   //
   // We fetch the full session list once (up to 200, 3h window) and compare.
-  let aliveSessions = new Set<string>();
+  const aliveSessions = new Set<string>();
   let livenessCheckFailed = false;
   try {
     const listResp = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {

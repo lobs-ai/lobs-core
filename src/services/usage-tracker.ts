@@ -82,7 +82,7 @@ export function getUsageSummary(periodDays: number): UsageSummary {
     if (!byAgent[agent]) byAgent[agent] = { cost: 0, runs: 0, succeeded: 0 };
     byAgent[agent].cost += r.totalCostUsd ?? 0;
     byAgent[agent].runs += 1;
-    if (!!r.succeeded) byAgent[agent].succeeded += 1;
+    if (r.succeeded) byAgent[agent].succeeded += 1;
   }
 
   // By model

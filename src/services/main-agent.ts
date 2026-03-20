@@ -2572,7 +2572,7 @@ export class MainAgent {
         }
       }
 
-      let afterSize = calculateContextSize(compacted);
+      const afterSize = calculateContextSize(compacted);
 
       // Hard cap: if still over absolute limit, drop oldest messages until we fit
       if (afterSize > HARD_CAP) {

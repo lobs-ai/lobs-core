@@ -244,7 +244,7 @@ function _eval(expr: string, context: Record<string, unknown>): unknown {
   }
 
   if (expr.startsWith("not ")) {
-    return !Boolean(_eval(expr.slice(4), context));
+    return !_eval(expr.slice(4), context);
   }
 
   for (const op of ["!=", "==", ">=", "<=", ">", "<"]) {
