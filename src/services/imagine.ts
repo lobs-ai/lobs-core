@@ -26,7 +26,7 @@ class ImagineService {
     this.started = true;
 
     // Check if already running externally
-    this.isRunning().then((running) => {
+    this.isRunning().then(async (running) => {
       if (running) {
         console.log("[imagine] Service already running");
         return;
@@ -39,6 +39,7 @@ class ImagineService {
       }
 
       console.log("[imagine] Starting service...");
+      await this.killExistingProcess();
 
       this.process = spawn(VENV_PYTHON, [SERVER_SCRIPT], {
         cwd: IMAGINE_DIR,
@@ -69,6 +70,7 @@ class ImagineService {
           console.log(`[imagine] Killed by signal ${signal}`);
         }
         this.process = null;
+        this.started = false;
       });
     });
   }
@@ -79,6 +81,40 @@ class ImagineService {
       console.log("[imagine] Stopping service...");
       this.process.kill("SIGTERM");
       this.process = null;
+    }
+  }
+
+  /** Stop the service, wait briefly, then start it again. */
+  async restart(): Promise<void> {
+    this.stop();
+    this.started = false;
+    await new Promise((r) => setTimeout(r, 1000));
+    this.start();
+  }
+
+  /** Kill any stale process occupying port 7421 before spawning a new one. */
+  private async killExistingProcess(): Promise<void> {
+    try {
+      const { execSync } = await import("node:child_process");
+      const result = execSync("lsof -ti :7421", {
+        encoding: "utf-8",
+        timeout: 5000,
+      }).trim();
+      if (result) {
+        const pids = result.split("\n").filter(Boolean);
+        for (const pid of pids) {
+          try {
+            execSync(`kill ${pid}`, { timeout: 5000 });
+            console.log(`[imagine] Killed stale process ${pid} on port 7421`);
+          } catch {
+            // Process may have already exited — ignore
+          }
+        }
+        // Give the OS a moment to release the port
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    } catch {
+      // lsof returned non-zero — no process on port 7421, nothing to do
     }
   }
 
