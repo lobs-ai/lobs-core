@@ -363,22 +363,39 @@ class MemoryServerSupervisor {
   private async killOrphans(): Promise<void> {
     try {
       const { execSync } = await import("node:child_process");
-      const output = execSync("pgrep -f 'bun.*server/index.ts'", { encoding: "utf-8", timeout: 3000 }).trim();
-      if (output) {
-        const pids = output.split("\n").map(p => parseInt(p.trim(), 10)).filter(p => !isNaN(p));
-        for (const pid of pids) {
-          try {
-            process.kill(pid, "SIGTERM");
-            console.log(`[memory-supervisor] Killed orphaned memory server (PID ${pid})`);
-          } catch {
-            // Already dead
-          }
+      const output = execSync("ps -axo pid=,ppid=,command=", { encoding: "utf-8", timeout: 3000 }).trim();
+      if (!output) return;
+
+      let killedAny = false;
+      const rows = output
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.includes("bun") && line.includes("server/index.ts") && line.includes(MEMORY_DIR));
+
+      for (const row of rows) {
+        const match = row.match(/^(\d+)\s+(\d+)\s+(.*)$/);
+        if (!match) continue;
+        const pid = parseInt(match[1], 10);
+        const ppid = parseInt(match[2], 10);
+        if (!Number.isFinite(pid) || !Number.isFinite(ppid) || pid === process.pid) continue;
+        if (ppid > 1) {
+          console.log(`[memory-supervisor] Leaving non-orphan memory server alone (PID ${pid}, PPID ${ppid})`);
+          continue;
         }
-        // Brief wait for cleanup
+        try {
+          process.kill(pid, "SIGTERM");
+          killedAny = true;
+          console.log(`[memory-supervisor] Killed orphaned memory server (PID ${pid}, PPID ${ppid})`);
+        } catch {
+          // Already dead
+        }
+      }
+
+      if (killedAny) {
         await new Promise(r => setTimeout(r, 500));
       }
     } catch {
-      // pgrep returns non-zero if no matches — that's fine
+      // Ignore lookup failures during startup.
     }
   }
 }

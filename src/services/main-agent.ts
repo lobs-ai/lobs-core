@@ -27,7 +27,10 @@ const DEFAULT_MODEL = "strong";  // Chat defaults to strong tier (opus)
 const DEFAULT_CWD = process.env.HOME ?? "/tmp";
 const MAX_CONCURRENT_CHANNELS = 10; // Max simultaneous channel conversations
 const LLM_TURN_TIMEOUT_MS = 600_000; // 10 minutes per LLM turn for long tool-heavy responses
+const STALE_ON_NEW_MESSAGE_MS = 3 * 60_000; // Explicit user follow-up can break a run after 3 min of no progress
+const STALE_AUTO_RECOVERY_MS = 10 * 60_000; // Background recovery should be much more conservative
 const QUEUE_RECOVERY_INTERVAL_MS = 5_000;
+const CHANNEL_PROGRESS_HEARTBEAT_MS = 15_000;
 const REPLY_HANDLER_TIMEOUT_MS = 15_000;
 const PROGRESS_HANDLER_TIMEOUT_MS = 15_000;
 const TYPING_HANDLER_TIMEOUT_MS = 5_000;
@@ -121,6 +124,9 @@ export class MainAgent {
   // Retry state for transient errors (properly typed, no more `as any`)
   private conversationRetryCount = new Map<string, number>();
   private pendingRetryDelay = new Map<string, number>();
+  private channelRunIds = new Map<string, number>();
+  private channelLastProgressAt = new Map<string, number>();
+  private channelLastSessionHeartbeatAt = new Map<string, number>();
   
   /** EventEmitter for SSE streaming — Nexus subscribes to this */
   public readonly events = new EventEmitter();
@@ -131,6 +137,7 @@ export class MainAgent {
     this.cwd = process.env.LOBS_CWD || DEFAULT_CWD;
     this.ensureTables();
     this.queueRecoveryTimer = setInterval(() => {
+      this.recoverStaleProcessingChannels();
       this.recoverQueuedChannels();
     }, QUEUE_RECOVERY_INTERVAL_MS);
   }
@@ -543,11 +550,12 @@ export class MainAgent {
 
       // Process — but respect concurrency limits
       if (this.processingChannels.size < MAX_CONCURRENT_CHANNELS) {
-        this.updateChannelSession(channelId, "processing");
+        this.updateChannelSession(channelId, "queued");
         // Don't await — let them run concurrently, but stagger starts
         // to avoid thundering herd on the API (especially after rate limits)
         const staggerDelay = 5000 + i * 5000; // 5s initial + 5s between each session
         setTimeout(() => {
+          this.updateChannelSession(channelId, "processing");
           this.processConversation(channelId).catch(err => {
             console.error(`[main-agent] Resume failed for channel ${channelId.slice(0, 8)}:`, err);
             this.processingChannels.delete(channelId);
@@ -616,6 +624,10 @@ export class MainAgent {
   /** Handle an incoming user message — queues if channel is busy or at concurrency limit */
   async handleMessage(msg: PendingMessage): Promise<void> {
     const channelId = msg.channelId;
+    const staleReason = this.getStaleProcessingReason(channelId, STALE_ON_NEW_MESSAGE_MS);
+    if (staleReason) {
+      this.recoverStaleChannel(channelId, staleReason);
+    }
     console.log(
       `[main-agent.inbound] channel=${this.channelTag(channelId)} msg=${msg.id.slice(0, 8)} ` +
       `author=${msg.authorName} len=${msg.content.length} active=${this.processingChannels.has(channelId)} ` +
@@ -770,8 +782,11 @@ export class MainAgent {
   private async processConversation(replyChannelId: string): Promise<void> {
     const conversationStartedAt = Date.now();
     const sessionId = `main-agent:${replyChannelId}`;
+    let conversationTimedOut = false;
+    const runId = this.beginChannelRun(replyChannelId);
     // Mark this channel as being processed
     this.processingChannels.add(replyChannelId);
+    this.noteChannelProgress(replyChannelId);
     console.log(
       `[main-agent] Processing started for ${this.channelTag(replyChannelId)} session=${sessionId} ` +
       `(active=${this.processingChannels.size}/${MAX_CONCURRENT_CHANNELS}, queued=${this.getQueueDepth()})`,
@@ -788,10 +803,33 @@ export class MainAgent {
     // 30 minutes for all session types — allow big work between messages
     const timeoutMinutes = 30;
     const conversationTimeout = setTimeout(() => {
+      conversationTimedOut = true;
       console.error(`[main-agent] Conversation timeout (${timeoutMinutes}min) for channel ${replyChannelId.slice(0, 12)} — force releasing`);
+      const timeoutMessage = `⚠️ Conversation timed out after ${timeoutMinutes} minutes. This session was interrupted mid-run.`;
+
+      this.db
+        .prepare(
+          `INSERT INTO main_agent_messages
+             (id, role, content, channel_id, token_estimate)
+           VALUES (?, 'assistant', ?, ?, ?)`,
+        )
+        .run(
+          randomUUID(),
+          timeoutMessage,
+          replyChannelId,
+          Math.ceil(timeoutMessage.length / 4),
+        );
+
+      this.events.emit("stream", {
+        type: "error",
+        channelId: replyChannelId,
+        result: timeoutMessage,
+        timestamp: Date.now(),
+      } satisfies AgentStreamEvent);
+
       this.processingChannels.delete(replyChannelId);
-      this.channelQueues.delete(replyChannelId);  // Clear queued messages to prevent memory leak
-      this.channelChatType.delete(replyChannelId);  // Clean up session metadata
+      this.channelLastProgressAt.delete(replyChannelId);
+      this.channelLastSessionHeartbeatAt.delete(replyChannelId);
       this.updateChannelSession(replyChannelId, "idle");
     }, timeoutMinutes * 60 * 1000);
 
@@ -978,6 +1016,12 @@ export class MainAgent {
           });
         }
 
+        // Final preflight after compaction/merge/synthetic messages. These later
+        // transformations can otherwise reintroduce invalid tool ordering.
+        messages = this.normalizeToolProtocolMessages(messages);
+        messages = this.mergeConsecutiveRoles(messages);
+        messages = this.emergencyRepairToolPairs(messages);
+
         // Validate message structure before sending to API
         const validation = this.validateMessages(messages);
         if (validation) {
@@ -1009,6 +1053,11 @@ export class MainAgent {
           tools,
           maxTokens: 16384,
         }, replyChannelId);
+        if (!this.isActiveChannelRun(replyChannelId, runId)) {
+          console.warn(`[main-agent] Discarding stale LLM response for ${this.channelTag(replyChannelId)} run=${runId}`);
+          return;
+        }
+        this.noteChannelProgress(replyChannelId);
         console.debug(
           `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
           `llm_response blocks=${response.content.length} stop=${response.stopReason}`,
@@ -1198,6 +1247,7 @@ export class MainAgent {
               Math.ceil(fullToolSummary.length / 4),
               toolUseMetadata,
             );
+          this.noteChannelProgress(replyChannelId);
 
           // Feed tool results back as a user turn
           messages.push({ role: "user", content: toolResults });
@@ -1233,6 +1283,7 @@ export class MainAgent {
               Math.ceil(toolResultSummary.length / 4),
               toolResultMetadata,
             );
+          this.noteChannelProgress(replyChannelId);
 
           // Inject any queued messages that arrived while we were working.
           // IMPORTANT: Append to the existing tool_results user message rather than
@@ -1270,6 +1321,7 @@ export class MainAgent {
                 replyChannelId,
                 Math.ceil(midLoopQueued.length / 4),
               );
+            this.noteChannelProgress(replyChannelId);
 
             console.log(`[main-agent] Appended ${midLoopQueued.split("---").length - 1} queued message(s) to tool results for channel ${replyChannelId.slice(0, 8)}`);
             console.debug(
@@ -1320,6 +1372,7 @@ export class MainAgent {
               replyChannelId,
               Math.ceil(textResponse.length / 4),
             );
+          this.noteChannelProgress(replyChannelId);
 
           // Reply
           if (this.onReply) {
@@ -1347,6 +1400,7 @@ export class MainAgent {
               replyChannelId,
               Math.ceil(textResponse.length / 4),
             );
+          this.noteChannelProgress(replyChannelId);
           console.log(`[main-agent] Routine heartbeat logged but not sent to Discord: ${textResponse}`);
         }
 
@@ -1442,8 +1496,13 @@ export class MainAgent {
       }
     } finally {
       clearTimeout(conversationTimeout);
+      if (!this.isActiveChannelRun(replyChannelId, runId)) {
+        return;
+      }
       // Mark this channel as no longer processing
       this.processingChannels.delete(replyChannelId);
+      this.channelLastProgressAt.delete(replyChannelId);
+      this.channelLastSessionHeartbeatAt.delete(replyChannelId);
       console.log(
         `[main-agent] Processing released for ${this.channelTag(replyChannelId)} session=${sessionId} ` +
         `(active=${this.processingChannels.size}/${MAX_CONCURRENT_CHANNELS}, queued=${this.getQueueDepth()})`,
@@ -1469,12 +1528,15 @@ export class MainAgent {
       }
 
       // Mark persisted queue as processed for this channel (skip if retrying)
-      if (!pendingDelay) {
+      if (!pendingDelay && !conversationTimedOut) {
         this.markQueueProcessed(replyChannelId);
       }
 
-      // Process queued messages for this channel (skip if we have a pending retry)
-      const channelQueue = !pendingDelay ? this.channelQueues.get(replyChannelId) : undefined;
+      // Process queued messages for this channel (skip if we have a pending retry
+      // or if the current run was force-released on timeout).
+      const channelQueue = !pendingDelay && !conversationTimedOut
+        ? this.channelQueues.get(replyChannelId)
+        : undefined;
       if (channelQueue && channelQueue.length > 0) {
         console.log(
           `[main-agent.queue] channel=${this.channelTag(replyChannelId)} draining_next=true depth=${channelQueue.length}`,
@@ -1492,7 +1554,7 @@ export class MainAgent {
       }
 
       // No more queued messages — mark channel idle (skip if pending retry)
-      if (!pendingDelay) {
+      if (!pendingDelay && !conversationTimedOut) {
         this.updateChannelSession(replyChannelId, "idle");
       }
 
@@ -1546,6 +1608,79 @@ export class MainAgent {
         this.updateChannelSession(channelId, "idle");
       });
     }, delayMs);
+  }
+
+  private beginChannelRun(channelId: string): number {
+    const runId = (this.channelRunIds.get(channelId) ?? 0) + 1;
+    this.channelRunIds.set(channelId, runId);
+    return runId;
+  }
+
+  private isActiveChannelRun(channelId: string, runId: number): boolean {
+    return this.channelRunIds.get(channelId) === runId;
+  }
+
+  private noteChannelProgress(channelId: string): void {
+    const now = Date.now();
+    this.channelLastProgressAt.set(channelId, now);
+    const lastHeartbeatAt = this.channelLastSessionHeartbeatAt.get(channelId) ?? 0;
+    if (now - lastHeartbeatAt >= CHANNEL_PROGRESS_HEARTBEAT_MS) {
+      this.channelLastSessionHeartbeatAt.set(channelId, now);
+      this.updateChannelSession(channelId, "processing");
+    }
+  }
+
+  private getStaleProcessingReason(channelId: string, thresholdMs: number): string | null {
+    if (!this.processingChannels.has(channelId)) return null;
+
+    const lastProgressAt = this.channelLastProgressAt.get(channelId);
+    if (!lastProgressAt) return null;
+
+    const stalledForMs = Date.now() - lastProgressAt;
+    if (stalledForMs < thresholdMs) return null;
+
+    return `no progress for ${Math.round(stalledForMs / 1000)}s`;
+  }
+
+  private recoverStaleChannel(channelId: string, reason: string): void {
+    console.warn(`[main-agent] Recovering stale channel ${this.channelTag(channelId)}: ${reason}`);
+    this.channelRunIds.set(channelId, (this.channelRunIds.get(channelId) ?? 0) + 1);
+    this.processingChannels.delete(channelId);
+    this.pendingRetryDelay.delete(channelId);
+    this.conversationRetryCount.delete(channelId);
+    this.channelLastProgressAt.delete(channelId);
+    this.channelLastSessionHeartbeatAt.delete(channelId);
+
+    const recoveryMessage = `⚠️ Previous run was interrupted after ${reason}. Starting a fresh turn with your latest message.`;
+    this.db
+      .prepare(
+        `INSERT INTO main_agent_messages
+           (id, role, content, channel_id, token_estimate)
+         VALUES (?, 'assistant', ?, ?, ?)`,
+      )
+      .run(
+        randomUUID(),
+        recoveryMessage,
+        channelId,
+        Math.ceil(recoveryMessage.length / 4),
+      );
+
+    this.events.emit("stream", {
+      type: "error",
+      channelId,
+      result: recoveryMessage,
+      timestamp: Date.now(),
+    } satisfies AgentStreamEvent);
+
+    this.updateChannelSession(channelId, "idle");
+  }
+
+  private recoverStaleProcessingChannels(): void {
+    for (const channelId of this.processingChannels) {
+      const staleReason = this.getStaleProcessingReason(channelId, STALE_AUTO_RECOVERY_MS);
+      if (!staleReason) continue;
+      this.recoverStaleChannel(channelId, staleReason);
+    }
   }
 
   /* ── Helpers ───────────────────────────────────────────────────── */
@@ -1692,6 +1827,45 @@ export class MainAgent {
     // A user message with tool_result must follow an assistant message with matching tool_use
     for (let i = 0; i < messages.length; i++) {
       const m = messages[i];
+      if (m.role === "assistant" && Array.isArray(m.content)) {
+        const toolUses = (m.content as any[]).filter((b: any) => b.type === "tool_use");
+        if (toolUses.length > 0) {
+          const next = messages[i + 1];
+          if (!next) {
+            return `assistant tool_use at index ${i} has no following user tool_result message`;
+          }
+          if (next.role !== "user") {
+            return `assistant tool_use at index ${i} followed by ${next.role} instead of user tool_result message`;
+          }
+          if (!Array.isArray(next.content)) {
+            return `assistant tool_use at index ${i} followed by plain-text user message instead of tool_result blocks`;
+          }
+
+          const nextBlocks = next.content as any[];
+          const toolResults = nextBlocks.filter((b: any) => b.type === "tool_result");
+          if (toolResults.length === 0) {
+            return `assistant tool_use at index ${i} not followed by tool_result blocks`;
+          }
+
+          const firstNonToolResult = nextBlocks.findIndex((b: any) => b.type !== "tool_result");
+          if (firstNonToolResult !== -1) {
+            const laterToolResult = nextBlocks
+              .slice(firstNonToolResult + 1)
+              .some((b: any) => b.type === "tool_result");
+            if (firstNonToolResult === 0 || laterToolResult) {
+              return `tool_result blocks at index ${i + 1} must come before any other user content`;
+            }
+          }
+
+          const toolUseIds = new Set(toolUses.map((b: any) => b.id));
+          for (const tr of toolResults) {
+            if (!toolUseIds.has(tr.tool_use_id)) {
+              return `tool_result references tool_use_id=${tr.tool_use_id} not found in preceding assistant message at index ${i}`;
+            }
+          }
+        }
+      }
+
       if (m.role === "user" && Array.isArray(m.content)) {
         const toolResults = (m.content as any[]).filter((b: any) => b.type === "tool_result");
         if (toolResults.length > 0) {
@@ -1749,7 +1923,7 @@ export class MainAgent {
             const orphanedIds = new Set(orphaned.map((b: any) => b.id));
             const kept = (msg.content as any[]).filter((b: any) => b.type !== "tool_use" || !orphanedIds.has(b.id));
             if (kept.length > 0) {
-              result.push({ ...msg, content: kept as any });
+              result.push({ ...msg, content: this.normalizeUserContentBlocks(kept as any) as any });
             } else {
               result.push({ ...msg, content: "[Tool calls were interrupted and results are unavailable]" });
             }
@@ -1774,7 +1948,7 @@ export class MainAgent {
             const orphanedIds = new Set(orphaned.map((b: any) => b.tool_use_id));
             const kept = (msg.content as any[]).filter((b: any) => b.type !== "tool_result" || !orphanedIds.has(b.tool_use_id));
             if (kept.length > 0) {
-              result.push({ ...msg, content: kept as any });
+              result.push({ ...msg, content: this.normalizeUserContentBlocks(kept as any) as any });
             } else {
               result.push({ ...msg, content: "[Earlier tool results — matching tool calls were compacted]" });
             }
@@ -1786,7 +1960,33 @@ export class MainAgent {
       result.push(msg);
     }
 
-    return result;
+    return this.normalizeToolProtocolMessages(result);
+  }
+
+  private normalizeUserContentBlocks(
+    content: Array<Record<string, unknown>>,
+  ): Array<Record<string, unknown>> {
+    const toolResults = content.filter((b: any) => b.type === "tool_result");
+    if (toolResults.length === 0) return content;
+
+    const otherBlocks = content.filter((b: any) => b.type !== "tool_result");
+    return [...toolResults, ...otherBlocks];
+  }
+
+  private normalizeToolProtocolMessages(messages: LLMMessage[]): LLMMessage[] {
+    return messages.map((message) => {
+      if (message.role !== "user" || !Array.isArray(message.content)) {
+        return message;
+      }
+
+      const normalized = this.normalizeUserContentBlocks(
+        message.content as Array<Record<string, unknown>>,
+      );
+      if (normalized === message.content) {
+        return message;
+      }
+      return { ...message, content: normalized };
+    });
   }
 
   private mergeConsecutiveRoles(messages: LLMMessage[]): LLMMessage[] {
@@ -1853,7 +2053,10 @@ export class MainAgent {
               blocks.push({ type: "text", text: m.content });
             }
           }
-          merged.push({ role: run.role as "user" | "assistant", content: blocks });
+          const normalizedBlocks = run.role === "user"
+            ? this.normalizeUserContentBlocks(blocks)
+            : blocks;
+          merged.push({ role: run.role as "user" | "assistant", content: normalizedBlocks });
         } else {
           let content = "";
           for (const m of runMessages) {
@@ -1870,13 +2073,55 @@ export class MainAgent {
       const oldMessages = runMessages.slice(0, -MAX_FULL_KEEP);
       const recentMessages = runMessages.slice(-MAX_FULL_KEEP);
 
+      if (run.role === "user") {
+        const toolProtocolMessages = runMessages.filter(
+          (m) => Array.isArray(m.content) && (m.content as any[]).some((b: any) => b.type === "tool_result"),
+        );
+
+        if (toolProtocolMessages.length > 0) {
+          const protocolSet = new Set(toolProtocolMessages);
+          const recentNonProtocol = runMessages
+            .filter((m) => !protocolSet.has(m))
+            .slice(-MAX_FULL_KEEP);
+          const summarizedCount = runMessages.length - toolProtocolMessages.length - recentNonProtocol.length;
+          const blocks: Array<Record<string, unknown>> = [];
+
+          for (const message of toolProtocolMessages) {
+            if (Array.isArray(message.content)) {
+              blocks.push(...this.normalizeUserContentBlocks(message.content as Array<Record<string, unknown>>));
+            }
+          }
+
+          if (summarizedCount > 0) {
+            blocks.push({
+              type: "text",
+              text: `[${summarizedCount} earlier user messages merged — tool call summaries from before restart]`,
+            });
+          }
+
+          for (const message of recentNonProtocol) {
+            if (Array.isArray(message.content)) {
+              blocks.push(...this.normalizeUserContentBlocks(message.content as Array<Record<string, unknown>>));
+            } else if (typeof message.content === "string" && message.content) {
+              blocks.push({ type: "text", text: message.content });
+            }
+          }
+
+          merged.push({
+            role: "user",
+            content: this.normalizeUserContentBlocks(blocks),
+          });
+          continue;
+        }
+      }
+
       // Check if recent messages have structured content blocks
       const recentHasArrayContent = recentMessages.some(m => Array.isArray(m.content));
 
       if (recentHasArrayContent) {
         // Preserve structured content: build summary text for old + flatten recent as blocks
         const summaryText = `[${oldMessages.length} earlier ${run.role} messages merged — tool call summaries from before restart]`;
-        const blocks: Array<Record<string, unknown>> = [{ type: "text", text: summaryText }];
+        const blocks: Array<Record<string, unknown>> = [];
         for (const m of recentMessages) {
           if (Array.isArray(m.content)) {
             blocks.push(...(m.content as Array<Record<string, unknown>>));
@@ -1884,7 +2129,16 @@ export class MainAgent {
             blocks.push({ type: "text", text: m.content });
           }
         }
-        merged.push({ role: run.role as "user" | "assistant", content: blocks });
+        if (run.role === "user") {
+          blocks.push({ type: "text", text: summaryText });
+          merged.push({
+            role: run.role as "user" | "assistant",
+            content: this.normalizeUserContentBlocks(blocks),
+          });
+        } else {
+          blocks.unshift({ type: "text", text: summaryText });
+          merged.push({ role: run.role as "user" | "assistant", content: blocks });
+        }
       } else {
         let content = `[${oldMessages.length} earlier ${run.role} messages merged — tool call summaries from before restart]\n`;
         // Add a brief excerpt from the old messages (just first 200 chars each, max 2000 total)
@@ -1915,7 +2169,7 @@ export class MainAgent {
         merged.push({ role: run.role as "user" | "assistant", content });
       }
     }
-    return merged;
+    return this.normalizeToolProtocolMessages(merged);
   }
 
   /**

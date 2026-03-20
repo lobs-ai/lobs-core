@@ -169,9 +169,13 @@ interface AnthropicAuth {
 const ANTHROPIC_5XX_FAILOVER_THRESHOLD = 2;
 const ANTHROPIC_GLOBAL_5XX_QUARANTINE_THRESHOLD = 3;
 const ANTHROPIC_GLOBAL_5XX_QUARANTINE_MS = 10 * 60 * 1000;
+const ANTHROPIC_STREAM_TIMEOUT_MS = 4 * 60 * 1000;
+const ANTHROPIC_TIMEOUT_COOLDOWN_MS = 2 * 60 * 1000;
 const anthropicServerErrorsBySession = new Map<string, { keyIndex: number; count: number }>();
 const anthropicServerErrorsByKey = new Map<number, number>();
 const RATE_LIMIT_COOLDOWN_FLOOR_MS = 15 * 60 * 1000;
+const MAX_INLINE_RATE_LIMIT_WAIT_SECONDS = 15;
+const RATE_LIMIT_ROTATION_RETRY_DELAY_MS = 1_000;
 
 const DEFAULT_KEYPOOL_SESSION_ID = "__default__";
 
@@ -250,7 +254,30 @@ function getRateLimitMeta(error: unknown): RateLimitErrorMeta | undefined {
   return (error as { __lobsRateLimitMeta?: RateLimitErrorMeta }).__lobsRateLimitMeta;
 }
 
+function isTimeoutLikeError(error: unknown): boolean {
+  if (error instanceof Error) {
+    if (error.name === "AbortError" || error.name === "TimeoutError") return true;
+    const message = error.message.toLowerCase();
+    return (
+      message.includes("timeout") ||
+      message.includes("timed out") ||
+      message.includes("aborterror") ||
+      message.includes("anthropic_stream_timeout")
+    );
+  }
+
+  const message = String(error).toLowerCase();
+  return (
+    message.includes("timeout") ||
+    message.includes("timed out") ||
+    message.includes("aborterror") ||
+    message.includes("anthropic_stream_timeout")
+  );
+}
+
 export function shouldRetryProviderError(error: unknown): boolean | undefined {
+  if (isTimeoutLikeError(error)) return true;
+
   if (error && typeof error === "object" && "headers" in error) {
     const headers = (error as { headers?: unknown }).headers;
     if (headers && typeof headers === "object" && "get" in headers && typeof (headers as Headers).get === "function") {
@@ -440,7 +467,23 @@ class AnthropicClient implements LLMClient {
     try {
       // Use streaming — matches Claude Code's calling convention
       const stream = this.client.messages.stream(apiParams);
-      const response = await stream.finalMessage();
+      let timeout: NodeJS.Timeout | undefined;
+      const response = await Promise.race([
+        stream.finalMessage(),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => {
+            stream.abort();
+            reject(
+              new Error(
+                `anthropic_stream_timeout after ${Math.round(ANTHROPIC_STREAM_TIMEOUT_MS / 1000)}s ` +
+                `session=${this.sessionId?.slice(0, 40) ?? "none"}`,
+              ),
+            );
+          }, ANTHROPIC_STREAM_TIMEOUT_MS);
+        }),
+      ]).finally(() => {
+        if (timeout) clearTimeout(timeout);
+      });
 
       const usage: TokenUsage = {
         inputTokens: response.usage.input_tokens,
@@ -464,6 +507,7 @@ class AnthropicClient implements LLMClient {
       if (this.sessionId && this.keyIndex !== undefined) {
         anthropicServerErrorsBySession.delete(this.sessionId);
         anthropicServerErrorsByKey.delete(this.keyIndex);
+        getKeyPool().markHealthy("anthropic", this.keyIndex);
       }
 
       // Map tool names back from Claude Code names to original names
@@ -490,17 +534,40 @@ class AnthropicClient implements LLMClient {
         const keyPool = getKeyPool();
         const status = getHttpStatus(error);
 
-        if (status === 401 || status === 403) {
+        if (isTimeoutLikeError(error) && this.keyIndex !== undefined) {
+          keyPool.markFailed(
+            "anthropic",
+            this.keyIndex,
+            message,
+            "unknown",
+            ANTHROPIC_TIMEOUT_COOLDOWN_MS,
+          );
+          const rotated = keyPool.rotateSession(
+            "anthropic",
+            this.sessionId,
+            `timeout:${this.keyLabel ?? `key-${this.keyIndex}`}`,
+          );
+          console.warn(
+            `[AnthropicClient] Timeout on key=${this.keyLabel ?? `key-${this.keyIndex ?? "unknown"}`} ` +
+            `rotated=${rotated} session=${this.sessionId.slice(0, 40)} ` +
+            `cooldown_ms=${ANTHROPIC_TIMEOUT_COOLDOWN_MS}`,
+          );
+        } else if (status === 401 || status === 403) {
           keyPool.markSessionFailed("anthropic", this.sessionId, message, "auth");
           console.warn("[AnthropicClient] Auth failure detected, rotating key");
         } else if (status === 429) {
           const cooldownMs = getRateLimitCooldownMs(error);
-          keyPool.markSessionFailed("anthropic", this.sessionId, message, "rate_limit", cooldownMs);
-          const rotated = keyPool.rotateSession("anthropic", this.sessionId, `rate_limit:${cooldownMs}`);
           console.warn(
             `[AnthropicClient] Rate limit detected on key=${this.keyLabel ?? `key-${this.keyIndex ?? "unknown"}`} ` +
-            `cooldown_ms=${cooldownMs} rotated=${rotated}`,
+            `cooldown_ms=${cooldownMs} waiting_for_retries=true`,
           );
+          throw annotateRateLimitMeta(error, {
+            provider: "anthropic",
+            sessionId: this.sessionId,
+            keyIndex: this.keyIndex,
+            keyLabel: this.keyLabel,
+            cooldownMs,
+          });
         } else if (status === 529 || message.includes("overloaded_error")) {
           // Overloaded errors are capacity-related — rotate key immediately so
           // retries hit a different key that may have available capacity
@@ -565,6 +632,14 @@ function resolveOpenAIKey(sessionId?: string): string | undefined {
   return process.env.OPENAI_API_KEY;
 }
 
+function resolveOpenAIAuth(sessionId?: string): { apiKey: string; keyIndex?: number; keyLabel?: string } | undefined {
+  const keyPool = getKeyPool();
+  const auth = keyPool.getAuth("openai", sessionId ?? DEFAULT_KEYPOOL_SESSION_ID);
+  if (auth?.apiKey) return { apiKey: auth.apiKey, keyIndex: auth.keyIndex, keyLabel: auth.label };
+  if (process.env.OPENAI_API_KEY) return { apiKey: process.env.OPENAI_API_KEY };
+  return undefined;
+}
+
 /**
  * Resolve OpenRouter API key from KeyPool or environment.
  */
@@ -573,6 +648,14 @@ function resolveOpenRouterKey(sessionId?: string): string | undefined {
   const auth = keyPool.getAuth("openrouter", sessionId ?? DEFAULT_KEYPOOL_SESSION_ID);
   if (auth?.apiKey) return auth.apiKey;
   return process.env.OPENROUTER_API_KEY;
+}
+
+function resolveOpenRouterAuth(sessionId?: string): { apiKey: string; keyIndex?: number; keyLabel?: string } | undefined {
+  const keyPool = getKeyPool();
+  const auth = keyPool.getAuth("openrouter", sessionId ?? DEFAULT_KEYPOOL_SESSION_ID);
+  if (auth?.apiKey) return { apiKey: auth.apiKey, keyIndex: auth.keyIndex, keyLabel: auth.label };
+  if (process.env.OPENROUTER_API_KEY) return { apiKey: process.env.OPENROUTER_API_KEY };
+  return undefined;
 }
 
 // ── OpenAI-Compatible Client ─────────────────────────────────────────────────
@@ -709,19 +792,25 @@ class OpenAICompatibleClient implements LLMClient {
   private headers: Record<string, string>;
   private provider: Provider;
   private sessionId?: string;
+  private keyIndex?: number;
+  private keyLabel?: string;
 
   constructor(
     baseUrl: string,
     apiKey: string,
     provider: Provider,
     sessionId?: string,
-    extraHeaders?: Record<string, string>
+    extraHeaders?: Record<string, string>,
+    keyIndex?: number,
+    keyLabel?: string,
   ) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.apiKey = apiKey;
     this.provider = provider;
     this.sessionId = sessionId;
     this.headers = extraHeaders ?? {};
+    this.keyIndex = keyIndex;
+    this.keyLabel = keyLabel;
   }
 
   async createMessage(params: {
@@ -877,9 +966,17 @@ class OpenAICompatibleClient implements LLMClient {
           console.warn(`[${this.provider}Client] Auth failure detected, rotating key`);
         } else if (response.status === 429) {
           const cooldownMs = getRateLimitCooldownMs(error);
-          keyPool.markSessionFailed(providerKey, this.sessionId, error.message, "rate_limit", cooldownMs);
-          const rotated = keyPool.rotateSession(providerKey, this.sessionId, `rate_limit:${cooldownMs}`);
-          console.warn(`[${this.provider}Client] Rate limit detected, cooldown_ms=${cooldownMs} rotated=${rotated}`);
+          console.warn(
+            `[${this.provider}Client] Rate limit detected on key=${this.keyLabel ?? `key-${this.keyIndex ?? "unknown"}`} ` +
+            `cooldown_ms=${cooldownMs} waiting_for_retries=true`,
+          );
+          throw annotateRateLimitMeta(error, {
+            provider: providerKey,
+            sessionId: this.sessionId,
+            keyIndex: this.keyIndex,
+            keyLabel: this.keyLabel,
+            cooldownMs,
+          });
         }
       }
 
@@ -887,6 +984,9 @@ class OpenAICompatibleClient implements LLMClient {
     }
 
     const data = (await response.json()) as OpenAIResponse;
+    if (this.sessionId && this.keyIndex !== undefined && (this.provider === "openai" || this.provider === "openrouter")) {
+      getKeyPool().markHealthy(this.provider as "openai" | "openrouter", this.keyIndex);
+    }
     const choice = data.choices?.[0];
     if (!choice) throw new Error("No choices in response");
 
@@ -1019,6 +1119,18 @@ class ResilientLLMClient implements LLMClient {
           const status = getHttpStatus(error);
           const shouldRetry = shouldRetryProviderError(error);
 
+          if (isTimeoutLikeError(error)) {
+            if (attempt < this.maxRetries && shouldRetry !== false) {
+              const waitTime = this.exponentialBackoff(attempt) * 1000;
+              console.warn(
+                `[ResilientLLMClient] Provider timeout for model ${model}, retrying in ${(waitTime / 1000).toFixed(1)}s ` +
+                `(attempt ${attempt}/${this.maxRetries}) session=${this.sessionId?.slice(0, 40) ?? "none"}`,
+              );
+              await this.sleep(waitTime);
+              continue;
+            }
+          }
+
           // Auth errors — retry to allow key rotation
           if (status === 401 || status === 403) {
             if (attempt < this.maxRetries) {
@@ -1031,13 +1143,51 @@ class ResilientLLMClient implements LLMClient {
           if (status === 429) {
             const retryAfter = getRetryAfterSeconds(error);
             const annotatedError = annotateRetryAfter(error, retryAfter);
-            if (attempt < this.maxRetries && shouldRetry !== false) {
+            const shouldQuarantineImmediately =
+              retryAfter !== undefined && retryAfter > MAX_INLINE_RATE_LIMIT_WAIT_SECONDS;
+
+            if (attempt < this.maxRetries && shouldRetry !== false && !shouldQuarantineImmediately) {
               console.warn(
-                `[ResilientLLMClient] Rate limit for model ${model}, retrying immediately with rotated key ` +
+                `[ResilientLLMClient] Rate limit for model ${model}, retrying with backoff before quarantining key ` +
                 `(attempt ${attempt}/${this.maxRetries}) session=${this.sessionId?.slice(0, 40) ?? "none"} ` +
                 `retry_after=${retryAfter ?? "unknown"}`,
               );
+              const waitTimeSeconds = retryAfter !== undefined
+                ? Math.max(1, retryAfter)
+                : this.exponentialBackoff(attempt);
+              await this.sleep(waitTimeSeconds * 1000);
               continue;
+            }
+
+            const rateLimitMeta = getRateLimitMeta(error);
+            if (rateLimitMeta?.sessionId && rateLimitMeta.keyIndex !== undefined) {
+              const keyPool = getKeyPool();
+              keyPool.markFailed(
+                rateLimitMeta.provider,
+                rateLimitMeta.keyIndex,
+                annotatedError.message,
+                "rate_limit",
+                rateLimitMeta.cooldownMs,
+              );
+              const rotated = keyPool.rotateSession(
+                rateLimitMeta.provider,
+                rateLimitMeta.sessionId,
+                `rate_limit:${rateLimitMeta.cooldownMs ?? "unknown"}`,
+              );
+              console.warn(
+                `[ResilientLLMClient] Quarantined ${rateLimitMeta.provider}/${rateLimitMeta.keyLabel ?? `key-${rateLimitMeta.keyIndex}`} ` +
+                `after ${attempt} rate-limit attempts rotated=${rotated}`,
+              );
+
+              if (attempt < this.maxRetries && shouldRetry !== false) {
+                console.warn(
+                  `[ResilientLLMClient] Retrying ${model} with a rotated key after quarantine ` +
+                  `(attempt ${attempt}/${this.maxRetries}) session=${this.sessionId?.slice(0, 40) ?? "none"} ` +
+                  `retry_after=${retryAfter ?? "unknown"}`,
+                );
+                await this.sleep(RATE_LIMIT_ROTATION_RETRY_DELAY_MS);
+                continue;
+              }
             }
 
             throw annotatedError;
@@ -1146,12 +1296,20 @@ export function createClient(config: ProviderConfig, sessionId?: string): LLMCli
   const baseUrl = config.baseUrl ?? defaults.baseUrl;
 
   let apiKey = config.apiKey ?? "";
+  let keyIndex: number | undefined;
+  let keyLabel: string | undefined;
   
   // Try KeyPool for OpenAI and OpenRouter
   if (!apiKey && config.provider === "openai") {
-    apiKey = resolveOpenAIKey(sessionId) ?? "";
+    const auth = resolveOpenAIAuth(sessionId);
+    apiKey = auth?.apiKey ?? "";
+    keyIndex = auth?.keyIndex;
+    keyLabel = auth?.keyLabel;
   } else if (!apiKey && config.provider === "openrouter") {
-    apiKey = resolveOpenRouterKey(sessionId) ?? "";
+    const auth = resolveOpenRouterAuth(sessionId);
+    apiKey = auth?.apiKey ?? "";
+    keyIndex = auth?.keyIndex;
+    keyLabel = auth?.keyLabel;
   }
 
   // Fallback to environment variables
@@ -1170,5 +1328,5 @@ export function createClient(config: ProviderConfig, sessionId?: string): LLMCli
     extraHeaders["X-Title"] = "Lobs Agent Runner";
   }
 
-  return new OpenAICompatibleClient(baseUrl, apiKey, config.provider, sessionId, extraHeaders);
+  return new OpenAICompatibleClient(baseUrl, apiKey, config.provider, sessionId, extraHeaders, keyIndex, keyLabel);
 }

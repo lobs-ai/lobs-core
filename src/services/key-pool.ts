@@ -38,6 +38,7 @@ export class KeyPoolService {
   private pools: Map<Provider, KeyEntry[]> = new Map();
   private assignments: Map<string, string> = new Map(); // "provider:sessionId" -> key identity
   private health: Map<string, KeyHealth> = new Map();   // "provider:keyIdentity" -> health
+  private preferredHealthyKey: Map<Provider, string> = new Map(); // provider -> last successful key identity
 
   private config: KeyConfig;
   private configSignature = "";
@@ -94,9 +95,14 @@ export class KeyPoolService {
     const assignedIdentity = this.assignments.get(assignmentKey);
     let keyIndex = assignedIdentity ? keys.findIndex((entry) => this.getKeyIdentity(provider, entry.key) === assignedIdentity) : -1;
 
-    // First time for this session — hash to initial key
+    // First time for this session — prefer the last key that actually succeeded.
+    // If we don't have one, spread new sessions across healthy keys instead of
+    // purely hashing into one slot and blackholing concurrent chats on the same key.
     if (keyIndex < 0) {
-      keyIndex = this.hashSessionToKey(sessionId, keys.length);
+      keyIndex =
+        this.getPreferredHealthyKeyIndex(provider, keys)
+        ?? this.selectHealthyKeyForNewSession(provider, sessionId, keys)
+        ?? this.hashSessionToKey(sessionId, keys.length);
       this.assignments.set(assignmentKey, this.getKeyIdentity(provider, keys[keyIndex].key));
     }
 
@@ -180,6 +186,10 @@ export class KeyPoolService {
       failureType: errorType,
     });
 
+    if (this.preferredHealthyKey.get(provider) === healthKey) {
+      this.preferredHealthyKey.delete(provider);
+    }
+
     const label = keys?.[keyIndex]?.label ?? `key-${keyIndex}`;
     const cooldownSuffix =
       errorType === "auth" ? "" : ` cooldown_ms=${effectiveCooldownMs}`;
@@ -199,6 +209,7 @@ export class KeyPoolService {
 
     health.healthy = true;
     health.recoverAt = undefined;
+    this.preferredHealthyKey.set(provider, healthKey);
     const label = keys?.[keyIndex]?.label ?? `key-${keyIndex}`;
     console.log(`[KeyPool] Marked ${provider}/${label} healthy after successful request`);
   }
@@ -253,6 +264,62 @@ export class KeyPoolService {
     }
 
     return summary;
+  }
+
+  /**
+   * Full status of all providers and keys — for the Nexus dashboard.
+   * Never exposes actual key values, only labels and health state.
+   */
+  getFullStatus(): {
+    providers: Record<string, {
+      total: number;
+      healthy: number;
+      keys: Array<{
+        label: string;
+        healthy: boolean;
+        failureType?: string;
+        failureReason?: string;
+        recoverAt?: string;
+      }>;
+    }>;
+  } {
+    this.refreshConfigIfChanged();
+    const providers: Record<string, {
+      total: number;
+      healthy: number;
+      keys: Array<{
+        label: string;
+        healthy: boolean;
+        failureType?: string;
+        failureReason?: string;
+        recoverAt?: string;
+      }>;
+    }> = {};
+
+    for (const [provider, keys] of this.pools.entries()) {
+      const keyStatuses = keys.map((entry, i) => {
+        const healthKey = this.getKeyIdentity(provider, entry.key);
+        const health = this.health.get(healthKey);
+        const isHealthy = !health || health.healthy !== false;
+        return {
+          label: entry.label ?? `key-${i}`,
+          healthy: isHealthy,
+          ...(health && !isHealthy ? {
+            failureType: health.failureType,
+            failureReason: health.failureReason,
+            recoverAt: health.recoverAt?.toISOString(),
+          } : {}),
+        };
+      });
+
+      providers[provider] = {
+        total: keys.length,
+        healthy: keyStatuses.filter(k => k.healthy).length,
+        keys: keyStatuses,
+      };
+    }
+
+    return { providers };
   }
 
   /**
@@ -363,7 +430,9 @@ export class KeyPoolService {
 
     for (let i = 0; i < poolSize; i++) {
       if (i === excludeIndex) continue;
-      const health = this.health.get(`${provider}:${i}`);
+      const key = this.pools.get(provider)?.[i]?.key;
+      if (!key) continue;
+      const health = this.health.get(this.getKeyIdentity(provider, key));
 
       // Skip permanently-failed auth keys
       if (health?.failureType === "auth") continue;
@@ -382,6 +451,74 @@ export class KeyPoolService {
     }
 
     return bestIndex;
+  }
+
+  private getPreferredHealthyKeyIndex(provider: Provider, keys: KeyEntry[]): number | undefined {
+    const preferredIdentity = this.preferredHealthyKey.get(provider);
+    if (!preferredIdentity) {
+      // Bootstrap preference: prefer the last configured healthy key.
+      // This lets operators put their best/most-reliable key last in config
+      // and avoids spraying fresh sessions across unproven keys after restart.
+      for (let i = keys.length - 1; i >= 0; i--) {
+        if (this.isHealthy(provider, i)) return i;
+      }
+      return undefined;
+    }
+
+    const keyIndex = keys.findIndex((entry) => this.getKeyIdentity(provider, entry.key) === preferredIdentity);
+    if (keyIndex < 0) {
+      this.preferredHealthyKey.delete(provider);
+      return undefined;
+    }
+
+    if (!this.isHealthy(provider, keyIndex)) {
+      this.preferredHealthyKey.delete(provider);
+      return undefined;
+    }
+
+    return keyIndex;
+  }
+
+  private selectHealthyKeyForNewSession(
+    provider: Provider,
+    sessionId: string,
+    keys: KeyEntry[],
+  ): number | undefined {
+    const counts = new Map<number, number>();
+    const healthyIndices: number[] = [];
+
+    for (let i = 0; i < keys.length; i++) {
+      if (!this.isHealthy(provider, i)) continue;
+      healthyIndices.push(i);
+      counts.set(i, 0);
+    }
+
+    if (healthyIndices.length === 0) return undefined;
+
+    for (const [assignmentKey, identity] of this.assignments.entries()) {
+      if (!assignmentKey.startsWith(`${provider}:`)) continue;
+      const assignedIndex = keys.findIndex((entry) => this.getKeyIdentity(provider, entry.key) === identity);
+      if (assignedIndex >= 0 && counts.has(assignedIndex)) {
+        counts.set(assignedIndex, (counts.get(assignedIndex) ?? 0) + 1);
+      }
+    }
+
+    let minCount = Number.POSITIVE_INFINITY;
+    const leastLoaded: number[] = [];
+    for (const index of healthyIndices) {
+      const count = counts.get(index) ?? 0;
+      if (count < minCount) {
+        minCount = count;
+        leastLoaded.length = 0;
+        leastLoaded.push(index);
+      } else if (count === minCount) {
+        leastLoaded.push(index);
+      }
+    }
+
+    if (leastLoaded.length === 1) return leastLoaded[0];
+    const tieBreak = this.hashSessionToKey(sessionId, leastLoaded.length);
+    return leastLoaded[tieBreak];
   }
 
   /**
