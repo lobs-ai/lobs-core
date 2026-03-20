@@ -138,9 +138,13 @@ export class ReflectionService {
   buildReflectionPrompt(agentType: string, reflectionId: string): string {
     const db = getDb();
 
-    // Recent worker runs for this agent WITH task titles
+    // Recent worker runs for this agent WITH task titles (6h window to avoid stale rehashing)
+    const agentRunsSince = new Date(Date.now() - 6 * 3600 * 1000).toISOString();
     const recentRuns = db.select().from(workerRuns)
-      .where(eq(workerRuns.agentType, agentType))
+      .where(and(
+        eq(workerRuns.agentType, agentType),
+        gte(workerRuns.startedAt, agentRunsSince)
+      ))
       .orderBy(desc(workerRuns.startedAt))
       .limit(10)
       .all();
