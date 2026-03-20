@@ -19,6 +19,7 @@ import { reactToolDefinition, executeReactTool, setDiscordService as setReactDis
 import { processToolDefinition, processTool } from "./process.js";
 import { humanizeToolDefinition, humanizeTool } from "./humanize.js";
 import { imagineToolDefinition, imagineTool } from "./imagine.js";
+import { htmlToPdfToolDefinition, htmlToPdfTool } from "./html-to-pdf.js";
 
 export { setReactDiscord };
 
@@ -135,6 +136,10 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   imagine: {
     definition: imagineToolDefinition,
     execute: (params, _cwd, context) => imagineTool(params, { toolUseId: context?.toolUseId }),
+  },
+  html_to_pdf: {
+    definition: htmlToPdfToolDefinition,
+    execute: (params, cwd) => htmlToPdfTool(params, cwd),
   },
 };
 

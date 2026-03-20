@@ -25,6 +25,7 @@ const NEXUS_TOOLS: ToolName[] = [
   "process",
   "humanize",
   "imagine",
+  "html_to_pdf",
 ];
 
 // Discord channel sessions — add message + react

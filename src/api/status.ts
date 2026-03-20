@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { eq, inArray, isNull, desc, gte, and } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { tasks, workerRuns, workflowRuns, inboxItems, modelUsageEvents } from "../db/schema.js";
+import { getKeyPool } from "../services/key-pool.js";
 import { json, error } from "./index.js";
 
 export async function handleStatusRequest(
@@ -60,6 +61,8 @@ export async function handleStatusRequest(
       .where(and(eq(tasks.status, "completed"), gte(tasks.updatedAt, todayStart.toISOString())))
       .all();
 
+    const keyPoolStatus = getKeyPool().getFullStatus();
+
     return json(res, {
       server: {
         status: "healthy",
@@ -105,6 +108,7 @@ export async function handleStatusRequest(
       inbox: {
         unread: unread.length,
       },
+      keys: keyPoolStatus,
     });
   }
 

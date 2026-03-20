@@ -5,6 +5,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { join, extname, resolve } from "node:path";
+import { URL } from "node:url";
 
 const MEDIA_DIR = join(process.env.HOME || "/tmp", ".lobs/media");
 
@@ -15,6 +16,17 @@ const MIME: Record<string, string> = {
   ".gif": "image/gif",
   ".webp": "image/webp",
   ".svg": "image/svg+xml",
+  ".pdf": "application/pdf",
+  ".html": "text/html",
+  ".htm": "text/html",
+  ".json": "application/json",
+  ".txt": "text/plain",
+  ".md": "text/markdown",
+  ".csv": "text/csv",
+  ".zip": "application/zip",
+  ".mp3": "audio/mpeg",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
 };
 
 export async function handleMediaRequest(
@@ -62,11 +74,23 @@ export async function handleMediaRequest(
     const mime = MIME[ext] || "application/octet-stream";
     const data = await readFile(filePath);
 
-    res.writeHead(200, {
+    // Check for ?download=true or ?download=filename.ext
+    const url = new URL(req.url || "/", "http://localhost");
+    const downloadParam = url.searchParams.get("download");
+
+    const headers: Record<string, string | number> = {
       "Content-Type": mime,
       "Content-Length": data.length,
       "Cache-Control": "public, max-age=86400, immutable",
-    });
+    };
+
+    if (downloadParam) {
+      // Use provided filename or the original filename
+      const filename = downloadParam === "true" ? sub : downloadParam;
+      headers["Content-Disposition"] = `attachment; filename="${filename}"`;
+    }
+
+    res.writeHead(200, headers);
 
     if (req.method === "HEAD") {
       res.end();

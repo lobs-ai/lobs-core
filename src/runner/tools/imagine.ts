@@ -68,7 +68,7 @@ export async function imagineTool(
   try {
     // Check if service is running
     const healthRes = await fetch(`${IMAGINE_URL}/health`, {
-      signal: AbortSignal.timeout(3000),
+      signal: AbortSignal.timeout(10000),
     }).catch(() => null);
 
     if (!healthRes || !healthRes.ok) {
