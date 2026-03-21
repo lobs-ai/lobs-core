@@ -129,9 +129,11 @@ The API health response includes diagnostic cross-links when LM Studio is down:
 
 Use `lm_studio_diagnostic.api.models` to fetch the full model report programmatically.
 
-> **Note:** `spawn_agent` preflight integration is a separate HIGH priority item  
-> tracked under "Wire LM Studio health check into spawn_agent preflight".  
-> Until that lands, run `lobs preflight` manually before spawning local agents.
+> **✅ spawn_agent preflight integration is complete (2026-03-17).**  
+> `processSpawnWithRunner` in `control-loop.ts` calls `checkModelsBeforeSpawn()` after model  
+> selection on every spawn. Local-model spawns are blocked with a structured error when  
+> LM Studio is unreachable or the required model is not loaded.  
+> `lobs preflight` remains the recommended session-start gate for human operators.
 
 ---
 

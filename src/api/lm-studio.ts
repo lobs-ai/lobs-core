@@ -5,12 +5,19 @@
  * Nexus, and CI pipelines can call it without importing lobs-core TypeScript.
  *
  * Routes:
- *   GET  /api/lm-studio           — full diagnostic (models, mismatches, latency)
- *   GET  /api/lm-studio/models    — loaded models list only (lightweight)
- *   GET  /api/lm-studio/latency   — API round-trip latency probe only
+ *   GET  /api/lm-studio                — full diagnostic (models, mismatches, latency)
+ *   GET  /api/lm-studio/models         — loaded models list only (lightweight)
+ *   GET  /api/lm-studio/latency        — API round-trip latency probe only
+ *   POST /api/lm-studio/alert-check    — run diagnostic and fire inbox alerts for threshold breaches
  *
  * Designed to be called before spawn_agent when local models are involved.
  * Always responds 200 — use the `ok` field to determine health status.
+ *
+ * Alert integration:
+ *   `GET /api/lm-studio` and `POST /api/lm-studio/alert-check` both evaluate
+ *   results against alerting thresholds (see src/diagnostics/lm-studio-alerting.ts).
+ *   Alert storms are prevented by inbox de-duplication: a new alert is only
+ *   created when no unread alert with the same key exists.
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -19,6 +26,7 @@ import {
   fetchLoadedModels,
   type LmStudioDiagnosticReport,
 } from "../diagnostics/lmstudio.js";
+import { evaluateAndAlert, type AlertEvaluationResult } from "../diagnostics/lm-studio-alerting.js";
 import { getModelConfig } from "../config/models.js";
 import { json, error, parseQuery } from "./index.js";
 
@@ -41,6 +49,8 @@ export interface LmStudioHealthResponse {
   latencyMs: number | null;
   warnings: string[];
   checkedAt: string;
+  /** Alert evaluation results — only present when alerting is enabled (default: true) */
+  alerts?: AlertEvaluationResult;
 }
 
 export interface LmStudioModelsResponse {
@@ -114,6 +124,9 @@ async function handleFullDiagnostic(req: IncomingMessage, res: ServerResponse): 
     measureLatency(baseUrl, timeoutMs),
   ]);
 
+  // Evaluate alerting thresholds and fire inbox alerts for any breach
+  const alerts = await evaluateAndAlert(report, latencyMs);
+
   const response: LmStudioHealthResponse = {
     ok: report.ok,
     status: deriveStatus(report),
@@ -128,6 +141,7 @@ async function handleFullDiagnostic(req: IncomingMessage, res: ServerResponse): 
     latencyMs,
     warnings: report.warnings,
     checkedAt: report.checkedAt.toISOString(),
+    alerts,
   };
 
   json(res, response);
@@ -189,12 +203,76 @@ async function handleLatencyProbe(req: IncomingMessage, res: ServerResponse): Pr
   json(res, response);
 }
 
+// ── Alert check ───────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/lm-studio/alert-check
+ *
+ * Designed for cron/scheduler use: runs the full diagnostic, evaluates all
+ * alerting thresholds, and inserts inbox alerts for any breach.
+ *
+ * Unlike GET /api/lm-studio, this route:
+ *   - Accepts POST (idempotent to callers that won't fire GET from a scheduler)
+ *   - Returns a focused `alerts` summary rather than the full diagnostic
+ *
+ * Body (optional JSON):
+ *   timeout  — per-request timeout in ms (default 4000, max 10000)
+ *   baseUrl  — override LM Studio URL
+ *
+ * Response:
+ *   ok       — true if LM Studio is reachable and no alerts were inserted
+ *   status   — "healthy" | "degraded" | "unreachable"
+ *   latencyMs
+ *   alerts   — { inserted, suppressed, fired[], skipped[] }
+ *   checkedAt
+ */
+async function handleAlertCheck(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const cfg = getModelConfig();
+
+  // Accept body params for scheduler flexibility
+  let bodyParams: Record<string, unknown> = {};
+  try {
+    const buf: Buffer[] = [];
+    for await (const chunk of req) buf.push(chunk as Buffer);
+    const raw = Buffer.concat(buf).toString("utf8").trim();
+    if (raw) bodyParams = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    // ignore malformed body — fall through to defaults
+  }
+
+  const rawTimeout = typeof bodyParams.timeout === "number" ? bodyParams.timeout
+    : parseInt(String(bodyParams.timeout ?? "4000"), 10);
+  const timeoutMs = Math.min(isNaN(rawTimeout) ? 4000 : rawTimeout, 10_000);
+  const baseUrl = (typeof bodyParams.baseUrl === "string" ? bodyParams.baseUrl : undefined)
+    ?? cfg.local.baseUrl;
+
+  const [report, latencyMs] = await Promise.all([
+    runLmStudioDiagnostic({ baseUrl, timeoutMs }),
+    measureLatency(baseUrl, timeoutMs),
+  ]);
+
+  const alerts = await evaluateAndAlert(report, latencyMs);
+
+  json(res, {
+    ok: report.ok && alerts.inserted === 0,
+    status: deriveStatus(report),
+    latencyMs,
+    alerts,
+    checkedAt: new Date().toISOString(),
+  });
+}
+
 // ── Main handler ──────────────────────────────────────────────────────────────
 
 /**
  * Route handler for all /api/lm-studio/* requests.
  *
- * @param _req     Incoming HTTP request
+ * GET  /api/lm-studio            — full diagnostic + alerting
+ * GET  /api/lm-studio/models     — loaded models list
+ * GET  /api/lm-studio/latency    — latency probe only
+ * POST /api/lm-studio/alert-check — run diagnostic + fire alerts (for schedulers)
+ *
+ * @param req      Incoming HTTP request
  * @param res      Outgoing HTTP response
  * @param subPath  Path segments after "lm-studio" (e.g. ["models"] or [])
  */
@@ -203,12 +281,22 @@ export async function handleLmStudioRequest(
   res: ServerResponse,
   subPath: string[],
 ): Promise<void> {
+  const sub = subPath[0] ?? "";
+
+  // alert-check accepts POST
+  if (sub === "alert-check") {
+    if (req.method !== "POST") {
+      error(res, "Method not allowed — use POST", 405);
+      return;
+    }
+    await handleAlertCheck(req, res);
+    return;
+  }
+
   if (req.method !== "GET") {
     error(res, "Method not allowed — use GET", 405);
     return;
   }
-
-  const sub = subPath[0] ?? "";
 
   switch (sub) {
     case "":
