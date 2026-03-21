@@ -174,7 +174,7 @@ function applySingleEdit(
       return {
         updated: content,
         diff: "",
-        summary: `Already applied (new text exists in ${filePath})`,
+        summary: `The new text already exists in ${filePath} (edit may have already been applied)`,
       };
     }
     // Try fuzzy matching to provide a helpful suggestion
@@ -257,9 +257,11 @@ export async function editTool(
   const results: string[] = [];
   let appliedCount = 0;
 
+  const isBatch = edits.length > 1;
+
   for (let i = 0; i < edits.length; i++) {
     const edit = edits[i];
-    const label = edits.length > 1 ? `Edit ${i + 1}/${edits.length}: ` : "";
+    const label = isBatch ? `Edit ${i + 1}/${edits.length}: ` : "";
 
     try {
       const { updated, diff, summary } = applySingleEdit(
@@ -277,15 +279,17 @@ export async function editTool(
         results.push(`${label}${summary}`);
       }
     } catch (err) {
-      // On error in multi-edit: write what we have so far and report
+      if (!isBatch) {
+        // Single edit — throw so the agent sees is_error: true
+        throw err;
+      }
+      // Multi-edit: write what we have so far and report
       if (appliedCount > 0) {
         writeFileSync(resolved, content, "utf-8");
       }
       const msg = err instanceof Error ? err.message : String(err);
       results.push(`${label}FAILED — ${msg}`);
-      if (edits.length > 1) {
-        results.push(`\n${appliedCount}/${edits.length} edits applied before failure. File has been partially updated.`);
-      }
+      results.push(`\n${appliedCount}/${edits.length} edits applied before failure. File has been partially updated.`);
       return `Edited ${filePath}\n\n${results.join("\n\n")}`;
     }
   }
