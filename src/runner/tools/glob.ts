@@ -62,9 +62,26 @@ export async function globTool(
   let args: string[];
 
   if (hasFd) {
-    // fd uses regex, but we can use --glob flag for glob patterns
+    // fd --glob doesn't support ** (deep recursion) — it recurses by default.
+    // Strip leading path segments from pattern and adjust the search dir.
+    // e.g. "src/**/*.ts" → search in <resolved>/src with pattern "*.ts"
+    let searchDir = resolved;
+    let fdPattern = pattern;
+
+    // Extract leading literal path prefix (before any glob chars)
+    const match = pattern.match(/^([^*?{[]+\/)/);
+    if (match) {
+      const prefix = match[1].replace(/\/$/, "");
+      searchDir = resolveToCwd(prefix, resolved);
+      fdPattern = pattern.slice(match[1].length);
+    }
+
+    // Strip any remaining **/ since fd recurses by default
+    fdPattern = fdPattern.replace(/\*\*\//g, "");
+    if (!fdPattern) fdPattern = "*";
+
     cmd = "fd";
-    args = ["--glob", "--color=never", pattern, resolved];
+    args = ["--glob", "--color=never", fdPattern, searchDir];
   } else {
     // Fallback to find with -name or -path
     cmd = "find";

@@ -112,10 +112,10 @@ export async function findFilesTool(
       args.push("--exclude", exclude);
     }
 
-    // pattern is positional — comes before the search path
-    if (pattern) {
-      args.push(pattern);
-    }
+    // fd positional args: [pattern] [path]
+    // When no pattern given, fd treats the first positional as pattern,
+    // so we must pass '.' explicitly to mean "match everything".
+    args.push(pattern || ".");
     args.push(resolved);
   } else {
     // Fallback: build an equivalent `find` command
