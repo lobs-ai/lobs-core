@@ -130,6 +130,16 @@ export class MainAgent {
   
   /** EventEmitter for SSE streaming — Nexus subscribes to this */
   public readonly events = new EventEmitter();
+  
+  /**
+   * Per-channel custom tool executors (e.g. vim-ws delegates file tools to client).
+   * Returns a ToolExecutionResult if handled, or null to fall through to default.
+   */
+  public channelToolExecutors = new Map<string, (
+    toolName: string,
+    params: Record<string, unknown>,
+    toolUseId: string,
+  ) => Promise<import("../runner/types.js").ToolExecutionResult | null>>();
 
   constructor(db: Database.Database, model?: string) {
     this.db = db;
@@ -1129,13 +1139,26 @@ export class MainAgent {
 
           const executeOneBlock = async (block: typeof toolUseBlocks[0]) => {
             const toolStartedAt = Date.now();
-            const { result, sideEffects } = await executeTool(
-              block.name,
-              block.input as Record<string, unknown>,
-              block.id,
-              this.cwd,
-              { channelId: replyChannelId },
-            );
+            
+            // Check for channel-specific tool executor (e.g. vim-ws delegates file tools to client)
+            let execResult: import("../runner/types.js").ToolExecutionResult;
+            const channelExecutor = this.channelToolExecutors.get(replyChannelId);
+            const overrideResult = channelExecutor 
+              ? await channelExecutor(block.name, block.input as Record<string, unknown>, block.id)
+              : null;
+            
+            if (overrideResult) {
+              execResult = overrideResult;
+            } else {
+              execResult = await executeTool(
+                block.name,
+                block.input as Record<string, unknown>,
+                block.id,
+                this.cwd,
+                { channelId: replyChannelId },
+              );
+            }
+            const { result, sideEffects } = execResult;
             if (sideEffects?.newCwd) {
               this.cwd = sideEffects.newCwd;
               console.debug(`[main-agent.loop] cwd_changed to=${this.cwd}`);

@@ -5,35 +5,36 @@
  * to the MainAgent, and streams events (tool calls, text deltas, etc.)
  * back to the Neovim client in real-time.
  *
- * Protocol: see docs/vim-ws-protocol.md (or inline comments below).
- *
- * Phase 1: Chat + streaming events.
- * Phase 2 (stubbed): Tool delegation — server asks Neovim to run
- *   file/exec tools locally via tool.request / tool.result messages.
+ * Tool delegation: file/exec tools are intercepted and sent to the
+ * Neovim client for local execution. The agent loop blocks until the
+ * client returns the result. Non-file tools (web, memory, agents) run
+ * on the server as usual.
  */
 
 import { WebSocketServer, WebSocket } from "ws";
 import type { Server as HttpServer, IncomingMessage } from "node:http";
 import { randomUUID } from "node:crypto";
-import type { AgentStreamEvent } from "../services/main-agent.js";
+import type { AgentStreamEvent, MainAgent } from "../services/main-agent.js";
+import type { ToolExecutionResult } from "../runner/types.js";
 import { log } from "../util/logger.js";
 
-// ── Tool delegation (Phase 2 stub) ─────────────────────────────
-// Tools that should be executed on the Neovim client, not the server.
-// These are file/search tools where the user's local filesystem is
-// the source of truth. Not wired up yet — requires hooking into the
-// MainAgent tool executor.
+// ── Tool delegation config ──────────────────────────────────────
+// Tools delegated to the Neovim client (local filesystem is source of truth).
+// Uses lowercase names to match the tool registry keys in main-agent.
 const CLIENT_TOOLS = new Set([
-  "Read",
-  "Write",
-  "Edit",
+  "read",
+  "write",
+  "edit",
   "ls",
   "exec",
-  "Grep",
-  "Glob",
+  "grep",
+  "glob",
   "find_files",
   "code_search",
 ]);
+
+// Timeout for waiting on a client tool result (ms)
+const TOOL_DELEGATION_TIMEOUT = 60_000;
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -42,12 +43,14 @@ interface VimSession {
   sessionKey: string;
   channelId: string;
   projectRoot: string;
-  /** Phase 2: pending tool requests waiting for client results */
+  /** Pending tool requests waiting for client results */
   pendingToolRequests: Map<
     string,
     {
       toolUseId: string;
       resolve: (result: { content: string; isError: boolean }) => void;
+      reject: (err: Error) => void;
+      timer: NodeJS.Timeout;
     }
   >;
 }
@@ -95,12 +98,9 @@ const sessions = new Map<string, VimSession>();
 export function attachVimWebSocket(httpServer: HttpServer): void {
   const wss = new WebSocketServer({ noServer: true });
 
-  // Handle HTTP→WS upgrade only for our path
   httpServer.on("upgrade", (req: IncomingMessage, socket, head) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname !== "/api/vim/ws") {
-      // Not ours — let other upgrade handlers (if any) deal with it,
-      // or destroy so the client gets a clean rejection.
       socket.destroy();
       return;
     }
@@ -113,7 +113,6 @@ export function attachVimWebSocket(httpServer: HttpServer): void {
   wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
     log().info("[vim-ws] New WebSocket connection");
 
-    // Session is established after a session.open message
     let session: VimSession | null = null;
 
     ws.on("message", async (data) => {
@@ -136,7 +135,7 @@ export function attachVimWebSocket(httpServer: HttpServer): void {
     ws.on("close", () => {
       if (session) {
         log().info(`[vim-ws] Session ${session.sessionKey} disconnected`);
-        sessions.delete(session.sessionKey);
+        cleanupSession(session);
       }
     });
 
@@ -146,6 +145,25 @@ export function attachVimWebSocket(httpServer: HttpServer): void {
   });
 
   log().info("[vim-ws] WebSocket handler attached on /api/vim/ws");
+}
+
+// ── Session cleanup ─────────────────────────────────────────────
+
+function cleanupSession(session: VimSession): void {
+  // Reject any pending tool requests
+  for (const [, pending] of session.pendingToolRequests) {
+    clearTimeout(pending.timer);
+    pending.reject(new Error("WebSocket disconnected"));
+  }
+  session.pendingToolRequests.clear();
+
+  // Unregister the channel tool executor
+  const mainAgent = getMainAgent();
+  if (mainAgent) {
+    mainAgent.channelToolExecutors.delete(session.channelId);
+  }
+
+  sessions.delete(session.sessionKey);
 }
 
 // ── Message handling ────────────────────────────────────────────
@@ -193,9 +211,22 @@ function handleSessionOpen(ws: WebSocket, msg: ClientMessage): VimSession {
 
   sessions.set(sessionKey, newSession);
 
-  log().info(
-    `[vim-ws] Session opened: ${sessionKey} project=${projectRoot}`,
-  );
+  // Register the tool delegation executor on this channel
+  const mainAgent = getMainAgent();
+  if (mainAgent) {
+    mainAgent.channelToolExecutors.set(
+      channelId,
+      (toolName, params, toolUseId) =>
+        delegateTool(newSession, toolName, params, toolUseId),
+    );
+    log().info(
+      `[vim-ws] Session opened: ${sessionKey} project=${projectRoot} (tool delegation enabled)`,
+    );
+  } else {
+    log().warn(
+      `[vim-ws] Session opened: ${sessionKey} but MainAgent not available — tool delegation disabled`,
+    );
+  }
 
   sendJson(ws, {
     type: "session.opened",
@@ -204,6 +235,95 @@ function handleSessionOpen(ws: WebSocket, msg: ClientMessage): VimSession {
   });
 
   return newSession;
+}
+
+// ── Tool delegation ─────────────────────────────────────────────
+
+/**
+ * Intercept a tool call and delegate to the Neovim client if it's a
+ * file/exec tool. Returns null for non-delegated tools (server handles them).
+ */
+async function delegateTool(
+  session: VimSession,
+  toolName: string,
+  params: Record<string, unknown>,
+  toolUseId: string,
+): Promise<ToolExecutionResult | null> {
+  // Only delegate tools in CLIENT_TOOLS set
+  if (!CLIENT_TOOLS.has(toolName)) {
+    return null; // Fall through to server execution
+  }
+
+  if (session.ws.readyState !== WebSocket.OPEN) {
+    return {
+      result: {
+        tool_use_id: toolUseId,
+        type: "tool_result",
+        content: "Error: Neovim client disconnected",
+        is_error: true,
+      },
+    };
+  }
+
+  const requestId = randomUUID().slice(0, 12);
+
+  log().info(
+    `[vim-ws] Delegating tool ${toolName} to client (session=${session.sessionKey}, request=${requestId})`,
+  );
+
+  // Send tool.request to the Neovim client
+  sendJson(session.ws, {
+    type: "tool.request",
+    id: requestId,
+    toolUseId,
+    tool: toolName,
+    args: params,
+  });
+
+  // Wait for the client to respond with tool.result
+  return new Promise<ToolExecutionResult>((resolve, _reject) => {
+    const timer = setTimeout(() => {
+      session.pendingToolRequests.delete(requestId);
+      log().warn(
+        `[vim-ws] Tool delegation timeout: ${toolName} (request=${requestId})`,
+      );
+      resolve({
+        result: {
+          tool_use_id: toolUseId,
+          type: "tool_result",
+          content: `Error: Tool execution timed out after ${TOOL_DELEGATION_TIMEOUT / 1000}s (tool=${toolName})`,
+          is_error: true,
+        },
+      });
+    }, TOOL_DELEGATION_TIMEOUT);
+
+    session.pendingToolRequests.set(requestId, {
+      toolUseId,
+      resolve: (result) => {
+        clearTimeout(timer);
+        resolve({
+          result: {
+            tool_use_id: toolUseId,
+            type: "tool_result",
+            content: result.content,
+            is_error: result.isError,
+          },
+        });
+      },
+      reject: (err) => {
+        clearTimeout(timer);
+        resolve({
+          result: {
+            tool_use_id: toolUseId,
+            type: "tool_result",
+            content: `Error: ${err.message}`,
+            is_error: true,
+          },
+        });
+      },
+      timer,
+    });
+  });
 }
 
 // ── chat.send ───────────────────────────────────────────────────
@@ -221,7 +341,7 @@ async function handleChatSend(
     return;
   }
 
-  const mainAgent = (globalThis as any).__lobsMainAgent;
+  const mainAgent = getMainAgent();
   if (!mainAgent) {
     sendJson(ws, { type: "error", message: "Main agent not initialized" });
     return;
@@ -238,7 +358,6 @@ async function handleChatSend(
     if (ws.readyState !== WebSocket.OPEN) return;
     forwardStreamEvent(ws, event);
 
-    // Clean up listener when the agent signals done
     if (event.type === "done") {
       mainAgent.events.off("stream", streamListener);
     }
@@ -246,7 +365,7 @@ async function handleChatSend(
 
   mainAgent.events.on("stream", streamListener);
 
-  // Dispatch to the MainAgent (same shape the Nexus chat API uses)
+  // Dispatch to the MainAgent
   mainAgent
     .handleMessage({
       id: randomUUID(),
@@ -255,7 +374,7 @@ async function handleChatSend(
       authorName: "Rafe",
       channelId,
       timestamp: Date.now(),
-      chatType: "nexus" as const, // treated like a private chat → steps visible
+      chatType: "nexus" as const,
     })
     .catch((err: unknown) => {
       log().error(`[vim-ws] handleMessage failed: ${err}`);
@@ -265,15 +384,13 @@ async function handleChatSend(
   try {
     await mainAgent.waitForChannelIdle(channelId, 300_000);
   } catch {
-    // Timeout — the "done" event may never have fired
     log().warn(`[vim-ws] Channel ${channelId} idle timeout`);
   }
 
-  // Belt-and-suspenders cleanup
   mainAgent.events.off("stream", streamListener);
 }
 
-// ── tool.result (Phase 2 — client responds to delegated tool) ──
+// ── tool.result (client responds to delegated tool) ─────────────
 
 function handleToolResult(
   msg: ClientMessage,
@@ -283,15 +400,25 @@ function handleToolResult(
 
   const pending = session.pendingToolRequests.get(msg.id);
   if (pending) {
+    log().info(
+      `[vim-ws] Got tool result for request=${msg.id} error=${msg.isError}`,
+    );
     pending.resolve({
       content: msg.content || "",
       isError: msg.isError || false,
     });
     session.pendingToolRequests.delete(msg.id);
+  } else {
+    log().warn(`[vim-ws] No pending request for tool.result id=${msg.id}`);
   }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
+
+function getMainAgent(): MainAgent | null {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (globalThis as any).__lobsMainAgent ?? null;
+}
 
 /**
  * Build the user content string, prefixing editor context when present.
