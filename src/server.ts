@@ -13,6 +13,7 @@ import { resolve } from "node:path";
 import sirv from "sirv";
 import { log } from "./util/logger.js";
 import { handleApiRequest } from "./api/router.js";
+import { attachVimWebSocket } from "./api/vim-ws.js";
 
 const HOME = process.env.HOME ?? "";
 
@@ -73,6 +74,9 @@ export function startServer(port: number): void {
     // Everything else: sirv handles static files + SPA fallback
     serve(req, res);
   });
+
+  // Attach WebSocket handler for vim integration
+  attachVimWebSocket(server);
 
   server.listen(port, "0.0.0.0", () => {
     log().info(`HTTP server listening on port ${port}`);
