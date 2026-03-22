@@ -48,7 +48,8 @@ export function startServer(port: number): void {
     }
 
     // API routes: /api/* and /paw/api/*
-    if (url.startsWith("/api/") || url.startsWith("/paw/api/")) {
+    // Skip /api/vim/ws — handled by WebSocket upgrade event
+    if ((url.startsWith("/api/") && !url.startsWith("/api/vim/ws")) || url.startsWith("/paw/api/")) {
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
       res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");

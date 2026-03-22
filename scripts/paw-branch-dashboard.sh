@@ -37,6 +37,11 @@ done
 # ---------------------------------------------------------------------------
 # Repo manifest — format: "name:/path/to/repo"
 # ---------------------------------------------------------------------------
+# NOTE: These are the standalone repo paths (not submodule paths inside
+# lobs-sets-sail).  The researcher session (169e8d58d8c818a6, 2026-03-20)
+# found that all 4 stalled branches were local-only; we now track them here
+# so the cron picks them up as soon as any branch is pushed to origin.
+# ---------------------------------------------------------------------------
 REPOS=(
   # PAW feature repos (primary focus — the 4 branches 1-2 commits ahead)
   "paw-hub:/Users/lobs/paw/paw-hub"
@@ -390,6 +395,103 @@ if staged_list:
             f"— +{e['staged_add']}/-{e['staged_del']} lines staged"
         )
     lines.append("")
+
+# ---------------------------------------------------------------------------
+# Merge Readiness — locked merge order for the 4 stalled PAW branches.
+# Source: docs/paw-branch-merge-strategy.md (2026-03-21)
+# ---------------------------------------------------------------------------
+MERGE_ORDER = [
+    {
+        "seq": 1,
+        "repo": "ship-api",
+        "branch": "fix/expose-gateway-token",
+        "deps": [],
+        "blocker": None,
+        "notes": "Push + PR first; no deps; 4-line change",
+    },
+    {
+        "seq": 2,
+        "repo": "lobs-sail",
+        "branch": "feat/tool-preflight-health-check",
+        "deps": [],
+        "blocker": "Fix OpenClaw→Trident ref in TOOLS.md before push",
+        "notes": "Docs-only; parallel with ship-api",
+    },
+    {
+        "seq": 3,
+        "repo": "paw-hub",
+        "branch": "fix/auto-provision-gateway-token",
+        "deps": ["ship-api"],
+        "blocker": "HARD dep: ship-api must be merged AND deployed",
+        "notes": "ship-client.js; end-to-end test post-merge",
+    },
+    {
+        "seq": 4,
+        "repo": "paw-plugin",
+        "branch": "fix/orphan-timeout-flood  +  fix/chat-agent-identity",
+        "deps": [],
+        "blocker": "Detached HEAD d2e2ba7 → branch first; cancel stale CI run",
+        "notes": "92 insertions; human review required",
+    },
+]
+
+# Build a set of repos that are already clean (merged / no unmerged branches)
+merged_repos = set(
+    e["repo"] for e in entries if e["status"] == "merged"
+)
+# Repos with at least one branch still unmerged
+unmerged_repos = set(
+    e["repo"] for e in entries
+    if e["branch"] != "__staged__" and e["status"] != "merged"
+)
+
+lines.append("## Merge Readiness\n")
+lines.append(
+    "_Locked merge order — see `docs/paw-branch-merge-strategy.md` for full checklist._\n"
+)
+lines.append("| # | Repo | Branch | Deps | Blocker | Status |")
+lines.append("|---|------|--------|------|---------|--------|")
+
+for mo in MERGE_ORDER:
+    seq      = mo["seq"]
+    repo     = mo["repo"]
+    branch   = mo["branch"]
+    deps     = ", ".join(mo["deps"]) if mo["deps"] else "—"
+    blocker  = mo["blocker"] or "—"
+    # Determine status cell from live scan data
+    if repo in merged_repos and repo not in unmerged_repos:
+        status_cell = "✅ Merged"
+    elif repo in unmerged_repos:
+        # Find the entry for more detail
+        repo_entries = [e for e in entries if e["repo"] == repo and e["branch"] != "__staged__"]
+        if repo_entries:
+            e0 = repo_entries[0]
+            s  = e0["status"]
+            if s == "local-only":
+                status_cell = "🟡 Local only — push needed"
+            elif s == "ready-to-pr":
+                status_cell = "🟢 Ready to PR"
+            elif s == "open-pr":
+                pr_ref = (f"[PR #{e0['pr_num']}]({e0['pr_url']})"
+                          if e0.get("pr_url") else f"PR #{e0['pr_num']}")
+                status_cell = f"🔵 Open {pr_ref}"
+            elif s == "ci-failing":
+                status_cell = "🔴 CI failing"
+            else:
+                status_cell = f"⚪ {s}"
+        else:
+            status_cell = "⚪ Not tracked / repo not found"
+    else:
+        status_cell = "⚪ Not yet tracked"
+
+    lines.append(f"| {seq} | **{repo}** | `{branch}` | {deps} | {blocker} | {status_cell} |")
+
+lines.append("")
+lines.append(
+    "> 📋 Full per-branch checklist: "
+    "`cat ~/lobs/lobs-core/docs/paw-branch-merge-strategy.md`"
+)
+lines.append("")
 
 md_content = '\n'.join(lines) + '\n'
 
