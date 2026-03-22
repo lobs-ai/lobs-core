@@ -20,6 +20,7 @@ import { runHeartbeat } from "./orchestrator/heartbeat.js";
 import { initCronService } from "./services/cron.js";
 import { runSentinelCheck } from "./services/system-sentinel.js";
 import { runCalendarSentinel } from "./services/calendar-sentinel.js";
+import { refreshSchedulerIntelligence } from "./services/scheduler-intelligence.js";
 import { randomUUID } from "node:crypto";
 import { browserService } from "./services/browser.js";
 import { skillsService } from "./services/skills.js";
@@ -350,6 +351,16 @@ async function main() {
       if (total > 0) {
         console.log(`[training-harvest] Harvested ${total} new training samples`);
       }
+    },
+  });
+
+  cronService.registerSystemJob({
+    id: "scheduler-intelligence-refresh",
+    name: "Scheduler Intelligence Refresh",
+    schedule: "*/10 * * * *", // every 10 minutes — keeps Nexus scheduler tab instant
+    enabled: true,
+    handler: async () => {
+      await refreshSchedulerIntelligence();
     },
   });
 
