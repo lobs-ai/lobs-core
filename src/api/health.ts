@@ -8,8 +8,8 @@ import { getKeyPool } from "../services/key-pool.js";
 
 const HOME = process.env.HOME ?? "";
 const PID_FILE = resolve(HOME, ".lobs/lobs.pid");
-const GOOGLE_TOKEN_FILE = resolve(HOME, ".openclaw/credentials/google_token.json");
-const GOOGLE_CREDENTIALS_FILE = resolve(HOME, ".openclaw/credentials/client_secret.json");
+const GOOGLE_TOKEN_FILE = resolve(HOME, ".lobs/credentials/google_token.json");
+const GOOGLE_CREDENTIALS_FILE = resolve(HOME, ".lobs/credentials/client_secret.json");
 
 async function checkMemoryServer(): Promise<boolean> {
   try {

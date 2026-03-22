@@ -2,7 +2,7 @@
  * Google Calendar Sync Service
  *
  * Reads from Google Calendar API using the OAuth2 token stored at
- * ~/.openclaw/credentials/google_token.json.
+ * ~/.lobs/credentials/google_token.json.
  *
  * - No googleapis npm package needed — pure fetch with OAuth2 token refresh
  * - 5-minute event cache to avoid rate limits
@@ -16,7 +16,7 @@ import { log } from "../util/logger.js";
 // ─── Token management ───────────────────────────────────────────────────────
 
 const HOME = process.env.HOME ?? "";
-const TOKEN_PATH = resolve(HOME, ".openclaw/credentials/google_token.json");
+const TOKEN_PATH = resolve(HOME, ".lobs/credentials/google_token.json");
 const CALENDAR_BASE = "https://www.googleapis.com/calendar/v3";
 
 interface GoogleToken {

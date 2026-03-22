@@ -25,8 +25,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
 ]
 
-CLIENT_SECRET = Path.home() / ".openclaw/credentials/client_secret.json"
-TOKEN_PATH = Path.home() / ".openclaw/credentials/google_token.json"
+CLIENT_SECRET = Path.home() / ".lobs/credentials/client_secret.json"
+TOKEN_PATH = Path.home() / ".lobs/credentials/google_token.json"
 
 if not CLIENT_SECRET.exists():
     print(f"ERROR: {CLIENT_SECRET} not found")
