@@ -444,11 +444,15 @@ async function delegateTool(
       toolUseId,
       resolve: (result) => {
         clearTimeout(timer);
+        // Anthropic API requires non-empty content when is_error is true
+        const content = result.isError && !result.content
+          ? "Tool error (no output)"
+          : (result.content || "");
         resolve({
           result: {
             tool_use_id: toolUseId,
             type: "tool_result",
-            content: result.content,
+            content,
             is_error: result.isError,
           },
         });

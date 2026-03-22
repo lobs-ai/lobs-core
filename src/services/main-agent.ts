@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { parseModelString, createResilientClient } from "../runner/providers.js";
 import type { LLMMessage, LLMClient } from "../runner/providers.js";
-import { getModelForTier } from "../config/models.js";
+import { getModelConfig } from "../config/models.js";
 import { getToolDefinitions, executeTool } from "../runner/tools/index.js";
 import type { ToolName } from "../runner/types.js";
 import { getToolsForSession, getSessionType } from "../runner/tools/tool-sets.js";
@@ -494,7 +494,7 @@ export class MainAgent {
 
   /**
    * Auto-generate or update a session title based on conversation content.
-   * Uses a cheap model (haiku) to generate a short descriptive title.
+   * Uses local LM Studio model for free, fast title generation.
    * Only runs after the first reply and then every ~5 messages.
    */
   async maybeUpdateSessionTitle(channelId: string): Promise<void> {
@@ -542,34 +542,60 @@ export class MainAgent {
     if (!conversationSnippet.trim()) return;
 
     try {
-      const model = getModelForTier("micro");
-      const anthropic = new Anthropic();
+      const modelConfig = getModelConfig();
+      const baseUrl = modelConfig.local?.baseUrl ?? "http://localhost:1234/v1";
+      const rawModel = modelConfig.local?.chatModel ?? "qwen/qwen3.5-9b";
+      const model = rawModel.replace(/^lmstudio\//, "");
 
-      const response = await anthropic.messages.create({
-        model,
-        max_tokens: 30,
-        system: "Generate a very short title (3-6 words) for this conversation. Return ONLY the title, no quotes, no punctuation at the end. Be specific about the topic, not generic.",
-        messages: [{
-          role: "user",
-          content: conversationSnippet,
-        }],
-      });
+      const systemPrompt = "Generate a very short title (3-6 words) for this conversation. Return ONLY the title, no quotes, no punctuation at the end. Be specific about the topic, not generic.";
 
-      const titleContent = response.content[0];
-      if (titleContent.type !== "text") return;
-      const title = titleContent.text.trim().replace(/^["']|["']$/g, "").slice(0, 60);
-      if (!title) return;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30_000);
 
-      this.setSessionTitle(channelId, title);
-      console.log(`[main-agent] Session title for ${this.channelTag(channelId)}: "${title}"`);
+      try {
+        const response = await fetch(`${baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: conversationSnippet },
+              { role: "assistant", content: "<think>\n\n</think>\n\n" },
+            ],
+            max_tokens: 32,
+            temperature: 0.3,
+            stream: false,
+          }),
+          signal: controller.signal,
+        });
 
-      // Emit title update event so frontends can display it
-      this.events.emit("stream", {
-        type: "title_update",
-        channelId,
-        title,
-        timestamp: Date.now(),
-      } satisfies AgentStreamEvent);
+        if (!response.ok) {
+          throw new Error(`LM Studio returned ${response.status}: ${await response.text()}`);
+        }
+
+        const data = await response.json() as {
+          choices?: Array<{ message?: { content?: string } }>;
+        };
+        let rawTitle = data.choices?.[0]?.message?.content?.trim() ?? "";
+        rawTitle = rawTitle.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+
+        const title = rawTitle.replace(/^["']|["']$/g, "").replace(/[.!?]+$/, "").slice(0, 60);
+        if (!title) return;
+
+        this.setSessionTitle(channelId, title);
+        console.log(`[main-agent] Session title for ${this.channelTag(channelId)}: "${title}"`);
+
+        // Emit title update event so frontends can display it
+        this.events.emit("stream", {
+          type: "title_update",
+          channelId,
+          title,
+          timestamp: Date.now(),
+        } satisfies AgentStreamEvent);
+      } finally {
+        clearTimeout(timeout);
+      }
     } catch (e) {
       console.error(`[main-agent] Title generation error:`, e);
     }
