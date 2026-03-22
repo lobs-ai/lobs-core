@@ -613,6 +613,12 @@ class AnthropicClient implements LLMClient {
               `[AnthropicClient] Repeated server errors on ${this.keyLabel ?? `key-${this.keyIndex}`}, rotating key`,
             );
           }
+        } else {
+          // Log any unhandled error statuses so we don't have silent failures
+          console.warn(
+            `[AnthropicClient] Unhandled error status=${status ?? "none"} on key=${this.keyLabel ?? `key-${this.keyIndex ?? "unknown"}`} ` +
+            `session=${this.sessionId.slice(0, 40)} message=${message.slice(0, 200)}`,
+          );
         }
       }
 
@@ -1070,6 +1076,7 @@ class ResilientLLMClient implements LLMClient {
   private fallbackModels: string[];
   private maxRetries: number;
   private sessionId?: string;
+  private primaryClientUsed = false;
 
   constructor(
     primaryClient: LLMClient,
@@ -1097,11 +1104,6 @@ class ResilientLLMClient implements LLMClient {
       const model = modelsToTry[modelIdx];
       const isFallback = modelIdx > 0;
 
-      // Create client for this model if it's a fallback
-      const client = isFallback
-        ? createClient(parseModelString(model), this.sessionId)
-        : this.primaryClient;
-
       const modelParams = { ...params, model: parseModelString(model).modelId };
 
       let attempt = 0;
@@ -1109,9 +1111,14 @@ class ResilientLLMClient implements LLMClient {
         attempt++;
 
         try {
-          const client = attempt === 1 && !isFallback
+          // Use the pre-built primaryClient only for the very first attempt of
+          // the very first createMessage() call. After that, always create a
+          // fresh client so we pick up key rotations from the pool.
+          const useOriginalPrimary = attempt === 1 && !isFallback && !this.primaryClientUsed;
+          const client = useOriginalPrimary
             ? this.primaryClient
             : createClient(parseModelString(model), this.sessionId);
+          if (useOriginalPrimary) this.primaryClientUsed = true;
 
           return await client.createMessage(modelParams);
         } catch (error) {
@@ -1230,7 +1237,12 @@ class ResilientLLMClient implements LLMClient {
             }
           }
 
-          // All retries exhausted for this model
+          // All retries exhausted for this model — log and decide
+          console.warn(
+            `[ResilientLLMClient] Unhandled error for model ${model} status=${status ?? "none"} ` +
+            `attempt=${attempt}/${this.maxRetries} modelIdx=${modelIdx}/${modelsToTry.length} ` +
+            `session=${this.sessionId?.slice(0, 40) ?? "none"} error=${message.slice(0, 200)}`,
+          );
           if (isFallback || modelIdx === modelsToTry.length - 1) {
             // Last model — propagate error
             throw error;
