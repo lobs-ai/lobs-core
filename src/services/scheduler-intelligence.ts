@@ -19,6 +19,12 @@ const SLOT_BUFFER_MINUTES = 10;
 
 const SNAPSHOT_KEY = "scheduler_last_event_snapshot";
 
+// Cache the intelligence snapshot to avoid re-computing on every page load
+// The LLM summary calls can take 10-20s — no reason to redo that every 30s
+const CACHE_TTL_MS = 5 * 60_000; // 5 minutes
+let _cachedSnapshot: SchedulerIntelligenceSnapshot | null = null;
+let _cachedAt = 0;
+
 export interface SchedulerModelSettings {
   enabled: boolean;
   localOnly: boolean;
@@ -143,6 +149,9 @@ export function updateSchedulerModelSettings(
   } as ModelConfig & { scheduler: SchedulerModelSettings };
 
   saveModelConfig(next);
+  // Invalidate cached snapshot so next request picks up new settings
+  _cachedSnapshot = null;
+  _cachedAt = 0;
   return next.scheduler;
 }
 
@@ -720,6 +729,11 @@ export async function analyzeScheduleChanges(
 }
 
 export async function getSchedulerIntelligenceSnapshot(): Promise<SchedulerIntelligenceSnapshot> {
+  // Return cached snapshot if fresh enough
+  if (_cachedSnapshot && Date.now() - _cachedAt < CACHE_TTL_MS) {
+    return _cachedSnapshot;
+  }
+
   const db = getDb();
   const now = new Date();
   const todayStart = startOfLocalDay(now);
@@ -888,7 +902,7 @@ export async function getSchedulerIntelligenceSnapshot(): Promise<SchedulerIntel
     analyzeScheduleChanges(googleEvents, dbEvents, rankedTasks, freeSlots),
   ]);
 
-  return {
+  const snapshot: SchedulerIntelligenceSnapshot = {
     ...baseSnapshot,
     model: {
       enabled: settings.enabled,
@@ -909,4 +923,10 @@ export async function getSchedulerIntelligenceSnapshot(): Promise<SchedulerIntel
     },
     ...(changeAnalysis ? { changeAnalysis } : {}),
   };
+
+  // Cache the result
+  _cachedSnapshot = snapshot;
+  _cachedAt = Date.now();
+
+  return snapshot;
 }
