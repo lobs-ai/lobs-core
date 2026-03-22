@@ -355,10 +355,16 @@ async function handleChatSend(
   // Wire up the stream listener BEFORE sending to the agent
   const streamListener = (event: AgentStreamEvent) => {
     if (event.channelId !== channelId) return;
-    if (ws.readyState !== WebSocket.OPEN) return;
+    if (ws.readyState !== WebSocket.OPEN) {
+      log().warn(`[vim-ws] WS closed, dropping ${event.type} for ${channelId}`);
+      mainAgent.events.off("stream", streamListener);
+      return;
+    }
+    log().debug?.(`[vim-ws] Forwarding ${event.type} to ${session?.sessionKey}`);
     forwardStreamEvent(ws, event);
 
     if (event.type === "done") {
+      log().info(`[vim-ws] Stream done for ${session?.sessionKey}`);
       mainAgent.events.off("stream", streamListener);
     }
   };
