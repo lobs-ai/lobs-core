@@ -1137,7 +1137,7 @@ async function cmdCron(subCmd?: string, extraArgs: string[] = []) {
         const check = j.enabled ? colorize("✓", "green") : colorize("✗", "red");
         const name = j.name.padEnd(22);
         const sched = j.schedule.padEnd(16);
-        const last = `last: ${timeAgo(j.last_run)}`;
+        const last = `last: ${timeAgo(j.lastRun)}`;
         console.log(`  ${check} ${colorize(name, "bright")}${colorize(sched, "dim")}  ${colorize(last, "gray")}`);
       }
     }
@@ -1151,7 +1151,7 @@ async function cmdCron(subCmd?: string, extraArgs: string[] = []) {
         const check = j.enabled ? colorize("✓", "green") : colorize("✗", "red");
         const name = j.name.padEnd(22);
         const sched = j.schedule.padEnd(16);
-        const last = `last: ${timeAgo(j.last_run)}`;
+        const last = `last: ${timeAgo(j.lastRun)}`;
         const id = colorize(`[${j.id.slice(0, 8)}]`, "dim");
         console.log(`  ${check} ${colorize(name, "bright")}${colorize(sched, "dim")}  ${colorize(last, "gray")}  ${id}`);
       }
