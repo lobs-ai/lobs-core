@@ -1200,6 +1200,17 @@ export class MainAgent {
           }
         }
 
+        // Sanitize: Anthropic API rejects tool_result with is_error=true and empty content
+        for (const m of messages) {
+          if (m.role === "user" && Array.isArray(m.content)) {
+            for (const block of m.content as Array<Record<string, unknown>>) {
+              if (block.type === "tool_result" && block.is_error && !block.content) {
+                block.content = "Tool error (no output)";
+              }
+            }
+          }
+        }
+
         const response = await this.createMessageWithTimeout(client, {
           model: config.modelId,
           system: fullSystem,
@@ -1340,7 +1351,7 @@ export class MainAgent {
             return {
               type: "tool_result" as const,
               tool_use_id: result.tool_use_id,
-              content: resultContent,
+              content: (result.is_error && !resultContent) ? "Tool error (no output)" : resultContent,
               is_error: result.is_error,
             };
           };
