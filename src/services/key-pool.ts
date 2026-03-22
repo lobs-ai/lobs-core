@@ -8,8 +8,13 @@
  */
 
 import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { homedir } from "node:os";
 import type { KeyEntry, KeyConfig } from "../config/keys.js";
 import { loadKeyConfig } from "../config/keys.js";
+
+const KEY_HEALTH_STATE_PATH = join(homedir(), ".lobs", "key-health-state.json");
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -46,10 +51,13 @@ export class KeyPoolService {
   private configSignature = "";
   private recoveryCheckInterval: NodeJS.Timeout | undefined;
 
+  private saveDebounceTimer: NodeJS.Timeout | undefined;
+
   constructor() {
     this.config = loadKeyConfig();
     this.initializePools();
     this.configSignature = this.computeConfigSignature(this.config);
+    this.loadHealthState();
     this.startRecoveryLoop();
   }
 
@@ -212,6 +220,7 @@ export class KeyPoolService {
     const cooldownSuffix =
       errorType === "auth" ? "" : ` cooldown_ms=${effectiveCooldownMs} consecutive=${consecutiveFailures}`;
     console.warn(`[KeyPool] Marked ${provider}/${label} as unhealthy (${errorType})${cooldownSuffix}: ${error}`);
+    this.saveHealthState();
   }
 
   markHealthy(provider: Provider, keyIndex: number): void {
@@ -235,6 +244,7 @@ export class KeyPoolService {
     this.preferredHealthyKey.set(provider, healthKey);
     const label = keys?.[keyIndex]?.label ?? `key-${keyIndex}`;
     console.log(`[KeyPool] Marked ${provider}/${label} healthy after successful request (prior_failures=${health.consecutiveFailures})`);
+    this.saveHealthState();
   }
 
   /**
@@ -418,6 +428,107 @@ export class KeyPoolService {
     if (this.recoveryCheckInterval) {
       clearInterval(this.recoveryCheckInterval);
     }
+    if (this.saveDebounceTimer) {
+      clearTimeout(this.saveDebounceTimer);
+    }
+    // Save state synchronously on shutdown so it persists across restarts
+    this.saveHealthStateSync();
+  }
+
+  // ── Health State Persistence ───────────────────────────────────────────────
+
+  private loadHealthState(): void {
+    try {
+      const raw = readFileSync(KEY_HEALTH_STATE_PATH, "utf-8");
+      const state = JSON.parse(raw) as Record<string, {
+        healthy: boolean;
+        lastFailure?: string;
+        recoverAt?: string;
+        failureReason?: string;
+        failureType: "auth" | "rate_limit" | "unknown";
+        consecutiveFailures: number;
+        lastRecovery?: string;
+      }>;
+
+      const now = Date.now();
+      let loaded = 0;
+      let skippedExpired = 0;
+      let skippedOld = 0;
+
+      for (const [healthKey, entry] of Object.entries(state)) {
+        // Skip entries older than 1 hour — stale data is worse than no data
+        const lastFailure = entry.lastFailure ? new Date(entry.lastFailure).getTime() : 0;
+        if (now - lastFailure > 60 * 60 * 1000) {
+          skippedOld++;
+          continue;
+        }
+
+        const recoverAt = entry.recoverAt ? new Date(entry.recoverAt) : undefined;
+
+        // If cooldown already expired, mark as recovered but preserve failure history
+        if (recoverAt && now >= recoverAt.getTime() && entry.failureType !== "auth") {
+          this.health.set(healthKey, {
+            healthy: true,
+            lastFailure: entry.lastFailure ? new Date(entry.lastFailure) : undefined,
+            recoverAt: undefined,
+            failureReason: entry.failureReason,
+            failureType: entry.failureType,
+            consecutiveFailures: entry.consecutiveFailures,
+            lastRecovery: new Date(now),
+          });
+          skippedExpired++;
+          continue;
+        }
+
+        this.health.set(healthKey, {
+          healthy: entry.healthy,
+          lastFailure: entry.lastFailure ? new Date(entry.lastFailure) : undefined,
+          recoverAt,
+          failureReason: entry.failureReason,
+          failureType: entry.failureType,
+          consecutiveFailures: entry.consecutiveFailures,
+          lastRecovery: entry.lastRecovery ? new Date(entry.lastRecovery) : undefined,
+        });
+        loaded++;
+      }
+
+      console.log(
+        `[KeyPool] Loaded health state: ${loaded} active, ${skippedExpired} expired-but-tracked, ${skippedOld} stale-discarded`,
+      );
+    } catch {
+      // No state file or invalid — start fresh (normal on first run)
+    }
+  }
+
+  private saveHealthState(): void {
+    // Debounce saves — health changes can come in bursts
+    if (this.saveDebounceTimer) clearTimeout(this.saveDebounceTimer);
+    this.saveDebounceTimer = setTimeout(() => {
+      this.saveHealthStateSync();
+    }, 2000);
+  }
+
+  private saveHealthStateSync(): void {
+    try {
+      const state: Record<string, object> = {};
+      for (const [healthKey, health] of this.health.entries()) {
+        // Only persist unhealthy keys or recently-recovered ones (for failure tracking)
+        if (health.healthy && !health.consecutiveFailures) continue;
+        state[healthKey] = {
+          healthy: health.healthy,
+          lastFailure: health.lastFailure?.toISOString(),
+          recoverAt: health.recoverAt?.toISOString(),
+          failureReason: health.failureReason,
+          failureType: health.failureType,
+          consecutiveFailures: health.consecutiveFailures,
+          lastRecovery: health.lastRecovery?.toISOString(),
+        };
+      }
+      mkdirSync(dirname(KEY_HEALTH_STATE_PATH), { recursive: true });
+      writeFileSync(KEY_HEALTH_STATE_PATH, JSON.stringify(state, null, 2));
+    } catch (err) {
+      console.warn(`[KeyPool] Failed to save health state: ${err}`);
+    }
   }
 
   // ── Private Methods ────────────────────────────────────────────────────────
@@ -567,6 +678,7 @@ export class KeyPoolService {
         const keys = this.pools.get(provider);
         const label = keys?.[i]?.label ?? `key-${i}`;
         console.log(`[KeyPool] Inline-recovered ${provider}/${label} (cooldown expired, prior_failures=${health.consecutiveFailures})`);
+        this.saveHealthState();
         return i;
       }
     }
@@ -582,6 +694,7 @@ export class KeyPoolService {
 
   private recoverKeys(): void {
     const now = new Date();
+    let anyRecovered = false;
 
     for (const [healthKey, health] of this.health.entries()) {
       if (health.healthy) continue; // Already healthy
@@ -600,6 +713,7 @@ export class KeyPoolService {
         health.healthy = true;
         health.recoverAt = undefined;
         health.lastRecovery = now;
+        anyRecovered = true;
         const { provider, label } = this.getHealthKeyMeta(healthKey);
         console.log(`[KeyPool] Recovered ${provider}/${label} after rate limit cooldown (prior_failures=${health.consecutiveFailures})`);
         continue;
@@ -609,10 +723,13 @@ export class KeyPoolService {
         health.healthy = true;
         health.recoverAt = undefined;
         health.lastRecovery = now;
+        anyRecovered = true;
         const { provider, label } = this.getHealthKeyMeta(healthKey);
         console.log(`[KeyPool] Recovered ${provider}/${label} after cooldown (prior_failures=${health.consecutiveFailures})`);
       }
     }
+
+    if (anyRecovered) this.saveHealthState();
   }
 
   private refreshConfigIfChanged(): void {

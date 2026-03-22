@@ -19,7 +19,7 @@ export async function handleStatusRequest(
     const activeWorkers = db.select().from(workerRuns).where(isNull(workerRuns.endedAt)).all();
     const completedWorkers = db.select().from(workerRuns).where(eq(workerRuns.succeeded, true)).all();
     const failedWorkers = db.select().from(workerRuns).where(eq(workerRuns.succeeded, false)).all();
-    const unread = db.select().from(inboxItems).where(eq(inboxItems.isRead, false)).all();
+    const unread = db.select().from(inboxItems).where(and(eq(inboxItems.requiresAction, true), eq(inboxItems.actionStatus, "pending"))).all();
 
     const activeTasks = openTasks.filter(t => t.status === "active");
     const waitingTasks = openTasks.filter(t => t.status === "waiting_on");
@@ -113,7 +113,7 @@ export async function handleStatusRequest(
         today_entries: 0,
       },
       inbox: {
-        unread: unread.length,
+        unread: unread.length,  // items requiring action with pending status
       },
       keys: keyPoolStatus,
     });

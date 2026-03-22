@@ -169,7 +169,7 @@ interface AnthropicAuth {
 const ANTHROPIC_5XX_FAILOVER_THRESHOLD = 2;
 const ANTHROPIC_GLOBAL_5XX_QUARANTINE_THRESHOLD = 3;
 const ANTHROPIC_GLOBAL_5XX_QUARANTINE_MS = 10 * 60 * 1000;
-const ANTHROPIC_STREAM_TIMEOUT_MS = 4 * 60 * 1000;
+const ANTHROPIC_STREAM_TIMEOUT_MS = 60 * 1000; // 60s — if no SSE events in 60s, key is dead
 const ANTHROPIC_TIMEOUT_COOLDOWN_MS = 2 * 60 * 1000;
 const anthropicServerErrorsBySession = new Map<string, { keyIndex: number; count: number }>();
 const anthropicServerErrorsByKey = new Map<number, number>();
