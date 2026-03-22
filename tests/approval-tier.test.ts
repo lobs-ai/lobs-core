@@ -130,8 +130,8 @@ describe("classifyApprovalTier — Tier B (lobs / default)", () => {
     expect(classifyApprovalTier("programmer", "update configuration values")).toBe("B");
   });
 
-  it("returns B for cleanup tasks", () => {
-    expect(classifyApprovalTier("programmer", "clean up unused imports")).toBe("B");
+  it("returns A for cleanup tasks (matches cleanup pattern)", () => {
+    expect(classifyApprovalTier("programmer", "clean up unused imports")).toBe("A");
   });
 
   it("returns B for performance work without feature/ui keywords", () => {
@@ -165,9 +165,13 @@ describe("classifyApprovalTier — Tier A takes priority over C", () => {
 
 describe("classifyApprovalTier — edge cases", () => {
   it("treats agent+notes as a single concatenated string for matching", () => {
-    // Use strings that contain no Tier-A or Tier-C keywords to get Tier B.
-    // NOTE: "quick" contains "ui" (substring) → Tier C, so avoid it.
-    expect(classifyApprovalTier("programmer", "clean up the codebase")).toBe("B");
+    // "clean up" matches clean.?up → Tier A
+    expect(classifyApprovalTier("programmer", "clean up the codebase")).toBe("A");
+  });
+
+  it("returns B when no tier keyword matches", () => {
+    // Use strings that contain no Tier-A, Tier-B, or Tier-C keywords
+    expect(classifyApprovalTier("programmer", "update configuration values")).toBe("B");
   });
 
   it("matches 'doc' embedded within a longer word like 'document'", () => {
