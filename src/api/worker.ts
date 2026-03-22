@@ -1,7 +1,7 @@
 import { isNull, desc } from "drizzle-orm";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getDb } from "../db/connection.js";
-import { workerRuns } from "../db/schema.js";
+import { workerRuns, chatSessions } from "../db/schema.js";
 import { json, parseQuery } from "./index.js";
 
 export async function handleWorkerRequest(
@@ -14,9 +14,24 @@ export async function handleWorkerRequest(
 
   if (id === "status") {
     const activeWorkers = db.select().from(workerRuns).where(isNull(workerRuns.endedAt)).all();
+
+    // Include active chat sessions — these represent real work happening on the system
+    const mainAgent = (globalThis as any).__lobsMainAgent;
+    const processingChannels = new Set(mainAgent?.getProcessingChannels?.() ?? []);
+    const allSessions = db.select().from(chatSessions).where(isNull(chatSessions.archivedAt)).all();
+    const activeChatSessions = allSessions
+      .filter(s => processingChannels.has(`nexus:${s.sessionKey}`))
+      .map(s => ({
+        type: 'chat' as const,
+        sessionKey: s.sessionKey,
+        label: s.label ?? 'Chat',
+        startedAt: s.lastMessageAt ?? s.createdAt,
+      }));
+
     return json(res, {
-      active: activeWorkers.length > 0,
+      active: activeWorkers.length > 0 || activeChatSessions.length > 0,
       workers: activeWorkers,
+      chatSessions: activeChatSessions,
       timestamp: new Date().toISOString(),
     });
   }

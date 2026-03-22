@@ -2,7 +2,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { eq, inArray, isNull, desc, gte, and } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
-import { tasks, workerRuns, workflowRuns, inboxItems, modelUsageEvents } from "../db/schema.js";
+import { tasks, workerRuns, workflowRuns, inboxItems, modelUsageEvents, chatSessions } from "../db/schema.js";
 import { getKeyPool } from "../services/key-pool.js";
 import { json, error } from "./index.js";
 
@@ -72,6 +72,13 @@ export async function handleStatusRequest(
       orchestrator: {
         running: true,
         paused: false,
+      },
+      chat: {
+        active: (() => {
+          const mainAgent = (globalThis as any).__lobsMainAgent;
+          const processing = mainAgent?.getProcessingChannels?.() ?? [];
+          return processing.filter((ch: string) => ch.startsWith('nexus:')).length;
+        })(),
       },
       workers: {
         active: activeWorkers.length,

@@ -229,10 +229,12 @@ function handleSessionOpen(ws: WebSocket, msg: ClientMessage): VimSession {
       );
     }
 
+    // Use DB title if available, otherwise derive from project root
+    const dbTitle = getMainAgent()?.getSessionTitle(channelId);
     sendJson(ws, {
       type: "session.opened",
       sessionKey,
-      title: `vim:${projectRoot.split("/").pop() || "project"}`,
+      title: dbTitle ?? `vim:${projectRoot.split("/").pop() || "project"}`,
     });
 
     return existingSession;
@@ -344,13 +346,17 @@ function handleSessionHistory(
       })
       .filter((m) => m.content.trim() !== "");
 
+    // Get session title
+    const title = mainAgent.getSessionTitle(channelId);
+
     log().info(
-      `[vim-ws] Returning ${messages.length} history messages for ${sessionKey}`,
+      `[vim-ws] Returning ${messages.length} history messages for ${sessionKey} (title: ${title ?? "none"})`,
     );
 
     sendJson(ws, {
       type: "session.history",
       messages,
+      title: title ?? undefined,
     });
   } catch (err) {
     log().error(`[vim-ws] Error fetching session history: ${err}`);
@@ -643,6 +649,10 @@ function forwardStreamEvent(ws: WebSocket, event: AgentStreamEvent): void {
 
     case "done":
       sendJson(ws, { type: "chat.status", status: "done" });
+      break;
+
+    case "title_update":
+      sendJson(ws, { type: "session.title", title: event.title });
       break;
   }
 }

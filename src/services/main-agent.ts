@@ -17,6 +17,7 @@ import { getToolsForSession, getSessionType } from "../runner/tools/tool-sets.js
 import { loadWorkspaceContext, buildSystemPrompt } from "./workspace-loader.js";
 import { buildFallbackChain, resolveModelForTier, type ModelTier } from "../orchestrator/model-chooser.js";
 import Database from "better-sqlite3";
+import Anthropic from "@anthropic-ai/sdk";
 import { compactMessages, findSafeSplitPoint, calculateContextSize } from "./compaction.js";
 import { LoopDetector } from "../runner/loop-detector.js";
 
@@ -91,7 +92,7 @@ interface PendingMessage {
 
 /** SSE event types emitted during agent processing */
 export interface AgentStreamEvent {
-  type: "tool_start" | "tool_result" | "text_delta" | "assistant_reply" | "thinking" | "error" | "done" | "queued" | "processing_start";
+  type: "tool_start" | "tool_result" | "text_delta" | "assistant_reply" | "thinking" | "error" | "done" | "queued" | "processing_start" | "title_update";
   channelId: string;
   queuePosition?: number; // For "queued" events — position in queue
   toolName?: string;
@@ -99,6 +100,7 @@ export interface AgentStreamEvent {
   toolUseId?: string;
   result?: string;       // tool result or final text
   isError?: boolean;
+  title?: string;        // For "title_update" events
   timestamp: number;
 }
 
@@ -178,7 +180,9 @@ export class MainAgent {
         last_author_id TEXT,
         last_author_name TEXT,
         context_summary TEXT,  -- brief summary of what was being worked on
-        model_override TEXT    -- per-channel model override
+        model_override TEXT,   -- per-channel model override
+        title TEXT,            -- auto-generated session title
+        message_count INTEGER NOT NULL DEFAULT 0  -- total user+assistant messages
       );
 
       -- Compaction summaries — summarize old messages without deleting them
@@ -227,6 +231,12 @@ export class MainAgent {
     } catch { /* already exists */ }
     try {
       this.db.exec(`ALTER TABLE main_agent_messages ADD COLUMN metadata TEXT`);
+    } catch { /* already exists */ }
+    try {
+      this.db.exec(`ALTER TABLE channel_sessions ADD COLUMN title TEXT`);
+    } catch { /* already exists */ }
+    try {
+      this.db.exec(`ALTER TABLE channel_sessions ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0`);
     } catch { /* already exists */ }
   }
 
@@ -459,6 +469,104 @@ export class MainAgent {
         last_author_name = COALESCE(excluded.last_author_name, channel_sessions.last_author_name),
         context_summary = COALESCE(excluded.context_summary, channel_sessions.context_summary)
     `).run(channelId, status, authorId || null, authorName || null, contextSummary || null);
+  }
+
+  /** Get session title for a channel */
+  getSessionTitle(channelId: string): string | null {
+    const row = this.db.prepare(
+      `SELECT title FROM channel_sessions WHERE channel_id = ?`
+    ).get(channelId) as { title: string | null } | undefined;
+    return row?.title ?? null;
+  }
+
+  /** Update session title */
+  setSessionTitle(channelId: string, title: string): void {
+    this.db.prepare(
+      `UPDATE channel_sessions SET title = ? WHERE channel_id = ?`
+    ).run(title, channelId);
+  }
+
+  /**
+   * Auto-generate or update a session title based on conversation content.
+   * Uses a cheap model (haiku) to generate a short descriptive title.
+   * Only runs after the first reply and then every ~5 messages.
+   */
+  async maybeUpdateSessionTitle(channelId: string): Promise<void> {
+    // Count user+assistant messages (skip tool_use/tool_result)
+    const countRow = this.db.prepare(
+      `SELECT COUNT(*) as cnt FROM main_agent_messages
+       WHERE channel_id = ? AND role IN ('user', 'assistant')`
+    ).get(channelId) as { cnt: number } | undefined;
+    const msgCount = countRow?.cnt ?? 0;
+
+    // Generate title after first exchange (2 messages), then every 5 messages
+    const existingTitle = this.getSessionTitle(channelId);
+    const shouldGenerate = (!existingTitle && msgCount >= 2) || (msgCount > 0 && msgCount % 5 === 0);
+    if (!shouldGenerate) return;
+
+    // Grab the last few user+assistant messages for context
+    const recentMessages = this.db.prepare(
+      `SELECT role, content FROM main_agent_messages
+       WHERE channel_id = ? AND role IN ('user', 'assistant')
+       ORDER BY created_at DESC LIMIT 6`
+    ).all(channelId) as { role: string; content: string }[];
+
+    if (recentMessages.length === 0) return;
+
+    // Build a summary of the conversation for title generation
+    const conversationSnippet = recentMessages.reverse().map((m) => {
+      // Extract text content, strip tool blocks
+      let text = m.content;
+      try {
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed)) {
+          text = parsed
+            .filter((b: any) => b.type === "text")
+            .map((b: any) => b.text)
+            .join("\n");
+        }
+      } catch {
+        // already plain text
+      }
+      // Truncate long messages
+      if (text.length > 300) text = text.slice(0, 300) + "...";
+      return `${m.role}: ${text}`;
+    }).join("\n");
+
+    if (!conversationSnippet.trim()) return;
+
+    try {
+      const model = getModelForTier("micro");
+      const anthropic = new Anthropic();
+
+      const response = await anthropic.messages.create({
+        model,
+        max_tokens: 30,
+        system: "Generate a very short title (3-6 words) for this conversation. Return ONLY the title, no quotes, no punctuation at the end. Be specific about the topic, not generic.",
+        messages: [{
+          role: "user",
+          content: conversationSnippet,
+        }],
+      });
+
+      const titleContent = response.content[0];
+      if (titleContent.type !== "text") return;
+      const title = titleContent.text.trim().replace(/^["']|["']$/g, "").slice(0, 60);
+      if (!title) return;
+
+      this.setSessionTitle(channelId, title);
+      console.log(`[main-agent] Session title for ${this.channelTag(channelId)}: "${title}"`);
+
+      // Emit title update event so frontends can display it
+      this.events.emit("stream", {
+        type: "title_update",
+        channelId,
+        title,
+        timestamp: Date.now(),
+      } satisfies AgentStreamEvent);
+    } catch (e) {
+      console.error(`[main-agent] Title generation error:`, e);
+    }
   }
 
   /** Resume sessions that were active before a restart */
@@ -1438,6 +1546,11 @@ export class MainAgent {
           `in ${Date.now() - conversationStartedAt}ms`,
         );
         this.conversationRetryCount.delete(replyChannelId);
+
+        // Auto-generate/update session title in the background
+        this.maybeUpdateSessionTitle(replyChannelId).catch((e) =>
+          console.error(`[main-agent] Title generation failed for ${replyChannelId}:`, e)
+        );
         console.debug(
           `[main-agent.loop] channel=${replyChannelId} completed iter=${loopIteration} ` +
           `duration_ms=${Date.now() - conversationStartedAt}`,
