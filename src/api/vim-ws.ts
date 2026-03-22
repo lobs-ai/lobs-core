@@ -65,6 +65,8 @@ interface ClientMessage {
   context?: VimContext;
   toolUseId?: string;
   isError?: boolean;
+  /** Project context (README, AGENTS.md, etc.) sent on new session.open */
+  projectContext?: string;
 }
 
 interface VimContext {
@@ -227,6 +229,11 @@ function handleSessionOpen(ws: WebSocket, msg: ClientMessage): VimSession {
         (toolName, params, toolUseId) =>
           delegateTool(existingSession, toolName, params, toolUseId),
       );
+
+      // Refresh project context on reconnect if provided
+      if (msg.projectContext) {
+        mainAgent.channelProjectContext.set(channelId, msg.projectContext as string);
+      }
     }
 
     // Use DB title if available, otherwise derive from project root
@@ -259,9 +266,14 @@ function handleSessionOpen(ws: WebSocket, msg: ClientMessage): VimSession {
       (toolName, params, toolUseId) =>
         delegateTool(newSession, toolName, params, toolUseId),
     );
-    log().info(
-      `[vim-ws] Session opened: ${sessionKey} project=${projectRoot} (tool delegation enabled)`,
-    );
+
+    // Store project context if provided (README, AGENTS.md, pwd, etc.)
+    if (msg.projectContext) {
+      mainAgent.channelProjectContext.set(channelId, msg.projectContext as string);
+      log().info(`[vim-ws] Session opened: ${sessionKey} project=${projectRoot} (with project context, ${(msg.projectContext as string).length} chars)`);
+    } else {
+      log().info(`[vim-ws] Session opened: ${sessionKey} project=${projectRoot} (tool delegation enabled)`);
+    }
   } else {
     log().warn(
       `[vim-ws] Session opened: ${sessionKey} but MainAgent not available — tool delegation disabled`,

@@ -134,6 +134,12 @@ export class MainAgent {
   public readonly events = new EventEmitter();
   
   /**
+   * Per-channel project context (e.g. vim session README, AGENTS.md, pwd, etc.)
+   * Injected into the system prompt when processing messages for that channel.
+   */
+  public channelProjectContext = new Map<string, string>();
+
+  /**
    * Per-channel custom tool executors (e.g. vim-ws delegates file tools to client).
    * Returns a ToolExecutionResult if handled, or null to fall through to default.
    */
@@ -983,6 +989,9 @@ export class MainAgent {
         chatContextNote = `\n\nThis is a DIRECT conversation. You MUST always respond to every message. Never reply with "NO_REPLY" — the user is talking directly to you and expects a response.`;
       }
 
+      // Per-channel project context (e.g. vim session README, AGENTS.md, etc.)
+      const projectContext = this.channelProjectContext.get(replyChannelId);
+
       const fullSystem = [
         freshSystemPrompt,
         "",
@@ -995,6 +1004,7 @@ export class MainAgent {
         })}`,
         `Session type: ${channelChatType}`,
         chatContextNote,
+        ...(projectContext ? ["", "## Project Context", projectContext] : []),
       ].join("\n");
 
       // 3. Build LLM messages (with image content blocks when present)
