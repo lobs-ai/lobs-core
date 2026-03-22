@@ -27,6 +27,8 @@ interface KeyHealth {
   recoverAt?: Date;
   failureReason?: string;
   failureType: "auth" | "rate_limit" | "unknown";
+  consecutiveFailures: number;
+  lastRecovery?: Date;
 }
 
 const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 15 * 60 * 1000;
@@ -158,15 +160,29 @@ export class KeyPoolService {
 
     const healthKey = this.getKeyIdentity(provider, key);
     const now = Date.now();
-    const effectiveCooldownMs =
+    const existing = this.health.get(healthKey);
+
+    // Track consecutive failures for escalating cooldowns.
+    // If the key was recently recovered (within 5 min) and failed again,
+    // keep the failure count high — it didn't actually recover.
+    const recentRecovery = existing?.lastRecovery && (now - existing.lastRecovery.getTime()) < 5 * 60 * 1000;
+    const consecutiveFailures = recentRecovery
+      ? (existing?.consecutiveFailures ?? 0) + 1
+      : (!existing || existing.healthy) ? 1 : (existing.consecutiveFailures ?? 0) + 1;
+
+    // Escalating cooldown: base * 2^(failures-1), capped at 30 minutes.
+    // 1st failure: base (60s/120s), 2nd: 2x, 3rd: 4x, 4th: 8x, etc.
+    const baseCooldownMs =
       errorType === "rate_limit"
         ? Math.max(cooldownMs ?? DEFAULT_RATE_LIMIT_COOLDOWN_MS, DEFAULT_RATE_LIMIT_COOLDOWN_MS)
         : cooldownMs ?? DEFAULT_UNKNOWN_COOLDOWN_MS;
+    const MAX_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes
+    const escalationFactor = Math.pow(2, Math.min(consecutiveFailures - 1, 8));
+    const effectiveCooldownMs = Math.min(baseCooldownMs * escalationFactor, MAX_COOLDOWN_MS);
 
     // If the key is already in cooldown, don't reset the timer — extend if needed
     // but never shorten. This prevents "thundering herd resets" where retries
     // against a rate-limited key keep pushing back its recovery time.
-    const existing = this.health.get(healthKey);
     let recoverAt: Date | undefined;
     if (errorType === "auth") {
       recoverAt = undefined; // auth failures stay down permanently
@@ -184,6 +200,8 @@ export class KeyPoolService {
       recoverAt,
       failureReason: error,
       failureType: errorType,
+      consecutiveFailures,
+      lastRecovery: existing?.lastRecovery,
     });
 
     if (this.preferredHealthyKey.get(provider) === healthKey) {
@@ -192,7 +210,7 @@ export class KeyPoolService {
 
     const label = keys?.[keyIndex]?.label ?? `key-${keyIndex}`;
     const cooldownSuffix =
-      errorType === "auth" ? "" : ` cooldown_ms=${effectiveCooldownMs}`;
+      errorType === "auth" ? "" : ` cooldown_ms=${effectiveCooldownMs} consecutive=${consecutiveFailures}`;
     console.warn(`[KeyPool] Marked ${provider}/${label} as unhealthy (${errorType})${cooldownSuffix}: ${error}`);
   }
 
@@ -209,9 +227,14 @@ export class KeyPoolService {
 
     health.healthy = true;
     health.recoverAt = undefined;
+    health.lastRecovery = new Date();
+    // Don't reset consecutiveFailures here — if it fails again within 5 min,
+    // markFailed will see the recent recovery and keep escalating.
+    // consecutiveFailures resets only when a key stays healthy for 5+ minutes
+    // (tracked via the recentRecovery check in markFailed).
     this.preferredHealthyKey.set(provider, healthKey);
     const label = keys?.[keyIndex]?.label ?? `key-${keyIndex}`;
-    console.log(`[KeyPool] Marked ${provider}/${label} healthy after successful request`);
+    console.log(`[KeyPool] Marked ${provider}/${label} healthy after successful request (prior_failures=${health.consecutiveFailures})`);
   }
 
   /**
@@ -540,9 +563,10 @@ export class KeyPoolService {
         // Cooldown expired — recover this key
         health.healthy = true;
         health.recoverAt = undefined;
+        health.lastRecovery = new Date(now);
         const keys = this.pools.get(provider);
         const label = keys?.[i]?.label ?? `key-${i}`;
-        console.log(`[KeyPool] Inline-recovered ${provider}/${label} (cooldown expired)`);
+        console.log(`[KeyPool] Inline-recovered ${provider}/${label} (cooldown expired, prior_failures=${health.consecutiveFailures})`);
         return i;
       }
     }
@@ -575,16 +599,18 @@ export class KeyPoolService {
       if (health.failureType === "rate_limit") {
         health.healthy = true;
         health.recoverAt = undefined;
+        health.lastRecovery = now;
         const { provider, label } = this.getHealthKeyMeta(healthKey);
-        console.log(`[KeyPool] Recovered ${provider}/${label} after rate limit cooldown`);
+        console.log(`[KeyPool] Recovered ${provider}/${label} after rate limit cooldown (prior_failures=${health.consecutiveFailures})`);
         continue;
       }
 
       if (health.failureType === "unknown") {
         health.healthy = true;
         health.recoverAt = undefined;
+        health.lastRecovery = now;
         const { provider, label } = this.getHealthKeyMeta(healthKey);
-        console.log(`[KeyPool] Recovered ${provider}/${label} after cooldown`);
+        console.log(`[KeyPool] Recovered ${provider}/${label} after cooldown (prior_failures=${health.consecutiveFailures})`);
       }
     }
   }
