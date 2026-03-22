@@ -34,7 +34,8 @@ const CLIENT_TOOLS = new Set([
 ]);
 
 // Timeout for waiting on a client tool result (ms)
-const TOOL_DELEGATION_TIMEOUT = 60_000;
+// Generous timeout since exec approval prompts may wait for user input
+const TOOL_DELEGATION_TIMEOUT = 120_000;
 
 // ── Types ───────────────────────────────────────────────────────
 
