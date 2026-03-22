@@ -8,7 +8,7 @@
 
 import { randomUUID } from "node:crypto";
 import { eq, and, lte, gte, desc, isNull, inArray } from "drizzle-orm";
-import { getDb } from "../db/connection.js";
+import { getDb, getRawDb } from "../db/connection.js";
 import {
   tasks, projects, inboxItems, inboxThreads, inboxMessages, scheduledEvents,
   agentProfiles, agentStatus, workerRuns, modelUsageEvents,
@@ -191,39 +191,10 @@ function reflectionRunSweep(args: Record<string, unknown>, _ctx: CallableContext
     .limit(30)
     .all();
 
-  // Build reflection summaries and persist each raw reflection into inbox (notice)
-  let rawInboxCount = 0;
+  // Build reflection summaries for triage (no longer persist raw reflection blobs to inbox —
+  // they were flooding Rafe's inbox with low-value "Reflection result — X" notices)
   const reflectionSummaries = reflections.map(r => {
     const result = r.result as Record<string, unknown> | null;
-
-    // Persist full per-agent reflection so human can review all outputs, not just triage results.
-    const existingInbox = db.select().from(inboxItems)
-      .where(eq(inboxItems.sourceReflectionId, r.id))
-      .limit(1)
-      .get();
-
-    if (!existingInbox) {
-      const summaryText = (typeof result?.summary === "string" && result.summary.trim().length > 0)
-        ? result.summary.trim()
-        : `Reflection output from ${r.agentType}`;
-      const payloadText = result
-        ? JSON.stringify(result, null, 2)
-        : "No structured reflection payload captured.";
-
-      db.insert(inboxItems).values({
-        id: randomUUID(),
-        title: `Reflection result — ${r.agentType}`,
-        content: payloadText.slice(0, 24000),
-        summary: summaryText.slice(0, 500),
-        type: "notice",
-        requiresAction: false,
-        actionStatus: "pending",
-        sourceAgent: r.agentType,
-        sourceReflectionId: r.id,
-        modifiedAt: new Date().toISOString(),
-      }).run();
-      rawInboxCount += 1;
-    }
 
     if (!result) return null;
     const parts: string[] = [`### ${r.agentType} (${r.createdAt})`];
@@ -320,11 +291,22 @@ IMPORTANT: After analyzing all reflections above, output a structured JSON summa
           const triage = JSON.parse(jsonMatch[1]);
           const db = getDb();
 
-          // Create inbox suggestion items
+          // Create inbox suggestion items (with dedup against existing pending items)
+          let suggestionsCreated = 0;
           for (const s of (triage.suggestions ?? [])) {
+            const title = (s.title || "").slice(0, 200);
+            // Dedup: skip if a pending item with the same first 50 chars of title already exists
+            const rawDb = getRawDb();
+            const existing = rawDb.prepare(
+              `SELECT COUNT(*) as cnt FROM inbox_items WHERE substr(title, 1, 50) = substr(?, 1, 50) AND action_status IN ('pending', 'done', 'approved')`
+            ).get(title) as { cnt: number } | undefined;
+            if (existing && existing.cnt > 0) {
+              log().debug?.(`[REFLECTION] Triage skipping duplicate suggestion: "${title.slice(0, 60)}"`);
+              continue;
+            }
             db.insert(inboxItems).values({
               id: randomUUID(),
-              title: s.title,
+              title,
               content: (s.content || "").slice(0, 24000),
               summary: (s.summary || s.title).slice(0, 500),
               type: "suggestion",
@@ -333,8 +315,9 @@ IMPORTANT: After analyzing all reflections above, output a structured JSON summa
               sourceAgent: s.sourceAgent || "reflection",
               modifiedAt: new Date().toISOString(),
             }).run();
+            suggestionsCreated++;
           }
-          log().info(`[REFLECTION] Triage created ${(triage.suggestions ?? []).length} suggestions, ${(triage.autoTasks ?? []).length} auto-tasks`);
+          log().info(`[REFLECTION] Triage created ${suggestionsCreated}/${(triage.suggestions ?? []).length} suggestions (deduped), ${(triage.autoTasks ?? []).length} auto-tasks`);
 
           // Create auto-approve tasks for obvious small fixes
           for (const t of (triage.autoTasks ?? [])) {
@@ -360,8 +343,8 @@ IMPORTANT: After analyzing all reflections above, output a structured JSON summa
   for (const r of reflections) {
     db.update(agentReflections).set({ status: "swept" }).where(eq(agentReflections.id, r.id)).run();
   }
-  log().info(`[REFLECTION] Sweep: gathered ${reflections.length} reflections, wrote ${rawInboxCount} raw inbox notices, marked swept, sent to main for triage`);
-  return { ok: true, processed: reflections.length, rawInboxNotices: rawInboxCount, sentToMain: true };
+  log().info(`[REFLECTION] Sweep: gathered ${reflections.length} reflections, marked swept, sent to main for triage`);
+  return { ok: true, processed: reflections.length, sentToMain: true };
 }
 
 function reflectionRunCompression(args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
