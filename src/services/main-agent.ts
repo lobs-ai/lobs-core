@@ -2788,6 +2788,13 @@ export class MainAgent {
     throw new Error(`Channel ${channelId.slice(0, 8)} did not become idle within ${timeoutMs}ms`);
   }
 
+  /** Get message history for a channel (for session resume) */
+  getChannelMessages(channelId: string, limit = 100): Array<{ role: string; content: string; created_at: number | string }> {
+    return this.db.prepare(
+      `SELECT role, content, created_at FROM main_agent_messages WHERE channel_id = ? ORDER BY created_at ASC LIMIT ?`
+    ).all(channelId, limit) as Array<{ role: string; content: string; created_at: number | string }>;
+  }
+
   /** Set model override for a specific channel */
   setChannelModel(channelId: string, model: string | null): void {
     this.db.prepare(`

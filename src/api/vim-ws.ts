@@ -163,7 +163,10 @@ function cleanupSession(session: VimSession): void {
     mainAgent.channelToolExecutors.delete(session.channelId);
   }
 
-  sessions.delete(session.sessionKey);
+  // Keep session in the map for reconnection — only null out the ws reference
+  // so we know it's disconnected. The session data (channelId, projectRoot, etc.)
+  // is preserved for when the client reconnects.
+  session.ws = null as unknown as WebSocket;
 }
 
 // ── Message handling ────────────────────────────────────────────
@@ -185,6 +188,10 @@ async function handleMessage(
       handleToolResult(msg, session);
       return session;
 
+    case "session.history":
+      handleSessionHistory(ws, msg, session);
+      return session;
+
     default:
       sendJson(ws, {
         type: "error",
@@ -201,6 +208,37 @@ function handleSessionOpen(ws: WebSocket, msg: ClientMessage): VimSession {
   const channelId = `vim:${sessionKey}`;
   const projectRoot = msg.projectRoot || process.cwd();
 
+  // Check if there's an existing session with this key (reconnection case)
+  const existingSession = sessions.get(sessionKey);
+  if (existingSession) {
+    log().info(
+      `[vim-ws] Reconnecting to existing session: ${sessionKey} project=${projectRoot}`,
+    );
+
+    // Update the WebSocket reference
+    existingSession.ws = ws;
+    existingSession.projectRoot = projectRoot;
+
+    // Re-register the tool delegation executor with the new ws
+    const mainAgent = getMainAgent();
+    if (mainAgent) {
+      mainAgent.channelToolExecutors.set(
+        channelId,
+        (toolName, params, toolUseId) =>
+          delegateTool(existingSession, toolName, params, toolUseId),
+      );
+    }
+
+    sendJson(ws, {
+      type: "session.opened",
+      sessionKey,
+      title: `vim:${projectRoot.split("/").pop() || "project"}`,
+    });
+
+    return existingSession;
+  }
+
+  // New session
   const newSession: VimSession = {
     ws,
     sessionKey,
@@ -235,6 +273,92 @@ function handleSessionOpen(ws: WebSocket, msg: ClientMessage): VimSession {
   });
 
   return newSession;
+}
+
+// ── session.history ─────────────────────────────────────────────
+
+/**
+ * Handle a session.history request — return past messages for the session.
+ * Queries main_agent_messages from the MainAgent's database.
+ */
+function handleSessionHistory(
+  ws: WebSocket,
+  msg: ClientMessage,
+  session: VimSession | null,
+): void {
+  const sessionKey = msg.sessionKey || session?.sessionKey;
+  if (!sessionKey) {
+    sendJson(ws, {
+      type: "error",
+      message: "No session key for history request",
+    });
+    return;
+  }
+
+  const channelId = `vim:${sessionKey}`;
+  const mainAgent = getMainAgent();
+
+  if (!mainAgent) {
+    sendJson(ws, {
+      type: "session.history",
+      messages: [],
+    });
+    return;
+  }
+
+  try {
+    // Query the database for past messages on this channel
+    const rows = mainAgent.getChannelMessages(channelId, 100);
+
+    // Map to simplified format — strip tool blocks, keep text content
+    const messages = rows
+      .filter((row) => row.role === "user" || row.role === "assistant")
+      .map((row) => {
+        let content = row.content || "";
+
+        // If content looks like JSON (array of content blocks), extract text
+        if (content.startsWith("[")) {
+          try {
+            const blocks = JSON.parse(content);
+            if (Array.isArray(blocks)) {
+              content = blocks
+                .filter(
+                  (b: { type: string; text?: string }) => b.type === "text",
+                )
+                .map((b: { text: string }) => b.text || "")
+                .join("\n");
+            }
+          } catch {
+            // Not JSON, use as-is
+          }
+        }
+
+        return {
+          role: row.role,
+          content,
+          timestamp:
+            typeof row.created_at === "number"
+              ? row.created_at
+              : new Date(row.created_at).getTime(),
+        };
+      })
+      .filter((m) => m.content.trim() !== "");
+
+    log().info(
+      `[vim-ws] Returning ${messages.length} history messages for ${sessionKey}`,
+    );
+
+    sendJson(ws, {
+      type: "session.history",
+      messages,
+    });
+  } catch (err) {
+    log().error(`[vim-ws] Error fetching session history: ${err}`);
+    sendJson(ws, {
+      type: "session.history",
+      messages: [],
+    });
+  }
 }
 
 // ── Tool delegation ─────────────────────────────────────────────
