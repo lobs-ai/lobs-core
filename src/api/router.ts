@@ -62,7 +62,7 @@ export function registerPawRouter(api: LobsPluginApi): void {
 
     try {
       switch (resource) {
-        case "health":          await handleHealthRequest(req, res); return true;
+        case "health":          await handleHealthRequest(req, res, parts[1]); return true;
         case "extraction":      await handleExtractionRequest(req, res, parts[1]); return true;
         case "tasks":           await handleTaskRequest(req, res, parts[1], parts); return true;
         case "projects":        await handleProjectRequest(req, res, parts[1], parts); return true;
@@ -142,7 +142,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 
   try {
     switch (resource) {
-      case "health":          await handleHealthRequest(req, res); return;
+      case "health":          await handleHealthRequest(req, res, parts[1]); return;
       case "extraction":      await handleExtractionRequest(req, res, parts[1]); return;
       case "tasks":           await handleTaskRequest(req, res, parts[1], parts); return;
       case "projects":        await handleProjectRequest(req, res, parts[1], parts); return;

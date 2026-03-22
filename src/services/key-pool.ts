@@ -41,11 +41,20 @@ const DEFAULT_UNKNOWN_COOLDOWN_MS = 60 * 1000;
 
 // ── KeyPool Service ──────────────────────────────────────────────────────────
 
+// In-flight request tracking per key — used to deprioritize keys that are
+// potentially stuck (many requests, none completing).
+interface InFlightInfo {
+  count: number;
+  oldestStart: number; // timestamp of oldest in-flight request
+  lastSuccess: number; // timestamp of last successful completion
+}
+
 export class KeyPoolService {
   private pools: Map<Provider, KeyEntry[]> = new Map();
   private assignments: Map<string, string> = new Map(); // "provider:sessionId" -> key identity
   private health: Map<string, KeyHealth> = new Map();   // "provider:keyIdentity" -> health
   private preferredHealthyKey: Map<Provider, string> = new Map(); // provider -> last successful key identity
+  private inFlight: Map<string, InFlightInfo> = new Map(); // "provider:keyIdentity" -> in-flight tracking
 
   private config: KeyConfig;
   private configSignature = "";
@@ -108,11 +117,27 @@ export class KeyPoolService {
     // First time for this session — prefer the last key that actually succeeded.
     // If we don't have one, spread new sessions across healthy keys instead of
     // purely hashing into one slot and blackholing concurrent chats on the same key.
+    // Also skip "suspect" keys — those with in-flight requests that aren't completing.
     if (keyIndex < 0) {
       keyIndex =
         this.getPreferredHealthyKeyIndex(provider, keys)
         ?? this.selectHealthyKeyForNewSession(provider, sessionId, keys)
         ?? this.hashSessionToKey(sessionId, keys.length);
+
+      // If the selected key is suspect (stuck in-flight requests), try to find a non-suspect one
+      if (this.isKeySuspect(provider, keyIndex)) {
+        const nonSuspect = this.findNonSuspectHealthyKey(provider, keyIndex, keys.length);
+        if (nonSuspect !== undefined) {
+          const suspectLabel = keys[keyIndex]?.label ?? `key-${keyIndex}`;
+          const newLabel = keys[nonSuspect]?.label ?? `key-${nonSuspect}`;
+          console.warn(
+            `[KeyPool] Avoided suspect key ${provider}/${suspectLabel} for new session=${sessionId.slice(0, 24)}, ` +
+            `using ${newLabel} instead`,
+          );
+          keyIndex = nonSuspect;
+        }
+      }
+
       this.assignments.set(assignmentKey, this.getKeyIdentity(provider, keys[keyIndex].key));
     }
 
@@ -245,6 +270,61 @@ export class KeyPoolService {
     const label = keys?.[keyIndex]?.label ?? `key-${keyIndex}`;
     console.log(`[KeyPool] Marked ${provider}/${label} healthy after successful request (prior_failures=${health.consecutiveFailures})`);
     this.saveHealthState();
+  }
+
+  // ── In-Flight Request Tracking ─────────────────────────────────────────────
+
+  /**
+   * Record that a request is starting on this key. Call before making the API request.
+   */
+  trackRequestStart(provider: Provider, keyIndex: number): void {
+    const key = this.pools.get(provider)?.[keyIndex]?.key;
+    if (!key) return;
+    const healthKey = this.getKeyIdentity(provider, key);
+    const info = this.inFlight.get(healthKey);
+    const now = Date.now();
+    if (info) {
+      info.count++;
+      if (now < info.oldestStart || info.count === 1) info.oldestStart = now;
+    } else {
+      this.inFlight.set(healthKey, { count: 1, oldestStart: now, lastSuccess: now });
+    }
+  }
+
+  /**
+   * Record that a request completed (success or failure). Call after the API request finishes.
+   */
+  trackRequestEnd(provider: Provider, keyIndex: number, success: boolean): void {
+    const key = this.pools.get(provider)?.[keyIndex]?.key;
+    if (!key) return;
+    const healthKey = this.getKeyIdentity(provider, key);
+    const info = this.inFlight.get(healthKey);
+    if (info) {
+      info.count = Math.max(0, info.count - 1);
+      if (success) info.lastSuccess = Date.now();
+      if (info.count === 0) info.oldestStart = Date.now();
+    }
+  }
+
+  /**
+   * Check if a key appears stuck — has in-flight requests with no recent success.
+   * A key is "suspect" if it has requests that have been running for >15s with no
+   * success in that window. This is much faster than waiting for the full 60s timeout.
+   */
+  private isKeySuspect(provider: Provider, keyIndex: number): boolean {
+    const key = this.pools.get(provider)?.[keyIndex]?.key;
+    if (!key) return false;
+    const healthKey = this.getKeyIdentity(provider, key);
+    const info = this.inFlight.get(healthKey);
+    if (!info || info.count === 0) return false;
+
+    const now = Date.now();
+    const SUSPECT_THRESHOLD_MS = 15_000; // 15 seconds with no success
+    const oldestAge = now - info.oldestStart;
+    const timeSinceSuccess = now - info.lastSuccess;
+
+    // Key is suspect if it has in-flight requests older than 15s AND no success in that time
+    return oldestAge > SUSPECT_THRESHOLD_MS && timeSinceSuccess > SUSPECT_THRESHOLD_MS;
   }
 
   /**
@@ -558,6 +638,21 @@ export class KeyPoolService {
     return undefined;
   }
 
+  /**
+   * Find a healthy key that isn't suspect (no stuck in-flight requests).
+   * Used for new session assignment to avoid piling onto a potentially-dead key.
+   */
+  private findNonSuspectHealthyKey(provider: Provider, currentIndex: number, poolSize: number): number | undefined {
+    for (let offset = 1; offset < poolSize; offset++) {
+      const tryIndex = (currentIndex + offset) % poolSize;
+      if (this.isHealthy(provider, tryIndex) && !this.isKeySuspect(provider, tryIndex)) {
+        return tryIndex;
+      }
+    }
+    // All other keys are also suspect or unhealthy — fall back to any healthy key
+    return this.findNextHealthyKey(provider, currentIndex, poolSize);
+  }
+
   private findLeastBadKey(provider: Provider, poolSize: number, excludeIndex?: number): number | undefined {
     let bestIndex: number | undefined;
     let bestRecoverAt = Number.POSITIVE_INFINITY;
@@ -594,7 +689,7 @@ export class KeyPoolService {
       // This lets operators put their best/most-reliable key last in config
       // and avoids spraying fresh sessions across unproven keys after restart.
       for (let i = keys.length - 1; i >= 0; i--) {
-        if (this.isHealthy(provider, i)) return i;
+        if (this.isHealthy(provider, i) && !this.isKeySuspect(provider, i)) return i;
       }
       return undefined;
     }
@@ -605,7 +700,7 @@ export class KeyPoolService {
       return undefined;
     }
 
-    if (!this.isHealthy(provider, keyIndex)) {
+    if (!this.isHealthy(provider, keyIndex) || this.isKeySuspect(provider, keyIndex)) {
       this.preferredHealthyKey.delete(provider);
       return undefined;
     }
@@ -623,6 +718,7 @@ export class KeyPoolService {
 
     for (let i = 0; i < keys.length; i++) {
       if (!this.isHealthy(provider, i)) continue;
+      if (this.isKeySuspect(provider, i)) continue; // Skip keys with stuck in-flight requests
       healthyIndices.push(i);
       counts.set(i, 0);
     }

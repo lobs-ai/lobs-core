@@ -464,6 +464,12 @@ class AnthropicClient implements LLMClient {
       apiParams.max_tokens = params.maxTokens;
     }
 
+    // Track this request as in-flight so the pool can deprioritize this key
+    // for new sessions if it appears stuck.
+    if (this.keyIndex !== undefined) {
+      getKeyPool().trackRequestStart("anthropic", this.keyIndex);
+    }
+
     try {
       // Use streaming — matches Claude Code's calling convention
       const stream = this.client.messages.stream(apiParams);
@@ -504,6 +510,9 @@ class AnthropicClient implements LLMClient {
           .join("\n\n");
       }
 
+      if (this.keyIndex !== undefined) {
+        getKeyPool().trackRequestEnd("anthropic", this.keyIndex, true);
+      }
       if (this.sessionId && this.keyIndex !== undefined) {
         anthropicServerErrorsBySession.delete(this.sessionId);
         anthropicServerErrorsByKey.delete(this.keyIndex);
@@ -528,6 +537,11 @@ class AnthropicClient implements LLMClient {
         thinkingContent,
       };
     } catch (error) {
+      // Track end of in-flight request (failure)
+      if (this.keyIndex !== undefined) {
+        getKeyPool().trackRequestEnd("anthropic", this.keyIndex, false);
+      }
+
       // Detect error type and mark key as failed if using KeyPool
       if (this.sessionId) {
         const message = error instanceof Error ? error.message : String(error);
