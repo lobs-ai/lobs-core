@@ -1448,6 +1448,89 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
     `(task=${taskId?.slice(0, 8) ?? "none"}, model=${runnerModel})`
   );
 
+  // ── blocked_by dependency gate ─────────────────────────────────────────────
+  // Defense-in-depth: skip spawning if any declared dependency is still unresolved.
+  // Primary enforcement is in scanner.findReadyTasks (hasUnresolvedBlockers).
+  // This catches edge cases where blocked_by was set after a workflow was already
+  // started, or where a task was re-queued after a crash while its blockers were
+  // re-activated. Must stay aligned with scanner.ts TERMINAL_STATUSES.
+  if (req.taskId) {
+    try {
+      const blockerRaw = getRawDb()
+        .prepare(`SELECT blocked_by FROM tasks WHERE id = ?`)
+        .get(req.taskId) as { blocked_by: string | null } | undefined;
+
+      if (blockerRaw?.blocked_by) {
+        let blockerIds: string[] = [];
+        let parseOk = true;
+        try { blockerIds = JSON.parse(blockerRaw.blocked_by); } catch {
+          parseOk = false;
+        }
+
+        // Fail-safe: malformed blocked_by JSON → treat as blocked (requeue, don't spawn)
+        if (!parseOk || !Array.isArray(blockerIds)) {
+          log().error(
+            `[BLOCKED_BY_GATE] Task ${req.taskId.slice(0, 8)} has corrupt blocked_by JSON ` +
+            `(value: ${JSON.stringify(blockerRaw.blocked_by).slice(0, 80)}) — re-queuing without spawning`
+          );
+          decrementPendingSpawns(projectId, req.agentType);
+          requeueSpawn(req);
+          return;
+        }
+
+        if (Array.isArray(blockerIds) && blockerIds.length > 0) {
+          const placeholders = blockerIds.map(() => "?").join(", ");
+          const activeBlockers = getRawDb()
+            .prepare(
+              `SELECT id FROM tasks WHERE id IN (${placeholders}) ` +
+              `AND status NOT IN ('completed', 'closed', 'cancelled', 'rejected') ` +
+              `AND (work_state IS NULL OR work_state NOT IN ('completed', 'done'))`
+            )
+            .all(...blockerIds) as Array<{ id: string }>;
+
+          if (activeBlockers.length > 0) {
+            const blockerStr = activeBlockers.map(b => b.id.slice(0, 8)).join(", ");
+            log().error(
+              `[BLOCKED_BY_GATE] Task ${req.taskId.slice(0, 8)} spawn BLOCKED — ` +
+              `${activeBlockers.length} active blocker(s) still open: ${blockerStr}. ` +
+              `Phase N+1 cannot start until Phase N is closed. Re-queuing.`
+            );
+            decrementPendingSpawns(projectId, req.agentType);
+            requeueSpawn(req);
+            return;
+          }
+
+          // ── Phase gate: AC verification on terminal blockers ─────────────────
+          // Even if all blockers are terminal, they must have verified acceptance
+          // criteria. A blocker that closed as "completed" but has unverified AC
+          // items (✗ or unchecked) fails this gate. This prevents phantom completions
+          // from unlocking dependent phases in sequential task chains
+          // (d131a765 → 971f07a8 → f2ef419a → 7b22c1cc).
+          const phaseGateResult = checkBlockerPhaseGates(blockerIds);
+          if (!phaseGateResult.allPassed) {
+            log().error(
+              `[PHASE_GATE] Task ${req.taskId.slice(0, 8)} spawn BLOCKED — ` +
+              `${phaseGateResult.failures.length} blocker(s) closed without verified AC:\n` +
+              phaseGateResult.failures.map(f => `  • ${f.taskId.slice(0, 8)}: ${f.reason}`).join("\n")
+            );
+            emitPhaseGateInboxAlert(req.taskId, phaseGateResult.failures);
+            decrementPendingSpawns(projectId, req.agentType);
+            requeueSpawn(req);
+            return;
+          }
+        }
+      }
+    } catch (gateErr) {
+      // Fail-safe: gate errors must never skip the check silently — requeue to retry
+      log().error(
+        `[BLOCKED_BY_GATE] Dependency gate check threw for task ${req.taskId.slice(0, 8)}: ${gateErr} — re-queuing`
+      );
+      decrementPendingSpawns(projectId, req.agentType);
+      requeueSpawn(req);
+      return;
+    }
+  }
+
   // ── LM Studio model availability preflight ──────────────────────────────
   // Check that the chosen model (and its fallbacks) are actually loaded in
   // LM Studio before we invest in context assembly or agent execution.
