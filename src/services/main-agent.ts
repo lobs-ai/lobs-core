@@ -1687,87 +1687,86 @@ export class MainAgent {
       }
     } finally {
       clearTimeout(conversationTimeout);
-      if (!this.isActiveChannelRun(replyChannelId, runId)) {
-        return;
-      }
-      // Mark this channel as no longer processing
-      this.processingChannels.delete(replyChannelId);
-      this.channelLastProgressAt.delete(replyChannelId);
-      this.channelLastSessionHeartbeatAt.delete(replyChannelId);
-      console.log(
-        `[main-agent] Processing released for ${this.channelTag(replyChannelId)} session=${sessionId} ` +
-        `(active=${this.processingChannels.size}/${MAX_CONCURRENT_CHANNELS}, queued=${this.getQueueDepth()})`,
-      );
-
-      // Check for pending retry (transient API errors)
-      const pendingDelay = this.pendingRetryDelay.get(replyChannelId);
-      if (pendingDelay) {
-        this.pendingRetryDelay.delete(replyChannelId);
-        this.scheduleConversationRetry(replyChannelId, pendingDelay);
-        // Still do queue draining below so other channels can start
-      }
-      
-      // Cleanup idle channel metadata periodically (prevent memory leak of old channel info)
-      if (this.channelChatType.size > 100) {
-        // Keep only channels that still have queued messages or are in DB as active
-        const activeChannelIds = new Set(this.channelQueues.keys());
-        for (const [chId, _] of this.channelChatType) {
-          if (!activeChannelIds.has(chId)) {
-            this.channelChatType.delete(chId);
-          }
-        }
-      }
-
-      // Mark persisted queue as processed for this channel (skip if retrying)
-      if (!pendingDelay && !conversationTimedOut) {
-        this.markQueueProcessed(replyChannelId);
-      }
-
-      // Process queued messages for this channel (skip if we have a pending retry
-      // or if the current run was force-released on timeout).
-      const channelQueue = !pendingDelay && !conversationTimedOut
-        ? this.channelQueues.get(replyChannelId)
-        : undefined;
-      if (channelQueue && channelQueue.length > 0) {
+      if (this.isActiveChannelRun(replyChannelId, runId)) {
+        // Mark this channel as no longer processing
+        this.processingChannels.delete(replyChannelId);
+        this.channelLastProgressAt.delete(replyChannelId);
+        this.channelLastSessionHeartbeatAt.delete(replyChannelId);
         console.log(
-          `[main-agent.queue] channel=${this.channelTag(replyChannelId)} draining_next=true depth=${channelQueue.length}`,
+          `[main-agent] Processing released for ${this.channelTag(replyChannelId)} session=${sessionId} ` +
+          `(active=${this.processingChannels.size}/${MAX_CONCURRENT_CHANNELS}, queued=${this.getQueueDepth()})`,
         );
-        const nextMsg = channelQueue.shift()!;
-        if (channelQueue.length === 0) {
-          this.channelQueues.delete(replyChannelId);
+
+        // Check for pending retry (transient API errors)
+        const pendingDelay = this.pendingRetryDelay.get(replyChannelId);
+        if (pendingDelay) {
+          this.pendingRetryDelay.delete(replyChannelId);
+          this.scheduleConversationRetry(replyChannelId, pendingDelay);
+          // Still do queue draining below so other channels can start
         }
-        
-        this.promoteQueuedMessage(nextMsg, "same-channel-drain");
-        
-        this.updateChannelSession(replyChannelId, "processing", nextMsg.authorId, nextMsg.authorName);
-        await this.processConversation(replyChannelId);
-        return;
-      }
 
-      // No more queued messages — mark channel idle (skip if pending retry)
-      if (!pendingDelay && !conversationTimedOut) {
-        this.updateChannelSession(replyChannelId, "idle");
-      }
-
-      // Fill all available concurrency slots from queued channels
-      for (const [channelId, queue] of this.channelQueues.entries()) {
-        if (this.processingChannels.size >= MAX_CONCURRENT_CHANNELS) break;
-        if (queue.length > 0 && !this.processingChannels.has(channelId)) {
-          console.log(
-            `[main-agent.queue] channel=${this.channelTag(channelId)} cross_channel_dispatch depth=${queue.length}`,
-          );
-          const nextMsg = queue.shift()!;
-          if (queue.length === 0) {
-            this.channelQueues.delete(channelId);
+        // Cleanup idle channel metadata periodically (prevent memory leak of old channel info)
+        if (this.channelChatType.size > 100) {
+          // Keep only channels that still have queued messages or are in DB as active
+          const activeChannelIds = new Set(this.channelQueues.keys());
+          for (const [chId, _] of this.channelChatType) {
+            if (!activeChannelIds.has(chId)) {
+              this.channelChatType.delete(chId);
+            }
           }
-          
-          this.promoteQueuedMessage(nextMsg, "cross-channel-dispatch");
-          
-          this.updateChannelSession(channelId, "processing", nextMsg.authorId, nextMsg.authorName);
-          // Don't await — fire concurrently so we fill all slots
-          this.processConversation(channelId).catch((err) =>
-            console.error(`[main-agent] Error processing queued channel ${channelId}:`, err),
+        }
+
+        // Mark persisted queue as processed for this channel (skip if retrying)
+        if (!pendingDelay && !conversationTimedOut) {
+          this.markQueueProcessed(replyChannelId);
+        }
+
+        // Process queued messages for this channel (skip if we have a pending retry
+        // or if the current run was force-released on timeout).
+        const channelQueue = !pendingDelay && !conversationTimedOut
+          ? this.channelQueues.get(replyChannelId)
+          : undefined;
+        if (channelQueue && channelQueue.length > 0) {
+          console.log(
+            `[main-agent.queue] channel=${this.channelTag(replyChannelId)} draining_next=true depth=${channelQueue.length}`,
           );
+          const nextMsg = channelQueue.shift()!;
+          if (channelQueue.length === 0) {
+            this.channelQueues.delete(replyChannelId);
+          }
+
+          this.promoteQueuedMessage(nextMsg, "same-channel-drain");
+
+          this.updateChannelSession(replyChannelId, "processing", nextMsg.authorId, nextMsg.authorName);
+          // Schedule drain asynchronously to avoid return-in-finally
+          void this.processConversation(replyChannelId);
+        } else {
+          // No more queued messages — mark channel idle (skip if pending retry)
+          if (!pendingDelay && !conversationTimedOut) {
+            this.updateChannelSession(replyChannelId, "idle");
+          }
+
+          // Fill all available concurrency slots from queued channels
+          for (const [channelId, queue] of this.channelQueues.entries()) {
+            if (this.processingChannels.size >= MAX_CONCURRENT_CHANNELS) break;
+            if (queue.length > 0 && !this.processingChannels.has(channelId)) {
+              console.log(
+                `[main-agent.queue] channel=${this.channelTag(channelId)} cross_channel_dispatch depth=${queue.length}`,
+              );
+              const nextMsg = queue.shift()!;
+              if (queue.length === 0) {
+                this.channelQueues.delete(channelId);
+              }
+
+              this.promoteQueuedMessage(nextMsg, "cross-channel-dispatch");
+
+              this.updateChannelSession(channelId, "processing", nextMsg.authorId, nextMsg.authorName);
+              // Don't await — fire concurrently so we fill all slots
+              this.processConversation(channelId).catch((err) =>
+                console.error(`[main-agent] Error processing queued channel ${channelId}:`, err),
+              );
+            }
+          }
         }
       }
     }
