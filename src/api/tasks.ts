@@ -17,7 +17,7 @@ import { getGatewayConfig } from "../config/lobs.js";
 import { assembleBrainDumpContext, formatBrainDumpContext } from "../services/context-assembler.js";
 import { logTrainingExample } from "../services/training-data.js";
 import { findDuplicateTask } from "../util/task-dedup.js";
-import { triageIncomingItem } from "../services/intake-triage.js";
+import { triageIncomingItem, triageHeuristic } from "../services/intake-triage.js";
 
 const learningSvc = new LearningService();
 
@@ -465,11 +465,22 @@ Return ONLY valid JSON in this exact format with no other text:
     if (!body.title) return error(res, "title is required");
     const taskId = (body.id as string) ?? randomUUID();
     const now = new Date().toISOString();
-    const triage = await triageIncomingItem({
-      kind: "task",
-      title: body.title as string,
-      content: (body.notes as string) ?? "",
-    });
+
+    // ── Fast-path: skip slow LLM triage when caller provides key fields ──
+    // The Nexus UI always sends agent + model_tier, so this avoids the 20-30s
+    // LM Studio roundtrip that was blocking the response.
+    const callerAgent = body.agent as string | undefined;
+    const callerModelTier = body.model_tier as string | undefined;
+    const callerPriority = body.priority as string | undefined;
+    const needsTriage = !callerAgent || !callerModelTier;
+
+    // Use fast heuristic triage (sync, <1ms) for any missing fields.
+    const heuristic = needsTriage
+      ? triageHeuristic({ kind: "task", title: body.title as string, content: (body.notes as string) ?? "" })
+      : null;
+    const heuristicAgent = callerAgent ?? heuristic!.agent;
+    const heuristicModelTier = callerModelTier ?? heuristic!.modelTier;
+    const heuristicPriority = callerPriority ?? heuristic?.urgency ?? "low";
 
     // ── Deduplication (24h window) ─────────────────────────────────────────
     // Skip if caller explicitly opts out via ?force=true or body.force=true.
@@ -477,8 +488,8 @@ Return ONLY valid JSON in this exact format with no other text:
     if (!forceCreate) {
       const dup = findDuplicateTask({
         title: (body.title as string).trim(),
-        agent: (body.agent as string | undefined) ?? triage.agent,
-        modelTier: (body.model_tier as string | undefined) ?? triage.modelTier,
+        agent: heuristicAgent,
+        modelTier: heuristicModelTier,
       });
       if (dup) {
         return json(res, {
@@ -490,10 +501,6 @@ Return ONLY valid JSON in this exact format with no other text:
     }
 
     // ── Sensitivity classification (Tier 1 regex, <1ms) ──────────────────
-    // Auto-classify the task based on FERPA/HIPAA/PII patterns in title+notes.
-    // If the caller already sets is_compliant=1 (e.g., synced from lobs-server),
-    // honour their value. Otherwise, run the classifier.
-    // is_compliant=1 forces local-model-only routing in the compliance gate.
     const callerIsCompliant = body.is_compliant === 1 || body.is_compliant === true;
     const autoIsCompliant = callerIsCompliant
       ? true
@@ -506,10 +513,10 @@ Return ONLY valid JSON in this exact format with no other text:
       owner: body.owner as string,
       projectId: (body.project_id as string) || inferProjectId(body.title as string, body.notes as string | null),
       notes: body.notes as string,
-      agent: (body.agent as string) ?? triage.agent,
-      modelTier: (body.model_tier as string) ?? triage.modelTier,
+      agent: heuristicAgent,
+      modelTier: heuristicModelTier,
       blockedBy: Array.isArray(body.blocked_by) ? body.blocked_by as string[] : null,
-      priority: (body.priority as string) ?? triage.urgency,
+      priority: heuristicPriority,
       complianceRequired: Boolean(body.compliance_required),
       isCompliant: autoIsCompliant,
       expectedArtifacts: body.expected_artifacts != null ? JSON.stringify(body.expected_artifacts) : undefined,
@@ -517,6 +524,23 @@ Return ONLY valid JSON in this exact format with no other text:
       updatedAt: now,
     }).run();
     const created = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+
+    // ── Background triage: refine agent/model/priority via LLM if needed ──
+    // Only update fields the caller didn't explicitly provide.
+    if (needsTriage) {
+      triageIncomingItem({
+        kind: "task",
+        title: body.title as string,
+        content: (body.notes as string) ?? "",
+      }).then(triage => {
+        const updates: Record<string, unknown> = { updatedAt: new Date().toISOString() };
+        if (!callerAgent) updates.agent = triage.agent;
+        if (!callerModelTier) updates.modelTier = triage.modelTier;
+        if (!callerPriority) updates.priority = triage.urgency;
+        db.update(tasks).set(updates).where(eq(tasks.id, taskId)).run();
+      }).catch(() => { /* heuristic defaults are fine */ });
+    }
+
     return json(res, created, 201);
   }
   return error(res, "Method not allowed", 405);

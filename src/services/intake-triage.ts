@@ -141,6 +141,18 @@ function routeToModelTier(route: IntakeRoute, category: IntakeCategory, urgency:
   return urgency === "low" ? "micro" : "small";
 }
 
+/**
+ * Synchronous heuristic triage using regex patterns. Runs in <1ms.
+ * Use this when you need triage defaults without blocking on LLM calls.
+ */
+export function triageHeuristic(input: {
+  kind: IntakeKind;
+  title: string;
+  content?: string | null;
+}): IntakeTriageResult {
+  return buildFallback(input.kind, input.title, input.content ?? "");
+}
+
 function buildFallback(kind: IntakeKind, title: string, content: string): IntakeTriageResult {
   const combined = `${title}\n\n${content}`.trim();
   const category = detectCategory(combined, kind);
