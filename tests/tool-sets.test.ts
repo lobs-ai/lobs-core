@@ -18,7 +18,7 @@ describe("Tool Sets", () => {
     });
 
     it("should detect discord session type from Discord snowflake", () => {
-      const result = getSessionType("1480648170647195869");
+      const result = getSessionType("123456789012345678");
       expect(result).toBe("discord");
     });
 

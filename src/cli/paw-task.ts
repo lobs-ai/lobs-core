@@ -135,7 +135,7 @@ try {
       if (!row) die(`Task not found: ${id}`);
       const sets: string[] = ["updated_at = ?"];
       const params: string[] = [new Date().toISOString()];
-      for (const [key, col] of Object.entries({ status: "status", notes: "notes", agent: "agent", tier: "model_tier", project: "project_id", title: "title" })) {
+      for (const [key, col] of Object.entries({ status: "status", notes: "notes", agent: "agent", tier: "model_tier", project: "project_id", title: "title", shape: "shape", priority: "priority" })) {
         if (args.flags[key]) { sets.push(`${col} = ?`); params.push(args.flags[key]); }
       }
       params.push(row.id);

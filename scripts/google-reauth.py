@@ -33,7 +33,7 @@ if not CLIENT_SECRET.exists():
     exit(1)
 
 print(f"Starting OAuth flow with client secret: {CLIENT_SECRET}")
-print("A browser window will open. Sign in with thelobsbot@gmail.com\n")
+print("A browser window will open. Sign in with the Google account configured for Lobs.\n")
 
 flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET), SCOPES)
 creds = flow.run_local_server(port=8089)

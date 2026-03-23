@@ -417,6 +417,9 @@ Return ONLY valid JSON in this exact format with no other text:
         is_compliant: "isCompliant",
         // Pre-flight artifact check: JSON array of ArtifactSpec objects
         expected_artifacts: "expectedArtifacts",
+        // Shape / tier classification (e.g. tier-1, high, standard) and priority
+        shape: "shape",
+        priority: "priority",
       };
       // Fields that must be JSON-stringified before persisting
       const jsonFields = new Set(["expected_artifacts", "blocked_by"]);

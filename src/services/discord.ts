@@ -9,6 +9,7 @@ export interface DiscordConfig {
     agentWork?: string;   // Channel ID for agent work updates
     completions?: string; // Channel ID for task completions
   };
+  ownerId?: string;       // Primary owner's Discord user ID
   dmAllowFrom: string[];  // User IDs allowed to DM the bot
   channelPolicies: Record<string, { allow: boolean; requireMention: boolean }>;
 }

@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { log } from "../util/logger.js";
 import { getGatewayConfig } from "../config/lobs.js";
+import { loadDiscordConfig } from "../config/discord.js";
 
 const svc = new MeetingsService();
 
@@ -147,7 +148,7 @@ ${meeting.summary}
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
         body: JSON.stringify({
           tool: "message",
-          args: { action: "send", channel: "discord", target: "user:644578016298795010", message: msg },
+          args: { action: "send", channel: "discord", target: `user:${loadDiscordConfig()?.ownerId ?? loadDiscordConfig()?.dmAllowFrom?.[0] ?? "unknown"}`, message: msg },
           sessionKey: "agent:sink:paw-orchestrator-v2",
         }),
       });

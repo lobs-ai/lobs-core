@@ -5,6 +5,7 @@
 import { readFileSync } from "node:fs";
 import { log } from "../util/logger.js";
 import { getGatewayConfig } from "../config/lobs.js";
+import { loadDiscordConfig } from "../config/discord.js";
 import { checkModelsBeforeSpawn } from "../diagnostics/lmstudio.js";
 import { getModelConfig } from "../config/models.js";
 
@@ -79,7 +80,7 @@ export function registerRestartContinuationHook(api: any): void {
               "Will retry on next gateway start."
             );
           } else {
-            const missing = preflight.missing.map((m) => m.id).join(", ");
+            const missing = preflight.missingIds.join(", ");
             log().warn(
               `[PAW] Restart continuation: LM Studio reachable but model(s) not loaded: ${missing} — ` +
               "skipping resume prompt to avoid model-drift failures."
@@ -99,7 +100,7 @@ export function registerRestartContinuationHook(api: any): void {
             tool: "sessions/send",
             sessionKey: "agent:sink:paw-orchestrator-v2",
             args: {
-              sessionKey: "agent:main:discord:direct:644578016298795010",
+              sessionKey: `agent:main:discord:direct:${loadDiscordConfig()?.ownerId ?? loadDiscordConfig()?.dmAllowFrom?.[0] ?? "unknown"}`,
               message: "[System] PAW plugin restarted. Continue any in-progress work.",
             },
           }),

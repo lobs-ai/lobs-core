@@ -6,10 +6,24 @@
 import { execSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { log } from "../util/logger.js";
 
-const GIT_USER_NAME = "Lobs";
-const GIT_USER_EMAIL = "thelobsbot@gmail.com";
+function getGitIdentity(): { name: string; email: string } {
+  const configPath = join(homedir(), ".lobs", "config", "lobs.json");
+  try {
+    if (existsSync(configPath)) {
+      const config = JSON.parse(readFileSync(configPath, "utf-8"));
+      if (config.git?.name && config.git?.email) {
+        return { name: config.git.name, email: config.git.email };
+      }
+    }
+  } catch {}
+  return {
+    name: process.env.LOBS_GIT_NAME ?? "Lobs",
+    email: process.env.LOBS_GIT_EMAIL ?? "lobs@localhost",
+  };
+}
 
 const TEMPLATE_FILES = ["AGENTS.md", "SOUL.md", "TOOLS.md", "USER.md", "IDENTITY.md", "WORKER_RULES.md", "HEARTBEAT.md"];
 
@@ -96,8 +110,9 @@ export class GitManager {
 
     const msg = `feat(${agentType}): ${taskTitle}\n\nTask: ${taskId}\nAgent: ${agentType}\n\n${stat}`;
     try {
-      this.git("config", "user.name", GIT_USER_NAME);
-      this.git("config", "user.email", GIT_USER_EMAIL);
+      const identity = getGitIdentity();
+      this.git("config", "user.name", identity.name);
+      this.git("config", "user.email", identity.email);
       const res = this.git("commit", "-m", msg);
       if (res.code !== 0) {
         log().error(`[GIT] Commit failed: ${res.stderr}`);

@@ -50,6 +50,7 @@ import { runAgent, assembleContext } from "../runner/index.js";
 import type { AgentResult } from "../runner/index.js";
 import { getAgentSessionsDir } from "../config/lobs.js";
 import { checkModelsBeforeSpawn } from "../diagnostics/lmstudio.js";
+import { checkBlockerPhaseGates, emitPhaseGateInboxAlert } from "./phase-gate.js";
 
 const learningSvc = new LearningService();
 
@@ -1994,6 +1995,25 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
             );
             const blockedWorkerProjectId = (taskCtx["projectId"] as string) ?? (taskCtx["project_id"] as string) ?? undefined;
             decrementPendingSpawns(blockedWorkerProjectId, req.agentType);
+            requeueSpawn(req);
+            return;
+          }
+
+          // ── Phase gate: AC verification on terminal blockers ───────────────────
+          // Even if all blockers are terminal, they must have verified acceptance
+          // criteria. A blocker that closed as "completed" but has unverified AC
+          // items (✗ or unchecked) fails this gate. This prevents phantom completions
+          // from unlocking dependent phases in sequential task chains.
+          const phaseGateResult = checkBlockerPhaseGates(blockerIds);
+          if (!phaseGateResult.allPassed) {
+            log().error(
+              `[PHASE_GATE] Task ${req.taskId.slice(0, 8)} spawn BLOCKED — ` +
+              `${phaseGateResult.failures.length} blocker(s) closed without verified AC:\n` +
+              phaseGateResult.failures.map(f => `  • ${f.taskId.slice(0, 8)}: ${f.reason}`).join("\n")
+            );
+            emitPhaseGateInboxAlert(req.taskId, phaseGateResult.failures);
+            const phaseGateProjectId = (taskCtx["projectId"] as string) ?? (taskCtx["project_id"] as string) ?? undefined;
+            decrementPendingSpawns(phaseGateProjectId, req.agentType);
             requeueSpawn(req);
             return;
           }

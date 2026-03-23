@@ -7,6 +7,7 @@ import { eq, and, inArray } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { tasks } from "../db/schema.js";
 import { log } from "../util/logger.js";
+import { checkBlockerPhaseGates, emitPhaseGateInboxAlert } from "./phase-gate.js";
 
 export interface ReadyTask {
   id: string;
@@ -78,11 +79,24 @@ export function findReadyTasks(limit = 10): ReadyTask[] {
       .orderBy(tasks.agent, tasks.updatedAt)
       .all();
 
-    // Filter out tasks with unresolved dependency blockers
+    // Filter out tasks with unresolved dependency blockers, including AC gate checks
     const unblocked = rows.filter(r => {
       if (hasUnresolvedBlockers(r.blockedBy, db)) {
         log().info(`[SCANNER] Skipping task ${r.id} (${r.title}) — has unresolved blockers`);
         return false;
+      }
+      // Phase gate: even if blockers are terminal, they must have verified AC
+      if (r.blockedBy) {
+        const gateResult = checkBlockerPhaseGates(r.blockedBy);
+        if (!gateResult.allPassed) {
+          log().error(
+            `[SCANNER] [PHASE_GATE] Skipping task ${r.id.slice(0, 8)} (${r.title}) — ` +
+            `${gateResult.failures.length} blocker(s) closed without verified AC:\n` +
+            gateResult.failures.map(f => `  • ${f.taskId.slice(0, 8)}: ${f.reason}`).join("\n")
+          );
+          emitPhaseGateInboxAlert(r.id, gateResult.failures);
+          return false;
+        }
       }
       return true;
     });
