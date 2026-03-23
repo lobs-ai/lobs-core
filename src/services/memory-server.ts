@@ -14,7 +14,7 @@ import { checkMemorySupervisorHealth } from "./restart-telemetry.js";
 const HOME = process.env.HOME ?? "";
 const MEMORY_DIR = resolve(HOME, "lobs/lobs-core/memory");
 const MEMORY_PORT = 7420;
-const HEALTH_URL = `http://localhost:${MEMORY_PORT}/status`;
+const HEALTH_URL = `http://localhost:${MEMORY_PORT}/healthz`;
 const BUN_PATH = resolve(HOME, ".bun/bin/bun");
 
 // Restart policy
@@ -23,6 +23,7 @@ const RESTART_DELAY_MAX_MS = 60_000;  // 60s max
 const RESTART_BACKOFF_FACTOR = 2;
 const HEALTH_CHECK_INTERVAL_MS = 30_000; // check every 30s
 const STARTUP_GRACE_MS = 10_000; // wait before first health check
+const HEALTH_FAILURES_BEFORE_RESTART = 3; // require 3 consecutive failures before restarting
 const MIN_FREE_DISK_BYTES = 512 * 1024 * 1024; // 512MB
 
 class MemoryServerSupervisor {
@@ -120,7 +121,9 @@ class MemoryServerSupervisor {
   async isHealthy(): Promise<boolean> {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3000);
+      // 8s timeout — vector searches can block the Bun event loop for 10-20s,
+      // so the lightweight /healthz endpoint may take a while to respond.
+      const timeout = setTimeout(() => controller.abort(), 8000);
       const res = await fetch(HEALTH_URL, { signal: controller.signal });
       clearTimeout(timeout);
       if (res.ok) {
@@ -342,6 +345,15 @@ class MemoryServerSupervisor {
             this.consecutiveHealthFailures = 0;
             console.log("[memory-supervisor] Resuming health checks after extended backoff");
           }, 5 * 60 * 1000);
+          return;
+        }
+
+        // Only restart after multiple consecutive failures — a single miss is
+        // usually just the event loop blocked by a long vector search.
+        if (this.consecutiveHealthFailures < HEALTH_FAILURES_BEFORE_RESTART) {
+          console.warn(
+            `[memory-supervisor] Health check failed (${this.consecutiveHealthFailures}/${HEALTH_FAILURES_BEFORE_RESTART}) — will retry`,
+          );
           return;
         }
 
