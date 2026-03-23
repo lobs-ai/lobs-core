@@ -143,6 +143,82 @@ export class SessionTranscript {
   }
 
   /**
+   * Load the conversation messages from the last turn of a session.
+   * Returns the full message history + the assistant's final response,
+   * ready to be used as `resumeMessages` in AgentSpec.
+   *
+   * Returns null if the session doesn't exist, has no turns, or is corrupt.
+   */
+  static loadResumableMessages(agentType: string, runId: string): LLMMessage[] | null {
+    const homeDir = process.env.HOME ?? "";
+    const sessionPath = `${homeDir}/.lobs/agents/${agentType}/sessions/${runId}.jsonl`;
+
+    if (!existsSync(sessionPath)) return null;
+
+    try {
+      const content = readFileSync(sessionPath, "utf-8");
+      const lines = content.trim().split("\n").filter((l) => l.length > 0);
+
+      // Find the last non-summary turn (reading backwards for efficiency)
+      let lastTurn: TurnRecord | null = null;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const record = JSON.parse(lines[i]);
+          if (record.type === "summary") continue;
+          if (record.turn && record.messages) {
+            lastTurn = record as TurnRecord;
+            break;
+          }
+        } catch {
+          continue;
+        }
+      }
+
+      if (!lastTurn || !lastTurn.messages || lastTurn.messages.length === 0) {
+        return null;
+      }
+
+      // Start with the messages that were sent TO the LLM on the last turn
+      const messages: LLMMessage[] = [...lastTurn.messages];
+
+      // Append the assistant's response from that turn
+      if (lastTurn.response?.content) {
+        messages.push({
+          role: "assistant",
+          content: lastTurn.response.content as LLMMessage["content"],
+        });
+
+        // If the last response was tool_use, we need to include the tool results
+        // that would have been generated (they're in the NEXT turn's messages).
+        // Since there IS no next turn (session was interrupted), we inject a
+        // synthetic tool result telling the agent the tools were interrupted.
+        if (lastTurn.response.stopReason === "tool_use") {
+          const toolCalls = lastTurn.response.content.filter(
+            (block: any) => block.type === "tool_use"
+          );
+          if (toolCalls.length > 0) {
+            const syntheticResults: any[] = toolCalls.map((tc: any) => ({
+              type: "tool_result",
+              tool_use_id: tc.id,
+              content: "[Session interrupted — tool execution was cut short by process restart. Re-run if needed.]",
+              is_error: true,
+            }));
+            messages.push({
+              role: "user",
+              content: syntheticResults,
+            });
+          }
+        }
+      }
+
+      return messages;
+    } catch (err) {
+      console.error(`[session-transcript] Failed to load resumable messages for ${runId}:`, err);
+      return null;
+    }
+  }
+
+  /**
    * Load the summary from a JSONL transcript.
    */
   static loadSummary(agentType: string, runId: string): SessionSummary | null {

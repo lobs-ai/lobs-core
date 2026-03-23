@@ -41,9 +41,10 @@ const DEFAULT_MAX_TOKENS = 16384;
 export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
   const startTime = Date.now();
   const maxTurns = spec.maxTurns ?? DEFAULT_MAX_TURNS;
+  const isResume = Boolean(spec.resumeMessages?.length);
 
   // Generate or use existing run ID for session persistence
-  const runId = spec.context?.taskId ?? randomBytes(8).toString("hex");
+  const runId = spec.runId ?? spec.context?.taskId ?? randomBytes(8).toString("hex");
   const transcript = new SessionTranscript(spec.agent, runId);
 
   // Emit before_agent_start hook
@@ -113,10 +114,29 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
   // Get tool definitions for the API
   const tools = getToolDefinitions(spec.tools);
 
-  // Initialize message history
-  const messages: LLMMessage[] = [
-    { role: "user", content: spec.task },
-  ];
+  // Initialize message history — resume from prior session or start fresh
+  const messages: LLMMessage[] = [];
+  let resumedTurnCount = 0;
+  if (isResume && spec.resumeMessages) {
+    messages.push(...spec.resumeMessages);
+    resumedTurnCount = Math.floor(spec.resumeMessages.length / 2); // rough estimate
+    // Inject a resume notice so the agent knows it was interrupted
+    messages.push({
+      role: "user",
+      content: [{ type: "text", text:
+        "[System] Your session was interrupted by a process restart. " +
+        "Your full conversation history has been restored. " +
+        "Continue where you left off — orient fast (check state if needed) then keep working. " +
+        "Do NOT restart the task from scratch."
+      }],
+    });
+    console.log(
+      `[agent-loop] run=${runId} agent=${spec.agent} RESUMING session ` +
+      `with ${spec.resumeMessages.length} prior messages (~${resumedTurnCount} turns)`
+    );
+  } else {
+    messages.push({ role: "user", content: spec.task });
+  }
 
   // Token tracking
   const usage: TokenUsage = {

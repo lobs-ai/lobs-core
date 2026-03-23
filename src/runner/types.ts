@@ -32,6 +32,14 @@ export interface AgentSpec {
   } | {
     type: "adaptive";
   };
+  /**
+   * Prior conversation messages for session resumption.
+   * When set, the agent loop resumes from these messages instead of
+   * starting fresh with just the task prompt.
+   */
+  resumeMessages?: import("./providers.js").LLMMessage[];
+  /** Override the session/run ID (for transcript file naming) */
+  runId?: string;
 }
 
 export type ToolName = "exec" | "read" | "write" | "edit" | "ls" | "grep" | "glob" | "find_files" | "code_search" | "web_search" | "web_fetch" | "memory_search" | "memory_read" | "memory_write" | "spawn_agent" | "run_pipeline" | "list_agents" | "cron" | "message" | "react" | "process" | "humanize" | "imagine" | "html_to_pdf";
