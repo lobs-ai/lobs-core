@@ -40,6 +40,7 @@ import { WorkerRegistry } from "./workers/index.js";
 import { MemoryProcessorWorker } from "./workers/memory-processor.js";
 import { ResearchProcessorWorker } from "./workers/research-processor.js";
 import { initResearchQueueService } from "./services/research-queue.js";
+import { runLmStudioAlertCheck } from "./services/lm-studio-monitor.js";
 
 const HOME = process.env.HOME ?? "";
 const DB_PATH = resolve(HOME, ".lobs/lobs.db");
@@ -361,6 +362,21 @@ async function main() {
     enabled: true,
     handler: async () => {
       await refreshSchedulerIntelligence();
+    },
+  });
+
+  cronService.registerSystemJob({
+    id: "lm-studio-monitor",
+    name: "LM Studio Health Monitor",
+    schedule: "*/5 * * * *", // every 5 minutes — fast enough to catch load issues, slow enough not to spam
+    enabled: true,
+    handler: async () => {
+      const result = await runLmStudioAlertCheck();
+      if (result.alerts.inserted > 0) {
+        console.log(
+          `[lm-studio-monitor] ${result.status} — ${result.alerts.inserted} alert(s) fired: ${result.alerts.fired.join(", ")}`,
+        );
+      }
     },
   });
 
