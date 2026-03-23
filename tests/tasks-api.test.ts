@@ -403,6 +403,20 @@ describe("PATCH /api/tasks/:id — updates", () => {
     expect(updated["owner"]).toBe("rafe");
   });
 
+  it("updates shape (tier classification)", async () => {
+    const created = await createTask({ title: "Shape tier task" });
+    const id = created["id"] as string;
+    const updated = await patchTask(id, { shape: "tier-1" });
+    expect(updated["shape"]).toBe("tier-1");
+  });
+
+  it("updates priority", async () => {
+    const created = await createTask({ title: "Priority task" });
+    const id = created["id"] as string;
+    const updated = await patchTask(id, { priority: "high" });
+    expect(updated["priority"]).toBe("high");
+  });
+
   it("updatedAt timestamp advances on PATCH", async () => {
     const created = await createTask({ title: "Timestamp advance task" });
     const id = created["id"] as string;
