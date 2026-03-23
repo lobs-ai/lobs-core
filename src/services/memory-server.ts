@@ -22,7 +22,7 @@ const RESTART_DELAY_BASE_MS = 1000;   // 1s initial
 const RESTART_DELAY_MAX_MS = 60_000;  // 60s max
 const RESTART_BACKOFF_FACTOR = 2;
 const HEALTH_CHECK_INTERVAL_MS = 30_000; // check every 30s
-const STARTUP_GRACE_MS = 10_000; // wait before first health check
+const STARTUP_GRACE_MS = 30_000; // wait before first health check (embedder init can take 10-15s)
 const HEALTH_FAILURES_BEFORE_RESTART = 3; // require 3 consecutive failures before restarting
 const MIN_FREE_DISK_BYTES = 512 * 1024 * 1024; // 512MB
 
@@ -64,13 +64,6 @@ class MemoryServerSupervisor {
 
     // Start the process
     this.spawnChild(bunPath);
-
-    // Start health checks after grace period
-    setTimeout(() => {
-      if (this.running && !this.shutdownRequested) {
-        this.startHealthChecks();
-      }
-    }, STARTUP_GRACE_MS);
   }
 
   /** Stop the memory server and supervision */
@@ -170,7 +163,22 @@ class MemoryServerSupervisor {
       return;
     }
 
+    // Stop any existing health checks — they'll be restarted after the grace period
+    if (this.healthTimer) {
+      clearInterval(this.healthTimer);
+      this.healthTimer = null;
+    }
+    // Reset failure counter for the new process
+    this.consecutiveHealthFailures = 0;
+
     console.log(`[memory-supervisor] Spawning: ${bunPath} run server/index.ts (cwd: ${MEMORY_DIR})`);
+
+    // Schedule health checks after grace period so the server has time to start
+    setTimeout(() => {
+      if (this.running && !this.shutdownRequested) {
+        this.startHealthChecks();
+      }
+    }, STARTUP_GRACE_MS);
 
     this.child = spawn(bunPath, ["run", "server/index.ts"], {
       cwd: MEMORY_DIR,
