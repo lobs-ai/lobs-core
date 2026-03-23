@@ -46,16 +46,14 @@ Phases **must execute in order**. Each phase depends on the previous being ✅.
 
 ---
 
-### Phase 1 — Verify & Close Orphaned Preflight Task
+### ✅ Phase 1 — Closed & Verified
 **Task:** `d131a765` — Wire LM Studio health check into spawn_agent preflight  
-**Dependency:** None  
-**Effort:** XS (30 min)
+**Status:** ✅ Closed (commit 1c3a52f)
 
-**Acceptance criteria:**
-1. Read `control-loop.ts` lines ~1450–1470 and ~2215–2230 to confirm `checkModelsBeforeSpawn` is present in both spawn paths.
-2. Run `tests/spawn-lmstudio-preflight.test.ts` — all tests pass.
-3. Update task `d131a765` status → `completed` with a short note confirming both paths are wired.
-4. If any gap is found, patch it before closing.
+**Evidence:**
+- `checkModelsBeforeSpawn` wired in control-loop (2 call sites in both spawn paths)
+- 13/13 integration tests pass
+- Evidence commit: 1c3a52f
 
 **Why first:** All downstream phases assume the preflight is production-wired. Closing this
 resolves ambiguity and gives the cron/alert phases a clean foundation.
@@ -186,7 +184,7 @@ No phase may be started until the previous phase's acceptance criteria are all v
 | # | Task ID | Title | Status |
 |---|---------|-------|--------|
 | 0 | `e7f7d09a` | Consolidate LM Studio monitoring into coordinated epic (this doc) | active |
-| 1 | `d131a765` | Wire LM Studio health check into spawn_agent preflight | active → verify & close |
+| 1 | `d131a765` | Wire LM Studio health check into spawn_agent preflight | ✅ closed (1c3a52f) |
 | 2 | TBD | Make LM Studio alert thresholds tunable via env vars | to create |
 | 3 | TBD | Export LM Studio monitoring metrics to Prometheus | to create |
 | 4 | TBD | Add end-to-end integration test for full LM Studio monitoring flow | to create |
