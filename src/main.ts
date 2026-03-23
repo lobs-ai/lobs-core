@@ -454,9 +454,9 @@ async function main() {
   setMainAgentForCommands(mainAgent);
 
   // Wire cron events to main agent
-  cronService.setEventHandler(async (text: string) => {
-    console.log(`[cron] Firing event to main agent: ${text.slice(0, 80)}...`);
-    await mainAgent.handleSystemEvent(text);
+  cronService.setEventHandler(async (text: string, channelId?: string) => {
+    console.log(`[cron] Firing event to main agent (channel=${channelId ?? "system"}): ${text.slice(0, 80)}...`);
+    await mainAgent.handleSystemEvent(text, channelId);
   });
 
   // Connect Discord bot (optional)

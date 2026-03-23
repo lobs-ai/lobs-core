@@ -192,7 +192,7 @@ async function checkWorkerHealth(): Promise<WorkerHealthResult> {
 async function checkInboxHealth(): Promise<InboxHealthResult> {
   const db = getRawDb();
   
-  const result = db.prepare("SELECT COUNT(*) as count FROM inbox_items WHERE read = 0").get() as { count: number };
+  const result = db.prepare("SELECT COUNT(*) as count FROM inbox_items WHERE is_read = 0").get() as { count: number };
   const unreadItems = result.count;
   
   let status: "ok" | "warning" | "error" = "ok";

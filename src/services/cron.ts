@@ -170,7 +170,7 @@ export class CronService {
   private running = false;
 
   // Event handler for agent jobs
-  private onEvent: ((text: string) => Promise<void>) | null = null;
+  private onEvent: ((text: string, channelId?: string) => Promise<void>) | null = null;
 
   constructor(db: Database.Database) {
     this.db = db;
@@ -233,7 +233,7 @@ export class CronService {
   // ── Agent Job Management (DB-backed) ─────────────────────────
 
   /** Set the event handler for agent jobs */
-  setEventHandler(handler: (text: string) => Promise<void>) {
+  setEventHandler(handler: (text: string, channelId?: string) => Promise<void>) {
     this.onEvent = handler;
   }
 
@@ -570,7 +570,29 @@ export class CronService {
 
     if (this.onEvent) {
       try {
-        await this.onEvent(job.payload);
+        // Each agent job gets a fresh cron channel — clear old history so the
+        // LLM isn't confused by prior job context (e.g. morning brief seeing
+        // yesterday's heartbeat noise). Silently skip if the table doesn't
+        // exist yet (e.g. in tests or before MainAgent.init() runs).
+        try {
+          this.db
+            .prepare(
+              `DELETE FROM main_agent_messages
+               WHERE channel_id = 'cron'
+               AND id NOT IN (
+                 SELECT id FROM main_agent_messages
+                 WHERE channel_id = 'cron'
+                 ORDER BY created_at DESC LIMIT 2
+               )`,
+            )
+            .run();
+        } catch {
+          // table not present — no-op
+        }
+
+        // Use a dedicated "cron" channel so agent jobs get clean, focused
+        // context rather than drowning in the noisy system channel history.
+        await this.onEvent(job.payload, "cron");
       } catch (err) {
         log().warn(`[cron] Error firing agent job ${job.name}: ${err}`);
       }
