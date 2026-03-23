@@ -1661,8 +1661,50 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
     model: orchestratorModel,
   });
 
+  // ── Session resumption: check for prior transcript to continue from ──────
+  // If this task was previously worked on (e.g., orphaned by a restart), we can
+  // resume from the prior conversation instead of starting from scratch.
+  let resumeMessages: import("../runner/providers.js").LLMMessage[] | undefined;
+  let previousTurnCount = 0;
+  if (taskId) {
+    try {
+      const { SessionTranscript } = await import("../runner/session-transcript.js");
+      if (SessionTranscript.exists(req.agentType, taskId)) {
+        // Check if the last run succeeded — don't resume a completed session
+        const lastSummary = SessionTranscript.loadSummary(req.agentType, taskId);
+        if (lastSummary?.succeeded) {
+          log().info(
+            `[NATIVE_RUNNER] Prior session for task ${taskId.slice(0, 8)} completed successfully — starting fresh`
+          );
+        } else {
+          const msgs = SessionTranscript.loadResumableMessages(req.agentType, taskId);
+          if (msgs && msgs.length > 2) {
+            // Only resume if the previous session had meaningful progress (>1 actual turn)
+            previousTurnCount = Math.floor(msgs.length / 2);
+            // Don't resume if the prior session was already very long (agent may be stuck in a loop)
+            if (previousTurnCount <= 120) {
+              resumeMessages = msgs;
+              log().info(
+                `[NATIVE_RUNNER] Found prior session for task ${taskId.slice(0, 8)} — ` +
+                `resuming with ${msgs.length} messages (~${previousTurnCount} turns)`
+              );
+            } else {
+              log().info(
+                `[NATIVE_RUNNER] Prior session for task ${taskId.slice(0, 8)} has ` +
+                `~${previousTurnCount} turns — too long, starting fresh`
+              );
+            }
+          }
+        }
+      }
+    } catch (resumeErr) {
+      log().warn(`[NATIVE_RUNNER] Failed to load prior session for task ${taskId?.slice(0, 8)}: ${resumeErr}`);
+    }
+  }
+
   try {
-    // Run the agent
+    // Run the agent — resume from prior session if available
+    const remainingTurns = resumeMessages ? Math.max(200 - previousTurnCount, 50) : 200;
     const result: AgentResult = await runAgent({
       task: fullPrompt,
       agent: req.agentType,
@@ -1670,7 +1712,9 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
       cwd: repoPath,
       tools: ["exec", "read", "write", "edit", "memory_search", "memory_read", "memory_write", "spawn_agent", "run_pipeline"],
       timeout: 900, // 15 minutes
-      maxTurns: 200,
+      maxTurns: remainingTurns,
+      ...(taskId ? { runId: taskId, context: { taskId } } : {}),
+      ...(resumeMessages ? { resumeMessages } : {}),
     });
 
     // Extract artifacts (files modified/created)

@@ -219,7 +219,9 @@ export class SessionTranscript {
   }
 
   /**
-   * Load the summary from a JSONL transcript.
+   * Load the last summary from a JSONL transcript.
+   * When a session is resumed, the file may contain multiple summaries —
+   * we want the most recent one (last in file).
    */
   static loadSummary(agentType: string, runId: string): SessionSummary | null {
     const homeDir = process.env.HOME ?? "";
@@ -230,9 +232,10 @@ export class SessionTranscript {
     const content = readFileSync(sessionPath, "utf-8");
     const lines = content.trim().split("\n").filter((l) => l.length > 0);
 
-    for (const line of lines) {
+    // Read backwards to find the last summary
+    for (let i = lines.length - 1; i >= 0; i--) {
       try {
-        const record = JSON.parse(line);
+        const record = JSON.parse(lines[i]);
         if (record.type === "summary") return record as SessionSummary;
       } catch {
         // Skip
