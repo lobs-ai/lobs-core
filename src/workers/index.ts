@@ -10,9 +10,12 @@
  * - Provide status/health info for the Nexus dashboard
  */
 
+import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { log } from "../util/logger.js";
 import type { CronService } from "../services/cron.js";
+import { getDb } from "../db/connection.js";
+import { inboxItems } from "../db/schema.js";
 import type { BaseWorker, WorkerResult, WorkerEvent } from "./base-worker.js";
 
 // ── DB Table ─────────────────────────────────────────────────────────────
@@ -126,7 +129,7 @@ export class WorkerRegistry {
       for (const alert of result.alerts) {
         if (alert.severity === "critical") {
           log().error(`[worker:${id}] CRITICAL: ${alert.title} — ${alert.message}`);
-          // TODO: surface to main agent via escalation
+          this.createWorkerAlert(id, alert.title, alert.message, "critical");
         } else if (alert.severity === "warning") {
           log().warn(`[worker:${id}] ${alert.title} — ${alert.message}`);
         }
@@ -220,6 +223,30 @@ export class WorkerRegistry {
   }
 
   // ── Internal ────────────────────────────────────────────────────────
+
+  /**
+   * Create an inbox alert for critical worker events so the main agent sees them.
+   */
+  private createWorkerAlert(workerId: string, title: string, message: string, severity: string): void {
+    try {
+      const db = getDb();
+      const now = new Date().toISOString();
+      db.insert(inboxItems).values({
+        id: `worker_alert_${randomUUID().slice(0, 8)}`,
+        title: `🚨 Worker Alert: ${title}`,
+        content: `**Worker:** \`${workerId}\`\n**Severity:** ${severity}\n\n${message}`,
+        summary: `Worker ${workerId}: ${title}`,
+        type: "alert",
+        isRead: false,
+        requiresAction: severity === "critical",
+        actionStatus: "pending",
+        modifiedAt: now,
+      }).run();
+      log().info(`[worker-registry] Created inbox alert for "${workerId}" (${severity})`);
+    } catch (e) {
+      log().error(`[worker-registry] Failed to create inbox alert: ${String(e)}`);
+    }
+  }
 
   private logRun(
     worker: BaseWorker,
