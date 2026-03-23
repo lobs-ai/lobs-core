@@ -96,6 +96,7 @@ export interface AgentJob {
   enabled: boolean;
   lastFired?: string;    // ISO timestamp
   createdAt: string;
+  channelId?: string;    // Discord channel ID to post replies to (optional)
 }
 
 /** In-memory system job */
@@ -117,6 +118,7 @@ export interface CronJobView {
   enabled: boolean;
   lastRun: string | null;
   nextRun: string | null; // ISO timestamp of next scheduled run
+  channelId?: string;     // Discord channel ID for agent jobs
 }
 
 /**
@@ -191,7 +193,8 @@ export class CronService {
         payload TEXT NOT NULL,
         enabled INTEGER NOT NULL DEFAULT 1,
         last_fired TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        channel_id TEXT
       );
     `);
   }
@@ -200,6 +203,13 @@ export class CronService {
   private runMigrations() {
     // Remove the old seeded Heartbeat agent job (duplicated the system heartbeat job)
     this.db.prepare("DELETE FROM cron_jobs WHERE name = 'Heartbeat'").run();
+    // Add channel_id column if it doesn't exist yet
+    const cols = (
+      this.db.prepare("PRAGMA table_info(cron_jobs)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("channel_id")) {
+      this.db.exec("ALTER TABLE cron_jobs ADD COLUMN channel_id TEXT");
+    }
   }
 
   // ── System Job Registration ─────────────────────────────────
@@ -246,8 +256,8 @@ export class CronService {
       .prepare(
         `INSERT INTO cron_jobs
            (id, name, schedule_kind, schedule_expr, schedule_at, schedule_every_ms,
-            schedule_tz, payload, enabled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            schedule_tz, payload, enabled, channel_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -259,6 +269,7 @@ export class CronService {
         job.schedule.tz || "America/New_York",
         job.payload,
         job.enabled ? 1 : 0,
+        job.channelId ?? null,
       );
 
     const fullJob: AgentJob = { ...job, id, createdAt: now };
@@ -362,6 +373,7 @@ export class CronService {
         enabled: agentJob.enabled,
         lastRun: agentJob.lastFired ?? null,
         nextRun,
+        channelId: agentJob.channelId,
       });
     }
 
@@ -545,6 +557,7 @@ export class CronService {
         enabled: row.enabled === 1,
         lastFired: row.last_fired ?? undefined,
         createdAt: row.created_at,
+        channelId: row.channel_id ?? undefined,
       };
       this.agentJobs.set(row.id, job);
 
@@ -570,29 +583,31 @@ export class CronService {
 
     if (this.onEvent) {
       try {
-        // Each agent job gets a fresh cron channel — clear old history so the
-        // LLM isn't confused by prior job context (e.g. morning brief seeing
-        // yesterday's heartbeat noise). Silently skip if the table doesn't
-        // exist yet (e.g. in tests or before MainAgent.init() runs).
+        // Each agent job runs in a dedicated channel so the LLM gets clean
+        // context instead of leftover history from previous runs.  Clear all
+        // but the last 2 messages from that channel before firing.
+        // Silently skip if the table doesn't exist yet (e.g. in tests).
+        const jobChannel = job.channelId ?? "cron";
         try {
           this.db
             .prepare(
               `DELETE FROM main_agent_messages
-               WHERE channel_id = 'cron'
+               WHERE channel_id = ?
                AND id NOT IN (
                  SELECT id FROM main_agent_messages
-                 WHERE channel_id = 'cron'
+                 WHERE channel_id = ?
                  ORDER BY created_at DESC LIMIT 2
                )`,
             )
-            .run();
+            .run(jobChannel, jobChannel);
         } catch {
           // table not present — no-op
         }
 
-        // Use a dedicated "cron" channel so agent jobs get clean, focused
-        // context rather than drowning in the noisy system channel history.
-        await this.onEvent(job.payload, "cron");
+        // Pass the job's Discord channel ID (if set) so replies go to the
+        // right place.  Falls back to "cron" which main.ts resolves to the
+        // alerts channel via resolveDiscordChannel().
+        await this.onEvent(job.payload, jobChannel);
       } catch (err) {
         log().warn(`[cron] Error firing agent job ${job.name}: ${err}`);
       }

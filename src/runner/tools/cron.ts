@@ -49,6 +49,11 @@ export const cronToolDefinition: ToolDefinition = {
         type: "string",
         description: "Text to inject as a system event when the job fires",
       },
+      channel_id: {
+        type: "string",
+        description:
+          "Discord channel ID to post the job's replies to. If omitted, output goes to the default alerts channel.",
+      },
       job_id: {
         type: "string",
         description: "Job ID (for remove/toggle)",
@@ -97,6 +102,7 @@ export async function executeCronTool(
         },
         payload: (input.payload as string) || "",
         enabled: true,
+        channelId: (input.channel_id as string) || undefined,
       });
       return JSON.stringify({ ok: true, id: job.id, name: job.name });
     }

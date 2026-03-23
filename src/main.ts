@@ -150,6 +150,26 @@ const consoleLogger = {
   },
 };
 
+/**
+ * Resolve an internal channel ID (e.g. "cron", "system") to a real Discord
+ * channel snowflake. Real Discord snowflakes are all-numeric and >15 chars.
+ * Internal names are routed to the configured alerts channel, then to the
+ * first channel in channelPolicies. Returns null if no Discord channel can
+ * be determined.
+ */
+function resolveDiscordChannel(
+  channelId: string,
+  discordConfig: import("./services/discord.js").DiscordConfig | null,
+): string | null {
+  // Already a real Discord snowflake (all-numeric, 15+ chars)
+  if (/^\d{15,}$/.test(channelId)) return channelId;
+  // Internal/synthetic channels: route to alerts channel or first policy channel
+  if (!discordConfig) return null;
+  if (discordConfig.channels.alerts) return discordConfig.channels.alerts;
+  const firstChannel = Object.keys(discordConfig.channelPolicies ?? {})[0];
+  return firstChannel ?? null;
+}
+
 async function main() {
   // Rotate oversized log before any output
   rotateLogFile();
@@ -473,20 +493,27 @@ async function main() {
       mainAgent.setReplyHandler(async (channelId, content) => {
         // Nexus channels are handled via the API, not Discord
         if (channelId.startsWith("nexus:")) return;
-        await discordService.send(channelId, content);
+        // System/cron channels are internal — route their output to the alerts Discord channel
+        const resolvedChannelId = resolveDiscordChannel(channelId, discordConfig);
+        if (!resolvedChannelId) return; // No Discord configured, drop silently
+        await discordService.send(resolvedChannelId, content);
       });
 
       // Wire typing handler
       mainAgent.setTypingHandler((channelId) => {
         if (channelId.startsWith("nexus:")) return;
-        discordService.sendTyping(channelId).catch(() => {});
+        const resolved = resolveDiscordChannel(channelId, discordConfig);
+        if (!resolved) return;
+        discordService.sendTyping(resolved).catch(() => {});
       });
 
       // Wire progress handler — shows tool steps in DMs only
       mainAgent.setProgressHandler(async (channelId, content) => {
         // For Nexus channels, progress is delivered via the API (not Discord)
         if (channelId.startsWith("nexus:")) return;
-        await discordService.send(channelId, content);
+        const resolved = resolveDiscordChannel(channelId, discordConfig);
+        if (!resolved) return;
+        await discordService.send(resolved, content);
       });
 
       // Wire incoming messages — Discord messages go to agent
