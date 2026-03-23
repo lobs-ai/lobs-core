@@ -27,9 +27,9 @@ const MAX_LIVE_TOOL_RESULT_CHARS = 200_000; // Safety valve only — compaction 
 const DEFAULT_MODEL = "strong";  // Chat defaults to strong tier (opus)
 const DEFAULT_CWD = process.env.HOME ?? "/tmp";
 const MAX_CONCURRENT_CHANNELS = 10; // Max simultaneous channel conversations
-const LLM_TURN_TIMEOUT_MS = 600_000; // 10 minutes per LLM turn for long tool-heavy responses
+const LLM_TURN_TIMEOUT_MS = 180_000; // 3 minutes per LLM turn — stale recovery is the outer safety net
 const STALE_ON_NEW_MESSAGE_MS = 3 * 60_000; // Explicit user follow-up can break a run after 3 min of no progress
-const STALE_AUTO_RECOVERY_MS = 10 * 60_000; // Background recovery should be much more conservative
+const STALE_AUTO_RECOVERY_MS = 5 * 60_000; // 5 min — outer safety net if LLM turn timeout (180s) somehow fails
 const QUEUE_RECOVERY_INTERVAL_MS = 5_000;
 const CHANNEL_PROGRESS_HEARTBEAT_MS = 15_000;
 const REPLY_HANDLER_TIMEOUT_MS = 15_000;
@@ -129,6 +129,8 @@ export class MainAgent {
   private channelRunIds = new Map<string, number>();
   private channelLastProgressAt = new Map<string, number>();
   private channelLastSessionHeartbeatAt = new Map<string, number>();
+  /** AbortController per channel — allows stale recovery to cancel in-flight LLM requests */
+  private channelAbortControllers = new Map<string, AbortController>();
   
   /** EventEmitter for SSE streaming — Nexus subscribes to this */
   public readonly events = new EventEmitter();
@@ -980,6 +982,12 @@ export class MainAgent {
       this.processingChannels.delete(replyChannelId);
       this.channelLastProgressAt.delete(replyChannelId);
       this.channelLastSessionHeartbeatAt.delete(replyChannelId);
+      // Abort any in-flight LLM request
+      const ac = this.channelAbortControllers.get(replyChannelId);
+      if (ac) {
+        ac.abort(new Error("Conversation timeout"));
+        this.channelAbortControllers.delete(replyChannelId);
+      }
       this.updateChannelSession(replyChannelId, "idle");
     }, timeoutMinutes * 60 * 1000);
 
@@ -1827,6 +1835,12 @@ export class MainAgent {
 
   private recoverStaleChannel(channelId: string, reason: string): void {
     console.warn(`[main-agent] Recovering stale channel ${this.channelTag(channelId)}: ${reason}`);
+    // Abort any in-flight LLM request for this channel
+    const ac = this.channelAbortControllers.get(channelId);
+    if (ac) {
+      ac.abort(new Error(`Channel recovered: ${reason}`));
+      this.channelAbortControllers.delete(channelId);
+    }
     this.channelRunIds.set(channelId, (this.channelRunIds.get(channelId) ?? 0) + 1);
     this.processingChannels.delete(channelId);
     this.pendingRetryDelay.delete(channelId);
@@ -3010,18 +3024,41 @@ export class MainAgent {
     },
     channelId: string,
   ) {
+    // Create a per-channel AbortController so stale recovery can cancel this request.
+    // Also use a setInterval-based watchdog since Bun's setTimeout can silently fail
+    // to fire when the event loop is waiting on a single I/O source (known Bun issue).
+    const ac = new AbortController();
+    this.channelAbortControllers.set(channelId, ac);
+    const startedAt = Date.now();
+    let watchdog: NodeJS.Timeout | undefined;
     let timeout: NodeJS.Timeout | undefined;
+
     try {
       return await Promise.race([
         client.createMessage(params),
         new Promise<never>((_, reject) => {
+          // Primary: standard setTimeout
           timeout = setTimeout(() => {
             reject(new Error(`LLM turn timeout after ${Math.round(LLM_TURN_TIMEOUT_MS / 1000)}s for ${channelId}`));
           }, LLM_TURN_TIMEOUT_MS);
+
+          // Backup: setInterval-based watchdog (fires reliably in Bun unlike setTimeout)
+          watchdog = setInterval(() => {
+            if (Date.now() - startedAt >= LLM_TURN_TIMEOUT_MS) {
+              reject(new Error(`LLM turn timeout (watchdog) after ${Math.round((Date.now() - startedAt) / 1000)}s for ${channelId}`));
+            }
+          }, 15_000); // Check every 15s
+
+          // Listen for external abort (from stale recovery)
+          ac.signal.addEventListener("abort", () => {
+            reject(ac.signal.reason ?? new Error(`LLM request aborted for ${channelId}`));
+          }, { once: true });
         }),
       ]);
     } finally {
       if (timeout) clearTimeout(timeout);
+      if (watchdog) clearInterval(watchdog);
+      this.channelAbortControllers.delete(channelId);
     }
   }
 

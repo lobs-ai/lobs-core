@@ -474,9 +474,12 @@ class AnthropicClient implements LLMClient {
       // Use streaming — matches Claude Code's calling convention
       const stream = this.client.messages.stream(apiParams);
       let timeout: NodeJS.Timeout | undefined;
+      let watchdog: NodeJS.Timeout | undefined;
+      const streamStartedAt = Date.now();
       const response = await Promise.race([
         stream.finalMessage(),
         new Promise<never>((_, reject) => {
+          // Primary: standard setTimeout
           timeout = setTimeout(() => {
             stream.abort();
             reject(
@@ -486,9 +489,24 @@ class AnthropicClient implements LLMClient {
               ),
             );
           }, ANTHROPIC_STREAM_TIMEOUT_MS);
+
+          // Backup: setInterval watchdog (Bun's setTimeout can silently fail to fire
+          // when the event loop is waiting on a single I/O source)
+          watchdog = setInterval(() => {
+            if (Date.now() - streamStartedAt >= ANTHROPIC_STREAM_TIMEOUT_MS) {
+              stream.abort();
+              reject(
+                new Error(
+                  `anthropic_stream_timeout (watchdog) after ${Math.round((Date.now() - streamStartedAt) / 1000)}s ` +
+                  `session=${this.sessionId?.slice(0, 40) ?? "none"}`,
+                ),
+              );
+            }
+          }, 10_000); // Check every 10s
         }),
       ]).finally(() => {
         if (timeout) clearTimeout(timeout);
+        if (watchdog) clearInterval(watchdog);
       });
 
       const usage: TokenUsage = {
