@@ -390,6 +390,11 @@ export class CronService {
     // Load agent jobs from DB into memory
     this.loadAgentJobs();
 
+    // Check for missed agent jobs and catch up (async, non-blocking)
+    this.catchUpMissedJobs().catch((err) => {
+      log().warn(`[cron] Error during startup catch-up: ${err}`);
+    });
+
     // Start the 60-second tick for ALL jobs (system + agent)
     this.tickInterval = setInterval(() => this.tick(), 60_000);
 
@@ -398,6 +403,77 @@ export class CronService {
     console.log(
       `[cron] Started — ${systemCount} system job(s), ${agentCount} agent job(s)`,
     );
+  }
+
+  /**
+   * Catch-up: on startup, check if any enabled cron-type agent jobs missed
+   * their scheduled fire time while lobs was down. If a job should have fired
+   * within the last CATCH_UP_WINDOW_MS but didn't, fire it now.
+   * Only catches up the most recent missed occurrence (not all of them).
+   */
+  private async catchUpMissedJobs(): Promise<void> {
+    const CATCH_UP_WINDOW_MS = 4 * 60 * 60 * 1000; // 4 hours
+    const now = new Date();
+
+    for (const [id, job] of this.agentJobs.entries()) {
+      if (!job.enabled || job.schedule.kind !== "cron") continue;
+
+      const schedule = this.agentSchedules.get(id);
+      if (!schedule) continue;
+
+      // Find the most recent time this cron should have fired
+      const lastExpectedFire = this.findLastCronMatch(schedule, now, CATCH_UP_WINDOW_MS);
+      if (!lastExpectedFire) continue; // No expected fire within the window
+
+      // Check if it actually fired at or after that time
+      let lastFiredTime: Date | null = null;
+      if (job.lastFired) {
+        const normalised = job.lastFired.includes("T") || job.lastFired.endsWith("Z")
+          ? job.lastFired
+          : job.lastFired.replace(" ", "T") + "Z";
+        lastFiredTime = new Date(normalised);
+      }
+
+      // If never fired, or last fire was before the expected fire time, catch up
+      if (!lastFiredTime || lastFiredTime.getTime() < lastExpectedFire.getTime()) {
+        log().info(
+          `[cron] Catch-up: firing missed agent job "${job.name}" ` +
+          `(should have fired at ${lastExpectedFire.toISOString()}, ` +
+          `last fired: ${lastFiredTime?.toISOString() ?? "never"})`,
+        );
+        await this.fireAgentJob(job);
+      }
+    }
+  }
+
+  /**
+   * Scan backwards from `now` to find the most recent time a cron schedule
+   * would have matched, within `windowMs` milliseconds.
+   * Returns the matching Date or null if none found within the window.
+   */
+  private findLastCronMatch(
+    schedule: ParsedSchedule,
+    now: Date,
+    windowMs: number,
+  ): Date | null {
+    // Start from the current minute, go backwards
+    const candidate = new Date(now);
+    candidate.setSeconds(0, 0);
+
+    const cutoff = now.getTime() - windowMs;
+
+    // Scan backwards minute-by-minute (up to windowMs / 60000 minutes)
+    const maxMinutes = Math.ceil(windowMs / 60_000);
+    for (let i = 0; i < maxMinutes; i++) {
+      if (candidate.getTime() < cutoff) break;
+
+      if (matchesCronSchedule(schedule, candidate)) {
+        return new Date(candidate);
+      }
+      candidate.setMinutes(candidate.getMinutes() - 1);
+    }
+
+    return null;
   }
 
   /** Stop everything */
