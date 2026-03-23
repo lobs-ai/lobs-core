@@ -27,7 +27,7 @@ const MAX_LIVE_TOOL_RESULT_CHARS = 200_000; // Safety valve only — compaction 
 const DEFAULT_MODEL = "strong";  // Chat defaults to strong tier (opus)
 const DEFAULT_CWD = process.env.HOME ?? "/tmp";
 const MAX_CONCURRENT_CHANNELS = 10; // Max simultaneous channel conversations
-const LLM_TURN_TIMEOUT_MS = 180_000; // 3 minutes per LLM turn — stale recovery is the outer safety net
+const LLM_TURN_TIMEOUT_MS = 480_000; // 8 minutes per LLM turn — stale recovery remains the outer safety net
 const STALE_ON_NEW_MESSAGE_MS = 3 * 60_000; // Explicit user follow-up can break a run after 3 min of no progress
 const STALE_AUTO_RECOVERY_MS = 5 * 60_000; // 5 min — outer safety net if LLM turn timeout (180s) somehow fails
 const QUEUE_RECOVERY_INTERVAL_MS = 5_000;
@@ -1618,11 +1618,8 @@ export class MainAgent {
       await this.flushDiscordToolBatch(replyChannelId).catch(() => {});
 
       const errStr = String(err);
-      const isTransient = errStr.includes("500") || errStr.includes("api_error") ||
-        errStr.includes("overloaded") || errStr.includes("rate_limit") || errStr.includes("429") ||
-        errStr.includes("529");
+      const { isTransient, isRateLimit, isOverloaded, isTimeout } = this.classifyConversationError(errStr);
       const retryAfterMs = this.extractRetryAfterMs(errStr);
-      const isRateLimit = errStr.includes("rate_limit") || errStr.includes("429");
 
       const currentRetries = this.conversationRetryCount.get(replyChannelId) ?? 0;
 
@@ -1636,7 +1633,6 @@ export class MainAgent {
         console.log(`[main-agent] Transient error, scheduling retry in ${(retryDelay / 1000).toFixed(0)}s (retry ${retryNum}/2) for channel ${replyChannelId.slice(0, 12)}`);
 
         // Emit a temporary status so frontend knows we're retrying, not dead
-        const isOverloaded = errStr.includes("overloaded");
         this.events.emit("stream", {
           type: "error",
           channelId: replyChannelId,
@@ -1644,6 +1640,8 @@ export class MainAgent {
             ? `⏳ Rate limited — retrying in ${Math.round(retryDelay / 1000)}s...`
             : isOverloaded
             ? `⏳ API overloaded — retrying in ${Math.round(retryDelay / 1000)}s...`
+            : isTimeout
+            ? `⏳ Request timed out — retrying in ${Math.round(retryDelay / 1000)}s...`
             : `⏳ API error — retrying in ${Math.round(retryDelay / 1000)}s...`,
           timestamp: Date.now(),
         } satisfies AgentStreamEvent);
@@ -1676,6 +1674,8 @@ export class MainAgent {
               friendlyMsg = "⚠️ The AI provider is overloaded — try again in a minute.";
             } else if (errStr.includes("rate_limit") || errStr.includes("429")) {
               friendlyMsg = "⚠️ Rate limited — try again shortly.";
+            } else if (isTimeout) {
+              friendlyMsg = "⚠️ The AI request timed out before completing.";
             } else {
               friendlyMsg = `❌ Error: ${errStr.substring(0, 200)}`;
             }
@@ -3011,6 +3011,29 @@ export class MainAgent {
     
     // Anything else (problems found, actions taken, longer explanations) - send to Discord
     return false;
+  }
+
+  private classifyConversationError(errStr: string): {
+    isTransient: boolean;
+    isRateLimit: boolean;
+    isOverloaded: boolean;
+    isTimeout: boolean;
+  } {
+    const isTimeout =
+      errStr.includes("LLM turn timeout") ||
+      errStr.includes("anthropic_stream_timeout") ||
+      errStr.includes("Provider timeout");
+    const isOverloaded = errStr.includes("overloaded");
+    const isRateLimit = errStr.includes("rate_limit") || errStr.includes("429");
+    const isTransient =
+      isTimeout ||
+      isOverloaded ||
+      isRateLimit ||
+      errStr.includes("500") ||
+      errStr.includes("api_error") ||
+      errStr.includes("529");
+
+    return { isTransient, isRateLimit, isOverloaded, isTimeout };
   }
 
   private async createMessageWithTimeout(

@@ -3,6 +3,7 @@
  * Port of lobs-server/app/orchestrator/worker_manager.py
  */
 
+import { emitQueueEvent } from "../util/queue-logger.js";
 import { eq, and, isNull, isNotNull, inArray } from "drizzle-orm";
 import { getDb, getRawDb } from "../db/connection.js";
 import { workerRuns, workflowRuns, agentStatus as agentStatusTable } from "../db/schema.js";
@@ -138,6 +139,7 @@ export function recordWorkerStart(opts: {
   const now = new Date().toISOString();
   try {
     log().info(`[WORKER_MANAGER] recordWorkerStart: workerId=${opts.workerId} agent=${opts.agentType} task=${opts.taskId ?? "none"}`);
+    emitQueueEvent({ ts: new Date().toISOString(), type: "agent.busy", agentType: opts.agentType, taskId: opts.taskId, projectId: opts.projectId, meta: { workerId: opts.workerId.slice(0, 16) } });
     db.insert(workerRuns).values({
       workerId: opts.workerId,
       agentType: opts.agentType,
@@ -219,6 +221,27 @@ export function recordWorkerEnd(opts: {
       updatePayload.model = opts.model;
     }
     db.update(workerRuns).set(updatePayload).where(eq(workerRuns.workerId, opts.workerId)).run();
+
+    // Emit structured queue events for task outcome + agent state change
+    emitQueueEvent({
+      ts: now,
+      type: opts.succeeded ? "task.completed" : "task.failed",
+      taskId: opts.taskId,
+      agentType: opts.agentType,
+      reason: opts.succeeded ? undefined : (derivedFailureType ?? "unknown"),
+      meta: {
+        durationSeconds: opts.durationSeconds ?? null,
+        totalCostUsd: opts.totalCostUsd ?? null,
+        model: opts.model ?? null,
+      },
+    });
+    emitQueueEvent({
+      ts: now,
+      type: "agent.idle",
+      agentType: opts.agentType,
+      taskId: opts.taskId,
+      meta: { workerId: opts.workerId.slice(0, 16) },
+    });
 
     // Update agent status
     db.insert(agentStatusTable)

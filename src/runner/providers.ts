@@ -169,7 +169,7 @@ interface AnthropicAuth {
 const ANTHROPIC_5XX_FAILOVER_THRESHOLD = 2;
 const ANTHROPIC_GLOBAL_5XX_QUARANTINE_THRESHOLD = 3;
 const ANTHROPIC_GLOBAL_5XX_QUARANTINE_MS = 10 * 60 * 1000;
-const ANTHROPIC_STREAM_TIMEOUT_MS = 60 * 1000; // 60s — if no SSE events in 60s, key is dead
+const ANTHROPIC_STREAM_INACTIVITY_TIMEOUT_MS = 4 * 60 * 1000; // 4m with no stream events before treating the stream as dead
 const ANTHROPIC_TIMEOUT_COOLDOWN_MS = 2 * 60 * 1000;
 const anthropicServerErrorsBySession = new Map<string, { keyIndex: number; count: number }>();
 const anthropicServerErrorsByKey = new Map<number, number>();
@@ -181,6 +181,66 @@ const DEFAULT_KEYPOOL_SESSION_ID = "__default__";
 
 function isOAuthToken(key: string): boolean {
   return key.includes("sk-ant-oat");
+}
+
+type AnthropicMessageStream = {
+  finalMessage(): Promise<any>;
+  abort(): void;
+  on(event: "connect" | "streamEvent", listener: (...args: any[]) => void): unknown;
+};
+
+export async function awaitAnthropicFinalMessageWithInactivityTimeout(
+  stream: AnthropicMessageStream,
+  sessionId?: string,
+  inactivityTimeoutMs = ANTHROPIC_STREAM_INACTIVITY_TIMEOUT_MS,
+): Promise<any> {
+  let timeout: NodeJS.Timeout | undefined;
+  let watchdog: NodeJS.Timeout | undefined;
+  let lastActivityAt = Date.now();
+
+  const touch = () => {
+    lastActivityAt = Date.now();
+  };
+
+  stream.on("connect", touch);
+  stream.on("streamEvent", touch);
+
+  const timeoutError = (elapsedMs: number, source: "timeout" | "watchdog") =>
+    new Error(
+      `anthropic_stream_timeout${source === "watchdog" ? " (watchdog)" : ""} after ${Math.round(elapsedMs / 1000)}s ` +
+      `session=${sessionId?.slice(0, 40) ?? "none"}`,
+    );
+
+  return await Promise.race([
+    stream.finalMessage(),
+    new Promise<never>((_, reject) => {
+      const checkForInactivity = (source: "timeout" | "watchdog") => {
+        const idleMs = Date.now() - lastActivityAt;
+        if (idleMs < inactivityTimeoutMs) return;
+        stream.abort();
+        reject(timeoutError(idleMs, source));
+      };
+
+      // Primary: standard setTimeout that is re-armed by stream activity.
+      const armTimeout = () => {
+        if (timeout) clearTimeout(timeout);
+        timeout = setTimeout(() => {
+          checkForInactivity("timeout");
+          armTimeout();
+        }, inactivityTimeoutMs);
+      };
+
+      armTimeout();
+
+      // Backup: setInterval watchdog in case timers drift while the stream is stalled.
+      watchdog = setInterval(() => {
+        checkForInactivity("watchdog");
+      }, 10_000);
+    }),
+  ]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+    if (watchdog) clearInterval(watchdog);
+  });
 }
 
 function getHttpStatus(error: unknown): number | undefined {
@@ -473,41 +533,7 @@ class AnthropicClient implements LLMClient {
     try {
       // Use streaming — matches Claude Code's calling convention
       const stream = this.client.messages.stream(apiParams);
-      let timeout: NodeJS.Timeout | undefined;
-      let watchdog: NodeJS.Timeout | undefined;
-      const streamStartedAt = Date.now();
-      const response = await Promise.race([
-        stream.finalMessage(),
-        new Promise<never>((_, reject) => {
-          // Primary: standard setTimeout
-          timeout = setTimeout(() => {
-            stream.abort();
-            reject(
-              new Error(
-                `anthropic_stream_timeout after ${Math.round(ANTHROPIC_STREAM_TIMEOUT_MS / 1000)}s ` +
-                `session=${this.sessionId?.slice(0, 40) ?? "none"}`,
-              ),
-            );
-          }, ANTHROPIC_STREAM_TIMEOUT_MS);
-
-          // Backup: setInterval watchdog (Bun's setTimeout can silently fail to fire
-          // when the event loop is waiting on a single I/O source)
-          watchdog = setInterval(() => {
-            if (Date.now() - streamStartedAt >= ANTHROPIC_STREAM_TIMEOUT_MS) {
-              stream.abort();
-              reject(
-                new Error(
-                  `anthropic_stream_timeout (watchdog) after ${Math.round((Date.now() - streamStartedAt) / 1000)}s ` +
-                  `session=${this.sessionId?.slice(0, 40) ?? "none"}`,
-                ),
-              );
-            }
-          }, 10_000); // Check every 10s
-        }),
-      ]).finally(() => {
-        if (timeout) clearTimeout(timeout);
-        if (watchdog) clearInterval(watchdog);
-      });
+      const response = await awaitAnthropicFinalMessageWithInactivityTimeout(stream, this.sessionId);
 
       const usage: TokenUsage = {
         inputTokens: response.usage.input_tokens,

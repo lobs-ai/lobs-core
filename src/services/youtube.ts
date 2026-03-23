@@ -26,12 +26,8 @@ function resultPath(id: string) { return `/tmp/yt-ingest-${id}.json`; }
 function resultTmpPath(id: string) { return `/tmp/yt-ingest-${id}.json.tmp`; }
 function errPath(id: string) { return `/tmp/yt-ingest-${id}.err`; }
 
-function gatewayCfg(): { port: number; token: string } {
-  return getGatewayConfig();
-}
-
 async function gatewayInvoke(tool: string, args: Record<string, unknown>, timeoutMs = 900000): Promise<any> {
-  const { port, token } = gatewayCfg();
+  const { port, token } = getGatewayConfig();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let r: Response;

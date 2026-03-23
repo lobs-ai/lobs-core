@@ -14,12 +14,8 @@ import { classifyApprovalTier } from "../util/approval-tier.js";
 import { getModelForTier } from "../config/models.js";
 import { getGatewayConfig } from "../config/lobs.js";
 
-function gatewayCfg(): { port: number; token: string } {
-  return getGatewayConfig();
-}
-
 async function gatewayInvoke(tool: string, args: Record<string, unknown>): Promise<any> {
-  const { port, token } = gatewayCfg();
+  const { port, token } = getGatewayConfig();
   const r = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },

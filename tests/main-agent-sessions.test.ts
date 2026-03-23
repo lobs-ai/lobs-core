@@ -439,6 +439,19 @@ describe("MainAgent Session Management", () => {
     expect(resumedSession.status).toBe("processing");
   });
 
+  it("should classify outer LLM turn timeouts as transient conversation errors", () => {
+    const classified = (agent as any).classifyConversationError(
+      "Error: LLM turn timeout after 180s for nexus:chat-timeout",
+    );
+
+    expect(classified).toMatchObject({
+      isTransient: true,
+      isTimeout: true,
+      isRateLimit: false,
+      isOverloaded: false,
+    });
+  });
+
   it("should recover a queued channel when nothing is actively processing it", async () => {
     const processSpy = vi
       .spyOn(agent as any, "processConversation")

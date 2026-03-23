@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { shouldRetryProviderError } from "../src/runner/providers.js";
+import { EventEmitter } from "node:events";
+import { awaitAnthropicFinalMessageWithInactivityTimeout, shouldRetryProviderError } from "../src/runner/providers.js";
 
 function writeKeysConfig(homeDir: string, data: unknown): void {
   const secretsDir = join(homeDir, ".lobs", "config", "secrets");
@@ -81,6 +82,71 @@ describe("shouldRetryProviderError", () => {
     } finally {
       shutdownKeyPool();
     }
+  });
+});
+
+describe("awaitAnthropicFinalMessageWithInactivityTimeout", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test("does not time out while stream events keep arriving", async () => {
+    vi.useFakeTimers();
+
+    class FakeStream extends EventEmitter {
+      aborted = false;
+
+      abort(): void {
+        this.aborted = true;
+      }
+
+      async finalMessage(): Promise<{ ok: boolean }> {
+        this.emit("connect");
+        await new Promise((resolve) => setTimeout(resolve, 110_000));
+        return { ok: true };
+      }
+    }
+
+    const stream = new FakeStream();
+    const promise = awaitAnthropicFinalMessageWithInactivityTimeout(stream as any, "session-keepalive", 60_000);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    stream.emit("streamEvent", { type: "content_block_delta" }, {});
+    await vi.advanceTimersByTimeAsync(30_000);
+    stream.emit("streamEvent", { type: "content_block_delta" }, {});
+    await vi.advanceTimersByTimeAsync(50_000);
+
+    await expect(promise).resolves.toEqual({ ok: true });
+    expect(stream.aborted).toBe(false);
+  });
+
+  test("times out after inactivity, not total request duration", async () => {
+    vi.useFakeTimers();
+
+    class FakeStream extends EventEmitter {
+      aborted = false;
+
+      abort(): void {
+        this.aborted = true;
+      }
+
+      async finalMessage(): Promise<{ ok: boolean }> {
+        this.emit("connect");
+        await new Promise((resolve) => setTimeout(resolve, 120_000));
+        return { ok: true };
+      }
+    }
+
+    const stream = new FakeStream();
+    const promise = awaitAnthropicFinalMessageWithInactivityTimeout(stream as any, "session-stalled", 60_000);
+    const rejection = expect(promise).rejects.toThrow(/anthropic_stream_timeout/);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    stream.emit("streamEvent", { type: "content_block_delta" }, {});
+    await vi.advanceTimersByTimeAsync(61_000);
+
+    await rejection;
+    expect(stream.aborted).toBe(true);
   });
 });
 

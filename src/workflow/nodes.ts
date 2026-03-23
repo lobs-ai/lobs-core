@@ -13,6 +13,7 @@ import { getDb } from "../db/connection.js";
 import { tasks, projects, inboxItems, workflowEvents, workflowRuns, workerRuns } from "../db/schema.js";
 import { evaluateCondition, evaluateExpression, interpolate } from "./functions.js";
 import { log } from "../util/logger.js";
+import { emitQueueEvent } from "../util/queue-logger.js";
 import { executeCallable } from "./callables.js";
 import { shouldTriggerReview } from "../orchestrator/review-triggers.js";
 
@@ -147,7 +148,7 @@ export class NodeHandlers {
       ? interpolate(config.prompt_template, run.context)
       : undefined;
 
-    _pendingSpawns.push({
+    const spawnReq: SpawnRequest = {
       runId: run.id,
       nodeId: nodeDef.id,
       agentType,
@@ -156,6 +157,15 @@ export class NodeHandlers {
       taskId: run.taskId ?? undefined,
       context: run.context,
       requestedAt: new Date().toISOString(),
+    };
+    _pendingSpawns.push(spawnReq);
+    emitQueueEvent({
+      ts: spawnReq.requestedAt,
+      type: "spawn.queued",
+      agentType,
+      taskId: run.taskId ?? undefined,
+      modelTier: spawnReq.modelTier ?? undefined,
+      meta: { runId: run.id.slice(0, 8), nodeId: nodeDef.id },
     });
 
     log().info(`[WORKFLOW] Queued spawn request: ${agentType} for run ${run.id.slice(0, 8)}`);

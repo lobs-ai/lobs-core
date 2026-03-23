@@ -46,6 +46,7 @@ import { chooseHealthyModel, seedModelHealthFromHistory } from "./model-health.j
 import { checkArtifacts } from "./artifact-check.js";
 import { validatePostSuccessArtifacts } from "./post-success-validator.js";
 import { LearningService, inferTaskCategory } from "../services/learning.js";
+import { emitQueueEvent } from "../util/queue-logger.js";
 import { runAgent, assembleContext } from "../runner/index.js";
 import type { AgentResult } from "../runner/index.js";
 import { getAgentSessionsDir } from "../config/lobs.js";
@@ -347,6 +348,7 @@ async function runTick(): Promise<void> {
       // Capacity gate: re-queue if at max workers
       if (!hasCapacity()) {
         log().info(`orchestrator: at capacity — re-queuing spawn for run ${req.runId.slice(0, 8)}`);
+        emitQueueEvent({ ts: new Date().toISOString(), type: "spawn.requeued", agentType: req.agentType, projectId: spawnProjectId, reason: "at_capacity", meta: { runId: req.runId.slice(0, 8) } });
         requeueSpawn(req);
         continue;
       }
@@ -354,17 +356,20 @@ async function runTick(): Promise<void> {
       // Project lock: one worker per project per agent type
       if (spawnProjectId && (projectHasActiveWorker(spawnProjectId, req.agentType) || projectHasPendingSpawn(spawnProjectId, req.agentType))) {
         log().debug?.(`orchestrator: project ${spawnProjectId.slice(0, 8)}:${req.agentType} locked — re-queuing spawn for run ${req.runId.slice(0, 8)}`);
+        emitQueueEvent({ ts: new Date().toISOString(), type: "spawn.requeued", agentType: req.agentType, projectId: spawnProjectId, reason: "project_locked", meta: { runId: req.runId.slice(0, 8) } });
         requeueSpawn(req);
         continue;
       }
 
       incrementPendingSpawns(spawnProjectId, req.agentType);
+      emitQueueEvent({ ts: new Date().toISOString(), type: "spawn.started", agentType: req.agentType, projectId: spawnProjectId, meta: { runId: req.runId.slice(0, 8), nodeId: req.nodeId } });
       
       // Route through native runner or the legacy host session API
       const spawnHandler = USE_NATIVE_RUNNER ? processSpawnWithRunner : processSpawnRequest;
       
       spawnHandler(req).catch((err) => {
         log().error(`orchestrator: spawn failed for run ${req.runId.slice(0, 8)}: ${err}`);
+        emitQueueEvent({ ts: new Date().toISOString(), type: "spawn.failed", agentType: req.agentType, projectId: spawnProjectId, reason: String(err).slice(0, 120), meta: { runId: req.runId.slice(0, 8) } });
         decrementPendingSpawns(spawnProjectId, req.agentType);
         writeSpawnResult(req.runId, req.nodeId, {
           status: "failed",
@@ -400,6 +405,9 @@ async function runTick(): Promise<void> {
   try {
     if (hasCapacity()) {
       const readyTasks = findReadyTasks(5);
+      if (readyTasks.length > 0) {
+        emitQueueEvent({ ts: new Date().toISOString(), type: "scanner.cycle", meta: { ready_count: readyTasks.length } });
+      }
       for (let task of readyTasks) {
         if (!hasCapacity()) break;
 
@@ -416,6 +424,7 @@ async function runTick(): Promise<void> {
 
         if (task.projectId && task.agent && (projectHasActiveWorker(task.projectId, task.agent) || projectHasPendingSpawn(task.projectId, task.agent))) {
           log().debug?.(`orchestrator: project ${task.projectId.slice(0, 8)}:${task.agent} locked — skipping task ${task.id.slice(0, 8)}`);
+          emitQueueEvent({ ts: new Date().toISOString(), type: "task.blocked", taskId: task.id, taskTitle: task.title, agentType: task.agent ?? undefined, projectId: task.projectId ?? undefined, modelTier: task.modelTier ?? undefined, reason: "project_locked" });
           continue;
         }
 
@@ -427,8 +436,10 @@ async function runTick(): Promise<void> {
             triggerType: "task_match",
           });
           log().info(`orchestrator: started workflow '${workflow.name}' for task ${task.id.slice(0, 8)} (${task.title.slice(0, 40)})`);
+          emitQueueEvent({ ts: new Date().toISOString(), type: "task.dispatched", taskId: task.id, taskTitle: task.title, agentType: task.agent ?? undefined, projectId: task.projectId ?? undefined, modelTier: task.modelTier ?? undefined, meta: { workflow: workflow.name } });
         } else {
           log().debug?.(`orchestrator: no workflow matched for task ${task.id.slice(0, 8)} (agent=${task.agent})`);
+          emitQueueEvent({ ts: new Date().toISOString(), type: "task.blocked", taskId: task.id, taskTitle: task.title, agentType: task.agent ?? undefined, projectId: task.projectId ?? undefined, modelTier: task.modelTier ?? undefined, reason: "no_workflow_match" });
         }
       }
     }
@@ -567,6 +578,7 @@ async function runTick(): Promise<void> {
     const staleWorkers = detectStaleWorkers(120);
     for (const workerId of staleWorkers) {
       log().warn(`orchestrator: force-terminating stale worker ${workerId}`);
+      emitQueueEvent({ ts: new Date().toISOString(), type: "agent.stale_killed", reason: "orchestrator_timeout", meta: { workerId: workerId.slice(0, 30) } });
       forceTerminateWorker(workerId, "orchestrator_timeout");
     }
   } catch (e) {

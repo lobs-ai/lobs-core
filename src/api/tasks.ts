@@ -91,12 +91,8 @@ function normalizeTaskBatch(rows: Record<string, unknown>[]): Record<string, unk
 
 // ── Brain Dump Gateway helpers ──────────────────────────────────────────
 
-function _brainDumpGatewayCfg(): { port: number; token: string } {
-  return getGatewayConfig();
-}
-
 async function _brainDumpInvoke(tool: string, args: Record<string, unknown>): Promise<any> {
-  const { port, token } = _brainDumpGatewayCfg();
+  const { port, token } = getGatewayConfig();
   if (!token) throw new Error("No gateway auth token configured");
   const r = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {
     method: "POST",

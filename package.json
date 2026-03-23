@@ -44,6 +44,9 @@
     "typescript-eslint": "^8.57.1",
     "vitest": "^3.2.4"
   },
+  "overrides": {
+    "undici": ">=6.24.1"
+  },
   "bin": {
     "lobs": "./dist/cli/lobs.js",
     "paw-task": "./src/cli/paw-task.ts",
