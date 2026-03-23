@@ -455,8 +455,15 @@ export class KeyPoolService {
       keyIndex = keys.findIndex((entry) => this.getKeyIdentity(provider, entry.key) === assignedIdentity);
     }
     if (keyIndex < 0) {
-      keyIndex = keys.length === 1 ? 0 : this.hashSessionToKey(sessionId, keys.length);
-      this.assignments.set(assignmentKey, this.getKeyIdentity(provider, keys[keyIndex].key));
+      if (keys.length === 1) {
+        keyIndex = 0;
+      } else {
+        console.warn(
+          `[KeyPool] Ignored markSessionFailed for ${provider} session=${sessionId.slice(0, 24)} ` +
+          `because no key assignment was recorded`,
+        );
+        return false;
+      }
     }
 
     this.markFailed(provider, keyIndex, error, errorType, cooldownMs);
@@ -683,29 +690,12 @@ export class KeyPoolService {
   }
 
   private getPreferredHealthyKeyIndex(provider: Provider, keys: KeyEntry[]): number | undefined {
-    const preferredIdentity = this.preferredHealthyKey.get(provider);
-    if (!preferredIdentity) {
-      // Bootstrap preference: prefer the last configured healthy key.
-      // This lets operators put their best/most-reliable key last in config
-      // and avoids spraying fresh sessions across unproven keys after restart.
-      for (let i = keys.length - 1; i >= 0; i--) {
-        if (this.isHealthy(provider, i) && !this.isKeySuspect(provider, i)) return i;
-      }
-      return undefined;
-    }
-
-    const keyIndex = keys.findIndex((entry) => this.getKeyIdentity(provider, entry.key) === preferredIdentity);
-    if (keyIndex < 0) {
-      this.preferredHealthyKey.delete(provider);
-      return undefined;
-    }
-
-    if (!this.isHealthy(provider, keyIndex) || this.isKeySuspect(provider, keyIndex)) {
-      this.preferredHealthyKey.delete(provider);
-      return undefined;
-    }
-
-    return keyIndex;
+    // NOTE: We no longer blindly funnel all new sessions to a single "preferred" key.
+    // That caused thundering-herd effects where one key took all load, got rate-limited,
+    // then the next key took all load, etc. Instead, preferred key is only used as a
+    // tiebreaker in selectHealthyKeyForNewSession (via load-balancing).
+    // Return undefined here so new sessions go through proper load-balanced selection.
+    return undefined;
   }
 
   private selectHealthyKeyForNewSession(

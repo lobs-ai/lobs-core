@@ -55,6 +55,29 @@ import { checkBlockerPhaseGates, emitPhaseGateInboxAlert } from "./phase-gate.js
 
 const learningSvc = new LearningService();
 
+// ─── Repo docs auto-injection ─────────────────────────────────────────────────
+// Load README.md and AGENTS.md from the repo root (if they exist) for task context.
+// Gives agents immediate orientation on the project without needing to read files.
+const REPO_DOC_FILES = ["README.md", "AGENTS.md"];
+const REPO_DOC_MAX_SIZE = 30_000; // chars per file
+
+function loadRepoDocs(repoPath: string | undefined): string {
+  if (!repoPath) return "";
+  const sections: string[] = [];
+  for (const filename of REPO_DOC_FILES) {
+    const filePath = `${repoPath}/${filename}`;
+    if (!existsSync(filePath)) continue;
+    try {
+      const content = readFileSync(filePath, "utf-8").trim();
+      if (content.length > 0) {
+        sections.push(`## ${filename}\n${content.slice(0, REPO_DOC_MAX_SIZE)}`);
+      }
+    } catch { /* skip unreadable files */ }
+  }
+  if (sections.length === 0) return "";
+  return `\n\n---\n# Project Documentation\n${sections.join("\n\n")}\n---\n`;
+}
+
 let timer: ReturnType<typeof setInterval> | null = null;
 let executor: WorkflowExecutor | null = null;
 let gatewayPort: number = 18789;
@@ -1625,7 +1648,8 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
 
   // Build task prompt with context
   const taskPrompt = `${taskTitle}\n\n${taskNotes}`.trim();
-  const fullPrompt = `${taskPrompt}\n\n${assembledContext.contextBlock}`;
+  const repoDocs = loadRepoDocs(repoPath);
+  const fullPrompt = `${taskPrompt}${repoDocs}\n\n${assembledContext.contextBlock}`;
 
   // Record worker start
   const workerId = `native:${req.agentType}:${Date.now()}`;
@@ -1977,7 +2001,8 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
     log().warn(`[LEARNING] Prompt injection failed: ${e}`);
   }
 
-  const finalPrompt = taskPrompt + contextBlock + reviewerPhasedInjection + learningInjection + architectReminder + gitReminder + taskContext;
+  const repoDocs = loadRepoDocs(repoPath);
+  const finalPrompt = taskPrompt + repoDocs + contextBlock + reviewerPhasedInjection + learningInjection + architectReminder + gitReminder + taskContext;
 
   // ── Artifact pre-flight check ──────────────────────────────────────────────
   // If the task declares expected_artifacts, check whether output files already

@@ -611,8 +611,20 @@ class AnthropicClient implements LLMClient {
             `cooldown_ms=${ANTHROPIC_TIMEOUT_COOLDOWN_MS}`,
           );
         } else if (status === 401 || status === 403) {
-          keyPool.markSessionFailed("anthropic", this.sessionId, message, "auth");
-          console.warn("[AnthropicClient] Auth failure detected, rotating key");
+          if (this.keyIndex !== undefined) {
+            keyPool.markFailed("anthropic", this.keyIndex, message, "auth");
+          } else {
+            keyPool.markSessionFailed("anthropic", this.sessionId, message, "auth");
+          }
+          const rotated = keyPool.rotateSession(
+            "anthropic",
+            this.sessionId,
+            `auth:${this.keyLabel ?? `key-${this.keyIndex ?? "unknown"}`}`,
+          );
+          console.warn(
+            `[AnthropicClient] Auth failure detected on key=${this.keyLabel ?? `key-${this.keyIndex ?? "unknown"}`} ` +
+            `rotated=${rotated}`,
+          );
         } else if (status === 429) {
           const cooldownMs = getRateLimitCooldownMs(error);
           console.warn(
@@ -630,7 +642,11 @@ class AnthropicClient implements LLMClient {
           // Overloaded errors are capacity-related — rotate key immediately so
           // retries hit a different key that may have available capacity
           const cooldownMs = 30_000;
-          keyPool.markSessionFailed("anthropic", this.sessionId, message, "rate_limit", cooldownMs);
+          if (this.keyIndex !== undefined) {
+            keyPool.markFailed("anthropic", this.keyIndex, message, "rate_limit", cooldownMs);
+          } else {
+            keyPool.markSessionFailed("anthropic", this.sessionId, message, "rate_limit", cooldownMs);
+          }
           const rotated = keyPool.rotateSession("anthropic", this.sessionId, `overloaded:${this.keyLabel ?? `key-${this.keyIndex}`}`);
           console.warn(
             `[AnthropicClient] Overloaded on key=${this.keyLabel ?? `key-${this.keyIndex ?? "unknown"}`} ` +
@@ -1026,8 +1042,20 @@ class OpenAICompatibleClient implements LLMClient {
         const providerKey = this.provider as "openai" | "openrouter";
 
         if (response.status === 401 || response.status === 403) {
-          keyPool.markSessionFailed(providerKey, this.sessionId, error.message, "auth");
-          console.warn(`[${this.provider}Client] Auth failure detected, rotating key`);
+          if (this.keyIndex !== undefined) {
+            keyPool.markFailed(providerKey, this.keyIndex, error.message, "auth");
+          } else {
+            keyPool.markSessionFailed(providerKey, this.sessionId, error.message, "auth");
+          }
+          const rotated = keyPool.rotateSession(
+            providerKey,
+            this.sessionId,
+            `auth:${this.keyLabel ?? `key-${this.keyIndex ?? "unknown"}`}`,
+          );
+          console.warn(
+            `[${this.provider}Client] Auth failure detected on key=${this.keyLabel ?? `key-${this.keyIndex ?? "unknown"}`} ` +
+            `rotated=${rotated}`,
+          );
         } else if (response.status === 429) {
           const cooldownMs = getRateLimitCooldownMs(error);
           console.warn(
@@ -1135,6 +1163,7 @@ class ResilientLLMClient implements LLMClient {
   private maxRetries: number;
   private sessionId?: string;
   private primaryClientUsed = false;
+  private allKeysWaitStart?: number;
 
   constructor(
     primaryClient: LLMClient,
@@ -1282,17 +1311,30 @@ class ResilientLLMClient implements LLMClient {
             }
           }
 
-          // All keys unavailable — wait for recovery then retry with fresh client
+          // All keys unavailable — wait for recovery then retry with fresh client.
+          // Key cooldowns can be 1–15+ minutes, so we need a longer retry window here
+          // than for normal errors. We use dedicated retry logic with 30s intervals,
+          // up to 20 minutes total, to outlast even escalated cooldowns.
           if (message.includes("all_anthropic_keys_unavailable") || message.includes("all_openai_keys_unavailable") || message.includes("all_openrouter_keys_unavailable")) {
-            if (attempt < this.maxRetries) {
-              const waitTime = this.exponentialBackoff(attempt) * 1000;
+            const ALL_KEYS_RETRY_INTERVAL_MS = 30_000;  // Check every 30s
+            const ALL_KEYS_MAX_WAIT_MS = 20 * 60 * 1000; // Give up after 20 minutes
+            const allKeysStartTime = this.allKeysWaitStart ?? Date.now();
+            this.allKeysWaitStart = allKeysStartTime;
+            const elapsed = Date.now() - allKeysStartTime;
+
+            if (elapsed < ALL_KEYS_MAX_WAIT_MS) {
               console.warn(
-                `[ResilientLLMClient] All keys unavailable for ${model}, waiting ${(waitTime / 1000).toFixed(1)}s for recovery ` +
-                `(attempt ${attempt}/${this.maxRetries}) session=${this.sessionId?.slice(0, 40) ?? "none"}`,
+                `[ResilientLLMClient] All keys unavailable for ${model}, waiting 30s for recovery ` +
+                `(elapsed ${(elapsed / 1000).toFixed(0)}s / max ${ALL_KEYS_MAX_WAIT_MS / 1000}s) ` +
+                `session=${this.sessionId?.slice(0, 40) ?? "none"}`,
               );
-              await this.sleep(waitTime);
+              await this.sleep(ALL_KEYS_RETRY_INTERVAL_MS);
+              // Don't increment attempt counter — this is a wait-for-recovery loop
+              attempt--;
               continue;
             }
+            // Exhausted wait time — clean up and fall through to error
+            this.allKeysWaitStart = undefined;
           }
 
           // All retries exhausted for this model — log and decide

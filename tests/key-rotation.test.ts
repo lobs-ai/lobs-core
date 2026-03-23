@@ -120,6 +120,7 @@ describe("key rotation", () => {
 
     try {
       const keyPool = getKeyPool();
+      keyPool.getAuth("anthropic", "session-reload");
       keyPool.markSessionFailed("anthropic", "session-reload", "401 unauthorized", "auth");
 
       writeKeysConfig(homeDir, {
@@ -208,6 +209,8 @@ describe("key rotation", () => {
 
     try {
       const keyPool = getKeyPool();
+      keyPool.getAuth("anthropic", "session-a");
+      keyPool.getAuth("anthropic", "session-b");
       keyPool.markSessionFailed("anthropic", "session-a", "401 unauthorized", "auth");
       keyPool.markSessionFailed("anthropic", "session-b", "401 unauthorized", "auth");
       keyPool.markHealthy("anthropic", 2);
@@ -216,6 +219,35 @@ describe("key rotation", () => {
       expect(selection?.apiKey).toBe("sk-ant-c");
       expect(selection?.keyIndex).toBe(2);
       expect(selection?.label).toBe("lobsbot");
+    } finally {
+      shutdownKeyPool();
+    }
+  });
+
+  test("does not quarantine a guessed key for an unassigned multi-key session", async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), "lobs-keypool-unassigned-"));
+    process.env.HOME = homeDir;
+    writeKeysConfig(homeDir, {
+      openai: {
+        keys: ["sk-openai-a", "sk-openai-b", "sk-openai-c"],
+        strategy: "sticky-failover",
+      },
+    });
+
+    vi.resetModules();
+    const { getKeyPool, shutdownKeyPool } = await import("../src/services/key-pool.js");
+
+    try {
+      const keyPool = getKeyPool();
+
+      expect(keyPool.markSessionFailed("openai", "session-a", "401 unauthorized", "auth")).toBe(false);
+      expect(keyPool.markSessionFailed("openai", "session-b", "401 unauthorized", "auth")).toBe(false);
+      expect(keyPool.getPoolHealthSummary("openai")).toMatchObject({ total: 3, healthy: 3, authFailed: 0 });
+
+      const first = keyPool.getAuth("openai", "session-a");
+      const second = keyPool.getAuth("openai", "session-b");
+      expect(first?.apiKey).toBeTruthy();
+      expect(second?.apiKey).toBeTruthy();
     } finally {
       shutdownKeyPool();
     }
