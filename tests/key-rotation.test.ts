@@ -190,7 +190,7 @@ describe("key rotation", () => {
     }
   });
 
-  test("prefers the last successful key for new sessions", async () => {
+  test("selects only healthy keys for new sessions after failures", async () => {
     const homeDir = mkdtempSync(join(tmpdir(), "lobs-keypool-prefer-success-"));
     process.env.HOME = homeDir;
     writeKeysConfig(homeDir, {
@@ -209,10 +209,14 @@ describe("key rotation", () => {
 
     try {
       const keyPool = getKeyPool();
+      // Assign and then fail all 3 keys
       keyPool.getAuth("anthropic", "session-a");
       keyPool.getAuth("anthropic", "session-b");
+      keyPool.getAuth("anthropic", "session-c");
       keyPool.markSessionFailed("anthropic", "session-a", "401 unauthorized", "auth");
       keyPool.markSessionFailed("anthropic", "session-b", "401 unauthorized", "auth");
+      keyPool.markSessionFailed("anthropic", "session-c", "401 unauthorized", "auth");
+      // Heal only lobsbot — it should be the only option for new sessions
       keyPool.markHealthy("anthropic", 2);
 
       const selection = keyPool.getAuth("anthropic", "fresh-session");
@@ -253,7 +257,7 @@ describe("key rotation", () => {
     }
   });
 
-  test("uses the bootstrap preferred key before any success is recorded", async () => {
+  test("load-balances new sessions across all healthy keys", async () => {
     const homeDir = mkdtempSync(join(tmpdir(), "lobs-keypool-balance-"));
     process.env.HOME = homeDir;
     writeKeysConfig(homeDir, {
@@ -272,13 +276,21 @@ describe("key rotation", () => {
 
     try {
       const keyPool = getKeyPool();
-      const a = keyPool.getAuth("anthropic", "session-a");
-      const b = keyPool.getAuth("anthropic", "session-b");
-      const c = keyPool.getAuth("anthropic", "session-c");
+      // Create enough sessions to see distribution across keys
+      const indices = new Set<number>();
+      for (let i = 0; i < 20; i++) {
+        const auth = keyPool.getAuth("anthropic", `session-balance-${i}`);
+        if (auth) indices.add(auth.keyIndex);
+      }
 
-      expect(a?.keyIndex).toBe(2);
-      expect(b?.keyIndex).toBe(2);
-      expect(c?.keyIndex).toBe(2);
+      // With 3 healthy keys and 20 sessions, we should see at least 2 different keys used
+      // (load-balancing distributes across all healthy keys, not funneling to one)
+      expect(indices.size).toBeGreaterThanOrEqual(2);
+      // All assigned indices should be valid (0, 1, or 2)
+      for (const idx of indices) {
+        expect(idx).toBeGreaterThanOrEqual(0);
+        expect(idx).toBeLessThan(3);
+      }
     } finally {
       shutdownKeyPool();
     }
