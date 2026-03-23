@@ -481,7 +481,12 @@ export class CronService {
 
           // Avoid duplicate runs within the same minute
           if (job.lastFired) {
-            const lastFiredTime = new Date(job.lastFired);
+            // Normalize: SQLite datetime('now') stores UTC without 'Z' suffix,
+            // so "2026-03-23 11:00:00" must be treated as UTC, not local time.
+            const normalised = job.lastFired.includes("T") || job.lastFired.endsWith("Z")
+              ? job.lastFired
+              : job.lastFired.replace(" ", "T") + "Z";
+            const lastFiredTime = new Date(normalised);
             lastFiredTime.setSeconds(0);
             lastFiredTime.setMilliseconds(0);
             if (lastFiredTime.getTime() === now.getTime()) continue;
@@ -504,9 +509,14 @@ export class CronService {
         }
         case "every": {
           const ms = job.schedule.everyMs || 60_000;
-          const lastFiredMs = job.lastFired
-            ? new Date(job.lastFired).getTime()
-            : 0;
+          let lastFiredMs = 0;
+          if (job.lastFired) {
+            // Normalize UTC-without-Z strings from SQLite
+            const normalised = job.lastFired.includes("T") || job.lastFired.endsWith("Z")
+              ? job.lastFired
+              : job.lastFired.replace(" ", "T") + "Z";
+            lastFiredMs = new Date(normalised).getTime();
+          }
           if (Date.now() - lastFiredMs >= ms) {
             await this.fireAgentJob(job);
           }
@@ -576,10 +586,12 @@ export class CronService {
   private async fireAgentJob(job: AgentJob) {
     log().info(`[cron] Firing agent job: ${job.name}`);
 
+    // Store as ISO 8601 UTC with 'Z' suffix so Node.js Date parsing is unambiguous
+    const firedAt = new Date().toISOString();
     this.db
-      .prepare("UPDATE cron_jobs SET last_fired = datetime('now') WHERE id = ?")
-      .run(job.id);
-    job.lastFired = new Date().toISOString();
+      .prepare("UPDATE cron_jobs SET last_fired = ? WHERE id = ?")
+      .run(firedAt, job.id);
+    job.lastFired = firedAt;
 
     if (this.onEvent) {
       try {

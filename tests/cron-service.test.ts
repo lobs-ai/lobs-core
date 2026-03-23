@@ -443,6 +443,58 @@ describe("lifecycle", () => {
   });
 });
 
+// ── last_fired UTC parsing (dedup guard) ─────────────────────────────────────
+
+describe("dedup guard: last_fired UTC normalization", () => {
+  it("does not double-fire when last_fired is stored as SQLite UTC (no Z suffix)", async () => {
+    // SQLite datetime('now') produces "2026-03-23 11:00:00" — no Z, no T
+    // Node.js parses this as LOCAL time, which in non-UTC zones gives the wrong ms.
+    // The fix normalises it to "2026-03-23T11:00:00Z" before calling new Date().
+    const svc = makeService();
+    let fireCount = 0;
+    svc.setEventHandler(async () => { fireCount++; });
+
+    // Add a job that matches every minute
+    const job = svc.addAgentJob({
+      name: "DedupeTest",
+      schedule: { kind: "cron", expr: "* * * * *" },
+      payload: "test",
+      enabled: true,
+    });
+
+    // Manually set last_fired in the SQLite format (no Z, no T)
+    const db = (svc as any).db;
+    const now = new Date();
+    now.setSeconds(0); now.setMilliseconds(0);
+    // Produce a "YYYY-MM-DD HH:MM:SS" string in UTC — the SQLite datetime('now') format
+    const sqliteUtcStr = now.toISOString().replace("T", " ").replace("Z", "").slice(0, 19);
+    db.prepare("UPDATE cron_jobs SET last_fired = ? WHERE id = ?").run(sqliteUtcStr, job.id);
+
+    // Reload the job (tick reloads from DB each time)
+    await (svc as any).tick();
+
+    // The job should NOT have fired — last_fired matches current minute
+    expect(fireCount).toBe(0);
+  });
+
+  it("fires when last_fired was a different minute (UTC normalization)", async () => {
+    const svc = makeService();
+    let fireCount = 0;
+    svc.setEventHandler(async () => { fireCount++; });
+
+    svc.addAgentJob({
+      name: "FiredBeforeTest",
+      schedule: { kind: "cron", expr: "* * * * *" },
+      payload: "test",
+      enabled: true,
+    });
+
+    // Don't set last_fired — job has never fired, so it should fire
+    await (svc as any).tick();
+    expect(fireCount).toBe(1);
+  });
+});
+
 // ── parseCronExpression edge cases not in cron-parser.test.ts ──────────────
 
 describe("parseCronExpression additional coverage", () => {
