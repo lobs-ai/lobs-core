@@ -5,6 +5,8 @@
 import { readFileSync } from "node:fs";
 import { log } from "../util/logger.js";
 import { getGatewayConfig } from "../config/lobs.js";
+import { checkModelsBeforeSpawn } from "../diagnostics/lmstudio.js";
+import { getModelConfig } from "../config/models.js";
 
 export function registerRestartContinuationHook(api: any): void {
   api.on("gateway_start", async () => {
@@ -57,6 +59,36 @@ export function registerRestartContinuationHook(api: any): void {
     // Delay 5s to let gateway fully initialize
     setTimeout(async () => {
       try {
+        // ── LM Studio preflight ──────────────────────────────────────────────
+        // Before sending the resume prompt we verify LM Studio is reachable
+        // and the configured local model is loaded. If the check fails we skip
+        // the prompt: the agent would immediately error on a tool call anyway,
+        // and the resume can be triggered manually or on the next gateway start.
+        const cfg = getModelConfig();
+        // Gather the model IDs we actually need for agent work (micro + local chat).
+        const modelsToCheck = [
+          cfg.tiers.micro,
+          `lmstudio/${cfg.local.chatModel.replace(/^lmstudio\//, "")}`,
+        ].filter((m): m is string => Boolean(m));
+
+        const preflight = await checkModelsBeforeSpawn(modelsToCheck);
+        if (!preflight.ok) {
+          if (!preflight.reachable) {
+            log().warn(
+              "[PAW] Restart continuation: LM Studio is unreachable — skipping resume prompt. " +
+              "Will retry on next gateway start."
+            );
+          } else {
+            const missing = preflight.missing.map((m) => m.id).join(", ");
+            log().warn(
+              `[PAW] Restart continuation: LM Studio reachable but model(s) not loaded: ${missing} — ` +
+              "skipping resume prompt to avoid model-drift failures."
+            );
+          }
+          return;
+        }
+        log().info("[PAW] Restart continuation: LM Studio preflight passed — sending resume prompt");
+
         const { port, token } = getGatewayConfig();
         if (!token) return;
 

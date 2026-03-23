@@ -134,6 +134,13 @@ Use `lm_studio_diagnostic.api.models` to fetch the full model report programmati
 > selection on every spawn. Local-model spawns are blocked with a structured error when  
 > LM Studio is unreachable or the required model is not loaded.  
 > `lobs preflight` remains the recommended session-start gate for human operators.
+>
+> **✅ restart-continuation preflight gap closed (2026-03-23).**  
+> The `gateway_start` hook in `restart-continuation.ts` now calls `checkModelsBeforeSpawn()`  
+> **before** sending the resume prompt on gateway restart. If LM Studio is unreachable or  
+> the configured micro/local model is not loaded, the resume prompt is suppressed to prevent  
+> orphaned sessions and model-drift failures. See `tests/restart-continuation-preflight.test.ts`  
+> for 6 integration tests covering all gate cases.
 
 ---
 
