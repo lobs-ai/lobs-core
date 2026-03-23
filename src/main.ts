@@ -41,6 +41,7 @@ import { MemoryProcessorWorker } from "./workers/memory-processor.js";
 import { ResearchProcessorWorker } from "./workers/research-processor.js";
 import { initResearchQueueService } from "./services/research-queue.js";
 import { runLmStudioAlertCheck } from "./services/lm-studio-monitor.js";
+import { runDbMaintenance } from "./services/db-maintenance.js";
 
 const HOME = process.env.HOME ?? "";
 const DB_PATH = resolve(HOME, ".lobs/lobs.db");
@@ -375,6 +376,22 @@ async function main() {
       if (result.alerts.inserted > 0) {
         console.log(
           `[lm-studio-monitor] ${result.status} — ${result.alerts.inserted} alert(s) fired: ${result.alerts.fired.join(", ")}`,
+        );
+      }
+    },
+  });
+
+  cronService.registerSystemJob({
+    id: "db-maintenance",
+    name: "DB Maintenance",
+    schedule: "0 3 * * *", // daily at 3am — prune old rows and VACUUM
+    enabled: true,
+    handler: async () => {
+      const result = await runDbMaintenance();
+      const totalPruned = Object.values(result.pruned).reduce((a, b) => a + b, 0);
+      if (totalPruned > 0) {
+        console.log(
+          `[db-maintenance] Pruned ${totalPruned} rows, saved ${((result.dbSizeBefore - result.dbSizeAfter) / 1048576).toFixed(1)}MB`,
         );
       }
     },
