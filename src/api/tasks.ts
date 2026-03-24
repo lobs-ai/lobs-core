@@ -173,21 +173,28 @@ IMPORTANT: Check the active tasks and recently completed tasks in the context. D
 Return ONLY valid JSON in this exact format with no other text:
 {"proposed_tasks": [{"title": "...", "agent": "...", "model_tier": "...", "notes": "..."}]}`;
 
-    const personalSystemPrompt = `You are a personal task extraction assistant. Given a brain dump of what someone has been working on and what they need to do, extract discrete actionable tasks.
-For each task assign:
-- title: concise, action-oriented title
-- priority: urgent/high/medium/low
-- estimatedMinutes: rough time estimate (15, 30, 60, 90, 120, 180, 240)
-- category: one of review/decision/action-item/personal/academic/errand
-- dueDate: ISO date string if a deadline is mentioned or strongly implied, null otherwise
-- notes: brief context
+    const personalSystemPrompt = `You are a personal assistant processing a brain dump. The user is telling you what's going on in their life — what they worked on, what they didn't get to, new information, shifted priorities, deadlines, anything.
 
-Also return:
-- accomplishments: list of things they mentioned completing (strings)
-- summary: 1-2 sentence summary of their current situation
+Your job is to understand ALL of it and return structured output:
+
+1. **tasks** — actionable items extracted (things they need to DO). For each:
+   - title: concise, action-oriented
+   - priority: urgent/high/medium/low
+   - estimatedMinutes: rough estimate (15, 30, 60, 90, 120, 180, 240)
+   - category: one of review/decision/action-item/personal/academic/errand
+   - dueDate: ISO date string if deadline mentioned/implied, null otherwise
+   - notes: brief context
+
+2. **accomplishments** — things they mentioned completing or making progress on (strings)
+
+3. **context_updates** — new information, status changes, or things to remember that aren't tasks (strings). Examples: "PAW migration has extra scope", "Prof. Smith prefers email over Slack", "EECS 545 midterm moved to next week"
+
+4. **summary** — 2-3 sentence natural language summary of their current situation
+
+Be smart about what's a task vs what's just context. "I worked on X for 3 hours" is an accomplishment, not a task. "I need to email Prof. Smith" is a task. "The project has more scope than expected" is a context update.
 
 Return ONLY valid JSON:
-{"proposed_tasks": [...], "accomplishments": [...], "summary": "..."}`;
+{"tasks": [...], "accomplishments": [...], "context_updates": [...], "summary": "..."}`;
 
     const systemPrompt = isPersonal ? personalSystemPrompt : agentSystemPrompt;
 
@@ -229,44 +236,15 @@ Return ONLY valid JSON:
       console.error("[training-data] Failed to log example:", e);
     }
 
-    const response: Record<string, unknown> = { proposed_tasks: parsed.proposed_tasks ?? [] };
     if (isPersonal) {
-      response.accomplishments = parsed.accomplishments ?? [];
-      response.summary = parsed.summary ?? "";
-      response.mode = "personal";
-    }
-    return json(res, response);
-  }
+      // Personal mode: auto-create tasks immediately, return full summary
+      const extractedTasks = parsed.tasks ?? parsed.proposed_tasks ?? [];
+      const db = getDb();
+      const now = new Date().toISOString();
+      const createdTasks = [];
 
-  // /api/tasks/braindump/confirm — POST: bulk-create proposed tasks
-  if (id === "braindump" && parts[2] === "confirm" && req.method === "POST") {
-    const body = await parseBody(req) as {
-      tasks?: Array<{
-        title: string;
-        agent?: string;
-        model_tier?: string;
-        notes?: string;
-        project_id?: string;
-        // Personal mode fields
-        priority?: string;
-        estimatedMinutes?: number;
-        category?: string;
-        dueDate?: string;
-      }>;
-      mode?: string;
-    };
-    if (!Array.isArray(body.tasks) || body.tasks.length === 0) return error(res, "tasks array is required");
-    const db = getDb();
-    const now = new Date().toISOString();
-    const created = [];
-    const skipped = [];
-    const isPersonal = body.mode === "personal";
-
-    for (const t of body.tasks) {
-      if (!t.title?.trim()) continue;
-
-      if (isPersonal) {
-        // ── Personal mode: create human tasks ─────────────────────────────
+      for (const t of extractedTasks) {
+        if (!t.title?.trim()) continue;
         const taskId = randomUUID();
         db.insert(tasks).values({
           id: taskId,
@@ -281,8 +259,45 @@ Return ONLY valid JSON:
           createdAt: now,
           updatedAt: now,
         }).run();
-        created.push(db.select().from(tasks).where(eq(tasks.id, taskId)).get());
-      } else {
+        createdTasks.push(db.select().from(tasks).where(eq(tasks.id, taskId)).get());
+      }
+
+      return json(res, {
+        mode: "personal",
+        summary: parsed.summary ?? "",
+        accomplishments: parsed.accomplishments ?? [],
+        context_updates: parsed.context_updates ?? [],
+        tasks_created: createdTasks,
+        task_count: createdTasks.length,
+      });
+    }
+
+    // Agent mode: return proposed tasks for confirmation
+    const response: Record<string, unknown> = { proposed_tasks: parsed.proposed_tasks ?? [] };
+    return json(res, response);
+  }
+
+  // /api/tasks/braindump/confirm — POST: bulk-create proposed tasks (agent mode only)
+  if (id === "braindump" && parts[2] === "confirm" && req.method === "POST") {
+    const body = await parseBody(req) as {
+      tasks?: Array<{
+        title: string;
+        agent?: string;
+        model_tier?: string;
+        notes?: string;
+        project_id?: string;
+      }>;
+    };
+    if (!Array.isArray(body.tasks) || body.tasks.length === 0) return error(res, "tasks array is required");
+    const db = getDb();
+    const now = new Date().toISOString();
+    const created = [];
+    const skipped = [];
+
+    for (const t of body.tasks) {
+      if (!t.title?.trim()) continue;
+
+      {
         // ── Agent mode: create agent tasks (original behavior) ────────────
         // Deduplication (24h window)
         const dup = findDuplicateTask({
