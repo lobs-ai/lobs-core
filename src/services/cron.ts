@@ -131,7 +131,7 @@ export interface CronJobView {
 
 /**
  * Compute the next fire time for a cron expression, brute-force scanning minute-by-minute.
- * Returns null if no match within 48 hours (safeguard).
+ * Returns null if no match within 8 days (safeguard).
  */
 function computeNextCronRun(cronExpr: string): string | null {
   try {
@@ -142,8 +142,8 @@ function computeNextCronRun(cronExpr: string): string | null {
     candidate.setSeconds(0, 0);
     candidate.setMinutes(candidate.getMinutes() + 1);
 
-    // Scan up to 48 hours ahead (2880 minutes)
-    for (let i = 0; i < 2880; i++) {
+    // Scan up to 8 days ahead (11520 minutes) to cover weekly schedules
+    for (let i = 0; i < 11520; i++) {
       if (
         schedule.minute.includes(candidate.getMinutes()) &&
         schedule.hour.includes(candidate.getHours()) &&
