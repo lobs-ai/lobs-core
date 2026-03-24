@@ -21,6 +21,7 @@ import { initCronService } from "./services/cron.js";
 import { runSentinelCheck } from "./services/system-sentinel.js";
 import { runCalendarSentinel } from "./services/calendar-sentinel.js";
 import { refreshSchedulerIntelligence } from "./services/scheduler-intelligence.js";
+import { runNightlyPlanner } from "./services/nightly-planner.js";
 import { randomUUID } from "node:crypto";
 import { browserService } from "./services/browser.js";
 import { skillsService } from "./services/skills.js";
@@ -383,6 +384,22 @@ async function main() {
     enabled: true,
     handler: async () => {
       await refreshSchedulerIntelligence();
+    },
+  });
+
+  cronService.registerSystemJob({
+    id: "nightly-planner",
+    name: "Nightly Planner",
+    schedule: "0 22 * * *", // 10pm ET every night
+    enabled: true,
+    handler: async () => {
+      const result = await runNightlyPlanner();
+      if (result.eventsCreated > 0) {
+        const mainAgent = (globalThis as any).__lobsMainAgent;
+        if (mainAgent) {
+          await mainAgent.handleSystemEvent(result.summary);
+        }
+      }
     },
   });
 
