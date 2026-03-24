@@ -11,7 +11,7 @@ import { initReranker, shutdownReranker } from "./reranker.js";
 import { initSearch, search, invalidateSearchCache, clearFileCache } from "./search.js";
 import { startIndexer, stopIndexer, reindexAll, pauseIndexing, resumeIndexing, getIndexerStatus } from "./indexer.js";
 import { loadMemoryConfig } from "./config.js";
-import type { MemoryConfig, SearchRequest, SearchResponse, HealthResponse } from "./types.js";
+import type { MemoryConfig, SearchRequest, SearchResponse, HealthResponse, BatchSearchItem } from "./types.js";
 
 let initialized = false;
 let startTime = 0;
@@ -65,6 +65,42 @@ export async function searchMemory(request: SearchRequest): Promise<SearchRespon
     throw new Error("Memory service not initialized. Call initMemory() first.");
   }
   return search(request);
+}
+
+/**
+ * Batch search — multiple queries in parallel.
+ * Returns results keyed by each search item's `id`.
+ */
+export async function searchMemoryBatch(
+  searches: BatchSearchItem[],
+): Promise<{ results: Record<string, SearchResponse>; timings: { totalMs: number } }> {
+  if (!initialized) {
+    throw new Error("Memory service not initialized. Call initMemory() first.");
+  }
+  const start = Date.now();
+  const entries = await Promise.all(
+    searches.map(async (item) => {
+      const response = await search({
+        query: item.query,
+        maxResults: item.maxResults,
+        minScore: item.minScore,
+        collections: item.collections,
+        conversationContext: item.conversationContext,
+      });
+      return [item.id, response] as const;
+    }),
+  );
+  return {
+    results: Object.fromEntries(entries),
+    timings: { totalMs: Date.now() - start },
+  };
+}
+
+/**
+ * Check if the memory service is initialized and ready.
+ */
+export function isMemoryReady(): boolean {
+  return initialized;
 }
 
 /**
@@ -133,3 +169,4 @@ export type {
 export { invalidateSearchCache, clearFileCache };
 export { pauseIndexing, resumeIndexing, getIndexerStatus };
 export { getIndexStats, getDetailedStats } from "./db.js";
+export { resetEmbedderCache } from "./search.js";

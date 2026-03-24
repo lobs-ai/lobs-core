@@ -13,6 +13,7 @@
  */
 
 import { readFileSync, existsSync } from "node:fs";
+import { memorySearchBatch } from "../services/memory-client.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -81,8 +82,8 @@ export interface AssembledContext {
 }
 
 export interface ContextEngineConfig {
-  /** lobs-memory search endpoint */
-  memorySearchUrl: string;
+  /** @deprecated Memory URL is now managed by memory-client.ts */
+  memorySearchUrl?: string;
   /** Maximum total context tokens */
   maxContextTokens: number;
   /** Project registry for scoping */
@@ -345,31 +346,7 @@ interface MemorySearchResult {
 /**
  * Search lobs-memory with scoping.
  */
-async function searchMemory(
-  query: string,
-  collections?: string[],
-  maxResults: number = 10,
-  baseUrl: string = "http://localhost:7420",
-): Promise<MemorySearchResult[]> {
-  try {
-    const body: Record<string, unknown> = { query, maxResults };
-    if (collections?.length) body.collections = collections;
-
-    const response = await fetch(`${baseUrl}/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    if (!response.ok) return [];
-
-    const data = (await response.json()) as { results?: MemorySearchResult[] };
-    return data.results ?? [];
-  } catch {
-    return [];
-  }
-}
+// searchMemory removed — now using unified memorySearchBatch from memory-client.ts
 
 /**
  * Map a search result to a budget category based on its source path.
@@ -417,7 +394,6 @@ export async function assembleContext(params: {
   contextRefs?: string[];
   config?: Partial<ContextEngineConfig>;
 }): Promise<AssembledContext> {
-  const memoryUrl = params.config?.memorySearchUrl ?? "http://localhost:7420";
   const maxTokens = params.config?.maxContextTokens ?? 8000;
   const projects = params.config?.projects ?? DEFAULT_PROJECTS;
 
@@ -451,49 +427,17 @@ export async function assembleContext(params: {
     queries.push(classification.topic);
   }
 
-  // Batch all memory searches into a single HTTP round-trip
+  // Batch all memory searches via unified memory client (handles HTTP + grep fallback)
   const batchSearches = [
     { id: "memory", query: queries[0], collections: ["workspace", "knowledge"], maxResults: 8 },
     { id: "project", query: queries[0], collections: projectCollections ?? ["projects", "knowledge"], maxResults: 8 },
     { id: "session", query: queries[0], collections: ["sessions"], maxResults: 5 },
   ];
 
-  let memoryResults: MemorySearchResult[] = [];
-  let projectResults: MemorySearchResult[] = [];
-  let sessionResults: MemorySearchResult[] = [];
-
-  try {
-    // Try batch endpoint first (single HTTP round-trip instead of 3)
-    const batchResponse = await fetch(`${memoryUrl}/search/batch`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ searches: batchSearches }),
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    if (batchResponse.ok) {
-      const batchData = await batchResponse.json() as {
-        results: Record<string, { results: MemorySearchResult[] }>;
-      };
-      memoryResults = batchData.results?.memory?.results ?? [];
-      projectResults = batchData.results?.project?.results ?? [];
-      sessionResults = batchData.results?.session?.results ?? [];
-    } else {
-      // Batch endpoint not available — fall back to parallel individual requests
-      [memoryResults, projectResults, sessionResults] = await Promise.all([
-        searchMemory(queries[0], ["workspace", "knowledge"], 8, memoryUrl),
-        searchMemory(queries[0], projectCollections ?? ["projects", "knowledge"], 8, memoryUrl),
-        searchMemory(queries[0], ["sessions"], 5, memoryUrl),
-      ]);
-    }
-  } catch {
-    // Server down — fall back to parallel individual requests (which have their own grep fallback)
-    [memoryResults, projectResults, sessionResults] = await Promise.all([
-      searchMemory(queries[0], ["workspace", "knowledge"], 8, memoryUrl),
-      searchMemory(queries[0], projectCollections ?? ["projects", "knowledge"], 8, memoryUrl),
-      searchMemory(queries[0], ["sessions"], 5, memoryUrl),
-    ]);
-  }
+  const batchResult = await memorySearchBatch(batchSearches);
+  const memoryResults: MemorySearchResult[] = (batchResult.results.memory ?? []) as MemorySearchResult[];
+  const projectResults: MemorySearchResult[] = (batchResult.results.project ?? []) as MemorySearchResult[];
+  const sessionResults: MemorySearchResult[] = (batchResult.results.session ?? []) as MemorySearchResult[];
 
   // Memory layer — decisions, learnings, preferences
   const memoryChunks: ContextChunk[] = memoryResults

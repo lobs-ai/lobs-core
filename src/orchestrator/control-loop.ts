@@ -1276,7 +1276,12 @@ function autoCloseSucceededTasks(): void {
             SELECT wr2.started_at FROM worker_runs wr2
             WHERE wr2.task_id = t.id AND wr2.ended_at IS NOT NULL
             ORDER BY wr2.ended_at DESC LIMIT 1
-        )                                                         AS last_started_at
+        )                                                         AS last_started_at,
+        (
+            SELECT wr2.child_session_key FROM worker_runs wr2
+            WHERE wr2.task_id = t.id AND wr2.ended_at IS NOT NULL
+            ORDER BY wr2.ended_at DESC LIMIT 1
+        )                                                         AS last_child_session_key
     FROM tasks t
     JOIN worker_runs wr ON wr.task_id = t.id
     LEFT JOIN projects p ON p.id = t.project_id
@@ -1300,6 +1305,7 @@ function autoCloseSucceededTasks(): void {
     run_count: number;
     last_run_at: string;
     last_started_at: string | null;
+    last_child_session_key: string | null;
   }> as Array<{
     id: string;
     title: string;
@@ -1309,6 +1315,7 @@ function autoCloseSucceededTasks(): void {
     run_count: number;
     last_run_at: string;
     last_started_at: string | null;
+    last_child_session_key: string | null;
     expected_artifacts?: string | null;
   }>;
 
@@ -1374,7 +1381,7 @@ function autoCloseSucceededTasks(): void {
     }
     let validation: ReturnType<typeof validatePostSuccessArtifacts>;
     try {
-      validation = validatePostSuccessArtifacts(task.agent, task.repo_path, durationMs, expectedArtifacts, task.last_started_at ?? null);
+      validation = validatePostSuccessArtifacts(task.agent, task.repo_path, durationMs, expectedArtifacts, task.last_started_at ?? null, task.last_child_session_key ?? null);
     } catch (e) {
       // Fail open: on error, close normally rather than blocking completions
       log().error(`[AUTO-CLOSE] Artifact validation error for task ${task.id.slice(0, 8)}: ${e}`);

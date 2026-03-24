@@ -32,7 +32,7 @@ import { loadWorkspaceContext, buildMainAgentPrompt } from "./services/workspace
 import { setDiscordService as setMessageDiscord } from "./runner/tools/message.js";
 import { setReactDiscord } from "./runner/tools/index.js";
 import { validateAllConfigs } from "./config/validator.js";
-import { memoryServer } from "./services/memory-server.js";
+import { initMemory, shutdownMemory } from "./services/memory/index.js";
 import { imagineService } from "./services/imagine.js";
 import { countActiveWorkers, getActiveWorkers } from "./orchestrator/worker-manager.js";
 import { runStartupTelemetry, startDiskSpaceMonitor } from "./services/restart-telemetry.js";
@@ -41,8 +41,10 @@ import { WorkerRegistry } from "./workers/index.js";
 import { MemoryProcessorWorker } from "./workers/memory-processor.js";
 import { ResearchProcessorWorker } from "./workers/research-processor.js";
 import { IntelSweepWorker } from "./workers/intel-sweep.js";
+import { ResearchRadarWorker } from "./workers/research-radar.js";
 import { initResearchQueueService } from "./services/research-queue.js";
 import { initIntelSweepService } from "./services/intel-sweep.js";
+import { initResearchRadarService } from "./services/research-radar.js";
 import { runLmStudioAlertCheck } from "./services/lm-studio-monitor.js";
 import { runDbMaintenance } from "./services/db-maintenance.js";
 
@@ -317,6 +319,10 @@ async function main() {
   const intelSweep = initIntelSweepService(getRawDb(), researchQueue);
   workerRegistry.register(new IntelSweepWorker(intelSweep));
 
+  // Research radar — identifies novel paper opportunities from intel insights
+  const researchRadar = initResearchRadarService(getRawDb());
+  workerRegistry.register(new ResearchRadarWorker(researchRadar, intelSweep));
+
   // Register system jobs (code handlers, not DB-backed)
   cronService.registerSystemJob({
     id: "heartbeat",
@@ -454,8 +460,13 @@ async function main() {
   // Purge archived chat sessions older than 30 days on startup
   purgeOldArchivedSessions();
 
-  // Start memory server (supervised child process)
-  await memoryServer.start();
+  // Initialize in-process memory service (replaces external Bun child process)
+  try {
+    await initMemory();
+  } catch (err) {
+    console.error("[memory] Failed to initialize memory service:", err);
+    console.warn("[memory] Continuing without memory — grep fallback will be used");
+  }
 
   // Start imagine service (background, non-blocking)
   imagineService.start();
@@ -469,11 +480,10 @@ async function main() {
   // Export main agent globally so API handlers can access it
   (globalThis as any).__lobsMainAgent = mainAgent;
 
-  const activityTimer = setInterval(() => {
+  const activityTimer = setInterval(async () => {
     const workers = getActiveWorkers();
     const activeChannels = mainAgent.getProcessingChannels();
     const queuedChannels = mainAgent.getQueueDepth();
-    const memoryStatus = memoryServer.getStatus();
     const workerSummary = workers.length > 0
       ? workers
           .slice(0, 5)
@@ -484,11 +494,17 @@ async function main() {
       ? activeChannels.slice(0, 5).map((channelId) => channelId.slice(0, 16)).join(", ")
       : "none";
 
+    let memoryLabel = "down";
+    try {
+      const { isMemoryReady } = await import("./services/memory/index.js");
+      memoryLabel = isMemoryReady() ? "in-process" : "not-ready";
+    } catch { /* ignore */ }
+
     console.log(
       `[runtime] workers=${countActiveWorkers()} [${workerSummary}] ` +
       `main-agent active=${mainAgent.getActiveChannelCount()}/${mainAgent.getMaxConcurrent()} ` +
       `queued=${queuedChannels} channels=[${channelSummary}] ` +
-      `memory=${memoryStatus.running ? `up(pid=${memoryStatus.pid ?? "?"})` : "down"}`,
+      `memory=${memoryLabel}`,
     );
   }, ACTIVITY_LOG_INTERVAL_MS);
   
@@ -683,7 +699,7 @@ async function main() {
     
     stopDiskMonitor();
     imagineService.stop();
-    await memoryServer.shutdown();
+    await shutdownMemory();
     await browserService.shutdown();
     await discordService.shutdown();
     cronService.stop();

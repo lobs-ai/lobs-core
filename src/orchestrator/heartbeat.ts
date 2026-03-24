@@ -50,23 +50,20 @@ interface InboxHealthResult extends CheckResult {
 }
 
 /**
- * Check if lobs-memory server is running.
+ * Check if in-process memory service is ready.
  */
 async function checkMemoryServer(): Promise<CheckResult> {
   try {
-    const response = await fetch("http://localhost:7420/health", {
-      signal: AbortSignal.timeout(5000),
-    });
-    
-    if (response.ok) {
-      return { status: "ok", message: "Memory server responding" };
+    const { isMemoryReady } = await import("../services/memory/index.js");
+    if (isMemoryReady()) {
+      return { status: "ok", message: "Memory service ready (in-process)" };
     } else {
-      return { status: "warning", message: `Memory server returned ${response.status}` };
+      return { status: "warning", message: "Memory service not yet initialized" };
     }
-  } catch (error) {
+  } catch (err) {
     return {
       status: "error",
-      message: "Memory server not responding (is lobs-memory running?)",
+      message: `Memory service error: ${err}`,
     };
   }
 }

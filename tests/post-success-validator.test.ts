@@ -772,9 +772,142 @@ describe("(8) Result shape contracts", () => {
   });
 });
 
-// ─── 9. Tilde expansion in repoPath ──────────────────────────────────────────
+// ─── 9. Concurrency deduplication — sessionKey disambiguation (bug c8cb6459) ─
 
-describe("(9) Tilde expansion in repoPath", () => {
+describe("(9) Concurrency deduplication — sessionKey exact match", () => {
+  /**
+   * Regression tests for bug c8cb6459:
+   * When concurrent tasks run for the same agent type, detectActualWorkingRepos()
+   * must pick the session that belongs to THIS task, not a sibling task's session.
+   *
+   * Priority order (tested below):
+   *   1. Exact sessionKey match (highest priority)
+   *   2. Smallest session ID in window (deterministic tie-break)
+   *   3. Most-recent session (fallback)
+   */
+
+  it("uses exact sessionKey to pick correct session among concurrent tasks", () => {
+    /**
+     * Two concurrent tasks, two sessions in the same time window.
+     * Without sessionKey, the wrong one would be picked.
+     * With sessionKey, the exact correct session is used.
+     */
+    const correctRepo = join(fakeHome, "lobs", "correct-repo");
+    const wrongRepo = join(fakeHome, "lobs", "wrong-repo");
+    initGitRepo(correctRepo);
+    initGitRepo(wrongRepo);
+    commitFile(correctRepo, "work.ts");
+    // wrongRepo has no commits → would return no_artifacts if picked
+
+    const startedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+
+    // Both sessions within the mtime window (5 min apart)
+    const correctStem = "aaaaaaaaaaaaaa01"; // smallest ID
+    const wrongStem = "zzzzzzzzzzzzzz99"; // largest ID
+    writeSession("programmer", correctRepo, `${correctStem}.jsonl`, 8 * 60);
+    writeSession("programmer", wrongRepo, `${wrongStem}.jsonl`, 6 * 60);
+
+    // With sessionKey pointing at correctRepo's session
+    const result = validatePostSuccessArtifacts(
+      "programmer", null, 90_000, null, startedAt, correctStem,
+    );
+    expect(result.status).toBe("valid");
+  });
+
+  it("sessionKey pointing at wrongRepo session → no_artifacts (correct behavior)", () => {
+    const correctRepo = join(fakeHome, "lobs", "correct-repo");
+    const wrongRepo = join(fakeHome, "lobs", "wrong-repo");
+    initGitRepo(correctRepo);
+    initGitRepo(wrongRepo);
+    commitFile(correctRepo, "work.ts");
+    // wrongRepo: no commits → detectActualWorkingRepos finds wrongRepo but no artifacts
+
+    const startedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+    const correctStem = "aaaaaaaaaaaaaa01";
+    const wrongStem = "zzzzzzzzzzzzzz99";
+    writeSession("programmer", correctRepo, `${correctStem}.jsonl`, 8 * 60);
+    writeSession("programmer", wrongRepo, `${wrongStem}.jsonl`, 6 * 60);
+
+    // sessionKey deliberately points to wrong session (no artifacts in that repo)
+    const result = validatePostSuccessArtifacts(
+      "programmer", null, 90_000, null, startedAt, wrongStem,
+    );
+    expect(result.status).toBe("no_artifacts");
+  });
+
+  it("deterministic tie-break: picks smallest session ID when sessionKey is null", () => {
+    /**
+     * Two sessions within the time window, no sessionKey.
+     * Should pick the session with the lexicographically smallest stem (not the most recent mtime).
+     */
+    const smallIdRepo = join(fakeHome, "lobs", "small-id-repo");
+    const largeIdRepo = join(fakeHome, "lobs", "large-id-repo");
+    initGitRepo(smallIdRepo);
+    initGitRepo(largeIdRepo);
+    commitFile(smallIdRepo, "work.ts");
+    // largeIdRepo: no commits → would return no_artifacts
+
+    const startedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+
+    // Both within window; largeIdRepo is MORE RECENT (5 min vs 8 min)
+    // Old code would pick largeIdRepo (most recent mtime) → no_artifacts (BUG)
+    // New code picks smallIdRepo (smallest ID) → valid (FIXED)
+    writeSession("programmer", smallIdRepo, "0000000000000001.jsonl", 8 * 60); // smaller stem, older mtime
+    writeSession("programmer", largeIdRepo, "ffffffffffffffff.jsonl", 5 * 60); // larger stem, newer mtime
+
+    const result = validatePostSuccessArtifacts(
+      "programmer", null, 90_000, null, startedAt, null,
+    );
+    expect(result.status).toBe("valid"); // small-id-repo was chosen
+  });
+
+  it("sessionKey not found falls back to window match deterministically", () => {
+    const repoDir = join(fakeHome, "lobs", "myrepo");
+    initGitRepo(repoDir);
+    commitFile(repoDir, "x.ts");
+
+    const startedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+    writeSession("programmer", repoDir, "aaaa000000000001.jsonl", 8 * 60);
+
+    // sessionKey that doesn't exist → falls back to window match
+    const result = validatePostSuccessArtifacts(
+      "programmer", null, 90_000, null, startedAt, "nonexistentsessionkey",
+    );
+    expect(result.status).toBe("valid"); // fallback found the actual session
+  });
+
+  it("null sessionKey with single window match → correct session selected", () => {
+    const repoDir = join(fakeHome, "lobs", "solo-repo");
+    initGitRepo(repoDir);
+    commitFile(repoDir, "solo.ts");
+
+    const startedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+    writeSession("programmer", repoDir, "bbbb000000000001.jsonl", 8 * 60);
+
+    const result = validatePostSuccessArtifacts(
+      "programmer", null, 90_000, null, startedAt, null,
+    );
+    expect(result.status).toBe("valid");
+  });
+
+  it("null sessionKey with null startedAt → falls back to most-recent session", () => {
+    const repoDir = join(fakeHome, "lobs", "recent-repo");
+    initGitRepo(repoDir);
+    commitFile(repoDir, "recent.ts");
+
+    // Most recent session (5 min old) → used as fallback
+    writeSession("programmer", repoDir, "cccc000000000001.jsonl", 5 * 60);
+
+    const result = validatePostSuccessArtifacts(
+      "programmer", null, 90_000, null, null, null,
+    );
+    expect(result.status).toBe("valid");
+  });
+});
+
+// ─── 10. Tilde expansion in repoPath ──────────────────────────────────────────
+
+describe("(10) Tilde expansion in repoPath", () => {
   it("expands ~ in repoPath using HOME env", () => {
     const repoDir = join(fakeHome, "my-project");
     initGitRepo(repoDir);

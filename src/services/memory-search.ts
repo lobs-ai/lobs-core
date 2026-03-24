@@ -1,12 +1,10 @@
 /**
+ * @deprecated Use memory-client.ts instead.
+ * This module is kept for backward compatibility but all new consumers
+ * should import from memory-client.ts which adds health tracking,
+ * connection backoff, and a unified API.
+ *
  * Memory search bridge — tries HTTP first, falls back to grep.
- * 
- * Priority:
- * 1. HTTP to localhost:7420 (primary — server is supervised)
- * 2. Simple file grep (if server is down or unresponsive)
- * 
- * This provides resilience without requiring Bun-specific imports
- * (lobs-memory uses bun:sqlite which won't work in Node).
  */
 
 import { readFileSync, readdirSync, statSync } from "node:fs";

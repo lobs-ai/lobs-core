@@ -138,18 +138,12 @@ export async function assembleCalendarCheckContext(event: {
     notes: t.notes,
   }));
 
-  // Try to get relevant memory snippets via memory search
+  // Try to get relevant memory snippets via in-process memory search
   let relevantMemory: string[] = [];
   try {
-    const res = await fetch("http://localhost:7420/search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: event.summary, limit: 5 }),
-    });
-    if (res.ok) {
-      const data = await res.json() as { results?: Array<{ content: string }> };
-      relevantMemory = (data.results ?? []).map(r => r.content).slice(0, 5);
-    }
+    const { memorySearch } = await import("./memory-client.js");
+    const { results } = await memorySearch(event.summary, { maxResults: 5 });
+    relevantMemory = results.map(r => r.snippet).slice(0, 5);
   } catch {
     // Memory search unavailable, continue without
   }

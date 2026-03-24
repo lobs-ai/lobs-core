@@ -14,7 +14,7 @@
 import { readFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ToolDefinition } from "../types.js";
-import { memorySearch } from "../../services/memory-search.js";
+import { memorySearch } from "../../services/memory-client.js";
 import { ensureTodaysMemoryFile } from "../../services/memory-condenser.js";
 
 // ── memory_search ────────────────────────────────────────────────────────────
@@ -77,12 +77,11 @@ export async function memorySearchTool(
     : undefined;
 
   try {
-    const { results, source, timeMs } = await memorySearch(
-      query,
+    const { results, source, timeMs } = await memorySearch(query, {
       maxResults,
       collections,
-      context,
-    );
+      conversationContext: context,
+    });
 
     if (!results || results.length === 0) {
       return `No results found for: "${query}"`;

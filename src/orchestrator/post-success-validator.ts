@@ -18,17 +18,33 @@
  * detected even if the auto-close check runs well after the task finished.
  * Falls back to FALLBACK_WINDOW_MINUTES if startedAt is unavailable.
  *
+ * ## Concurrency Deduplication (bug c8cb6459 fix)
+ *
+ * When multiple tasks of the same agent type run concurrently, a simple
+ * `.find()` on mtime-sorted sessions can pick the wrong session.
+ *
+ * Fix: `detectActualWorkingRepos` now accepts a `sessionKey` parameter
+ * (the `child_session_key` from `worker_runs`) and uses it for exact
+ * filename matching. If sessionKey is absent, it falls back to deterministic
+ * disambiguation: smallest session ID (lexicographic) among all sessions
+ * whose mtime falls within the expected window (NOT first mtime match).
+ *
  * @see docs/decisions/designs/post-success-artifact-validation.md
+ * @see docs/decisions/designs/orphaned-session-recovery.md
  */
 
 import { execSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { log } from "../util/logger.js";
 
 /** Fallback: how far back to look if we don't have startedAt (10 minutes). */
 const FALLBACK_WINDOW_MINUTES = 10;
 
 /** Flag completions faster than this as suspicious (60 seconds). */
 const FAST_THRESHOLD_MS = 60 * 1000;
+
+/** How long after startedAt a session file could still be active (30 minutes). */
+const SESSION_MATCH_WINDOW_MS = 30 * 60_000;
 
 /**
  * Agent types that require artifact validation.
@@ -72,6 +88,7 @@ function buildTimeCutoff(startedAt: string | null): { gitSince: string; findNewe
  * @param durationMs        how long the last run took (ended_at - started_at in ms), null if unknown
  * @param expectedArtifacts parsed expected_artifacts from the task (ArtifactSpec[]), null to use heuristics
  * @param startedAt         ISO timestamp of when the task's last run started, null if unknown
+ * @param sessionKey        child_session_key from worker_runs (hex filename stem), null if unknown
  */
 export function validatePostSuccessArtifacts(
   agentType: string | null,
@@ -79,6 +96,7 @@ export function validatePostSuccessArtifacts(
   durationMs: number | null,
   expectedArtifacts: unknown = null,
   startedAt: string | null = null,
+  sessionKey: string | null = null,
 ): PostSuccessValidationResult {
   const agent = agentType ?? "unknown";
 
@@ -102,7 +120,7 @@ export function validatePostSuccessArtifacts(
     // Agents often work in a different repo than the project's declared repo_path
     // (e.g., a task filed under PAW might fix code in lobs-core).
     if (!hasArtifacts) {
-      const actualRepos = detectActualWorkingRepos(agent, startedAt);
+      const actualRepos = detectActualWorkingRepos(agent, startedAt, sessionKey);
       for (const actualRepo of actualRepos) {
         // Skip if same as project repo (already checked)
         if (actualRepo === repoPath?.replace(/^~/, process.env["HOME"] ?? "")) continue;
@@ -328,40 +346,122 @@ function checkExpectedArtifactPaths(paths: string[]): { found: boolean; detail: 
  * Looks at the most recent session for the given agent type, extracts git repo paths
  * from exec commands (git commit, git add, etc.) and Write/Edit tool paths.
  * Returns unique repo root directories.
+ *
+ * ## Concurrency Deduplication (bug c8cb6459 fix)
+ *
+ * When multiple tasks run concurrently for the same agent type, a simple
+ * `.find()` on mtime-sorted sessions can pick the wrong one. This function uses
+ * the following priority order for session selection:
+ *
+ *  1. **Exact match** — if `sessionKey` is provided (from `worker_runs.child_session_key`),
+ *     use that specific file directly. This is the most reliable path.
+ *  2. **Deterministic window match** — if multiple sessions fall within the
+ *     startedAt ± SESSION_MATCH_WINDOW_MS window, pick the one with the
+ *     **smallest session ID** (lexicographic hex sort), not the most-recent mtime.
+ *     This is deterministic and avoids race conditions.
+ *  3. **Fallback** — use the most-recent session file if nothing else matches.
+ *
+ * Structured log lines (debug level) document which sessions were considered
+ * and why one was chosen, to aid post-mortem diagnosis.
  */
-function detectActualWorkingRepos(agentType: string, startedAt: string | null): string[] {
+function detectActualWorkingRepos(
+  agentType: string,
+  startedAt: string | null,
+  sessionKey: string | null = null,
+): string[] {
   const home = process.env["HOME"] ?? "";
   const sessionsDir = `${home}/.lobs/agents/${agentType}/sessions`;
+  const prefix = `[psv:session-match] agent=${agentType}`;
 
-  if (!existsSync(sessionsDir)) return [];
+  if (!existsSync(sessionsDir)) {
+    log().debug?.(`${prefix} sessionsDir not found — skipping: ${sessionsDir}`);
+    return [];
+  }
 
   try {
-    // Find the most recent session file(s) — look for sessions modified around the startedAt time
-    // All programmer sessions are now saved as spawned-*.jsonl (including regular task runs),
-    // so we include all .jsonl files, not just non-spawned ones.
-    const files = readdirSync(sessionsDir)
+    // Enumerate all .jsonl session files with mtime metadata
+    const allFiles = readdirSync(sessionsDir)
       .filter(f => f.endsWith(".jsonl"))
       .map(f => ({
         name: f,
+        stem: f.replace(/\.jsonl$/, ""),
         path: `${sessionsDir}/${f}`,
         mtime: statSync(`${sessionsDir}/${f}`).mtimeMs,
       }))
-      .sort((a, b) => b.mtime - a.mtime);
+      .sort((a, b) => b.mtime - a.mtime); // most-recent first (for fallback only)
 
-    if (files.length === 0) return [];
-
-    // If we have a startedAt, find the session that was active during that time
-    // Otherwise just use the most recent session
-    let targetFile = files[0];
-    if (startedAt) {
-      const startMs = new Date(startedAt).getTime();
-      // Find session file whose mtime is closest to (and after) startedAt
-      const candidate = files.find(f => {
-        // Session mtime should be near or after task start (within 30 min)
-        return f.mtime >= startMs && f.mtime <= startMs + 30 * 60_000;
-      });
-      if (candidate) targetFile = candidate;
+    if (allFiles.length === 0) {
+      log().debug?.(`${prefix} no session files found`);
+      return [];
     }
+
+    log().debug?.(
+      `${prefix} found ${allFiles.length} session file(s). ` +
+      `sessionKey=${sessionKey ?? "none"} startedAt=${startedAt ?? "none"}`,
+    );
+
+    let targetFile: typeof allFiles[0] | undefined;
+    let selectionReason = "unset";
+
+    // ── Priority 1: Exact match via sessionKey ─────────────────────────────
+    if (sessionKey) {
+      const exactMatch = allFiles.find(f => f.stem === sessionKey);
+      if (exactMatch) {
+        targetFile = exactMatch;
+        selectionReason = `exact sessionKey match (${sessionKey})`;
+      } else {
+        log().debug?.(`${prefix} sessionKey=${sessionKey} not found among ${allFiles.length} files — falling back to window match`);
+      }
+    }
+
+    // ── Priority 2: Deterministic window match ─────────────────────────────
+    if (!targetFile && startedAt) {
+      const startMs = new Date(startedAt).getTime();
+      const windowEnd = startMs + SESSION_MATCH_WINDOW_MS;
+
+      // Collect all sessions whose mtime falls within the expected window
+      const windowMatches = allFiles.filter(
+        f => f.mtime >= startMs && f.mtime <= windowEnd,
+      );
+
+      log().debug?.(
+        `${prefix} window [${new Date(startMs).toISOString()} → ${new Date(windowEnd).toISOString()}]: ` +
+        `${windowMatches.length} match(es) — [${windowMatches.map(f => f.stem).join(", ")}]`,
+      );
+
+      if (windowMatches.length === 1) {
+        targetFile = windowMatches[0];
+        selectionReason = `sole window match (mtime=${new Date(targetFile.mtime).toISOString()})`;
+      } else if (windowMatches.length > 1) {
+        // Deterministic tie-break: smallest session ID (lexicographic hex sort).
+        // This is stable across concurrent tasks and avoids the race that caused c8cb6459.
+        // We do NOT pick the most-recent mtime because that can select a different concurrent task.
+        const sorted = [...windowMatches].sort((a, b) => a.stem.localeCompare(b.stem));
+        targetFile = sorted[0];
+        selectionReason =
+          `smallest session ID among ${windowMatches.length} window match(es) ` +
+          `(chosen=${targetFile.stem}, others=[${sorted.slice(1).map(f => f.stem).join(", ")}])`;
+        log().debug?.(
+          `${prefix} CONCURRENCY DEDUP: multiple sessions in window — ` +
+          `choosing smallest ID. chosen=${targetFile.stem} ` +
+          `discarded=[${sorted.slice(1).map(f => f.stem).join(", ")}]`,
+        );
+      }
+    }
+
+    // ── Priority 3: Fallback — most recent session ─────────────────────────
+    if (!targetFile) {
+      targetFile = allFiles[0];
+      selectionReason = `fallback (most recent, mtime=${new Date(targetFile.mtime).toISOString()})`;
+      if (allFiles.length > 1) {
+        log().debug?.(
+          `${prefix} using fallback most-recent session. ` +
+          `This may be inaccurate for concurrent tasks — provide sessionKey for exact matching.`,
+        );
+      }
+    }
+
+    log().debug?.(`${prefix} selected session=${targetFile.stem} reason=${selectionReason ?? "unknown"}`);
 
     // Read the session and extract repo paths from tool calls
     const content = readFileSync(targetFile.path, "utf-8");
@@ -402,8 +502,15 @@ function detectActualWorkingRepos(agentType: string, startedAt: string | null): 
       } catch { /* skip unparseable lines */ }
     }
 
+    if (repoPaths.size > 0) {
+      log().debug?.(`${prefix} repos detected from session ${targetFile.stem}: [${[...repoPaths].join(", ")}]`);
+    } else {
+      log().debug?.(`${prefix} no repos detected from session ${targetFile.stem}`);
+    }
+
     return [...repoPaths];
-  } catch {
+  } catch (err) {
+    log().debug?.(`${prefix} error scanning sessions: ${err}`);
     return [];
   }
 }

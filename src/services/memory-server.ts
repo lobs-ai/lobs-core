@@ -10,6 +10,7 @@ import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { checkMemorySupervisorHealth } from "./restart-telemetry.js";
+import { resetClient as resetMemoryClient } from "./memory-client.js";
 
 const HOME = process.env.HOME ?? "";
 const MEMORY_DIR = resolve(HOME, "lobs/lobs-core/memory");
@@ -172,6 +173,9 @@ class MemoryServerSupervisor {
     this.consecutiveHealthFailures = 0;
 
     console.log(`[memory-supervisor] Spawning: ${bunPath} run server/index.ts (cwd: ${MEMORY_DIR})`);
+
+    // Clear memory-client backoff so it retries immediately after restart
+    resetMemoryClient();
 
     // Schedule health checks after grace period so the server has time to start
     setTimeout(() => {

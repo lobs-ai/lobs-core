@@ -196,11 +196,11 @@ async function handleStatusCommand(interaction: ChatInputCommandInteraction): Pr
   // Count active tasks
   const activeTasks = db.prepare('SELECT COUNT(*) as count FROM tasks WHERE status = ?').get('active') as { count: number };
   
-  // Get memory server health (check if port 7420 is responding)
+  // Get memory service health (in-process)
   let memoryHealth = '❓ Unknown';
   try {
-    const memCheck = await fetch('http://localhost:7420/health', { signal: AbortSignal.timeout(2000) });
-    memoryHealth = memCheck.ok ? '✅ Healthy' : '⚠️ Degraded';
+    const { isMemoryReady } = await import("./memory/index.js");
+    memoryHealth = isMemoryReady() ? '✅ In-Process' : '⚠️ Not Ready';
   } catch {
     memoryHealth = '❌ Down';
   }
@@ -214,7 +214,7 @@ async function handleStatusCommand(interaction: ChatInputCommandInteraction): Pr
       { name: 'Uptime', value: uptime, inline: true },
       { name: 'Active Workers', value: String(busyAgents.count), inline: true },
       { name: 'Tasks in Queue', value: String(activeTasks.count), inline: true },
-      { name: 'Memory Server', value: memoryHealth, inline: true },
+      { name: 'Memory', value: memoryHealth, inline: true },
       { name: 'Model', value: model, inline: false },
     )
     .setTimestamp();

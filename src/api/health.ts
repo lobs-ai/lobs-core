@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { json } from "./index.js";
-import { memoryServer } from "../services/memory-server.js";
+import { isMemoryReady, getMemoryHealth } from "../services/memory/index.js";
 import { discordService } from "../services/discord.js";
 import { getKeyPool } from "../services/key-pool.js";
 
@@ -10,15 +10,6 @@ const HOME = process.env.HOME ?? "";
 const PID_FILE = resolve(HOME, ".lobs/lobs.pid");
 const GOOGLE_TOKEN_FILE = resolve(HOME, ".lobs/credentials/google_token.json");
 const GOOGLE_CREDENTIALS_FILE = resolve(HOME, ".lobs/credentials/client_secret.json");
-
-async function checkMemoryServer(): Promise<boolean> {
-  try {
-    const res = await fetch("http://localhost:7420/health", { signal: AbortSignal.timeout(1000) });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
 
 async function checkLmStudio(): Promise<boolean> {
   try {
@@ -63,7 +54,6 @@ interface ServiceHealth {
   status: ServiceStatus;
   message?: string;
   fix?: string;
-  /** severity: error = must fix, warning = should fix, info = FYI */
   severity: "error" | "warning" | "info";
 }
 
@@ -75,7 +65,6 @@ async function checkGoogleToken(): Promise<{ valid: boolean; message: string }> 
     const token = JSON.parse(readFileSync(GOOGLE_TOKEN_FILE, "utf8"));
     if (!token.refresh_token) return { valid: false, message: "No refresh token — reauth needed" };
 
-    // Try a lightweight token refresh to verify the refresh token works
     const creds = JSON.parse(readFileSync(GOOGLE_CREDENTIALS_FILE, "utf8"));
     const installed = creds.installed ?? creds.web;
     const body = new URLSearchParams({
@@ -103,20 +92,19 @@ async function checkGoogleToken(): Promise<{ valid: boolean; message: string }> 
 async function getServiceWarnings(): Promise<ServiceHealth[]> {
   const services: ServiceHealth[] = [];
 
-  // Run checks in parallel
   const [memoryOk, lmStudioOk, imagineOk, googleResult] = await Promise.all([
-    checkMemoryServer(),
+    Promise.resolve(isMemoryReady()),
     checkLmStudio(),
     checkImagine(),
     checkGoogleToken(),
   ]);
 
-  // Memory server
+  // Memory service (in-process)
   if (!memoryOk) {
     services.push({
-      id: "memory-server", name: "Memory Server", status: "down",
-      message: "Memory search unavailable",
-      fix: "Check lobs-memory container or run: lobs restart",
+      id: "memory-server", name: "Memory Service", status: "down",
+      message: "Memory search unavailable (in-process module not initialized)",
+      fix: "Check startup logs or run: lobs restart",
       severity: "error",
     });
   }
@@ -153,7 +141,7 @@ async function getServiceWarnings(): Promise<ServiceHealth[]> {
     });
   }
 
-  // Google APIs (Calendar + Gmail share the same token)
+  // Google APIs
   if (!existsSync(GOOGLE_TOKEN_FILE)) {
     services.push({
       id: "google", name: "Google APIs", status: "unconfigured",
@@ -170,7 +158,7 @@ async function getServiceWarnings(): Promise<ServiceHealth[]> {
     });
   }
 
-  // Key pool — check for providers with all keys unhealthy
+  // Key pool
   try {
     const poolStatus = getKeyPool().getFullStatus();
     for (const [provider, info] of Object.entries(poolStatus.providers)) {
@@ -221,34 +209,40 @@ export async function handleHealthRequest(_req: IncomingMessage, res: ServerResp
   }
 
   // Default: full health check
-  const [memoryOk, lmStudio] = await Promise.all([
-    checkMemoryServer(),
+  const [memoryReady, lmStudio] = await Promise.all([
+    Promise.resolve(isMemoryReady()),
     checkLmStudio(),
   ]);
 
   const db = checkDb();
   const pid = getPid();
-
   const status = db ? "healthy" : "unhealthy";
 
-  const memoryStatus = memoryServer.getStatus();
+  let memoryInfo: Record<string, unknown> = { status: "down" };
+  if (memoryReady) {
+    try {
+      const health = await getMemoryHealth();
+      memoryInfo = {
+        status: health.status,
+        mode: "in-process",
+        uptime: health.uptime,
+        documents: health.index.documents,
+        chunks: health.index.chunks,
+      };
+    } catch {
+      memoryInfo = { status: "error", mode: "in-process" };
+    }
+  }
 
   const body: Record<string, unknown> = {
     status,
     uptime: process.uptime(),
     pid: pid ?? process.pid,
     db: db ? "ok" : "error",
-    memory_server: memoryOk ? "ok" : "down",
-    memory_supervisor: {
-      pid: memoryStatus.pid,
-      restarts: memoryStatus.restartCount,
-      running: memoryStatus.running,
-    },
+    memory: memoryInfo,
     lm_studio: lmStudio ? "ok" : "down",
   };
 
-  // When LM Studio is unreachable, include diagnostic links so callers know
-  // exactly where to get the full model-availability report.
   if (!lmStudio) {
     body.lm_studio_diagnostic = {
       hint: "LM Studio appears unreachable. Run `lobs preflight` or query the diagnostic API for details.",
