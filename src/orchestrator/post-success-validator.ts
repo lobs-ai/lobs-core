@@ -239,21 +239,44 @@ function checkWriterArtifacts(cutoff: TimeCutoff): { found: boolean; detail: str
 /** Fallback: check for any recently modified files (no specific repo). */
 function checkAnyRecentFiles(baseDir: string | null, cutoff: TimeCutoff): { found: boolean; detail: string } {
   const home = process.env["HOME"] ?? "";
-  const searchDir = baseDir ?? `${home}/apps`;
-  if (!existsSync(searchDir)) return { found: false, detail: `search dir not found: ${searchDir}` };
+  
+  // If baseDir is provided, use it directly
+  if (baseDir) {
+    if (!existsSync(baseDir)) return { found: false, detail: `search dir not found: ${baseDir}` };
+    try {
+      const recent = execSync(
+        `find "${baseDir}" -newermt "${cutoff.findNewer}" -type f -not -path '*/.git/*' 2>/dev/null | head -5`,
+        { timeout: 5000, encoding: "utf-8" },
+      ).trim();
+      if (recent.length > 0) {
+        const count = recent.split("\n").length;
+        return { found: true, detail: `${count} file(s) modified ${cutoff.label}` };
+      }
+    } catch { /* ignore */ }
+    return { found: false, detail: "no recent file activity found" };
+  }
 
-  try {
-    const recent = execSync(
-      `find "${searchDir}" -newermt "${cutoff.findNewer}" -type f -not -path '*/.git/*' 2>/dev/null | head -5`,
-      { timeout: 5000, encoding: "utf-8" },
-    ).trim();
-    if (recent.length > 0) {
-      const count = recent.split("\n").length;
-      return { found: true, detail: `${count} file(s) modified ${cutoff.label}` };
-    }
-  } catch { /* ignore */ }
+  // No baseDir provided: try a list of known dev directories in order
+  const searchDirs = [
+    `${home}/lobs`,
+    `${home}/paw`,
+    `${home}/apps`,
+  ].filter(p => existsSync(p));
 
-  return { found: false, detail: "no recent file activity found" };
+  for (const searchDir of searchDirs) {
+    try {
+      const recent = execSync(
+        `find "${searchDir}" -newermt "${cutoff.findNewer}" -type f -not -path '*/.git/*' 2>/dev/null | head -5`,
+        { timeout: 5000, encoding: "utf-8" },
+      ).trim();
+      if (recent.length > 0) {
+        const count = recent.split("\n").length;
+        return { found: true, detail: `${count} file(s) modified ${cutoff.label} (in ${searchDir})` };
+      }
+    } catch { /* ignore */ }
+  }
+
+  return { found: false, detail: `no recent file activity found in known dev directories (${searchDirs.join(", ") || "none found"})` };
 }
 
 /**
@@ -314,8 +337,10 @@ function detectActualWorkingRepos(agentType: string, startedAt: string | null): 
 
   try {
     // Find the most recent session file(s) — look for sessions modified around the startedAt time
+    // All programmer sessions are now saved as spawned-*.jsonl (including regular task runs),
+    // so we include all .jsonl files, not just non-spawned ones.
     const files = readdirSync(sessionsDir)
-      .filter(f => f.endsWith(".jsonl") && !f.startsWith("spawned-"))
+      .filter(f => f.endsWith(".jsonl"))
       .map(f => ({
         name: f,
         path: `${sessionsDir}/${f}`,
