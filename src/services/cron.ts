@@ -671,11 +671,10 @@ export class CronService {
 
     if (this.onEvent) {
       try {
-        // Each agent job runs in a dedicated channel so the LLM gets clean
-        // context instead of leftover history from previous runs.  Clear all
-        // but the last 2 messages from that channel before firing.
-        // Silently skip if the table doesn't exist yet (e.g. in tests).
-        const jobChannel = job.channelId ?? "cron";
+        // Each agent job runs in a dedicated internal channel so the LLM
+        // gets clean context and status replies don't leak to Discord.
+        // Clear all but the last 2 messages from that channel before firing.
+        const conversationChannel = `cron:${job.id}`;
         try {
           this.db
             .prepare(
@@ -687,15 +686,14 @@ export class CronService {
                  ORDER BY created_at DESC LIMIT 2
                )`,
             )
-            .run(jobChannel, jobChannel);
+            .run(conversationChannel, conversationChannel);
         } catch {
           // table not present — no-op
         }
 
-        // Pass the job's Discord channel ID (if set) so replies go to the
-        // right place.  Falls back to "cron" which main.ts resolves to the
-        // alerts channel via resolveDiscordChannel().
-        await this.onEvent(job.payload, jobChannel);
+        // The agent uses the `message` tool to send to the actual Discord
+        // channel. Its conversational replies stay on this internal channel.
+        await this.onEvent(job.payload, conversationChannel);
       } catch (err) {
         log().warn(`[cron] Error firing agent job ${job.name}: ${err}`);
       }
