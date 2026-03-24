@@ -47,6 +47,7 @@ import { handleMediaRequest } from "./media.js";
 import { handlePublicPulseRequest } from "./public-pulse.js";
 import { handleQueueMetrics } from "./queue-metrics.js";
 import { handleMyTasksRequest } from "./my-tasks.js";
+import { handleIntelRequest } from "./intel.js";
 import { error } from "./index.js";
 
 const PREFIXES = ["/paw/api/", "/api/"];
@@ -114,6 +115,7 @@ export function registerPawRouter(api: LobsPluginApi): void {
         case "media":           await handleMediaRequest(req, res, parts[1]); return true;
         case "queue-metrics":   await handleQueueMetrics(req, res); return true;
         case "my-tasks":       await handleMyTasksRequest(req, res, parts[1], parts); return true;
+        case "intel":          await handleIntelRequest(req, res, parts[1], parts); return true;
         case "public":
           if (parts[1] === "pulse") { await handlePublicPulseRequest(req, res); return true; }
           error(res, "Not found", 404); return true;
@@ -188,6 +190,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       case "media":           await handleMediaRequest(req, res, parts[1]); return;
       case "queue-metrics":   await handleQueueMetrics(req, res); return;
       case "my-tasks":       await handleMyTasksRequest(req, res, parts[1], parts); return;
+      case "intel":          await handleIntelRequest(req, res, parts[1], parts); return;
       case "public":
         if (parts[1] === "pulse") { await handlePublicPulseRequest(req, res); return; }
         error(res, "Not found", 404); return;

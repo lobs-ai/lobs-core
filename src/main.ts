@@ -40,7 +40,9 @@ import { getGatewayConfig } from "./config/lobs.js";
 import { WorkerRegistry } from "./workers/index.js";
 import { MemoryProcessorWorker } from "./workers/memory-processor.js";
 import { ResearchProcessorWorker } from "./workers/research-processor.js";
+import { IntelSweepWorker } from "./workers/intel-sweep.js";
 import { initResearchQueueService } from "./services/research-queue.js";
+import { initIntelSweepService } from "./services/intel-sweep.js";
 import { runLmStudioAlertCheck } from "./services/lm-studio-monitor.js";
 import { runDbMaintenance } from "./services/db-maintenance.js";
 
@@ -310,6 +312,10 @@ async function main() {
   const workerRegistry = new WorkerRegistry(getRawDb(), cronService);
   workerRegistry.register(new MemoryProcessorWorker());
   workerRegistry.register(new ResearchProcessorWorker(researchQueue));
+
+  // Intelligence sweep system
+  const intelSweep = initIntelSweepService(getRawDb(), researchQueue);
+  workerRegistry.register(new IntelSweepWorker(intelSweep));
 
   // Register system jobs (code handlers, not DB-backed)
   cronService.registerSystemJob({
