@@ -170,6 +170,12 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
         break;
       }
 
+      // Check abort signal — graceful shutdown before starting a new LLM call
+      if (spec.abortSignal?.aborted) {
+        stopReason = "interrupted";
+        break;
+      }
+
       turns++;
       console.debug(
         `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} ` +
@@ -512,6 +518,12 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
           `tool_roundtrip count=${results.length} continuing=true`,
         );
 
+        // Check abort signal after tool execution — don't start next LLM call
+        if (spec.abortSignal?.aborted) {
+          stopReason = "interrupted";
+          break;
+        }
+
         continue;
       }
 
@@ -533,7 +545,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
     const durationSeconds = (Date.now() - startTime) / 1000;
     const costUsd = calculateCost(spec.model, usage);
 
-    // Write final summary
+    // Write final summary — for interrupted runs this is the resume checkpoint
     transcript.writeSummary({
       type: "summary",
       runId,
@@ -546,6 +558,14 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       stopReason,
       timestamp: new Date().toISOString(),
     });
+
+    if (stopReason === "interrupted") {
+      console.log(
+        `[agent-loop] run=${runId} agent=${spec.agent} CHECKPOINT written — ` +
+        `turns=${turns} messages=${messages.length} duration_s=${durationSeconds.toFixed(1)} ` +
+        `(will resume on next restart if task is re-queued)`
+      );
+    }
 
     const result: AgentResult = {
       succeeded: stopReason === "end_turn",

@@ -40,6 +40,13 @@ export interface AgentSpec {
   resumeMessages?: import("./providers.js").LLMMessage[];
   /** Override the session/run ID (for transcript file naming) */
   runId?: string;
+  /**
+   * Abort signal for graceful shutdown.
+   * When aborted, the agent loop finishes the current turn then writes a
+   * shutdown checkpoint (stopReason="interrupted") so the run can be resumed
+   * after a restart without losing progress.
+   */
+  abortSignal?: AbortSignal;
 }
 
 export type ToolName = "exec" | "read" | "write" | "edit" | "ls" | "grep" | "glob" | "find_files" | "code_search" | "web_search" | "web_fetch" | "memory_search" | "memory_read" | "memory_write" | "spawn_agent" | "run_pipeline" | "list_agents" | "cron" | "message" | "react" | "process" | "humanize" | "imagine" | "html_to_pdf";
@@ -68,7 +75,7 @@ export interface AgentResult {
   /** Number of LLM turns */
   turns: number;
   /** How the run ended */
-  stopReason: "end_turn" | "max_turns" | "timeout" | "error";
+  stopReason: "end_turn" | "max_turns" | "timeout" | "error" | "interrupted";
   /** Error message if failed */
   error?: string;
   /** Files created or modified during the run */

@@ -9,7 +9,7 @@
 import { initDb, closeDb, getRawDb } from "./db/connection.js";
 import { runMigrations } from "./db/migrate.js";
 import { seedDefaultWorkflows } from "./workflow/seeds.js";
-import { startControlLoop, stopControlLoop } from "./orchestrator/control-loop.js";
+import { startControlLoop, stopControlLoop, flushWorkerCheckpoints } from "./orchestrator/control-loop.js";
 import { startServer } from "./server.js";
 import { purgeOldArchivedSessions } from "./api/chat.js";
 import { setLogger, log } from "./util/logger.js";
@@ -645,7 +645,13 @@ async function main() {
 
     // Persist session state before anything else
     await mainAgent.prepareForShutdown();
-    
+
+    // Checkpoint in-flight worker agents — signal them to finish their current
+    // tool call and write a transcript checkpoint so they can resume on restart.
+    // Must happen before stopControlLoop() so the control-loop timer doesn't
+    // re-queue anything while we're waiting.
+    await flushWorkerCheckpoints(20_000);
+
     // Clean up PID file
     if (existsSync(PID_FILE)) {
       unlinkSync(PID_FILE);

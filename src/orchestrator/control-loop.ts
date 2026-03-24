@@ -89,6 +89,52 @@ export function getGatewayConfig(): { port: number; token: string } {
 }
 let isFirstTick = true;
 
+// ─── Worker checkpoint / graceful shutdown ────────────────────────────────────
+// Each in-flight processSpawnWithRunner call registers an AbortController here.
+// On SIGTERM (or explicit flushWorkerCheckpoints()), we abort all of them so
+// runAgent() can finish its current tool call, write a checkpoint, and return
+// instead of being hard-killed mid-turn.
+const activeWorkerControllers = new Map<
+  string, // workerId
+  { controller: AbortController; promise: Promise<void>; taskId: string | undefined }
+>();
+
+/**
+ * Signal all in-flight worker agents to finish their current tool call and
+ * write a shutdown checkpoint.  Returns a promise that resolves once every
+ * worker has written its checkpoint (or the `drainMs` deadline is reached).
+ *
+ * Call this from the SIGTERM handler *before* process.exit().
+ *
+ * @param drainMs Maximum time to wait for workers to finish (default 20 s).
+ */
+export async function flushWorkerCheckpoints(drainMs = 20_000): Promise<void> {
+  if (activeWorkerControllers.size === 0) return;
+
+  log().info(
+    `[checkpoint] Signalling ${activeWorkerControllers.size} in-flight worker(s) ` +
+    `to checkpoint (drain window: ${drainMs / 1000}s)…`
+  );
+
+  // Abort all controllers — each runAgent() will finish its current turn then break
+  for (const { controller, taskId } of activeWorkerControllers.values()) {
+    log().info(`[checkpoint] Aborting worker for task ${taskId?.slice(0, 8) ?? "(no-task)"}`);
+    controller.abort();
+  }
+
+  // Collect all in-flight promises, wait up to drainMs
+  const promises = [...activeWorkerControllers.values()].map(w => w.promise);
+  const deadline = new Promise<void>(resolve => setTimeout(resolve, drainMs));
+  await Promise.race([Promise.allSettled(promises), deadline]);
+
+  const remaining = activeWorkerControllers.size;
+  if (remaining > 0) {
+    log().warn(`[checkpoint] ${remaining} worker(s) did not finish within drain window — proceeding with shutdown`);
+  } else {
+    log().info(`[checkpoint] All workers checkpointed cleanly ✓`);
+  }
+}
+
 // ─── Escalation (inline) ─────────────────────────────────────────────────────
 
 const ESCALATION_TIERS = {
@@ -1702,10 +1748,21 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
     }
   }
 
+  // Register an AbortController so flushWorkerCheckpoints() can signal this worker
+  const workerAbort = new AbortController();
+  activeWorkerControllers.set(workerId, {
+    controller: workerAbort,
+    // Placeholder promise — replaced below once we have the real runAgent() promise
+    promise: Promise.resolve(),
+    taskId,
+  });
+
   try {
     // Run the agent — resume from prior session if available
     const remainingTurns = resumeMessages ? Math.max(200 - previousTurnCount, 50) : 200;
-    const result: AgentResult = await runAgent({
+
+    // Build the runAgent promise and register it so flushWorkerCheckpoints() can await it
+    const agentPromise = runAgent({
       task: fullPrompt,
       agent: req.agentType,
       model: runnerModel,
@@ -1715,7 +1772,16 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
       maxTurns: remainingTurns,
       ...(taskId ? { runId: taskId, context: { taskId } } : {}),
       ...(resumeMessages ? { resumeMessages } : {}),
+      abortSignal: workerAbort.signal,
     });
+    // Replace placeholder with real promise (errors are swallowed — we handle them below)
+    activeWorkerControllers.set(workerId, {
+      controller: workerAbort,
+      promise: agentPromise.then(() => undefined).catch(() => undefined),
+      taskId,
+    });
+
+    const result: AgentResult = await agentPromise;
 
     // Extract artifacts (files modified/created)
     const artifacts = result.artifacts ?? [];
@@ -1723,7 +1789,37 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
     // Compact the conversation to extract learnings
     // Note: runAgent doesn't expose raw messages yet, so we'll use output as a proxy
     const summary = result.output.slice(0, 2000); // First 2K chars as summary
-    
+
+    if (result.stopReason === "interrupted") {
+      // Worker was checkpointed during graceful shutdown.
+      // The session transcript is on disk; processPendingResumes() will re-queue
+      // the task on the next startup so work continues from where it left off.
+      log().info(
+        `[NATIVE_RUNNER] Worker checkpointed (interrupted) for task ${taskId?.slice(0, 8) ?? "(no-task)"} ` +
+        `after ${result.turns} turns — will resume on next restart`
+      );
+      recordWorkerEnd({
+        workerId,
+        agentType: req.agentType,
+        succeeded: false,
+        summary: `[checkpointed after ${result.turns} turns] ${summary}`,
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+        totalCostUsd: result.costUsd,
+        durationSeconds: result.durationSeconds,
+        failureType: 'infra',
+      });
+      // Leave task work_state as-is — do NOT mark done or failed.
+      // processPendingResumes() treats in-progress tasks as resumable on startup.
+      decrementPendingSpawns(projectId, req.agentType);
+      writeSpawnResult(req.runId, req.nodeId, {
+        childSessionKey: workerId,
+        status: "failed",
+        error: "interrupted: checkpoint written, will resume on restart",
+      });
+      return;
+    }
+
     // Record worker end
     recordWorkerEnd({
       workerId,
@@ -1774,6 +1870,9 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
 
     decrementPendingSpawns(projectId, req.agentType);
     throw error;
+  } finally {
+    // Always deregister — whether we finished cleanly, errored, or were interrupted
+    activeWorkerControllers.delete(workerId);
   }
 }
 
