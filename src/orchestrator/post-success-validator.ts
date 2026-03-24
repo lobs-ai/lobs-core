@@ -120,7 +120,8 @@ export function validatePostSuccessArtifacts(
     // Agents often work in a different repo than the project's declared repo_path
     // (e.g., a task filed under PAW might fix code in lobs-core).
     if (!hasArtifacts) {
-      const actualRepos = detectActualWorkingRepos(agent, startedAt, sessionKey);
+      const sessionResult = detectActualWorkingRepos(agent, startedAt, sessionKey);
+      const actualRepos = sessionResult.repos;
       for (const actualRepo of actualRepos) {
         // Skip if same as project repo (already checked)
         if (actualRepo === repoPath?.replace(/^~/, process.env["HOME"] ?? "")) continue;
@@ -130,6 +131,21 @@ export function validatePostSuccessArtifacts(
           artifactDetail = `${altResult.detail} (in ${actualRepo}, not project repo ${repoPath})`;
           break;
         }
+      }
+      // WARNING: session was found and had activity patterns, but we still found no artifacts
+      // in any of the repos it referenced. This suggests a phantom completion or a session
+      // matching problem — the repos may have been checked on the wrong branch, or the
+      // session was already rolled back.
+      if (!hasArtifacts && sessionResult.sessionStem !== null && sessionResult.hadActivityPatterns) {
+        log().warn(
+          `[psv:artifact-check:warn] agent=${agent} ` +
+          `NO_ARTIFACTS_IN_SESSION_REPOS: session=${sessionResult.sessionStem} ` +
+          `had activity patterns (gitCmds/writeEdits detected) ` +
+          `but no artifacts found in any referenced repo ` +
+          `[${actualRepos.join(", ") || "none"}]. ` +
+          `projectRepo=${repoPath ?? "none"} startedAt=${startedAt ?? "unknown"} — ` +
+          `possible phantom completion or wrong session matched.`,
+        );
       }
     }
   } else if (agent === "writer") {
@@ -363,19 +379,26 @@ function checkExpectedArtifactPaths(paths: string[]): { found: boolean; detail: 
  *
  * Structured log lines (debug level) document which sessions were considered
  * and why one was chosen, to aid post-mortem diagnosis.
+ *
+ * WARNING-level logs are emitted for conditions that indicate a possible
+ * session matching bug or phantom completion:
+ *  - Multiple sessions fall within the time window (concurrency ambiguity)
+ *  - Picked session contains no recognisable work patterns (no git commands)
  */
 function detectActualWorkingRepos(
   agentType: string,
   startedAt: string | null,
   sessionKey: string | null = null,
-): string[] {
+): { repos: string[]; sessionStem: string | null; hadActivityPatterns: boolean } {
   const home = process.env["HOME"] ?? "";
   const sessionsDir = `${home}/.lobs/agents/${agentType}/sessions`;
   const prefix = `[psv:session-match] agent=${agentType}`;
+  const dbg = (msg: string) => log().debug?.(msg);
+  const warn = (msg: string) => log().warn(msg);
 
   if (!existsSync(sessionsDir)) {
-    log().debug?.(`${prefix} sessionsDir not found — skipping: ${sessionsDir}`);
-    return [];
+    dbg(`${prefix} sessionsDir not found — skipping: ${sessionsDir}`);
+    return { repos: [], sessionStem: null, hadActivityPatterns: false };
   }
 
   try {
@@ -391,14 +414,18 @@ function detectActualWorkingRepos(
       .sort((a, b) => b.mtime - a.mtime); // most-recent first (for fallback only)
 
     if (allFiles.length === 0) {
-      log().debug?.(`${prefix} no session files found`);
-      return [];
+      dbg(`${prefix} no session files found`);
+      return { repos: [], sessionStem: null, hadActivityPatterns: false };
     }
 
-    log().debug?.(
+    dbg(
       `${prefix} found ${allFiles.length} session file(s). ` +
       `sessionKey=${sessionKey ?? "none"} startedAt=${startedAt ?? "none"}`,
     );
+    // Log each candidate with its mtime for post-mortem tracing
+    for (const f of allFiles) {
+      dbg(`${prefix}   candidate session=${f.stem} mtime=${new Date(f.mtime).toISOString()}`);
+    }
 
     let targetFile: typeof allFiles[0] | undefined;
     let selectionReason = "unset";
@@ -408,9 +435,9 @@ function detectActualWorkingRepos(
       const exactMatch = allFiles.find(f => f.stem === sessionKey);
       if (exactMatch) {
         targetFile = exactMatch;
-        selectionReason = `exact sessionKey match (${sessionKey})`;
+        selectionReason = `exact sessionKey match (${sessionKey}) mtime=${new Date(exactMatch.mtime).toISOString()}`;
       } else {
-        log().debug?.(`${prefix} sessionKey=${sessionKey} not found among ${allFiles.length} files — falling back to window match`);
+        dbg(`${prefix} sessionKey=${sessionKey} not found among ${allFiles.length} files — falling back to window match`);
       }
     }
 
@@ -424,7 +451,7 @@ function detectActualWorkingRepos(
         f => f.mtime >= startMs && f.mtime <= windowEnd,
       );
 
-      log().debug?.(
+      dbg(
         `${prefix} window [${new Date(startMs).toISOString()} → ${new Date(windowEnd).toISOString()}]: ` +
         `${windowMatches.length} match(es) — [${windowMatches.map(f => f.stem).join(", ")}]`,
       );
@@ -441,10 +468,16 @@ function detectActualWorkingRepos(
         selectionReason =
           `smallest session ID among ${windowMatches.length} window match(es) ` +
           `(chosen=${targetFile.stem}, others=[${sorted.slice(1).map(f => f.stem).join(", ")}])`;
-        log().debug?.(
-          `${prefix} CONCURRENCY DEDUP: multiple sessions in window — ` +
-          `choosing smallest ID. chosen=${targetFile.stem} ` +
-          `discarded=[${sorted.slice(1).map(f => f.stem).join(", ")}]`,
+        // WARNING: multiple sessions in the window is a strong signal of concurrent task ambiguity.
+        // If no sessionKey was available to disambiguate, this heuristic may pick the wrong session.
+        warn(
+          `[psv:session-match:warn] agent=${agentType} ` +
+          `MULTIPLE_WINDOW_MATCHES: ${windowMatches.length} sessions in time window — ` +
+          `concurrent task ambiguity detected. ` +
+          `chosen=${targetFile.stem} (smallest ID, deterministic) ` +
+          `discarded=[${sorted.slice(1).map(f => f.stem).join(", ")}] ` +
+          `window=[${new Date(startMs).toISOString()} → ${new Date(windowEnd).toISOString()}] ` +
+          `sessionKey=${sessionKey ?? "none (provide sessionKey for exact match)"}`,
         );
       }
     }
@@ -454,18 +487,20 @@ function detectActualWorkingRepos(
       targetFile = allFiles[0];
       selectionReason = `fallback (most recent, mtime=${new Date(targetFile.mtime).toISOString()})`;
       if (allFiles.length > 1) {
-        log().debug?.(
-          `${prefix} using fallback most-recent session. ` +
+        dbg(
+          `${prefix} using fallback most-recent session (${allFiles.length} candidates). ` +
           `This may be inaccurate for concurrent tasks — provide sessionKey for exact matching.`,
         );
       }
     }
 
-    log().debug?.(`${prefix} selected session=${targetFile.stem} reason=${selectionReason ?? "unknown"}`);
+    dbg(`${prefix} selected session=${targetFile.stem} reason=${selectionReason ?? "unknown"}`);
 
     // Read the session and extract repo paths from tool calls
     const content = readFileSync(targetFile.path, "utf-8");
     const repoPaths = new Set<string>();
+    let gitCommandsSeen = 0;
+    let writeEditCallsSeen = 0;
 
     for (const line of content.split("\n")) {
       if (!line.trim()) continue;
@@ -477,6 +512,7 @@ function detectActualWorkingRepos(
           if (tc.name === "exec" && typeof tc.input?.["command"] === "string") {
             const cmd = tc.input["command"] as string;
             if (cmd.includes("git ")) {
+              gitCommandsSeen++;
               // Look for cd /path && git ... or git -C /path ...
               const cdMatch = cmd.match(/cd\s+(\/\S+|~\/\S+)/);
               if (cdMatch) {
@@ -488,6 +524,7 @@ function detectActualWorkingRepos(
           // Extract paths from Write/Edit tool calls
           if ((tc.name === "write" || tc.name === "Write" || tc.name === "edit" || tc.name === "Edit")
               && typeof tc.input?.["path"] === "string") {
+            writeEditCallsSeen++;
             const filePath = (tc.input["path"] as string).replace(/^~/, home);
             // Walk up to find git root
             try {
@@ -502,15 +539,35 @@ function detectActualWorkingRepos(
       } catch { /* skip unparseable lines */ }
     }
 
+    const hadActivityPatterns = gitCommandsSeen > 0 || writeEditCallsSeen > 0;
+
+    dbg(
+      `${prefix} session=${targetFile.stem} content analysis: ` +
+      `gitCmds=${gitCommandsSeen} writeEditCalls=${writeEditCallsSeen} ` +
+      `reposFound=${repoPaths.size}`,
+    );
+
     if (repoPaths.size > 0) {
-      log().debug?.(`${prefix} repos detected from session ${targetFile.stem}: [${[...repoPaths].join(", ")}]`);
+      dbg(`${prefix} repos detected from session ${targetFile.stem}: [${[...repoPaths].join(", ")}]`);
     } else {
-      log().debug?.(`${prefix} no repos detected from session ${targetFile.stem}`);
+      dbg(`${prefix} no repos detected from session ${targetFile.stem}`);
     }
 
-    return [...repoPaths];
+    // WARNING: if the selected session has no recognisable work patterns, the session
+    // matching may have picked the wrong file (e.g., a stale session from a prior run).
+    if (!hadActivityPatterns) {
+      warn(
+        `[psv:session-match:warn] agent=${agentType} ` +
+        `NO_ACTIVITY_PATTERNS in session=${targetFile.stem} ` +
+        `(gitCmds=0, writeEditCalls=0, mtime=${new Date(targetFile.mtime).toISOString()}) — ` +
+        `session may be empty or wrong session was selected. ` +
+        `selectionReason=${selectionReason ?? "unknown"}`,
+      );
+    }
+
+    return { repos: [...repoPaths], sessionStem: targetFile.stem, hadActivityPatterns };
   } catch (err) {
-    log().debug?.(`${prefix} error scanning sessions: ${err}`);
-    return [];
+    dbg(`${prefix} error scanning sessions: ${err}`);
+    return { repos: [], sessionStem: null, hadActivityPatterns: false };
   }
 }

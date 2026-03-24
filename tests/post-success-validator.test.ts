@@ -6,6 +6,7 @@
  * (2) mtime-based session matching with concurrent tasks (session file selection)
  * (3) Fallback directory search with non-existent directories
  * (4) No false phantom-flags on succeeded tasks that produced real output
+ * (11) Structured logging warnings — WARNING emitted for session ambiguity / no-activity / no-artifacts
  *
  * Regression prevention:
  * - Hardcoded ~/apps-only assumption: null repoPath must check ~/lobs, ~/paw, ~/apps
@@ -902,6 +903,155 @@ describe("(9) Concurrency deduplication — sessionKey exact match", () => {
       "programmer", null, 90_000, null, null, null,
     );
     expect(result.status).toBe("valid");
+  });
+});
+
+// ─── 11. Structured logging warnings ──────────────────────────────────────────
+
+describe("(11) Structured logging warnings", () => {
+  /**
+   * Helper: write a session file that contains NO tool calls (empty activity).
+   * Used to trigger the NO_ACTIVITY_PATTERNS warning.
+   */
+  function writeEmptySession(agentType: string, filename: string, ageSec = 0): string {
+    const sessDir = join(fakeHome, ".lobs", "agents", agentType, "sessions");
+    mkdirSync(sessDir, { recursive: true });
+    const record = { toolCalls: [] };
+    const sessionPath = join(sessDir, filename);
+    writeFileSync(sessionPath, JSON.stringify(record) + "\n");
+    if (ageSec > 0) {
+      const t = new Date(Date.now() - ageSec * 1_000);
+      utimesSync(sessionPath, t, t);
+    }
+    return sessionPath;
+  }
+
+  beforeEach(() => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("MULTIPLE_WINDOW_MATCHES warning emitted when >1 session in time window", () => {
+    // Two sessions with mtimes inside the 30-min window → concurrency ambiguity
+    const repoA = join(fakeHome, "lobs", "repo-a");
+    const repoB = join(fakeHome, "lobs", "repo-b");
+    initGitRepo(repoA);
+    initGitRepo(repoB);
+    commitFile(repoA, "a.ts");
+    commitFile(repoB, "b.ts");
+
+    const startedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+    // Both sessions at 8 min old → within the 30-min window around startedAt
+    writeSession("programmer", repoA, "aaaa000000000001.jsonl", 8 * 60);
+    writeSession("programmer", repoB, "aaaa000000000002.jsonl", 8 * 60);
+
+    validatePostSuccessArtifacts("programmer", null, 90_000, null, startedAt, null);
+
+    const warnCalls = (console.warn as ReturnType<typeof vi.spyOn>).mock.calls
+      .flat()
+      .filter((m: unknown) => typeof m === "string" && (m as string).includes("MULTIPLE_WINDOW_MATCHES"));
+    expect(warnCalls.length).toBeGreaterThan(0);
+    expect(warnCalls[0]).toContain("agent=programmer");
+    expect(warnCalls[0]).toContain("2 sessions in time window");
+    expect(warnCalls[0]).toContain("sessionKey=none");
+  });
+
+  it("MULTIPLE_WINDOW_MATCHES warning NOT emitted when sessionKey resolves to exact match", () => {
+    // Exact sessionKey provided → exact match path taken, no ambiguity warning
+    const repoA = join(fakeHome, "lobs", "repo-a");
+    const repoB = join(fakeHome, "lobs", "repo-b");
+    initGitRepo(repoA);
+    initGitRepo(repoB);
+    commitFile(repoA, "a.ts");
+    commitFile(repoB, "b.ts");
+
+    const startedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+    const exactKey = "bbbb000000000001";
+    writeSession("programmer", repoA, `${exactKey}.jsonl`, 8 * 60);
+    writeSession("programmer", repoB, "bbbb000000000002.jsonl", 8 * 60);
+
+    validatePostSuccessArtifacts("programmer", null, 90_000, null, startedAt, exactKey);
+
+    const warnCalls = (console.warn as ReturnType<typeof vi.spyOn>).mock.calls
+      .flat()
+      .filter((m: unknown) => typeof m === "string" && (m as string).includes("MULTIPLE_WINDOW_MATCHES"));
+    expect(warnCalls.length).toBe(0);
+  });
+
+  it("NO_ACTIVITY_PATTERNS warning emitted when selected session has no git/write tool calls", () => {
+    // Session file exists but contains no tool calls → warning expected
+    const startedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    const emptyKey = "cccc000000000001";
+    writeEmptySession("programmer", `${emptyKey}.jsonl`, 3 * 60);
+
+    validatePostSuccessArtifacts("programmer", null, 90_000, null, startedAt, emptyKey);
+
+    const warnCalls = (console.warn as ReturnType<typeof vi.spyOn>).mock.calls
+      .flat()
+      .filter((m: unknown) => typeof m === "string" && (m as string).includes("NO_ACTIVITY_PATTERNS"));
+    expect(warnCalls.length).toBeGreaterThan(0);
+    expect(warnCalls[0]).toContain(`session=${emptyKey}`);
+    expect(warnCalls[0]).toContain("gitCmds=0");
+    expect(warnCalls[0]).toContain("writeEditCalls=0");
+  });
+
+  it("NO_ACTIVITY_PATTERNS warning NOT emitted when session has git commands", () => {
+    const repoDir = join(fakeHome, "lobs", "active-repo");
+    initGitRepo(repoDir);
+    commitFile(repoDir, "active.ts");
+
+    const startedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    const activeKey = "dddd000000000001";
+    writeSession("programmer", repoDir, `${activeKey}.jsonl`, 3 * 60);
+
+    validatePostSuccessArtifacts("programmer", null, 90_000, null, startedAt, activeKey);
+
+    const warnCalls = (console.warn as ReturnType<typeof vi.spyOn>).mock.calls
+      .flat()
+      .filter((m: unknown) => typeof m === "string" && (m as string).includes("NO_ACTIVITY_PATTERNS"));
+    expect(warnCalls.length).toBe(0);
+  });
+
+  it("NO_ARTIFACTS_IN_SESSION_REPOS warning emitted when session has activity but no artifacts found", () => {
+    // Session references a repo that has NO recent commits → no artifacts despite activity patterns
+    const repoDir = join(fakeHome, "lobs", "stale-repo");
+    initGitRepo(repoDir);
+    // Do NOT commit any recent files — repo exists but is old
+
+    const startedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    const sessionKey = "eeee000000000001";
+    // Session claims to have worked in repoDir (has git commands) but no recent commit there
+    writeSession("programmer", repoDir, `${sessionKey}.jsonl`, 3 * 60);
+
+    // cutoff = 1 ms means no commit is recent enough → no artifacts
+    validatePostSuccessArtifacts("programmer", null, 1, null, startedAt, sessionKey);
+
+    const warnCalls = (console.warn as ReturnType<typeof vi.spyOn>).mock.calls
+      .flat()
+      .filter((m: unknown) => typeof m === "string" && (m as string).includes("NO_ARTIFACTS_IN_SESSION_REPOS"));
+    expect(warnCalls.length).toBeGreaterThan(0);
+    expect(warnCalls[0]).toContain("agent=programmer");
+    expect(warnCalls[0]).toContain(`session=${sessionKey}`);
+    expect(warnCalls[0]).toContain("had activity patterns");
+    expect(warnCalls[0]).toContain("possible phantom completion");
+  });
+
+  it("NO_ARTIFACTS_IN_SESSION_REPOS warning NOT emitted when session has no activity patterns", () => {
+    // Empty session → NO_ACTIVITY_PATTERNS fires, but NOT NO_ARTIFACTS_IN_SESSION_REPOS
+    // (hadActivityPatterns = false → skip the second warn)
+    const startedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    const sessionKey = "ffff000000000001";
+    writeEmptySession("programmer", `${sessionKey}.jsonl`, 3 * 60);
+
+    validatePostSuccessArtifacts("programmer", null, 1, null, startedAt, sessionKey);
+
+    const warnCalls = (console.warn as ReturnType<typeof vi.spyOn>).mock.calls
+      .flat()
+      .filter((m: unknown) => typeof m === "string" && (m as string).includes("NO_ARTIFACTS_IN_SESSION_REPOS"));
+    expect(warnCalls.length).toBe(0);
   });
 });
 
