@@ -3059,8 +3059,20 @@ export class MainAgent {
   private isRoutineHeartbeat(response: string): boolean {
     if (!response) return false;
     
+    const trimmed = response.trim();
+
     // Exact "HEARTBEAT_OK" is routine - suppress
-    if (response === "HEARTBEAT_OK") return true;
+    if (trimmed === "HEARTBEAT_OK") return true;
+
+    // Response ends with HEARTBEAT_OK on its own line — the agent did its internal
+    // notes then signaled routine. Suppress the whole thing.
+    if (trimmed.endsWith("HEARTBEAT_OK")) {
+      const lastLine = trimmed.split("\n").pop()?.trim();
+      if (lastLine === "HEARTBEAT_OK") {
+        console.log(`[main-agent] Suppressing routine heartbeat (ended with HEARTBEAT_OK, ${trimmed.length} chars)`);
+        return true;
+      }
+    }
     
     // Short responses with only routine indicators are likely routine
     const routinePatterns = [
@@ -3074,10 +3086,10 @@ export class MainAgent {
     ];
     
     // If it matches routine patterns and is short (< 100 chars), suppress
-    if (response.length < 100) {
+    if (trimmed.length < 100) {
       for (const pattern of routinePatterns) {
-        if (pattern.test(response.trim())) {
-          console.log(`[main-agent] Suppressing routine heartbeat: "${response.slice(0, 50)}..."`);
+        if (pattern.test(trimmed)) {
+          console.log(`[main-agent] Suppressing routine heartbeat: "${trimmed.slice(0, 50)}..."`);
           return true;
         }
       }
