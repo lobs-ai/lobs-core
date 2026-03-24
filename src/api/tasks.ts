@@ -147,19 +147,21 @@ export async function handleTaskRequest(
 
   // /api/tasks/braindump — POST: parse brain dump text, return proposed tasks
   if (id === "braindump" && req.method === "POST") {
-    const body = await parseBody(req) as { text?: string; project_id?: string; model_tier_override?: string };
+    const body = await parseBody(req) as { text?: string; project_id?: string; model_tier_override?: string; mode?: string };
     if (!body.text?.trim()) return error(res, "text is required");
 
-    // Assemble project context if project_id provided
+    const isPersonal = body.mode === "personal";
+
+    // Assemble project context if project_id provided (agent mode only)
     let contextBlock = "";
     let contextData: Record<string, unknown> = {};
-    if (body.project_id) {
+    if (!isPersonal && body.project_id) {
       const ctx = assembleBrainDumpContext(body.project_id);
       contextBlock = formatBrainDumpContext(ctx);
       contextData = ctx as unknown as Record<string, unknown>;
     }
 
-    const systemPrompt = `You are a task extraction assistant. Given freeform text and project context, extract discrete actionable tasks.
+    const agentSystemPrompt = `You are a task extraction assistant. Given freeform text and project context, extract discrete actionable tasks.
 For each task assign:
 - title: concise, action-oriented title
 - agent: one of programmer/writer/researcher/reviewer/architect (pick best fit based on task nature)
@@ -171,9 +173,29 @@ IMPORTANT: Check the active tasks and recently completed tasks in the context. D
 Return ONLY valid JSON in this exact format with no other text:
 {"proposed_tasks": [{"title": "...", "agent": "...", "model_tier": "...", "notes": "..."}]}`;
 
-    const userPrompt = contextBlock
-      ? `${contextBlock}\n\n---\n\nExtract actionable tasks from this brain dump:\n\n${body.text}`
-      : `Extract actionable tasks from this text:\n\n${body.text}`;
+    const personalSystemPrompt = `You are a personal task extraction assistant. Given a brain dump of what someone has been working on and what they need to do, extract discrete actionable tasks.
+For each task assign:
+- title: concise, action-oriented title
+- priority: urgent/high/medium/low
+- estimatedMinutes: rough time estimate (15, 30, 60, 90, 120, 180, 240)
+- category: one of review/decision/action-item/personal/academic/errand
+- dueDate: ISO date string if a deadline is mentioned or strongly implied, null otherwise
+- notes: brief context
+
+Also return:
+- accomplishments: list of things they mentioned completing (strings)
+- summary: 1-2 sentence summary of their current situation
+
+Return ONLY valid JSON:
+{"proposed_tasks": [...], "accomplishments": [...], "summary": "..."}`;
+
+    const systemPrompt = isPersonal ? personalSystemPrompt : agentSystemPrompt;
+
+    const userPrompt = isPersonal
+      ? `Extract personal tasks from this brain dump:\n\n${body.text}`
+      : contextBlock
+        ? `${contextBlock}\n\n---\n\nExtract actionable tasks from this brain dump:\n\n${body.text}`
+        : `Extract actionable tasks from this text:\n\n${body.text}`;
 
     const modelId = body.model_tier_override
       ? getModelForTier(body.model_tier_override)
@@ -207,46 +229,88 @@ Return ONLY valid JSON in this exact format with no other text:
       console.error("[training-data] Failed to log example:", e);
     }
 
-    return json(res, { proposed_tasks: parsed.proposed_tasks ?? [] });
+    const response: Record<string, unknown> = { proposed_tasks: parsed.proposed_tasks ?? [] };
+    if (isPersonal) {
+      response.accomplishments = parsed.accomplishments ?? [];
+      response.summary = parsed.summary ?? "";
+      response.mode = "personal";
+    }
+    return json(res, response);
   }
 
   // /api/tasks/braindump/confirm — POST: bulk-create proposed tasks
   if (id === "braindump" && parts[2] === "confirm" && req.method === "POST") {
-    const body = await parseBody(req) as { tasks?: Array<{ title: string; agent?: string; model_tier?: string; notes?: string; project_id?: string }> };
+    const body = await parseBody(req) as {
+      tasks?: Array<{
+        title: string;
+        agent?: string;
+        model_tier?: string;
+        notes?: string;
+        project_id?: string;
+        // Personal mode fields
+        priority?: string;
+        estimatedMinutes?: number;
+        category?: string;
+        dueDate?: string;
+      }>;
+      mode?: string;
+    };
     if (!Array.isArray(body.tasks) || body.tasks.length === 0) return error(res, "tasks array is required");
     const db = getDb();
     const now = new Date().toISOString();
     const created = [];
     const skipped = [];
+    const isPersonal = body.mode === "personal";
+
     for (const t of body.tasks) {
       if (!t.title?.trim()) continue;
 
-      // ── Deduplication (24h window) ──────────────────────────────────────
-      const dup = findDuplicateTask({
-        title: t.title.trim(),
-        agent: t.agent,
-        modelTier: t.model_tier ?? "standard",
-      });
-      if (dup) {
-        skipped.push({ title: t.title, existing_id: dup.id, reason: "duplicate_within_24h" });
-        continue;
-      }
+      if (isPersonal) {
+        // ── Personal mode: create human tasks ─────────────────────────────
+        const taskId = randomUUID();
+        db.insert(tasks).values({
+          id: taskId,
+          title: t.title.trim(),
+          status: "active",
+          owner: "rafe",
+          priority: t.priority ?? "medium",
+          dueDate: t.dueDate ?? null,
+          shape: t.category ?? null,
+          notes: t.notes ?? null,
+          estimatedMinutes: t.estimatedMinutes ?? null,
+          createdAt: now,
+          updatedAt: now,
+        }).run();
+        created.push(db.select().from(tasks).where(eq(tasks.id, taskId)).get());
+      } else {
+        // ── Agent mode: create agent tasks (original behavior) ────────────
+        // Deduplication (24h window)
+        const dup = findDuplicateTask({
+          title: t.title.trim(),
+          agent: t.agent,
+          modelTier: t.model_tier ?? "standard",
+        });
+        if (dup) {
+          skipped.push({ title: t.title, existing_id: dup.id, reason: "duplicate_within_24h" });
+          continue;
+        }
 
-      const taskId = randomUUID();
-      const braindumpIsCompliant = classifyAndLog(taskId, t.title, t.notes ?? "");
-      db.insert(tasks).values({
-        id: taskId,
-        title: t.title,
-        status: "active",
-        projectId: t.project_id || inferProjectId(t.title, t.notes),
-        notes: t.notes,
-        agent: t.agent,
-        modelTier: t.model_tier ?? "standard",
-        isCompliant: braindumpIsCompliant,
-        createdAt: now,
-        updatedAt: now,
-      }).run();
-      created.push(db.select().from(tasks).where(eq(tasks.id, taskId)).get());
+        const taskId = randomUUID();
+        const braindumpIsCompliant = classifyAndLog(taskId, t.title, t.notes ?? "");
+        db.insert(tasks).values({
+          id: taskId,
+          title: t.title,
+          status: "active",
+          projectId: t.project_id || inferProjectId(t.title, t.notes),
+          notes: t.notes,
+          agent: t.agent,
+          modelTier: t.model_tier ?? "standard",
+          isCompliant: braindumpIsCompliant,
+          createdAt: now,
+          updatedAt: now,
+        }).run();
+        created.push(db.select().from(tasks).where(eq(tasks.id, taskId)).get());
+      }
     }
     return json(res, { created, skipped }, 201);
   }
