@@ -4,7 +4,6 @@ import { getDb } from "../db/connection.js";
 import { tasks, projects } from "../db/schema.js";
 import { json, error } from "./index.js";
 import { getCachedBrief, getCachedHealth, generateDailyBriefSummary } from "../services/system-sentinel.js";
-import { getSchedulerIntelligenceSnapshot } from "../services/scheduler-intelligence.js";
 
 /**
  * Daily brief endpoint — AI-enhanced daily summary.
@@ -36,7 +35,7 @@ interface DailyBriefResponse {
     alerts: Array<{ type: string; severity: string; message: string }>;
     summary: string;
   } | null;
-  scheduler: Awaited<ReturnType<typeof getSchedulerIntelligenceSnapshot>> | null;
+  scheduler?: undefined;
 }
 
 export async function handleDailyBriefRequest(
@@ -160,8 +159,6 @@ export async function handleDailyBriefRequest(
       const aiSummary = getCachedBrief();
       const health = getCachedHealth();
 
-      const scheduler = await getSchedulerIntelligenceSnapshot().catch(() => null);
-
       const brief: DailyBriefResponse = {
         date: today,
         tasks: {
@@ -185,7 +182,6 @@ export async function handleDailyBriefRequest(
           alerts: health.alerts,
           summary: health.summary,
         } : null,
-        scheduler,
       };
 
       return json(res, brief);
