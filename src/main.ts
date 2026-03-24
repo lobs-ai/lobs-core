@@ -495,6 +495,8 @@ async function main() {
         if (channelId.startsWith("nexus:")) return;
         // Cron channels are internal — the agent sends to Discord via the message tool
         if (channelId.startsWith("cron:")) return;
+        // Vim channels are handled via WebSocket, not Discord
+        if (channelId.startsWith("vim:")) return;
         // System/cron channels are internal — route their output to the alerts Discord channel
         const resolvedChannelId = resolveDiscordChannel(channelId, discordConfig);
         if (!resolvedChannelId) return; // No Discord configured, drop silently
@@ -505,6 +507,7 @@ async function main() {
       mainAgent.setTypingHandler((channelId) => {
         if (channelId.startsWith("nexus:")) return;
         if (channelId.startsWith("cron:")) return;
+        if (channelId.startsWith("vim:")) return;
         const resolved = resolveDiscordChannel(channelId, discordConfig);
         if (!resolved) return;
         discordService.sendTyping(resolved).catch(() => {});
@@ -516,6 +519,8 @@ async function main() {
         if (channelId.startsWith("nexus:")) return;
         // Cron channels are internal
         if (channelId.startsWith("cron:")) return;
+        // Vim channels are handled via WebSocket, not Discord
+        if (channelId.startsWith("vim:")) return;
         const resolved = resolveDiscordChannel(channelId, discordConfig);
         if (!resolved) return;
         await discordService.send(resolved, content);
