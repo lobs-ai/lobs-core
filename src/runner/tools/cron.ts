@@ -49,6 +49,12 @@ export const cronToolDefinition: ToolDefinition = {
         type: "string",
         description: "Text to inject as a system event when the job fires",
       },
+      payload_kind: {
+        type: "string",
+        enum: ["agent", "script"],
+        description:
+          "Execution mode: 'agent' fires text into the LLM, 'script' runs a shell command directly without LLM. Default: 'agent'.",
+      },
       channel_id: {
         type: "string",
         description:
@@ -83,6 +89,7 @@ export async function executeCronTool(
           id: j.id,
           name: j.name,
           kind: j.kind,
+          payloadKind: j.payloadKind,
           schedule: j.schedule,
           enabled: j.enabled,
           lastRun: j.lastRun,
@@ -101,6 +108,7 @@ export async function executeCronTool(
           everyMs: input.schedule_every_ms as number | undefined,
         },
         payload: (input.payload as string) || "",
+        payloadKind: (input.payload_kind as "agent" | "script") || "agent",
         enabled: true,
         channelId: (input.channel_id as string) || undefined,
       });

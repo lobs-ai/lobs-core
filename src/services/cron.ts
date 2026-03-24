@@ -1,19 +1,25 @@
 /**
  * CronService — unified scheduler for lobs-core.
  *
- * Two kinds of jobs:
+ * Three kinds of jobs:
  *   1. System jobs — registered at boot with code handlers (heartbeat, memory condensation, etc.)
  *      Not stored in DB. Managed via code, not the agent tool.
  *   2. Agent jobs — DB-backed, fire text payloads into the main agent via handleSystemEvent.
  *      Managed by the agent via the cron tool, or via the API.
+ *   3. Script jobs — DB-backed like agent jobs, but execute a shell command directly
+ *      instead of invoking the LLM. For deterministic tasks that don't need AI reasoning.
  *
  * Both kinds of jobs are checked in a single 60-second tick loop
  * using proper cron expression matching.
  */
 
 import { randomUUID } from "node:crypto";
+import { exec as execCb } from "node:child_process";
+import { promisify } from "node:util";
 import type Database from "better-sqlite3";
 import { log } from "../util/logger.js";
+
+const execAsync = promisify(execCb);
 
 // ── Cron Expression Parser ──────────────────────────────────────
 
@@ -92,7 +98,8 @@ export interface AgentJob {
     everyMs?: number;    // interval ms (for kind=every)
     tz?: string;         // timezone
   };
-  payload: string;       // Text injected as system event
+  payload: string;       // Text injected as system event (agent) or shell command (script)
+  payloadKind?: "agent" | "script"; // Execution mode (default: 'agent')
   enabled: boolean;
   lastFired?: string;    // ISO timestamp
   createdAt: string;
@@ -119,6 +126,7 @@ export interface CronJobView {
   lastRun: string | null;
   nextRun: string | null; // ISO timestamp of next scheduled run
   channelId?: string;     // Discord channel ID for agent jobs
+  payloadKind: "system" | "agent" | "script"; // Execution mode
 }
 
 /**
@@ -210,6 +218,10 @@ export class CronService {
     if (!cols.includes("channel_id")) {
       this.db.exec("ALTER TABLE cron_jobs ADD COLUMN channel_id TEXT");
     }
+    // Add payload_kind column ('agent' or 'script') if it doesn't exist yet
+    if (!cols.includes("payload_kind")) {
+      this.db.exec("ALTER TABLE cron_jobs ADD COLUMN payload_kind TEXT NOT NULL DEFAULT 'agent'");
+    }
   }
 
   // ── System Job Registration ─────────────────────────────────
@@ -256,8 +268,8 @@ export class CronService {
       .prepare(
         `INSERT INTO cron_jobs
            (id, name, schedule_kind, schedule_expr, schedule_at, schedule_every_ms,
-            schedule_tz, payload, enabled, channel_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            schedule_tz, payload, enabled, channel_id, payload_kind)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -270,6 +282,7 @@ export class CronService {
         job.payload,
         job.enabled ? 1 : 0,
         job.channelId ?? null,
+        job.payloadKind || "agent",
       );
 
     const fullJob: AgentJob = { ...job, id, createdAt: now };
@@ -321,6 +334,7 @@ export class CronService {
         tz: row.schedule_tz ?? "America/New_York",
       },
       payload: row.payload,
+      payloadKind: (row.payload_kind as "agent" | "script") || "agent",
       enabled: row.enabled === 1,
       lastFired: row.last_fired ?? undefined,
       createdAt: row.created_at,
@@ -343,6 +357,7 @@ export class CronService {
         enabled: job.enabled,
         lastRun: job.lastRun?.toISOString() ?? null,
         nextRun: job.enabled ? computeNextCronRun(job.schedule) : null,
+        payloadKind: "system",
       });
     }
 
@@ -374,6 +389,7 @@ export class CronService {
         lastRun: agentJob.lastFired ?? null,
         nextRun,
         channelId: agentJob.channelId,
+        payloadKind: agentJob.payloadKind || "agent",
       });
     }
 
@@ -640,6 +656,7 @@ export class CronService {
           tz: row.schedule_tz ?? "America/New_York",
         },
         payload: row.payload,
+        payloadKind: (row.payload_kind as "agent" | "script") || "agent",
         enabled: row.enabled === 1,
         lastFired: row.last_fired ?? undefined,
         createdAt: row.created_at,
@@ -660,7 +677,7 @@ export class CronService {
   }
 
   private async fireAgentJob(job: AgentJob) {
-    log().info(`[cron] Firing agent job: ${job.name}`);
+    log().info(`[cron] Firing ${job.payloadKind || "agent"} job: ${job.name}`);
 
     // Store as ISO 8601 UTC with 'Z' suffix so Node.js Date parsing is unambiguous
     const firedAt = new Date().toISOString();
@@ -669,6 +686,25 @@ export class CronService {
       .run(firedAt, job.id);
     job.lastFired = firedAt;
 
+    // Script jobs: execute shell command directly, no LLM involved
+    if (job.payloadKind === "script") {
+      try {
+        const { stdout, stderr } = await execAsync(job.payload, {
+          timeout: 120_000,
+          maxBuffer: 1024 * 1024,
+          env: { ...process.env, HOME: process.env.HOME },
+          shell: "/bin/bash",
+        });
+        log().info(`[cron] Script job "${job.name}" stdout: ${stdout.trim().slice(0, 500)}`);
+        if (stderr.trim()) log().warn(`[cron] Script job "${job.name}" stderr: ${stderr.trim().slice(0, 500)}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log().warn(`[cron] Script job "${job.name}" failed: ${msg}`);
+      }
+      return;
+    }
+
+    // Agent jobs: fire text into the LLM via onEvent handler
     if (this.onEvent) {
       try {
         // Each agent job runs in a dedicated internal channel so the LLM

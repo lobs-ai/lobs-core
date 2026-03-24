@@ -24,11 +24,12 @@
  *   lobs chat resume <key>    Resume an existing chat
  *
  * Cron:
- *   lobs cron [list]           List all cron jobs
- *   lobs cron add <n> <s> <p>  Add an agent cron job
- *   lobs cron remove <id>      Remove an agent cron job
- *   lobs cron toggle <id>      Toggle enabled/disabled
- *   lobs cron run <id>         Trigger immediate run
+ *   lobs cron [list]                       List all cron jobs
+ *   lobs cron add <n> <s> <p>              Add an agent cron job (LLM)
+ *   lobs cron add --script <n> <s> <cmd>   Add a script job (shell command)
+ *   lobs cron remove <id>                  Remove an agent cron job
+ *   lobs cron toggle <id>                  Toggle enabled/disabled
+ *   lobs cron run <id>                     Trigger immediate run
  *
  * Config:
  *   lobs config check         Validate all config files
@@ -1150,10 +1151,13 @@ async function cmdCron(subCmd?: string, extraArgs: string[] = []) {
       for (const j of agentJobs) {
         const check = j.enabled ? colorize("✓", "green") : colorize("✗", "red");
         const name = j.name.padEnd(22);
+        const kindTag = j.payloadKind === "script"
+          ? colorize("[script]", "yellow")
+          : colorize("[agent]", "cyan");
         const sched = j.schedule.padEnd(16);
         const last = `last: ${timeAgo(j.lastRun)}`;
         const id = colorize(`[${j.id.slice(0, 8)}]`, "dim");
-        console.log(`  ${check} ${colorize(name, "bright")}${colorize(sched, "dim")}  ${colorize(last, "gray")}  ${id}`);
+        console.log(`  ${check} ${colorize(name, "bright")}${kindTag}  ${colorize(sched, "dim")}  ${colorize(last, "gray")}  ${id}`);
       }
     }
 
@@ -1161,20 +1165,27 @@ async function cmdCron(subCmd?: string, extraArgs: string[] = []) {
     return;
   }
 
-  // add <name> <schedule> <payload>
+  // add [--script] <name> <schedule> <payload>
   if (subCmd === "add") {
-    const name = extraArgs[0];
-    const schedule = extraArgs[1];
-    const payload = extraArgs.slice(2).join(" ");
+    const isScript = extraArgs.includes("--script");
+    const filteredArgs = extraArgs.filter((a) => a !== "--script");
+    const name = filteredArgs[0];
+    const schedule = filteredArgs[1];
+    const payload = filteredArgs.slice(2).join(" ");
 
     if (!name || !schedule || !payload) {
       console.log(colorize("Usage: lobs cron add <name> <schedule> <payload>", "yellow"));
+      console.log(colorize("       lobs cron add --script <name> <schedule> <cmd>", "yellow"));
       console.log(colorize("Example: lobs cron add 'Daily Report' '0 9 * * *' 'Generate daily report'", "dim"));
+      console.log(colorize("Example: lobs cron add --script 'Pulse Update' '0 3 * * *' 'node scripts/update-pulse.js'", "dim"));
       return;
     }
 
-    const result = await postApi("/scheduler", { name, schedule, payload });
-    console.log(colorize("✓", "green") + ` Created cron job: ${result.name}`);
+    const body: Record<string, unknown> = { name, schedule, payload };
+    if (isScript) body.payload_kind = "script";
+
+    const result = await postApi("/scheduler", body);
+    console.log(colorize("✓", "green") + ` Created ${isScript ? "script" : "agent"} cron job: ${result.name}`);
     console.log(colorize(`  ID: ${result.id}`, "dim"));
     console.log(colorize(`  Schedule: ${result.schedule}`, "dim"));
     return;
@@ -1223,11 +1234,12 @@ async function cmdCron(subCmd?: string, extraArgs: string[] = []) {
   // Unknown subcommand
   console.log(colorize("Usage: lobs cron [list|add|remove|toggle|run]", "yellow"));
   console.log("");
-  console.log("  list                         List all cron jobs");
-  console.log("  add <name> <sched> <payload>  Add an agent job");
-  console.log("  remove <id>                  Remove an agent job");
-  console.log("  toggle <id>                  Toggle enabled/disabled");
-  console.log("  run <id>                     Trigger immediate run");
+  console.log("  list                              List all cron jobs");
+  console.log("  add <name> <sched> <payload>       Add an agent job (default: LLM)");
+  console.log("  add --script <name> <sched> <cmd>  Add a script job (shell command)");
+  console.log("  remove <id>                       Remove an agent job");
+  console.log("  toggle <id>                       Toggle enabled/disabled");
+  console.log("  run <id>                          Trigger immediate run");
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -1337,11 +1349,12 @@ const subcommand = args[1];
       console.log("  lobs chat model <k> [m]  Show or set a chat session model");
       console.log("");
       console.log(colorize("Cron:", "cyan"));
-      console.log("  lobs cron [list]         List all cron jobs");
-      console.log("  lobs cron add <n> <s> <p>  Add an agent cron job");
-      console.log("  lobs cron remove <id>    Remove an agent cron job");
-      console.log("  lobs cron toggle <id>    Toggle enabled/disabled");
-      console.log("  lobs cron run <id>       Trigger immediate run");
+      console.log("  lobs cron [list]              List all cron jobs");
+      console.log("  lobs cron add <n> <s> <p>     Add an agent cron job (LLM)");
+      console.log("  lobs cron add --script <n> <s> <cmd>  Add a script job (shell)");
+      console.log("  lobs cron remove <id>         Remove an agent cron job");
+      console.log("  lobs cron toggle <id>         Toggle enabled/disabled");
+      console.log("  lobs cron run <id>            Trigger immediate run");
       console.log("");
       console.log(colorize("Models:", "cyan"));
       console.log("  lobs models              Diagnose LM Studio model availability");
