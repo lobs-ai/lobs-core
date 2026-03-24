@@ -1,80 +1,130 @@
 #!/usr/bin/env bash
-# update-pulse.sh — Fetch live metrics from lobs-core and push to lobslab.com
-# Runs as a cron script job (no LLM needed).
+# update-pulse.sh — Generate pulse.json from DB and push to lobslab.com
+# Runs as a cron script job. Queries DB directly for rich metrics.
 set -euo pipefail
 
+DB="$HOME/.lobs/lobs.db"
 SITE_DIR="$HOME/lobs/lobs-ai.github.io"
-API_URL="http://localhost:9420/api/public/pulse"
-DB_PATH="$HOME/.lobs/lobs.db"
+OUT="$SITE_DIR/pulse.json"
+
+[ ! -f "$DB" ] && echo "ERROR: DB not found at $DB" >&2 && exit 1
 
 cd "$SITE_DIR"
+git pull --rebase origin main --quiet 2>/dev/null || true
 
-# Pull latest
-git pull --rebase origin main --quiet
-
-# Fetch live metrics (fallback to DB query if API is down)
-if PULSE=$(curl -sf --max-time 10 "$API_URL"); then
-  echo "$PULSE" | jq '.' > pulse.json
-  echo "Fetched live pulse from API"
-else
-  echo "API unreachable, building pulse from DB"
-  
-  # Build pulse from direct DB queries
-  ACTIVE=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM tasks WHERE status='active'")
-  COMPLETED_TODAY=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM tasks WHERE status='completed' AND created_at >= date('now', 'start of day')")
-  TOTAL_COMPLETED=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM tasks WHERE status='completed'")
-  TOTAL=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM tasks")
-  RUNS_30D=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM worker_runs WHERE started_at >= datetime('now', '-30 days')")
-  SUCCEEDED_30D=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM worker_runs WHERE started_at >= datetime('now', '-30 days') AND succeeded=1")
-  FAILED_30D=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM worker_runs WHERE started_at >= datetime('now', '-30 days') AND succeeded=0")
-  
-  if [ "$RUNS_30D" -gt 0 ]; then
-    SUCCESS_RATE=$(( SUCCEEDED_30D * 100 / RUNS_30D ))
+# ── System uptime ──
+LOBS_PID=$(pgrep -f "node.*lobs-core" 2>/dev/null | head -1 || true)
+if [ -n "$LOBS_PID" ]; then
+  SYSTEM_STATUS="online"
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    PROC_START=$(ps -p "$LOBS_PID" -o lstart= 2>/dev/null || echo "")
+    if [ -n "$PROC_START" ]; then
+      START_EPOCH=$(date -j -f "%a %b %d %T %Y" "$PROC_START" +%s 2>/dev/null || echo "0")
+      UPTIME_SECONDS=$(( $(date +%s) - START_EPOCH ))
+    else
+      UPTIME_SECONDS=0
+    fi
   else
-    SUCCESS_RATE=0
+    UPTIME_SECONDS=$(( $(date +%s) - $(stat -c %Y /proc/$LOBS_PID 2>/dev/null || echo $(date +%s)) ))
   fi
+else
+  SYSTEM_STATUS="offline"
+  UPTIME_SECONDS=0
+fi
 
-  cat > pulse.json << EOJSON
+# Format uptime
+if [ "$UPTIME_SECONDS" -ge 86400 ]; then
+  UPTIME_HUMAN="$((UPTIME_SECONDS / 86400))d $((UPTIME_SECONDS % 86400 / 3600))h"
+elif [ "$UPTIME_SECONDS" -ge 3600 ]; then
+  UPTIME_HUMAN="$((UPTIME_SECONDS / 3600))h $((UPTIME_SECONDS % 3600 / 60))m"
+else
+  UPTIME_HUMAN="$((UPTIME_SECONDS / 60))m"
+fi
+
+# ── Time ranges ──
+TODAY=$(date -u +"%Y-%m-%dT00:00:00.000Z")
+THIRTY_DAYS=$(date -u -v-30d +"%Y-%m-%dT00:00:00.000Z" 2>/dev/null || date -u -d "30 days ago" +"%Y-%m-%dT00:00:00.000Z")
+NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+
+# ── Task metrics ──
+TASKS_ACTIVE=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status='active'")
+TASKS_TODAY=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status='completed' AND updated_at >= '$TODAY'")
+TASKS_COMPLETED=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status='completed'")
+TASKS_TOTAL=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks")
+
+# ── Worker metrics (30d) ──
+RUNS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM worker_runs WHERE started_at >= '$THIRTY_DAYS'")
+SUCCEEDED=$(sqlite3 "$DB" "SELECT COUNT(*) FROM worker_runs WHERE started_at >= '$THIRTY_DAYS' AND succeeded=1")
+FAILED=$(sqlite3 "$DB" "SELECT COUNT(*) FROM worker_runs WHERE started_at >= '$THIRTY_DAYS' AND succeeded=0")
+ACTIVE_WORKERS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM worker_runs WHERE ended_at IS NULL")
+[ "$RUNS" -gt 0 ] && SUCCESS_RATE=$(( SUCCEEDED * 100 / RUNS )) || SUCCESS_RATE=0
+
+# ── Token metrics (30d) ──
+TOKENS_IN=$(sqlite3 "$DB" "SELECT COALESCE(SUM(input_tokens), 0) FROM worker_runs WHERE started_at >= '$THIRTY_DAYS'")
+TOKENS_OUT=$(sqlite3 "$DB" "SELECT COALESCE(SUM(output_tokens), 0) FROM worker_runs WHERE started_at >= '$THIRTY_DAYS'")
+
+# ── Per-agent breakdown ──
+AGENT_JSON=$(sqlite3 -json "$DB" "
+  SELECT COALESCE(agent_type, 'unknown') as agent, COUNT(*) as runs,
+    CAST(SUM(CASE WHEN succeeded=1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) AS INTEGER) as success_rate
+  FROM worker_runs WHERE started_at >= '$THIRTY_DAYS'
+  GROUP BY agent_type ORDER BY runs DESC" 2>/dev/null || echo "[]")
+[ -z "$AGENT_JSON" ] && AGENT_JSON="[]"
+
+# ── Recent activity (last 20 runs) ──
+ACTIVITY_JSON=$(sqlite3 -json "$DB" "
+  SELECT CASE WHEN succeeded=1 THEN 'completed' WHEN succeeded=0 THEN 'failed' ELSE 'running' END as type,
+    COALESCE(agent_type, 'unknown') as agent,
+    COALESCE(SUBSTR(model, 1, INSTR(model, '/') - 1), 'unknown') as provider,
+    COALESCE(ended_at, started_at, datetime('now')) as timestamp
+  FROM worker_runs WHERE started_at >= '$THIRTY_DAYS'
+  ORDER BY started_at DESC LIMIT 20" 2>/dev/null || echo "[]")
+[ -z "$ACTIVITY_JSON" ] && ACTIVITY_JSON="[]"
+
+# ── Build JSON ──
+cat > "$OUT" << ENDJSON
 {
   "system": {
-    "status": "offline",
-    "uptime_seconds": 0,
-    "uptime_human": "0m",
+    "status": "$SYSTEM_STATUS",
+    "uptime_seconds": $UPTIME_SECONDS,
+    "uptime_human": "$UPTIME_HUMAN",
     "version": "8.0"
   },
   "tasks": {
-    "active": $ACTIVE,
-    "completed_today": $COMPLETED_TODAY,
-    "total_completed": $TOTAL_COMPLETED,
-    "total": $TOTAL
+    "active": $TASKS_ACTIVE,
+    "completed_today": $TASKS_TODAY,
+    "total_completed": $TASKS_COMPLETED,
+    "total": $TASKS_TOTAL
   },
   "workers": {
-    "active": 0,
-    "runs_30d": $RUNS_30D,
-    "succeeded_30d": $SUCCEEDED_30D,
-    "failed_30d": $FAILED_30D,
-    "success_rate_30d": $SUCCESS_RATE
+    "active": $ACTIVE_WORKERS,
+    "runs_30d": $RUNS,
+    "succeeded_30d": $SUCCEEDED,
+    "failed_30d": $FAILED,
+    "success_rate_30d": $SUCCESS_RATE,
+    "by_agent": $AGENT_JSON
   },
-  "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  "tokens_30d": {
+    "input": $TOKENS_IN,
+    "output": $TOKENS_OUT,
+    "total": $((TOKENS_IN + TOKENS_OUT))
+  },
+  "recent_activity": $ACTIVITY_JSON,
+  "generated_at": "$NOW"
 }
-EOJSON
-fi
+ENDJSON
 
-# Validate JSON
-jq . pulse.json > /dev/null
+# Validate
+jq . "$OUT" > /dev/null
 
-# Check if anything meaningful changed (ignore generated_at timestamp)
-DIFF=$(git diff pulse.json | grep '^[+-]' | grep -v '^[+-][+-][+-]' | grep -v 'generated_at' | grep -v 'uptime' || true)
+# ── Smart diff: skip if only timestamp/uptime changed ──
+DIFF=$(git diff "$OUT" | grep '^[+-]' | grep -v '^[+-][+-][+-]' | grep -v 'generated_at' | grep -v 'uptime' || true)
 if [ -z "$DIFF" ]; then
-  # Only timestamp/uptime changed — not worth a commit
-  git checkout -- pulse.json
-  echo "Only timestamp changed, skipping commit"
+  git checkout -- "$OUT" 2>/dev/null || true
+  echo "Pulse: no meaningful changes"
   exit 0
 fi
 
-# Commit and push
-git add pulse.json
-git commit -m "chore: update pulse metrics [$(date +%Y-%m-%d)]" --quiet
-git push origin main --quiet
-
-echo "Pulse update pushed successfully"
+git add "$OUT"
+git commit -m "pulse: update $(date -u +'%Y-%m-%d %H:%M UTC')" --quiet --no-verify
+git push origin main --quiet 2>/dev/null && echo "Pulse updated and pushed" || echo "Push failed (will retry)"
