@@ -84,9 +84,10 @@ export class GoogleCalendarService {
     const calendars = res.data.items ?? [];
     log().info(`[GCAL] Available calendars: ${calendars.map((c: any) => c.summary + " (" + c.id + ")").join(", ")}`);
 
+    // Match a dedicated Lobs calendar by summary — skip the primary/email calendar
     const lobs = calendars.find((c: any) =>
-      c.summary?.toLowerCase().includes("lobs") ||
-      c.id?.toLowerCase().includes("lobs")
+      c.summary?.toLowerCase().includes("lobs") &&
+      c.id?.includes("@group.calendar.google.com")
     );
     if (lobs?.id) {
       LOBS_CALENDAR_ID = lobs.id;
