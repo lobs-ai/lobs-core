@@ -13,7 +13,7 @@ import { readFileSync as _readFileSync } from "node:fs";
 import { LearningService } from "../services/learning.js";
 import { classifyAndLog } from "../services/task-sensitivity.js";
 import { getModelForTier } from "../config/models.js";
-import { getGatewayConfig } from "../config/lobs.js";
+import { runAgent } from "../runner/agent-loop.js";
 import { assembleBrainDumpContext, formatBrainDumpContext } from "../services/context-assembler.js";
 import { logTrainingExample } from "../services/training-data.js";
 import { findDuplicateTask } from "../util/task-dedup.js";
@@ -91,17 +91,23 @@ function normalizeTaskBatch(rows: Record<string, unknown>[]): Record<string, unk
 
 // ── Brain Dump Gateway helpers ──────────────────────────────────────────
 
-async function _brainDumpInvoke(tool: string, args: Record<string, unknown>): Promise<any> {
-  const { port, token } = getGatewayConfig();
-  if (!token) throw new Error("No gateway auth token configured");
-  const r = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-    body: JSON.stringify({ tool, args, sessionKey: "agent:sink:paw-orchestrator-v2" }),
+async function _brainDumpRun(args: {
+  task: string;
+  system?: string;
+  model: string;
+  runTimeoutSeconds?: number;
+}): Promise<{ reply: string }> {
+  const result = await runAgent({
+    task: args.task,
+    systemPrompt: args.system,
+    model: args.model,
+    agent: "writer",
+    tools: [],
+    maxTurns: 1,
+    cwd: process.cwd(),
+    timeout: args.runTimeoutSeconds ?? 60,
   });
-  if (!r.ok) throw new Error(`Gateway ${tool} failed (${r.status}): ${await r.text()}`);
-  const data = (await r.json()) as any;
-  return data?.result?.details ?? data?.result ?? data;
+  return { reply: result.output };
 }
 
 export async function handleTaskRequest(
@@ -173,17 +179,14 @@ Return ONLY valid JSON in this exact format with no other text:
       ? getModelForTier(body.model_tier_override)
       : getModelForTier("small");
 
-    const result = await _brainDumpInvoke("sessions/spawn", {
+    const result = await _brainDumpRun({
       task: userPrompt,
       system: systemPrompt,
       model: modelId,
-      mode: "run",
-      cleanup: "kill",
       runTimeoutSeconds: 60,
-      maxTokens: 2000,
     });
 
-    const rawReply: string = result?.reply ?? result?.response ?? result?.text ?? "";
+    const rawReply: string = result?.reply ?? "";
     // Extract JSON from reply (handle markdown code blocks)
     const jsonMatch = rawReply.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return error(res, "LLM did not return valid JSON. Reply: " + rawReply.slice(0, 200), 500);

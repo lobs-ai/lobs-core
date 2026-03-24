@@ -298,6 +298,34 @@ export async function getUpcomingEvents(hours: number = 2): Promise<CalendarEven
 }
 
 /**
+ * Get events for an arbitrary date range.
+ * timeMin and timeMax should be ISO 8601 strings.
+ * Results are cached for 5 minutes.
+ */
+export async function getEventsForDateRange(timeMin: string, timeMax: string): Promise<CalendarEvent[]> {
+  const cacheKey = `range:${timeMin}:${timeMax}`;
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const events = await fetchEvents({
+      timeMin,
+      timeMax,
+      singleEvents: "true",
+      orderBy: "startTime",
+      maxResults: "50",
+    });
+
+    setCache(cacheKey, events);
+    log().info(`[google-calendar] Fetched ${events.length} events for range ${timeMin.slice(0, 10)} to ${timeMax.slice(0, 10)}`);
+    return events;
+  } catch (err) {
+    log().warn(`[google-calendar] getEventsForDateRange failed: ${err}`);
+    return [];
+  }
+}
+
+/**
  * Get full details for a specific event by ID.
  * Not cached (details rarely needed repeatedly).
  */

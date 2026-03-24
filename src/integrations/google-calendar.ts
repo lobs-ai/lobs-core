@@ -151,6 +151,43 @@ export class GoogleCalendarService {
     }
   }
 
+  async listEvents(calendarId: string | null, timeMin: string, timeMax: string): Promise<CalendarEvent[]> {
+    try {
+      const auth = await this._getAuth();
+      const targetCal = calendarId ?? await this._discoverLobsCalendar(auth);
+      const cal = google.calendar({ version: "v3", auth });
+      const res = await cal.events.list({
+        calendarId: targetCal,
+        timeMin,
+        timeMax,
+        singleEvents: true,
+        orderBy: "startTime",
+        maxResults: 250,
+      });
+      return (res.data.items ?? []).map((e: any) => this._mapEvent(e));
+    } catch (err) {
+      log().warn(`[GCAL] listEvents failed: ${String(err)}`);
+      return [];
+    }
+  }
+
+  async deleteEvent(calendarId: string | null, eventId: string): Promise<boolean> {
+    try {
+      const auth = await this._getAuth();
+      const targetCal = calendarId ?? await this._discoverLobsCalendar(auth);
+      const cal = google.calendar({ version: "v3", auth });
+      await cal.events.delete({
+        calendarId: targetCal,
+        eventId,
+      });
+      log().info(`[GCAL] Deleted event ${eventId} from ${targetCal}`);
+      return true;
+    } catch (err) {
+      log().warn(`[GCAL] deleteEvent failed: ${String(err)}`);
+      return false;
+    }
+  }
+
   async getFreeBusy(timeMin: string, timeMax: string, calendarIds?: string[]): Promise<Record<string, { busy: { start: string; end: string }[] }>> {
     try {
       const auth = await this._getAuth();

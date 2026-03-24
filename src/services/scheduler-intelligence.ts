@@ -12,10 +12,10 @@ import { getTodayEvents, isGoogleCalendarAvailable, type CalendarEvent } from ".
 import { isLocalModelAvailable } from "../runner/local-classifier.js";
 import { log } from "../util/logger.js";
 
-const DAY_START_HOUR = 8;
-const DAY_END_HOUR = 23;
-const MIN_SLOT_MINUTES = 30;
-const SLOT_BUFFER_MINUTES = 10;
+export const DAY_START_HOUR = 8;
+export const DAY_END_HOUR = 23;
+export const MIN_SLOT_MINUTES = 30;
+export const SLOT_BUFFER_MINUTES = 10;
 
 const SNAPSHOT_KEY = "scheduler_last_event_snapshot";
 
@@ -111,7 +111,7 @@ export interface SchedulerIntelligenceSnapshot {
   };
 }
 
-interface BusyBlock {
+export interface BusyBlock {
   title: string;
   start: Date;
   end: Date;
@@ -167,13 +167,13 @@ function endOfLocalDay(base = new Date()): Date {
   return day;
 }
 
-function dateAt(base: Date, hour: number, minute: number): Date {
+export function dateAt(base: Date, hour: number, minute: number): Date {
   const d = new Date(base);
   d.setHours(hour, minute, 0, 0);
   return d;
 }
 
-function clampToWindow(start: Date, end: Date): { start: Date; end: Date } | null {
+export function clampToWindow(start: Date, end: Date): { start: Date; end: Date } | null {
   const dayStart = dateAt(start, DAY_START_HOUR, 0);
   const dayEnd = dateAt(start, DAY_END_HOUR, 0);
   const clampedStart = start > dayStart ? start : dayStart;
@@ -186,7 +186,7 @@ function durationMinutes(start: Date, end: Date): number {
   return Math.max(0, Math.round((end.getTime() - start.getTime()) / 60000));
 }
 
-function normalizeEstimate(task: {
+export function normalizeEstimate(task: {
   estimatedMinutes: number | null;
   shape: string | null;
   title: string;
@@ -203,7 +203,7 @@ function normalizeEstimate(task: {
   return 45;
 }
 
-function scoreTask(task: {
+export function scoreTask(task: {
   priority: string | null;
   dueDate: string | null;
   updatedAt: string;
@@ -322,12 +322,12 @@ function getRecurringBlocksFromDb(dayOfWeek: number, baseDate: Date): BusyBlock[
   }
 }
 
-function getFixedBusyBlocks(baseDate: Date): BusyBlock[] {
+export function getFixedBusyBlocks(baseDate: Date): BusyBlock[] {
   const dayOfWeek = baseDate.getDay();
   return getRecurringBlocksFromDb(dayOfWeek, baseDate);
 }
 
-function mergeBusyBlocks(blocks: BusyBlock[]): BusyBlock[] {
+export function mergeBusyBlocks(blocks: BusyBlock[]): BusyBlock[] {
   const sorted = [...blocks].sort((a, b) => a.start.getTime() - b.start.getTime());
   const merged: BusyBlock[] = [];
   for (const block of sorted) {
@@ -344,7 +344,7 @@ function mergeBusyBlocks(blocks: BusyBlock[]): BusyBlock[] {
   return merged;
 }
 
-function buildFreeSlots(baseDate: Date, busyBlocks: BusyBlock[]): PlannerSlot[] {
+export function buildFreeSlots(baseDate: Date, busyBlocks: BusyBlock[]): PlannerSlot[] {
   const dayStart = dateAt(baseDate, DAY_START_HOUR, 0);
   const dayEnd = dateAt(baseDate, DAY_END_HOUR, 0);
   const merged = mergeBusyBlocks(busyBlocks);
