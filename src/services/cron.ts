@@ -11,6 +11,11 @@
  *
  * Both kinds of jobs are checked in a single 60-second tick loop
  * using proper cron expression matching.
+ *
+ * Observability: Every job fire is recorded in an in-memory ring buffer (CronFireEvent).
+ * The fire log is accessible via getCronFireLog() / getCronFireSummary() and exposed at
+ * GET /api/scheduler/fire-log so diagnosing "did this cron actually fire?" takes seconds,
+ * not hours.
  */
 
 import { randomUUID } from "node:crypto";
@@ -20,6 +25,34 @@ import type Database from "better-sqlite3";
 import { log } from "../util/logger.js";
 
 const execAsync = promisify(execCb);
+
+// ── Fire-log observability ──────────────────────────────────────
+
+/** Maximum number of fire events kept per job in the in-memory ring buffer. */
+const FIRE_LOG_MAX_PER_JOB = 50;
+
+/**
+ * A single recorded fire of a cron job.
+ *
+ * Stored in-memory only — survives restarts only via the `lastFired` DB column,
+ * but this detail log (outcome, duration, error) is purely runtime state.
+ */
+export interface CronFireEvent {
+  jobId: string;
+  jobName: string;
+  /** "system" | "agent" | "script" */
+  jobKind: string;
+  /** ISO timestamp of when the job was fired */
+  firedAt: string;
+  /** Whether the job completed without throwing */
+  success: boolean;
+  /** Wall-clock duration in milliseconds */
+  durationMs: number;
+  /** Error message if success=false */
+  error?: string;
+  /** Whether this fire was triggered manually (vs scheduler tick) */
+  manual: boolean;
+}
 
 // ── Cron Expression Parser ──────────────────────────────────────
 
@@ -181,6 +214,10 @@ export class CronService {
 
   // Event handler for agent jobs
   private onEvent: ((text: string, channelId?: string) => Promise<void>) | null = null;
+
+  // ── Fire-log ring buffer ──
+  /** Per-job ring buffer of the last FIRE_LOG_MAX_PER_JOB fire events (newest first). */
+  private fireLog: Map<string, CronFireEvent[]> = new Map();
 
   constructor(db: Database.Database) {
     this.db = db;
@@ -510,13 +547,101 @@ export class CronService {
     // system heartbeat job registered in main.ts. No default agent jobs needed.
   }
 
+  // ── Fire-log helpers ────────────────────────────────────────────
+
+  /**
+   * Record a fire event into the per-job ring buffer (newest first, max FIRE_LOG_MAX_PER_JOB).
+   * Called internally after every job execution.
+   */
+  private recordFire(event: CronFireEvent): void {
+    const existing = this.fireLog.get(event.jobId) ?? [];
+    // Prepend newest, cap length
+    const updated = [event, ...existing].slice(0, FIRE_LOG_MAX_PER_JOB);
+    this.fireLog.set(event.jobId, updated);
+  }
+
+  /**
+   * Return the fire-log for all jobs, or just one job if jobId is supplied.
+   * Entries are newest-first within each job.
+   */
+  getFireLog(jobId?: string): CronFireEvent[] {
+    if (jobId) {
+      return this.fireLog.get(jobId) ?? [];
+    }
+    // Merge all jobs, sort overall newest-first
+    const all: CronFireEvent[] = [];
+    for (const events of this.fireLog.values()) {
+      all.push(...events);
+    }
+    return all.sort((a, b) => b.firedAt.localeCompare(a.firedAt));
+  }
+
+  /**
+   * Return a per-job summary: last fire time, last success, consecutive failure count.
+   * Useful for a status-page roll-up without sending the full raw log.
+   */
+  getFireSummary(): Array<{
+    jobId: string;
+    jobName: string;
+    jobKind: string;
+    lastFiredAt: string | null;
+    lastSuccess: boolean | null;
+    consecutiveFailures: number;
+    totalFires: number;
+  }> {
+    const result = [];
+
+    // Include every job in scope (system + agent + script)
+    const allJobIds = new Set([
+      ...Array.from(this.systemJobs.keys()),
+      ...Array.from(this.agentJobs.keys()),
+      // jobs with fire-log entries but no longer in memory
+      ...Array.from(this.fireLog.keys()),
+    ]);
+
+    for (const id of allJobIds) {
+      const events = this.fireLog.get(id) ?? [];
+      const systemJob = this.systemJobs.get(id);
+      const agentJob = this.agentJobs.get(id);
+      const jobName = systemJob?.name ?? agentJob?.name ?? id;
+      const jobKind = systemJob ? "system" : agentJob?.payloadKind === "script" ? "script" : "agent";
+
+      let consecutiveFailures = 0;
+      for (const ev of events) {
+        if (!ev.success) consecutiveFailures++;
+        else break;
+      }
+
+      result.push({
+        jobId: id,
+        jobName,
+        jobKind,
+        lastFiredAt: events[0]?.firedAt ?? null,
+        lastSuccess: events[0]?.success ?? null,
+        consecutiveFailures,
+        totalFires: events.length,
+      });
+    }
+
+    // Sort: jobs with failures first, then by most-recently-fired
+    return result.sort((a, b) => {
+      if (b.consecutiveFailures !== a.consecutiveFailures) {
+        return b.consecutiveFailures - a.consecutiveFailures;
+      }
+      if (a.lastFiredAt && b.lastFiredAt) return b.lastFiredAt.localeCompare(a.lastFiredAt);
+      if (a.lastFiredAt) return -1;
+      if (b.lastFiredAt) return 1;
+      return 0;
+    });
+  }
+
   /** Manually trigger a job by ID (system or agent) */
   async triggerJob(id: string): Promise<boolean> {
     // Check system jobs first
     const systemJob = this.systemJobs.get(id);
     if (systemJob) {
       log().info(`[cron] Manually triggering system job: ${systemJob.name}`);
-      await this.runSystemJob(systemJob);
+      await this.runSystemJob(systemJob, true);
       return true;
     }
 
@@ -524,7 +649,7 @@ export class CronService {
     const agentJob = this.agentJobs.get(id);
     if (agentJob) {
       log().info(`[cron] Manually triggering agent job: ${agentJob.name}`);
-      await this.fireAgentJob(agentJob);
+      await this.fireAgentJob(agentJob, true);
       return true;
     }
 
@@ -618,18 +743,38 @@ export class CronService {
     }
   }
 
-  private async runSystemJob(job: SystemJob): Promise<void> {
+  private async runSystemJob(job: SystemJob, manual = false): Promise<void> {
     const start = Date.now();
+    const firedAt = new Date().toISOString();
     job.lastRun = new Date();
 
     try {
       await job.handler();
-      const duration = Date.now() - start;
-      log().info(`[cron] System job "${job.name}" completed in ${duration}ms`);
+      const durationMs = Date.now() - start;
+      log().info(`[cron] ✅ System job "${job.name}" fired${manual ? " (manual)" : ""} — completed in ${durationMs}ms`);
+      this.recordFire({
+        jobId: job.id,
+        jobName: job.name,
+        jobKind: "system",
+        firedAt,
+        success: true,
+        durationMs,
+        manual,
+      });
     } catch (err) {
-      const duration = Date.now() - start;
+      const durationMs = Date.now() - start;
       const msg = err instanceof Error ? err.message : String(err);
-      log().warn(`[cron] System job "${job.name}" failed after ${duration}ms: ${msg}`);
+      log().warn(`[cron] ❌ System job "${job.name}" fired${manual ? " (manual)" : ""} — FAILED after ${durationMs}ms: ${msg}`);
+      this.recordFire({
+        jobId: job.id,
+        jobName: job.name,
+        jobKind: "system",
+        firedAt,
+        success: false,
+        durationMs,
+        error: msg,
+        manual,
+      });
     }
   }
 
@@ -676,9 +821,11 @@ export class CronService {
     }
   }
 
-  private async fireAgentJob(job: AgentJob) {
-    log().info(`[cron] Firing ${job.payloadKind || "agent"} job: ${job.name}`);
+  private async fireAgentJob(job: AgentJob, manual = false) {
+    const jobKind = job.payloadKind === "script" ? "script" : "agent";
+    log().info(`[cron] Firing ${jobKind} job: "${job.name}"${manual ? " (manual)" : ""}`);
 
+    const start = Date.now();
     // Store as ISO 8601 UTC with 'Z' suffix so Node.js Date parsing is unambiguous
     const firedAt = new Date().toISOString();
     this.db
@@ -695,11 +842,16 @@ export class CronService {
           env: { ...process.env, HOME: process.env.HOME },
           shell: "/bin/bash",
         });
-        log().info(`[cron] Script job "${job.name}" stdout: ${stdout.trim().slice(0, 500)}`);
+        const durationMs = Date.now() - start;
+        log().info(`[cron] ✅ Script job "${job.name}" fired${manual ? " (manual)" : ""} — completed in ${durationMs}ms`);
+        if (stdout.trim()) log().info(`[cron] Script job "${job.name}" stdout: ${stdout.trim().slice(0, 500)}`);
         if (stderr.trim()) log().warn(`[cron] Script job "${job.name}" stderr: ${stderr.trim().slice(0, 500)}`);
+        this.recordFire({ jobId: job.id, jobName: job.name, jobKind, firedAt, success: true, durationMs, manual });
       } catch (err) {
+        const durationMs = Date.now() - start;
         const msg = err instanceof Error ? err.message : String(err);
-        log().warn(`[cron] Script job "${job.name}" failed: ${msg}`);
+        log().warn(`[cron] ❌ Script job "${job.name}" fired${manual ? " (manual)" : ""} — FAILED after ${durationMs}ms: ${msg}`);
+        this.recordFire({ jobId: job.id, jobName: job.name, jobKind, firedAt, success: false, durationMs, error: msg, manual });
       }
       return;
     }
@@ -730,9 +882,19 @@ export class CronService {
         // The agent uses the `message` tool to send to the actual Discord
         // channel. Its conversational replies stay on this internal channel.
         await this.onEvent(job.payload, conversationChannel);
+        const durationMs = Date.now() - start;
+        log().info(`[cron] ✅ Agent job "${job.name}" fired${manual ? " (manual)" : ""} — dispatched in ${durationMs}ms`);
+        this.recordFire({ jobId: job.id, jobName: job.name, jobKind, firedAt, success: true, durationMs, manual });
       } catch (err) {
-        log().warn(`[cron] Error firing agent job ${job.name}: ${err}`);
+        const durationMs = Date.now() - start;
+        const msg = err instanceof Error ? err.message : String(err);
+        log().warn(`[cron] ❌ Agent job "${job.name}" fired${manual ? " (manual)" : ""} — FAILED after ${durationMs}ms: ${msg}`);
+        this.recordFire({ jobId: job.id, jobName: job.name, jobKind, firedAt, success: false, durationMs, error: msg, manual });
       }
+    } else {
+      const durationMs = Date.now() - start;
+      log().warn(`[cron] ⚠️  Agent job "${job.name}" fired${manual ? " (manual)" : ""} but no onEvent handler registered — job dropped!`);
+      this.recordFire({ jobId: job.id, jobName: job.name, jobKind, firedAt, success: false, durationMs, error: "No onEvent handler registered", manual });
     }
   }
 }

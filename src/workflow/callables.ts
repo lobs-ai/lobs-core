@@ -389,10 +389,12 @@ function reflectionSpawnAll(args: Record<string, unknown>, _ctx: CallableContext
   const hours = (args.window_hours as number) ?? 3;
 
   const spawned: string[] = [];
+  const pickedAgents = new Set<string>();
 
   for (const _agent of reflectionSvc.listAgents()) {
-    const pick = reflectionSvc.pickNextAgent(hours);
+    const pick = reflectionSvc.pickNextAgent(hours, pickedAgents);
     if (!pick) continue;
+    pickedAgents.add(pick.agentType);
 
     const prompt = reflectionSvc.buildReflectionPrompt(pick.agentType, pick.reflectionId);
     const reflectionId = pick.reflectionId;

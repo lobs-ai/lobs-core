@@ -11,6 +11,11 @@ import { getSchedulerIntelligenceSnapshot } from "../services/scheduler-intellig
  * DELETE /api/scheduler/:id           → delete an agent job
  * POST   /api/scheduler/:id/toggle    → toggle enabled state
  * POST   /api/scheduler/:id/run       → trigger immediate run
+ *
+ * Observability (fire-log):
+ * GET    /api/scheduler/fire-log           → merged fire events for all jobs (newest first)
+ * GET    /api/scheduler/fire-log?jobId=X   → fire events for one job
+ * GET    /api/scheduler/fire-summary       → per-job roll-up (lastFiredAt, success, failures)
  */
 
 export async function handleSchedulerRequest(
@@ -32,6 +37,28 @@ export async function handleSchedulerRequest(
       return json(res, snapshot);
     } catch (err) {
       return error(res, `Failed to compute scheduler intelligence: ${String(err)}`, 500);
+    }
+  }
+
+  // GET /api/scheduler/fire-log[?jobId=X] — raw per-job fire history (newest first)
+  if (jobName === "fire-log" && method === "GET") {
+    try {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const filterJobId = url.searchParams.get("jobId") ?? undefined;
+      const events = cronService.getFireLog(filterJobId);
+      return json(res, { events });
+    } catch (err) {
+      return error(res, `Failed to retrieve fire log: ${String(err)}`, 500);
+    }
+  }
+
+  // GET /api/scheduler/fire-summary — per-job roll-up for dashboards/status pages
+  if (jobName === "fire-summary" && method === "GET") {
+    try {
+      const summary = cronService.getFireSummary();
+      return json(res, { summary });
+    } catch (err) {
+      return error(res, `Failed to retrieve fire summary: ${String(err)}`, 500);
     }
   }
 

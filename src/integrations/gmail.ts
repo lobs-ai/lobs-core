@@ -13,9 +13,9 @@ import { getDb } from "../db/connection.js";
 import { inboxItems } from "../db/schema.js";
 import { log } from "../util/logger.js";
 
-const LOBS_SERVER_DIR = process.env.LOBS_SERVER_DIR ?? `${process.env.HOME}/lobs-server`;
-const GMAIL_TOKEN_FILE = process.env.GMAIL_TOKEN_FILE ?? join(LOBS_SERVER_DIR, "credentials/gmail_token.json");
-const GMAIL_CREDENTIALS_FILE = process.env.GMAIL_CREDENTIALS_FILE ?? join(LOBS_SERVER_DIR, "credentials/gmail.json");
+const HOME = process.env.HOME ?? "";
+const GMAIL_TOKEN_FILE = process.env.GMAIL_TOKEN_FILE ?? join(HOME, ".lobs/credentials/google_token.json");
+const GMAIL_CREDENTIALS_FILE = process.env.GMAIL_CREDENTIALS_FILE ?? join(HOME, ".lobs/credentials/client_secret.json");
 
 export interface EmailMessage {
   id: string;
@@ -45,7 +45,7 @@ export class GmailService {
     }
 
     try {
-      const pyScript = join(LOBS_SERVER_DIR, "bin/fetch_gmail.py");
+      const pyScript = join(HOME, "lobs-server/bin/fetch_gmail.py");
       if (existsSync(pyScript)) {
         const result = spawnSync("python3", [pyScript, "--max", String(maxResults), "--json"], {
           encoding: "utf8", timeout: 30_000,

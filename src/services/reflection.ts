@@ -87,11 +87,13 @@ export class ReflectionService {
    * Pick the next agent that should reflect — least recently reflected.
    * Returns null if all agents reflected within the window.
    */
-  pickNextAgent(windowHours = 3): { agentType: string; reflectionId: string } | null {
+  pickNextAgent(windowHours = 3, exclude: Set<string> = new Set()): { agentType: string; reflectionId: string } | null {
     const db = getDb();
     const windowStart = new Date(Date.now() - windowHours * 3600 * 1000).toISOString();
 
     for (const agent of REFLECTION_AGENTS) {
+      if (exclude.has(agent)) continue; // Already picked this cycle
+
       // Only skip agents that have a COMPLETED reflection within the window
       const completed = db.select().from(agentReflections)
         .where(and(

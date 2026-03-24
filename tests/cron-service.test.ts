@@ -24,6 +24,7 @@ import {
   type AgentJob,
   type SystemJob,
   type CronJobView,
+  type CronFireEvent,
 } from "../src/services/cron.js";
 
 // Helper: fresh CronService backed by the shared in-memory DB
@@ -535,5 +536,188 @@ describe("parseCronExpression additional coverage", () => {
     expect(r.minute).toEqual([0]);
     expect(r.hour).toEqual([0]);
     expect(r.dayOfMonth).toHaveLength(31);
+  });
+});
+
+// ── Fire-log observability ───────────────────────────────────────────────────
+
+describe("CronFireEvent ring buffer", () => {
+  it("getFireLog returns empty array before any fires", () => {
+    const svc = makeService();
+    svc.registerSystemJob({
+      id: "early-bird",
+      name: "EarlyBird",
+      schedule: "* * * * *",
+      enabled: true,
+      handler: async () => {},
+    });
+    expect(svc.getFireLog()).toHaveLength(0);
+    expect(svc.getFireLog("early-bird")).toHaveLength(0);
+  });
+
+  it("records a fire event for a system job (success)", async () => {
+    const svc = makeService();
+    svc.registerSystemJob({
+      id: "sys-log",
+      name: "SysLog",
+      schedule: "0 0 1 1 *",
+      enabled: true,
+      handler: async () => {},
+    });
+
+    await svc.triggerJob("sys-log");
+
+    const events = svc.getFireLog("sys-log");
+    expect(events).toHaveLength(1);
+    const ev = events[0];
+    expect(ev.jobId).toBe("sys-log");
+    expect(ev.jobName).toBe("SysLog");
+    expect(ev.jobKind).toBe("system");
+    expect(ev.success).toBe(true);
+    expect(ev.manual).toBe(true);
+    expect(ev.firedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(ev.durationMs).toBeGreaterThanOrEqual(0);
+    expect(ev.error).toBeUndefined();
+  });
+
+  it("records a fire event for a system job (failure)", async () => {
+    const svc = makeService();
+    svc.registerSystemJob({
+      id: "sys-fail",
+      name: "SysFail",
+      schedule: "0 0 1 1 *",
+      enabled: true,
+      handler: async () => { throw new Error("boom"); },
+    });
+
+    await svc.triggerJob("sys-fail");
+
+    const events = svc.getFireLog("sys-fail");
+    expect(events).toHaveLength(1);
+    const ev = events[0];
+    expect(ev.success).toBe(false);
+    expect(ev.error).toBe("boom");
+  });
+
+  it("records a fire event for an agent job (success)", async () => {
+    const svc = makeService();
+    const fired: string[] = [];
+    svc.setEventHandler(async (text) => { fired.push(text); });
+
+    const job = svc.addAgentJob({
+      name: "AgentFireLog",
+      schedule: { kind: "cron", expr: "0 0 1 1 *" },
+      payload: "run agent",
+      enabled: true,
+    });
+
+    await svc.triggerJob(job.id);
+
+    const events = svc.getFireLog(job.id);
+    expect(events).toHaveLength(1);
+    const ev = events[0];
+    expect(ev.jobName).toBe("AgentFireLog");
+    expect(ev.jobKind).toBe("agent");
+    expect(ev.success).toBe(true);
+    expect(ev.manual).toBe(true);
+  });
+
+  it("records failure when no onEvent handler is wired for agent job", async () => {
+    const svc = makeService(); // no setEventHandler call
+
+    const job = svc.addAgentJob({
+      name: "NoHandler",
+      schedule: { kind: "cron", expr: "0 0 1 1 *" },
+      payload: "lost payload",
+      enabled: true,
+    });
+
+    await svc.triggerJob(job.id);
+
+    const events = svc.getFireLog(job.id);
+    expect(events).toHaveLength(1);
+    expect(events[0].success).toBe(false);
+    expect(events[0].error).toMatch(/no onEvent handler/i);
+  });
+
+  it("getFireLog() without jobId returns merged events for all jobs (newest first)", async () => {
+    const svc = makeService();
+    svc.setEventHandler(async () => {});
+
+    svc.registerSystemJob({ id: "a", name: "A", schedule: "0 0 1 1 *", enabled: true, handler: async () => {} });
+    const jobB = svc.addAgentJob({ name: "B", schedule: { kind: "cron", expr: "0 0 1 1 *" }, payload: "b", enabled: true });
+
+    await svc.triggerJob("a");
+    await svc.triggerJob(jobB.id);
+
+    const all = svc.getFireLog();
+    expect(all.length).toBeGreaterThanOrEqual(2);
+    // Newest first
+    for (let i = 1; i < all.length; i++) {
+      expect(all[i - 1].firedAt >= all[i].firedAt).toBe(true);
+    }
+  });
+
+  it("ring buffer caps at 50 entries per job", async () => {
+    const svc = makeService();
+    svc.registerSystemJob({ id: "flood", name: "Flood", schedule: "0 0 1 1 *", enabled: true, handler: async () => {} });
+
+    // Fire 60 times
+    for (let i = 0; i < 60; i++) {
+      await svc.triggerJob("flood");
+    }
+
+    const events = svc.getFireLog("flood");
+    expect(events).toHaveLength(50);
+  });
+
+  it("getFireSummary returns a row for each known job", async () => {
+    const svc = makeService();
+    svc.setEventHandler(async () => {});
+    svc.registerSystemJob({ id: "s1", name: "S1", schedule: "* * * * *", enabled: true, handler: async () => {} });
+    const j1 = svc.addAgentJob({ name: "J1", schedule: { kind: "cron", expr: "* * * * *" }, payload: "j1", enabled: true });
+
+    await svc.triggerJob("s1");
+    await svc.triggerJob(j1.id);
+
+    const summary = svc.getFireSummary();
+    expect(summary.length).toBeGreaterThanOrEqual(2);
+    const s1 = summary.find(r => r.jobId === "s1");
+    expect(s1?.lastSuccess).toBe(true);
+    expect(s1?.consecutiveFailures).toBe(0);
+    expect(s1?.totalFires).toBe(1);
+  });
+
+  it("getFireSummary sorts jobs with consecutive failures first", async () => {
+    const svc = makeService();
+    svc.registerSystemJob({ id: "good", name: "Good", schedule: "0 0 1 1 *", enabled: true, handler: async () => {} });
+    svc.registerSystemJob({ id: "bad", name: "Bad", schedule: "0 0 1 1 *", enabled: true, handler: async () => { throw new Error("x"); } });
+
+    await svc.triggerJob("good");
+    await svc.triggerJob("bad");
+    await svc.triggerJob("bad");
+
+    const summary = svc.getFireSummary();
+    expect(summary[0].jobId).toBe("bad");
+    expect(summary[0].consecutiveFailures).toBe(2);
+  });
+
+  it("trigger via scheduler tick (non-manual) records manual=false", async () => {
+    const svc = makeService();
+    svc.setEventHandler(async () => {});
+
+    const job = svc.addAgentJob({
+      name: "TickJob",
+      schedule: { kind: "cron", expr: "* * * * *" },
+      payload: "tick",
+      enabled: true,
+    });
+
+    // Simulate a tick fire (no triggerJob, direct tick)
+    await (svc as any).tick();
+
+    const events = svc.getFireLog(job.id);
+    expect(events.length).toBeGreaterThanOrEqual(1);
+    expect(events[0].manual).toBe(false);
   });
 });
