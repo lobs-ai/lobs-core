@@ -157,12 +157,13 @@ async function checkWorkerHealth(): Promise<WorkerHealthResult> {
   `).get() as { count: number };
   const recentCompletions = completionsResult.count;
   
-  // Count failures in last hour
+  // Count failures in last hour (exclude orphaned-on-restart — those are expected during deploys)
   const failuresResult = db.prepare(`
     SELECT COUNT(*) as count 
     FROM worker_runs 
     WHERE started_at >= datetime('now', '-1 hour')
     AND succeeded = 0
+    AND (timeout_reason IS NULL OR timeout_reason != 'orphaned on restart')
   `).get() as { count: number };
   const recentFailures = failuresResult.count;
   
