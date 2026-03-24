@@ -466,10 +466,10 @@ function reflectionSpawnAll(args: Record<string, unknown>, _ctx: CallableContext
 }
 
 /**
- * Wake the main agent with a builder reflection prompt.
- * Instead of spawning subagent workers to produce JSON reports,
+ * Wake the main agent with a strategic reflection prompt.
+ * Instead of spawning 6 subagent workers to produce JSON reports,
  * this fires a system event into the main agent which has full tools
- * and can actually investigate, build, and fix things.
+ * and can investigate, create tasks, and route ideas to Rafe's inbox.
  */
 function reflectionWakeMain(_args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
   const mainAgent = (globalThis as any).__lobsMainAgent;

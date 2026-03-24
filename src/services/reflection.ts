@@ -268,10 +268,10 @@ Reflection ID: ${reflectionId}`;
   }
 
   /**
-   * Build a system event payload for the main agent's builder reflection.
-   * Unlike subagent reflections which produce JSON, this wakes the main agent
-   * with context about recent activity and tells it to actually DO something.
-   * The main agent has full tools, memory, and context — it can investigate and act.
+   * Build a system event payload for the main agent's strategic reflection.
+   * Wakes the main agent with activity context and tells it to think strategically,
+   * create tasks for actionable work, and route new ideas to Rafe's inbox.
+   * The main agent has full tools and can investigate before deciding.
    */
   buildMainReflectionEvent(): string {
     const db = getDb();
@@ -322,25 +322,61 @@ Reflection ID: ${reflectionId}`;
         ).join("\n")
       : "  No recent failures.";
 
-    return `[BUILDER REFLECTION] Time to look deeper and build something.
+    // Projects
+    const activeProjects = db.select().from(projectsTable)
+      .where(eq(projectsTable.archived, false))
+      .limit(10)
+      .all();
+    const projectList = activeProjects.length > 0
+      ? activeProjects.map((p: Record<string, unknown>) =>
+          `  "${p.title}" (type=${p.type})${p.notes ? ` — ${safeSlice(p.notes as string, 100)}` : ""}`
+        ).join("\n")
+      : "  No active projects.";
+
+    // Prior suggestion outcomes (helps calibrate)
+    const suggestionOutcomes = this._getSuggestionOutcomes();
+
+    return `[STRATEGIC REFLECTION] Time to think about the bigger picture.
 
 RECENT ACTIVITY (6h):
 ${activitySummary}
 
-ACTIVE TASKS:
+ACTIVE/BLOCKED TASKS:
 ${taskSummary}
 
 RECENT FAILURES (24h):
 ${failureSummary}
 
-This is your 3-hour builder reflection. The heartbeat keeps things running — this is for going deeper. You have full tools. Read your HEARTBEAT.md, read today's memory, then:
+ACTIVE PROJECTS:
+${projectList}
 
-1. Look at what's been happening — any patterns? Repeated failures? Stalled work?
-2. Check the repos (git log, open PRs/issues, TODOs in code)
-3. Pick ONE high-value thing and actually do it — write code, fix a bug, improve a system
-4. If it's too big for one session, spawn a programmer/architect agent with a clear task
+PRIOR SUGGESTION OUTCOMES:
+${suggestionOutcomes}
 
-Don't just observe and report. Build something. Ship something. Make the system materially better.`;
+---
+
+This is your 3-hour strategic reflection. The heartbeat keeps the system running — this is for stepping back and thinking about what SHOULD be happening.
+
+You have full tools. Investigate anything that looks interesting — check git logs, read code, look at patterns. Then act on what you find:
+
+WHAT TO LOOK FOR:
+- Inefficiencies: repeated failures, stalled tasks, wasted effort
+- System risks: things that could break, single points of failure, technical debt
+- Missed opportunities: useful things nobody's working on, low-hanging fruit
+- Process improvements: better ways to organize work, reduce friction
+
+WHAT TO DO WITH YOUR FINDINGS:
+1. Small/obvious improvements (tier A/B): spawn an agent to do the work right now
+2. New ideas that need Rafe's approval (tier C): create an inbox item with a clear description of what and why — use exec to insert into the inbox_items table:
+   sqlite3 ~/.lobs/lobs.db "INSERT INTO inbox_items (id, source, type, title, body, priority, status, created_at, updated_at) VALUES (lower(hex(randomblob(16))), 'reflection', 'suggestion', '<title>', '<body>', 'medium', 'pending', datetime('now'), datetime('now'))"
+3. If something is broken or failing: fix it directly or spawn an agent to fix it
+
+Tier guide — when in doubt, it's tier C:
+- Tier A: Pure observation/analysis, reading code, checking status
+- Tier B: Small fixes, doc updates, test additions, config tweaks
+- Tier C: New features, architectural changes, anything Rafe should weigh in on
+
+Use prior suggestion outcomes to calibrate — suggest things similar to what was accepted, avoid patterns similar to what was rejected. Be concrete and specific, not vague.`;
   }
 
   /**

@@ -813,7 +813,7 @@ const DEFAULT_WORKFLOWS = [
   // ══════════════════════════════════════════════════════════════════
   {
     name: "reflection-cycle",
-    description: "Builder reflection — wakes main agent every 3h with context to investigate and build.",
+    description: "Strategic reflection — wakes main agent every 3h to analyze patterns, create tasks, and route ideas to inbox.",
     trigger: { type: "schedule", cron: "0 */3 * * *", timezone: "America/New_York" },
     is_active: true,
     nodes: [
