@@ -465,6 +465,34 @@ function reflectionSpawnAll(args: Record<string, unknown>, _ctx: CallableContext
   return { ok: true, spawned: spawned.length, agents: spawned };
 }
 
+/**
+ * Wake the main agent with a builder reflection prompt.
+ * Instead of spawning subagent workers to produce JSON reports,
+ * this fires a system event into the main agent which has full tools
+ * and can actually investigate, build, and fix things.
+ */
+function reflectionWakeMain(_args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
+  const mainAgent = (globalThis as any).__lobsMainAgent;
+  if (!mainAgent) {
+    log().warn("[REFLECTION] Main agent not available, skipping builder reflection");
+    return { ok: false, error: "main_agent_not_available" };
+  }
+
+  // Check if main agent is already busy (don't pile on)
+  if (mainAgent.isProcessing && mainAgent.isProcessing()) {
+    log().info("[REFLECTION] Main agent is busy, skipping builder reflection this cycle");
+    return { ok: true, skipped: true, reason: "main_agent_busy" };
+  }
+
+  const eventText = reflectionSvc.buildMainReflectionEvent();
+  mainAgent.handleSystemEvent(eventText).catch((e: Error) => {
+    log().error(`[REFLECTION] Failed to inject builder reflection: ${e.message}`);
+  });
+
+  log().info("[REFLECTION] Fired builder reflection into main agent");
+  return { ok: true, fired: true };
+}
+
 // ─── Diagnostics ──────────────────────────────────────────────────────────────
 
 function diagnosticsRunOnce(_args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
@@ -897,6 +925,7 @@ const REGISTRY: Record<string, CallableFn | undefined> = {
   "reflection.build_prompt": reflectionBuildPrompt,
   "reflection.store_output": reflectionStoreOutput,
   "reflection.spawn_all": reflectionSpawnAll,
+  "reflection.wake_main": reflectionWakeMain,
 
   // Diagnostics
   "diagnostics.run_once": diagnosticsRunOnce,

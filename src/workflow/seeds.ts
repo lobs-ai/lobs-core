@@ -813,47 +813,18 @@ const DEFAULT_WORKFLOWS = [
   // ══════════════════════════════════════════════════════════════════
   {
     name: "reflection-cycle",
-    description: "Full strategic reflection pipeline — spawns workers, collects results, sweeps to inbox.",
+    description: "Builder reflection — wakes main agent every 3h with context to investigate and build.",
     trigger: { type: "schedule", cron: "0 */3 * * *", timezone: "America/New_York" },
     is_active: true,
     nodes: [
-      // Reflections always run — they're system maintenance, not queued work
+      // Instead of spawning 6 subagent workers to produce JSON reports,
+      // fire a system event into the main agent which has full tools and can act.
       {
-        id: "spawn_all",
+        id: "wake_main",
         type: "ts_call",
-        config: { callable: "reflection.spawn_all" },
-        on_success: "check_results",
-        on_failure: { retry: 1, abort_on: ["python_error"] },
-      },
-      {
-        id: "check_results",
-        type: "branch",
-        config: {
-          conditions: [{ match: "spawn_all.spawned == 0", goto: "run_sweep" }],
-          default: "wait_for_workers",
-        },
-      },
-      {
-        id: "wait_for_workers",
-        type: "delay",
-        config: { seconds: 120 },
-        on_success: "run_sweep",
-      },
-      {
-        id: "run_sweep",
-        type: "ts_call",
-        config: { callable: "reflection.run_sweep" },
-        on_success: "notify_complete",
-        on_failure: { retry: 2 },
-      },
-      {
-        id: "notify_complete",
-        type: "notify",
-        config: {
-          channel: "internal",
-          message_template: "Reflection cycle complete. Spawned {spawn_all.spawned}, collected {spawn_all.collected}. Sweep routed {run_sweep.routed} to inbox.",
-        },
+        config: { callable: "reflection.wake_main" },
         on_success: "done",
+        on_failure: { retry: 1 },
       },
       { id: "done", type: "cleanup", config: { delete_session: false } },
     ],

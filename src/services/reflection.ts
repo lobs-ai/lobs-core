@@ -13,7 +13,7 @@ import { buildTaskContext } from "../util/task-context.js";
 import { classifyApprovalTier } from "../util/approval-tier.js";
 import { log } from "../util/logger.js";
 
-const REFLECTION_AGENTS = ["programmer", "researcher", "writer", "architect", "reviewer", "main"];
+const REFLECTION_AGENTS = ["main"];
 const QUALITY_MIN_LENGTH = 50;
 
 /** Slice a string without splitting surrogate pairs (avoids invalid JSON errors) */
@@ -265,6 +265,82 @@ ${"```"}
 Do not read files. Do not use tools. Just analyze the provided data and respond with the JSON. Keep reasoning brief.
 
 Reflection ID: ${reflectionId}`;
+  }
+
+  /**
+   * Build a system event payload for the main agent's builder reflection.
+   * Unlike subagent reflections which produce JSON, this wakes the main agent
+   * with context about recent activity and tells it to actually DO something.
+   * The main agent has full tools, memory, and context — it can investigate and act.
+   */
+  buildMainReflectionEvent(): string {
+    const db = getDb();
+
+    // Recent worker runs across all agents (6h window)
+    const recentSince = new Date(Date.now() - 6 * 3600 * 1000).toISOString();
+    const recentRuns = db.select().from(workerRuns)
+      .where(gte(workerRuns.startedAt, recentSince))
+      .orderBy(desc(workerRuns.startedAt))
+      .limit(15)
+      .all();
+
+    const activitySummary = recentRuns.length > 0
+      ? recentRuns.map(r => {
+          let title = "untitled";
+          if (r.taskId) {
+            const task = db.select().from(tasksTable).where(eq(tasksTable.id, r.taskId)).get();
+            title = (task as Record<string, unknown>)?.title as string ?? "untitled";
+          }
+          const status = r.succeeded ? "✓" : r.succeeded === false ? "✗" : "?";
+          return `  ${status} [${r.agentType}] "${title}" (${r.startedAt})`;
+        }).join("\n")
+      : "  No recent worker activity.";
+
+    // Active/blocked tasks
+    const activeTasks = db.select().from(tasksTable)
+      .where(inArray(tasksTable.status, ["active", "blocked"]))
+      .limit(20)
+      .all();
+    const taskSummary = activeTasks.length > 0
+      ? activeTasks.map((t: Record<string, unknown>) =>
+          `  [${t.status}] "${t.title}" (agent=${t.agent ?? "unassigned"})`
+        ).join("\n")
+      : "  No active tasks.";
+
+    // Failed tasks (last 24h)
+    const failedSince = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+    const failedTasks = db.select().from(tasksTable)
+      .where(and(
+        eq(tasksTable.status, "failed"),
+        gte(tasksTable.updatedAt, failedSince),
+      ))
+      .limit(10)
+      .all();
+    const failureSummary = failedTasks.length > 0
+      ? failedTasks.map((t: Record<string, unknown>) =>
+          `  ✗ "${t.title}" — ${(t as any).failureReason ?? "unknown"}`
+        ).join("\n")
+      : "  No recent failures.";
+
+    return `[BUILDER REFLECTION] Time to look deeper and build something.
+
+RECENT ACTIVITY (6h):
+${activitySummary}
+
+ACTIVE TASKS:
+${taskSummary}
+
+RECENT FAILURES (24h):
+${failureSummary}
+
+This is your 3-hour builder reflection. The heartbeat keeps things running — this is for going deeper. You have full tools. Read your HEARTBEAT.md, read today's memory, then:
+
+1. Look at what's been happening — any patterns? Repeated failures? Stalled work?
+2. Check the repos (git log, open PRs/issues, TODOs in code)
+3. Pick ONE high-value thing and actually do it — write code, fix a bug, improve a system
+4. If it's too big for one session, spawn a programmer/architect agent with a clear task
+
+Don't just observe and report. Build something. Ship something. Make the system materially better.`;
   }
 
   /**
