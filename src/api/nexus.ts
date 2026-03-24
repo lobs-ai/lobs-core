@@ -9,7 +9,7 @@ import { readFile } from "node:fs/promises";
 import { join, extname } from "node:path";
 import { log } from "../util/logger.js";
 
-const WEB_ROOT = process.env.NEXUS_WEB_ROOT || "/Users/lobs/lobs-nexus/dist";
+const WEB_ROOT = process.env.NEXUS_WEB_ROOT || "/Users/lobs/lobs/lobs-nexus/dist";
 const ASSETS_ROOT = join(WEB_ROOT, "static");
 
 const MIME: Record<string, string> = {
