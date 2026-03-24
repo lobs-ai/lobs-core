@@ -479,6 +479,89 @@ describe("MainAgent Session Management", () => {
     expect(session.last_author_name).toBe("Alice");
   });
 
+  it("should pause an active channel without emitting a failure", () => {
+    const channelId = "vim:test-pause";
+
+    db.prepare(`
+      INSERT INTO channel_sessions (channel_id, status, last_activity)
+      VALUES (?, 'processing', datetime('now'))
+    `).run(channelId);
+
+    (agent as any).processingChannels.add(channelId);
+    (agent as any).channelRunIds.set(channelId, 4);
+    (agent as any).pendingRetryDelay.set(channelId, 1000);
+    (agent as any).conversationRetryCount.set(channelId, 1);
+    (agent as any).channelLastProgressAt.set(channelId, Date.now());
+    (agent as any).channelLastSessionHeartbeatAt.set(channelId, Date.now());
+
+    agent.pauseChannel(channelId, "Neovim WebSocket disconnected");
+
+    expect(agent.isChannelProcessing(channelId)).toBe(false);
+    expect((agent as any).pendingRetryDelay.has(channelId)).toBe(false);
+    expect((agent as any).conversationRetryCount.has(channelId)).toBe(false);
+    expect((agent as any).channelLastProgressAt.has(channelId)).toBe(false);
+
+    const session = db.prepare(`
+      SELECT status FROM channel_sessions WHERE channel_id = ?
+    `).get(channelId) as { status: string };
+    expect(session.status).toBe("queued");
+  });
+
+  it("should resume a paused channel only when explicitly requested", () => {
+    const channelId = "vim:test-resume";
+
+    db.prepare(`
+      INSERT INTO channel_sessions (channel_id, status, last_activity)
+      VALUES (?, 'queued', datetime('now'))
+    `).run(channelId);
+
+    const processSpy = vi
+      .spyOn(agent as any, "processConversation")
+      .mockResolvedValue(undefined);
+
+    const resumed = agent.resumeChannel(
+      channelId,
+      "[System] Neovim WebSocket reconnected. Resume the interrupted task from the latest confirmed state.",
+    );
+
+    expect(resumed).toBe(true);
+    expect(processSpy).toHaveBeenCalledWith(channelId);
+
+    const session = db.prepare(`
+      SELECT status FROM channel_sessions WHERE channel_id = ?
+    `).get(channelId) as { status: string };
+    expect(session.status).toBe("processing");
+
+    const resumeNote = db.prepare(`
+      SELECT content FROM main_agent_messages
+      WHERE channel_id = ? AND role = 'user'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(channelId) as { content: string };
+    expect(resumeNote.content).toContain("Resume the interrupted task");
+  });
+
+  it("should refuse to resume an idle channel", () => {
+    const channelId = "vim:test-idle";
+
+    db.prepare(`
+      INSERT INTO channel_sessions (channel_id, status, last_activity)
+      VALUES (?, 'idle', datetime('now'))
+    `).run(channelId);
+
+    const processSpy = vi
+      .spyOn(agent as any, "processConversation")
+      .mockResolvedValue(undefined);
+
+    const resumed = agent.resumeChannel(
+      channelId,
+      "[System] Neovim WebSocket reconnected. Resume the interrupted task from the latest confirmed state.",
+    );
+
+    expect(resumed).toBe(false);
+    expect(processSpy).not.toHaveBeenCalled();
+  });
+
   it("should mark delayed restart resumes as queued until processing actually begins", async () => {
     vi.useFakeTimers();
 

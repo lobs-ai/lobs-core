@@ -40,7 +40,7 @@ const TOOL_DELEGATION_TIMEOUT = 120_000;
 // ── Types ───────────────────────────────────────────────────────
 
 interface VimSession {
-  ws: WebSocket;
+  ws: WebSocket | null;
   sessionKey: string;
   channelId: string;
   projectRoot: string;
@@ -156,20 +156,19 @@ function cleanupSession(session: VimSession): void {
   // Reject any pending tool requests
   for (const [, pending] of session.pendingToolRequests) {
     clearTimeout(pending.timer);
-    pending.reject(new Error("WebSocket disconnected"));
+    pending.reject(new Error("Channel paused: Neovim WebSocket disconnected"));
   }
   session.pendingToolRequests.clear();
 
-  // Unregister the channel tool executor
   const mainAgent = getMainAgent();
   if (mainAgent) {
-    mainAgent.channelToolExecutors.delete(session.channelId);
+    mainAgent.pauseChannel(session.channelId, "Neovim WebSocket disconnected");
   }
 
   // Keep session in the map for reconnection — only null out the ws reference
   // so we know it's disconnected. The session data (channelId, projectRoot, etc.)
   // is preserved for when the client reconnects.
-  session.ws = null as unknown as WebSocket;
+  session.ws = null;
 }
 
 // ── Message handling ────────────────────────────────────────────
@@ -185,6 +184,10 @@ async function handleMessage(
 
     case "chat.send":
       await handleChatSend(ws, msg, session);
+      return session;
+
+    case "session.resume":
+      await handleSessionResume(ws, session);
       return session;
 
     case "tool.result":
@@ -210,6 +213,7 @@ function handleSessionOpen(ws: WebSocket, msg: ClientMessage): VimSession {
   const sessionKey = msg.sessionKey || `vim-${randomUUID().slice(0, 8)}`;
   const channelId = `vim:${sessionKey}`;
   const projectRoot = msg.projectRoot || process.cwd();
+  const mainAgent = getMainAgent();
 
   // Check if there's an existing session with this key (reconnection case)
   const existingSession = sessions.get(sessionKey);
@@ -223,7 +227,6 @@ function handleSessionOpen(ws: WebSocket, msg: ClientMessage): VimSession {
     existingSession.projectRoot = projectRoot;
 
     // Re-register the tool delegation executor with the new ws
-    const mainAgent = getMainAgent();
     if (mainAgent) {
       mainAgent.channelToolExecutors.set(
         channelId,
@@ -239,10 +242,13 @@ function handleSessionOpen(ws: WebSocket, msg: ClientMessage): VimSession {
 
     // Use DB title if available, otherwise derive from project root
     const dbTitle = getMainAgent()?.getSessionTitle(channelId);
+    const channelStatus = mainAgent?.getChannelStatus(channelId);
     sendJson(ws, {
       type: "session.opened",
       sessionKey,
       title: dbTitle ?? `vim:${projectRoot.split("/").pop() || "project"}`,
+      status: channelStatus,
+      resumeRequired: channelStatus === "queued",
     });
 
     return existingSession;
@@ -260,7 +266,6 @@ function handleSessionOpen(ws: WebSocket, msg: ClientMessage): VimSession {
   sessions.set(sessionKey, newSession);
 
   // Register the tool delegation executor on this channel
-  const mainAgent = getMainAgent();
   if (mainAgent) {
     mainAgent.channelToolExecutors.set(
       channelId,
@@ -285,6 +290,8 @@ function handleSessionOpen(ws: WebSocket, msg: ClientMessage): VimSession {
     type: "session.opened",
     sessionKey,
     title: `vim:${projectRoot.split("/").pop() || "project"}`,
+    status: mainAgent?.getChannelStatus(channelId) ?? "idle",
+    resumeRequired: false,
   });
 
   return newSession;
@@ -397,15 +404,8 @@ async function delegateTool(
     return null; // Fall through to server execution
   }
 
-  if (session.ws.readyState !== WebSocket.OPEN) {
-    return {
-      result: {
-        tool_use_id: toolUseId,
-        type: "tool_result",
-        content: "Error: Neovim client disconnected",
-        is_error: true,
-      },
-    };
+  if (!session.ws || session.ws.readyState !== WebSocket.OPEN) {
+    throw new Error("Channel paused: Neovim WebSocket disconnected");
   }
 
   const requestId = randomUUID().slice(0, 12);
@@ -424,7 +424,7 @@ async function delegateTool(
   });
 
   // Wait for the client to respond with tool.result
-  return new Promise<ToolExecutionResult>((resolve, _reject) => {
+  return new Promise<ToolExecutionResult>((resolve, reject) => {
     const timer = setTimeout(() => {
       session.pendingToolRequests.delete(requestId);
       log().warn(
@@ -448,25 +448,18 @@ async function delegateTool(
         const content = result.isError && !result.content
           ? "Tool error (no output)"
           : (result.content || "");
-        resolve({
-          result: {
-            tool_use_id: toolUseId,
-            type: "tool_result",
-            content,
-            is_error: result.isError,
-          },
-        });
+      resolve({
+        result: {
+          tool_use_id: toolUseId,
+          type: "tool_result",
+          content,
+          is_error: result.isError,
+        },
+      });
       },
       reject: (err) => {
         clearTimeout(timer);
-        resolve({
-          result: {
-            tool_use_id: toolUseId,
-            type: "tool_result",
-            content: `Error: ${err.message}`,
-            is_error: true,
-          },
-        });
+        reject(err);
       },
       timer,
     });
@@ -541,6 +534,37 @@ async function handleChatSend(
   }
 
   mainAgent.events.off("stream", streamListener);
+}
+
+// ── session.resume ──────────────────────────────────────────────
+
+async function handleSessionResume(
+  ws: WebSocket,
+  session: VimSession | null,
+): Promise<void> {
+  if (!session) {
+    sendJson(ws, {
+      type: "error",
+      message: "No session — send session.open first",
+    });
+    return;
+  }
+
+  const mainAgent = getMainAgent();
+  if (!mainAgent) {
+    sendJson(ws, { type: "error", message: "Main agent not initialized" });
+    return;
+  }
+
+  const resumed = mainAgent.resumeChannel(
+    session.channelId,
+    "[System] Neovim WebSocket reconnected. Resume the interrupted task from the latest confirmed state.",
+  );
+
+  sendJson(ws, {
+    type: "chat.status",
+    status: resumed ? "resuming" : "queued",
+  });
 }
 
 // ── tool.result (client responds to delegated tool) ─────────────

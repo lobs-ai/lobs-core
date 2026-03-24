@@ -929,6 +929,76 @@ export class MainAgent {
     return MAX_CONCURRENT_CHANNELS;
   }
 
+  /** Get persisted session status for a channel */
+  getChannelStatus(channelId: string): "idle" | "processing" | "queued" | null {
+    const row = this.db.prepare(
+      `SELECT status FROM channel_sessions WHERE channel_id = ?`
+    ).get(channelId) as { status: "idle" | "processing" | "queued" } | undefined;
+    return row?.status ?? null;
+  }
+
+  /**
+   * Pause an in-flight channel without treating it as a hard failure.
+   * Used by transports like vim-ws when the live client disappears mid-turn.
+   */
+  pauseChannel(channelId: string, reason: string): void {
+    console.warn(`[main-agent] Pausing channel ${this.channelTag(channelId)}: ${reason}`);
+
+    const ac = this.channelAbortControllers.get(channelId);
+    if (ac) {
+      ac.abort(new Error(`Channel paused: ${reason}`));
+      this.channelAbortControllers.delete(channelId);
+    }
+
+    this.channelRunIds.set(channelId, (this.channelRunIds.get(channelId) ?? 0) + 1);
+    this.processingChannels.delete(channelId);
+    this.pendingRetryDelay.delete(channelId);
+    this.conversationRetryCount.delete(channelId);
+    this.channelLastProgressAt.delete(channelId);
+    this.channelLastSessionHeartbeatAt.delete(channelId);
+    this.updateChannelSession(channelId, "queued");
+  }
+
+  /**
+   * Resume a previously paused/queued channel if capacity is available.
+   * Returns true when a new processing run was started immediately.
+   */
+  resumeChannel(channelId: string, resumeInstruction?: string): boolean {
+    if (this.processingChannels.has(channelId)) {
+      return false;
+    }
+
+    if (this.getChannelStatus(channelId) !== "queued") {
+      return false;
+    }
+
+    if (this.processingChannels.size >= MAX_CONCURRENT_CHANNELS) {
+      this.updateChannelSession(channelId, "queued");
+      return false;
+    }
+
+    if (resumeInstruction?.trim()) {
+      this.db.prepare(`
+        INSERT INTO main_agent_messages (id, role, content, channel_id, token_estimate)
+        VALUES (?, 'user', ?, ?, ?)
+      `).run(
+        randomUUID(),
+        resumeInstruction,
+        channelId,
+        Math.ceil(resumeInstruction.length / 4),
+      );
+    }
+
+    this.updateChannelSession(channelId, "processing");
+    this.processConversation(channelId).catch((err) => {
+      console.error(`[main-agent] Resume failed for ${this.channelTag(channelId)}:`, err);
+      this.conversationRetryCount.delete(channelId);
+      this.processingChannels.delete(channelId);
+      this.updateChannelSession(channelId, "idle");
+    });
+    return true;
+  }
+
   /* ── Core conversation loop ────────────────────────────────────── */
 
   private async processConversation(replyChannelId: string): Promise<void> {
@@ -1618,6 +1688,11 @@ export class MainAgent {
       await this.flushDiscordToolBatch(replyChannelId).catch(() => {});
 
       const errStr = String(err);
+      if (this.isPauseError(errStr)) {
+        console.warn(`[main-agent] Conversation paused for ${this.channelTag(replyChannelId)}: ${errStr}`);
+        return;
+      }
+
       const { isTransient, isRateLimit, isOverloaded, isTimeout } = this.classifyConversationError(errStr);
       const retryAfterMs = this.extractRetryAfterMs(errStr);
 
@@ -3033,6 +3108,10 @@ export class MainAgent {
       errStr.includes("529");
 
     return { isTransient, isRateLimit, isOverloaded, isTimeout };
+  }
+
+  private isPauseError(errStr: string): boolean {
+    return errStr.includes("Channel paused:");
   }
 
   private async createMessageWithTimeout(
