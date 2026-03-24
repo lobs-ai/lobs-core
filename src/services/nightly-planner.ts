@@ -1,62 +1,46 @@
 /**
- * Nightly Planner — runs at 10pm ET every night
+ * Nightly Planner Service
  *
- * Plans the next 7 days by:
- * 1. Reading Rafe's calendar for the week ahead
- * 2. Fetching active/in-progress human tasks, scored by priority + deadlines
- * 3. Calculating free slots per day
- * 4. Assigning tasks to slots (highest priority first, deadline-aware)
- * 5. Clearing old planner events from the Lobs Planning calendar
- * 6. Writing new events with descriptive emoji-prefixed titles
- * 7. Returning a summary for Discord notification
+ * Runs at 10pm ET every night. Reads the user's calendar for tomorrow,
+ * fetches active tasks, computes free slots, and creates planning events
+ * on the Lobs calendar (thelobsbot@gmail.com).
  */
 
-import { and, asc, desc, inArray } from "drizzle-orm";
+import { inArray } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { tasks } from "../db/schema.js";
+import { log } from "../util/logger.js";
+
 import { getEventsForDateRange, type CalendarEvent } from "./google-calendar.js";
-import { GoogleCalendarService } from "../integrations/google-calendar.js";
 import {
   buildFreeSlots,
+  mergeBusyBlocks,
   getFixedBusyBlocks,
   scoreTask,
   normalizeEstimate,
-  clampToWindow,
   MIN_SLOT_MINUTES,
   SLOT_BUFFER_MINUTES,
   type BusyBlock,
-  type PlannerSlot,
 } from "./scheduler-intelligence.js";
-import { log } from "../util/logger.js";
+import { GoogleCalendarService } from "../integrations/google-calendar.js";
 
-// ─── Configuration ────────────────────────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-/** How many days ahead to plan */
-const PLANNING_HORIZON_DAYS = 7;
-
-/** Max work blocks to schedule per day */
-const MAX_BLOCKS_PER_DAY = 6;
-
-/** Try to leave at least one free slot of this size (minutes) per day */
+const TZ = "America/New_York";
+const MAX_WORK_BLOCKS = 6;
 const BREATHING_ROOM_MINUTES = 90;
-
-/** Marker in event descriptions so we can identify & clear planner events */
 const PLANNER_TAG = "[lobs-planner]";
 
-/** Timezone for all scheduling */
-const TZ = "America/New_York";
-
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Interfaces ───────────────────────────────────────────────────────────────
 
 export interface NightlyPlannerResult {
   plannedAt: string;
-  targetDateRange: { start: string; end: string }; // YYYY-MM-DD
+  targetDate: string; // YYYY-MM-DD
   eventsCreated: number;
-  eventsCleared: number;
+  eventsCleared: number; // old planning events removed
   plannedBlocks: Array<{
     taskId: string;
     taskTitle: string;
-    day: string; // YYYY-MM-DD
     start: string;
     end: string;
     minutes: number;
@@ -67,78 +51,91 @@ export interface NightlyPlannerResult {
     taskTitle: string;
     reason: string;
   }>;
-  dayBreakdown: Array<{
-    date: string;
-    existingEvents: number;
-    freeMinutes: number;
-    blocksScheduled: number;
-  }>;
-  summary: string;
+  tomorrowEvents: number; // how many events are on the calendar tomorrow
+  freeMinutes: number; // total free minutes tomorrow
+  summary: string; // human-readable summary for Discord notification
 }
 
-interface RankedTask {
-  id: string;
-  title: string;
-  priority: string | null;
-  dueDate: string | null;
-  estimatedMinutes: number;
-  score: number;
-  status: string;
-  workState: string | null;
-  projectId: string | null;
-  shape: string | null;
-  remainingMinutes: number; // tracks how much is left to schedule
-}
+// ─── Emoji Helpers ────────────────────────────────────────────────────────────
 
-// ─── Emoji mapping ────────────────────────────────────────────────────────────
-
-function getTaskEmoji(task: RankedTask): string {
-  const title = task.title.toLowerCase();
-  if (/review|audit|check|grade/.test(title)) return "🔍";
-  if (/doc|write|draft|essay|paper/.test(title)) return "📝";
-  if (/study|read|lecture|homework|hw|exam|quiz/.test(title)) return "📚";
-  if (/research|investigate|explore/.test(title)) return "🔬";
-  if (/fix|bug|patch|debug/.test(title)) return "🔧";
-  if (/build|implement|create|develop|feature|ship/.test(title)) return "🔨";
-  if (/meet|sync|call|discuss/.test(title)) return "🗣️";
-  if (/plan|design|architect|outline/.test(title)) return "📐";
-  if (/test|verify|qa/.test(title)) return "✅";
-  if (/deploy|release|launch/.test(title)) return "🚀";
+function pickEmoji(title: string, shape: string | null): string {
+  const lower = title.toLowerCase();
+  if (/fix|bug|patch|debug/.test(lower)) return "🐛";
+  if (/deploy|release|launch|ship/.test(lower)) return "🚀";
+  if (/test|verify|qa/.test(lower)) return "🧪";
+  if (/build|implement|create|develop|feature|api|code|coding/.test(lower)) return "🔨";
+  if (/design|architect|outline/.test(lower)) return "🎨";
+  if (/plan|planning/.test(lower)) return "📋";
+  if (/review|audit|check|grade/.test(lower)) return "🔍";
+  if (/doc|write|draft|essay|paper/.test(lower)) return "📝";
+  if (/study|read|lecture|homework|hw|exam|quiz|eecs|class|course/.test(lower)) return "📚";
+  if (/research|investigate|explore/.test(lower)) return "🔍";
+  if (/meet|sync|call|discuss/.test(lower)) return "🤝";
 
   // Fallback by shape
-  if (task.shape === "spike") return "🔬";
-  if (task.shape === "feature") return "🔨";
-  if (task.shape === "fix") return "🔧";
-  if (task.shape === "review") return "🔍";
-  if (task.shape === "write") return "📝";
+  if (shape === "spike") return "🔍";
+  if (shape === "feature") return "🔨";
+  if (shape === "fix") return "🐛";
 
-  return "📋";
+  return "📌";
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Date Helpers ─────────────────────────────────────────────────────────────
 
-function startOfDay(date: Date): Date {
-  const d = new Date(date);
-  d.setHours(0, 0, 0, 0);
-  return d;
+/** Get tomorrow's date as a Date object representing midnight local time */
+function getTomorrowET(): Date {
+  const now = new Date();
+  // Format in ET to get the correct local date
+  const etDateStr = now.toLocaleDateString("en-CA", { timeZone: TZ }); // YYYY-MM-DD
+  const parts = etDateStr.split("-").map(Number);
+  const todayET = new Date(parts[0], parts[1] - 1, parts[2]);
+  todayET.setDate(todayET.getDate() + 1);
+  return todayET;
 }
 
-function endOfDay(date: Date): Date {
-  const d = new Date(date);
-  d.setHours(23, 59, 59, 999);
-  return d;
+/** Format a Date as YYYY-MM-DD */
+function formatDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
-function addDays(date: Date, days: number): Date {
-  const d = new Date(date);
-  d.setDate(d.getDate() + days);
-  return d;
+/** Get ET offset string (handles DST) for a given date */
+function getETOffset(d: Date): string {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: TZ,
+    timeZoneName: "shortOffset",
+  });
+  const parts = formatter.formatToParts(d);
+  const tzPart = parts.find((p) => p.type === "timeZoneName");
+  if (tzPart?.value) {
+    const match = tzPart.value.match(/GMT([+-]\d+)/);
+    if (match) {
+      const offset = parseInt(match[1], 10);
+      const sign = offset >= 0 ? "+" : "-";
+      const abs = Math.abs(offset);
+      return `${sign}${String(abs).padStart(2, "0")}:00`;
+    }
+  }
+  return "-05:00"; // fallback to EST
 }
 
-function formatDate(date: Date): string {
-  return date.toISOString().slice(0, 10);
+/** Create ISO datetime string with ET offset */
+function toETIso(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+): string {
+  const d = new Date(year, month - 1, day, hour, minute, 0);
+  const offset = getETOffset(d);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${year}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(minute)}:00${offset}`;
 }
 
+/** Format an ISO time string to a human-readable ET time like "2:30 PM" */
 function formatTimeET(iso: string): string {
   try {
     return new Date(iso).toLocaleTimeString("en-US", {
@@ -151,411 +148,452 @@ function formatTimeET(iso: string): string {
   }
 }
 
-function formatDayLabel(date: Date): string {
-  return date.toLocaleDateString("en-US", {
-    timeZone: TZ,
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-  });
-}
-
-function toBusyBlockFromRafeCalendar(event: CalendarEvent): BusyBlock | null {
-  const startRaw = event.start.dateTime ?? event.start.date;
-  const endRaw = event.end.dateTime ?? event.end.date;
-  if (!startRaw || !endRaw) return null;
-  const start = new Date(startRaw);
-  const end = new Date(endRaw);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
-  const clamped = clampToWindow(start, end);
-  if (!clamped) return null;
-  return {
-    title: event.summary || "(untitled)",
-    start: clamped.start,
-    end: clamped.end,
-    source: "google",
-    location: event.location,
-  };
-}
-
-// ─── Core planner ─────────────────────────────────────────────────────────────
+// ─── Core Logic ───────────────────────────────────────────────────────────────
 
 export async function runNightlyPlanner(): Promise<NightlyPlannerResult> {
-  const now = new Date();
-  const gcal = new GoogleCalendarService();
-
+  const startTime = Date.now();
   log().info("[nightly-planner] Starting nightly planning run");
 
-  // ── 1. Determine date range ──────────────────────────────────────────────
-  const tomorrow = addDays(startOfDay(now), 1);
-  const rangeEnd = addDays(tomorrow, PLANNING_HORIZON_DAYS);
+  const tomorrow = getTomorrowET();
+  const targetDate = formatDate(tomorrow);
+  const year = tomorrow.getFullYear();
+  const month = tomorrow.getMonth() + 1;
+  const day = tomorrow.getDate();
 
-  // ── 2. Fetch Rafe's calendar for the full range ─────────────────────────
-  let rafeEvents: CalendarEvent[] = [];
+  // Build time range for tomorrow in ET
+  const timeMin = toETIso(year, month, day, 0, 0);
+  const timeMax = toETIso(year, month, day, 23, 59);
+
+  log().info(`[nightly-planner] Planning for ${targetDate} (${timeMin} to ${timeMax})`);
+
+  // ── Step 1: Fetch tomorrow's calendar events (Rafe's calendar) ────────
+
+  let tomorrowEvents: CalendarEvent[] = [];
   try {
-    rafeEvents = await getEventsForDateRange(
-      startOfDay(tomorrow).toISOString(),
-      endOfDay(addDays(rangeEnd, -1)).toISOString(),
+    tomorrowEvents = await getEventsForDateRange(timeMin, timeMax);
+    log().info(
+      `[nightly-planner] Found ${tomorrowEvents.length} calendar events for tomorrow`,
     );
-    log().info(`[nightly-planner] Fetched ${rafeEvents.length} events from Rafe's calendar`);
   } catch (err) {
-    log().warn(`[nightly-planner] Failed to fetch Rafe's calendar: ${err}`);
+    log().warn(`[nightly-planner] Failed to fetch calendar events: ${err}`);
   }
 
-  // ── 3. Fetch active human tasks ─────────────────────────────────────────
-  const db = getDb();
-  const taskRows = db
-    .select({
-      id: tasks.id,
-      title: tasks.title,
-      priority: tasks.priority,
-      dueDate: tasks.dueDate,
-      estimatedMinutes: tasks.estimatedMinutes,
-      status: tasks.status,
-      workState: tasks.workState,
-      projectId: tasks.projectId,
-      shape: tasks.shape,
-      updatedAt: tasks.updatedAt,
-      blockedBy: tasks.blockedBy,
-      agent: tasks.agent,
-    })
-    .from(tasks)
-    .where(
-      and(
-        inArray(tasks.status, ["active", "in_progress"]),
-      ),
-    )
-    .orderBy(desc(tasks.priority), asc(tasks.dueDate))
-    .all()
-    .filter((row) => !row.agent); // human tasks only
+  // Also check both calendars for conflicts via FreeBusy
+  const gcalService = new GoogleCalendarService();
+  const lobsCalBusy: Array<{ start: string; end: string }> = [];
+  try {
+    const freeBusyResult = await gcalService.getFreeBusy(timeMin, timeMax, [
+      "primary",
+      "thelobsbot@gmail.com",
+    ]);
+    if (freeBusyResult) {
+      for (const calId of Object.keys(freeBusyResult)) {
+        const busy = freeBusyResult[calId]?.busy ?? [];
+        lobsCalBusy.push(...busy);
+      }
+    }
+  } catch (err) {
+    log().warn(`[nightly-planner] FreeBusy check failed: ${err}`);
+  }
 
-  const rankedTasks: RankedTask[] = taskRows
-    .map((row) => ({
-      id: row.id,
-      title: row.title,
-      priority: row.priority,
-      dueDate: row.dueDate,
-      estimatedMinutes: normalizeEstimate(row),
-      score: scoreTask(row),
-      status: row.status,
-      workState: row.workState,
-      projectId: row.projectId,
-      shape: row.shape,
-      remainingMinutes: normalizeEstimate(row),
+  // ── Step 2: Get active tasks ──────────────────────────────────────────
+
+  let taskRows: Array<{
+    id: string;
+    title: string;
+    status: string;
+    priority: string | null;
+    dueDate: string | null;
+    estimatedMinutes: number | null;
+    shape: string | null;
+    agent: string | null;
+    blockedBy: unknown;
+    workState: string | null;
+    projectId: string | null;
+    updatedAt: string;
+  }> = [];
+
+  try {
+    const db = getDb();
+    taskRows = db
+      .select()
+      .from(tasks)
+      .where(inArray(tasks.status, ["active", "in_progress"]))
+      .all()
+      .filter((t) => !t.agent) // human tasks only
+      .map((t) => ({
+        id: t.id,
+        title: t.title,
+        status: t.status,
+        priority: t.priority ?? null,
+        dueDate: t.dueDate ?? null,
+        estimatedMinutes: t.estimatedMinutes ?? null,
+        shape: t.shape ?? null,
+        agent: t.agent ?? null,
+        blockedBy: t.blockedBy ?? null,
+        workState: t.workState ?? null,
+        projectId: t.projectId ?? null,
+        updatedAt: t.updatedAt,
+      }));
+    log().info(`[nightly-planner] Found ${taskRows.length} active human tasks`);
+  } catch (err) {
+    log().warn(`[nightly-planner] Failed to fetch tasks: ${err}`);
+  }
+
+  if (taskRows.length === 0) {
+    log().info("[nightly-planner] No active tasks — skipping planning");
+    return {
+      plannedAt: new Date().toISOString(),
+      targetDate,
+      eventsCreated: 0,
+      eventsCleared: 0,
+      plannedBlocks: [],
+      unscheduledTasks: [],
+      tomorrowEvents: tomorrowEvents.length,
+      freeMinutes: 0,
+      summary: `📅 **Nightly Planner** — ${targetDate}\nNo active tasks to schedule.`,
+    };
+  }
+
+  // Score and rank tasks (highest score first)
+  const rankedTasks = taskRows
+    .map((t) => ({
+      ...t,
+      score: scoreTask(t),
+      estimatedMinutes: normalizeEstimate(t),
     }))
     .sort((a, b) => b.score - a.score);
 
-  log().info(`[nightly-planner] ${rankedTasks.length} active human tasks, ranked by score`);
+  log().info(
+    `[nightly-planner] Top tasks: ${rankedTasks
+      .slice(0, 5)
+      .map((t) => `${t.title} (${t.score})`)
+      .join(", ")}`,
+  );
 
-  // ── 4. Clear old planner events from Lobs calendar ──────────────────────
+  // ── Step 3: Calculate free slots for tomorrow ─────────────────────────
+
+  // Busy blocks from Rafe's calendar events
+  const calendarBusyBlocks: BusyBlock[] = tomorrowEvents
+    .filter((e) => e.start?.dateTime && e.end?.dateTime)
+    .map((e) => ({
+      title: e.summary ?? "Calendar Event",
+      start: new Date(e.start.dateTime!),
+      end: new Date(e.end.dateTime!),
+      source: "google" as const,
+    }));
+
+  // Busy blocks from FreeBusy (Lobs calendar)
+  const freeBusyBlocks: BusyBlock[] = lobsCalBusy.map((b) => ({
+    title: "Lobs Calendar Busy",
+    start: new Date(b.start),
+    end: new Date(b.end),
+    source: "google" as const,
+  }));
+
+  // Fixed recurring blocks (habits, recurring commitments)
+  const fixedBlocks = getFixedBusyBlocks(tomorrow);
+
+  // Merge all busy blocks
+  const allBusy = mergeBusyBlocks([
+    ...calendarBusyBlocks,
+    ...freeBusyBlocks,
+    ...fixedBlocks,
+  ]);
+
+  log().info(`[nightly-planner] ${allBusy.length} merged busy blocks for tomorrow`);
+
+  // Build free slots
+  const freeSlots = buildFreeSlots(tomorrow, allBusy);
+  const totalFreeMinutes = freeSlots.reduce((sum, s) => sum + s.minutes, 0);
+
+  log().info(
+    `[nightly-planner] ${freeSlots.length} free slots, ${totalFreeMinutes} total free minutes`,
+  );
+
+  if (freeSlots.length === 0) {
+    log().info("[nightly-planner] No free slots tomorrow — skipping");
+    return {
+      plannedAt: new Date().toISOString(),
+      targetDate,
+      eventsCreated: 0,
+      eventsCleared: 0,
+      plannedBlocks: [],
+      unscheduledTasks: rankedTasks.map((t) => ({
+        taskId: t.id,
+        taskTitle: t.title,
+        reason: "no free slots",
+      })),
+      tomorrowEvents: tomorrowEvents.length,
+      freeMinutes: totalFreeMinutes,
+      summary: `📅 **Nightly Planner** — ${targetDate}\nNo free slots available. ${tomorrowEvents.length} events on calendar.`,
+    };
+  }
+
+  // ── Step 4: Generate work plan (greedy fit, highest priority first) ───
+
+  interface PlannedBlock {
+    taskId: string;
+    taskTitle: string;
+    start: string;
+    end: string;
+    minutes: number;
+    calendarEventId: string | null;
+    emoji: string;
+  }
+
+  const planned: PlannedBlock[] = [];
+  const scheduledTaskIds = new Set<string>();
+
+  // Reserve breathing room: protect the largest slot if it's big enough
+  const sortedBySize = [...freeSlots].sort((a, b) => b.minutes - a.minutes);
+  let protectedSlotIdx: number | null = null;
+  if (sortedBySize.length > 1 && sortedBySize[0].minutes >= BREATHING_ROOM_MINUTES) {
+    const protectedSlot = sortedBySize[0];
+    protectedSlotIdx = freeSlots.findIndex(
+      (s) => s.start === protectedSlot.start && s.end === protectedSlot.end,
+    );
+  }
+
+  // Track remaining capacity per slot
+  const slotState = freeSlots.map((s) => ({
+    ...s,
+    startDate: new Date(s.start),
+    usedMinutes: 0,
+  }));
+
+  for (const task of rankedTasks) {
+    if (planned.length >= MAX_WORK_BLOCKS) break;
+
+    const taskMinutes = task.estimatedMinutes;
+    if (taskMinutes < MIN_SLOT_MINUTES) continue;
+
+    let assigned = false;
+
+    for (let i = 0; i < slotState.length; i++) {
+      // Skip protected breathing room slot on first pass
+      if (protectedSlotIdx !== null && i === protectedSlotIdx) continue;
+
+      const slot = slotState[i];
+      const available = slot.minutes - slot.usedMinutes;
+
+      if (available >= taskMinutes) {
+        const blockStart = new Date(
+          slot.startDate.getTime() + slot.usedMinutes * 60_000,
+        );
+        const blockEnd = new Date(blockStart.getTime() + taskMinutes * 60_000);
+
+        planned.push({
+          taskId: task.id,
+          taskTitle: task.title,
+          start: toETIso(
+            year,
+            month,
+            day,
+            blockStart.getHours(),
+            blockStart.getMinutes(),
+          ),
+          end: toETIso(
+            year,
+            month,
+            day,
+            blockEnd.getHours(),
+            blockEnd.getMinutes(),
+          ),
+          minutes: taskMinutes,
+          calendarEventId: null,
+          emoji: pickEmoji(task.title, task.shape),
+        });
+
+        slot.usedMinutes += taskMinutes + SLOT_BUFFER_MINUTES;
+        scheduledTaskIds.add(task.id);
+        assigned = true;
+        break;
+      }
+    }
+
+    // If not assigned, try the protected slot as a fallback
+    if (!assigned && protectedSlotIdx !== null && planned.length < MAX_WORK_BLOCKS) {
+      const slot = slotState[protectedSlotIdx];
+      const available = slot.minutes - slot.usedMinutes;
+
+      if (available >= taskMinutes) {
+        const blockStart = new Date(
+          slot.startDate.getTime() + slot.usedMinutes * 60_000,
+        );
+        const blockEnd = new Date(blockStart.getTime() + taskMinutes * 60_000);
+
+        planned.push({
+          taskId: task.id,
+          taskTitle: task.title,
+          start: toETIso(
+            year,
+            month,
+            day,
+            blockStart.getHours(),
+            blockStart.getMinutes(),
+          ),
+          end: toETIso(
+            year,
+            month,
+            day,
+            blockEnd.getHours(),
+            blockEnd.getMinutes(),
+          ),
+          minutes: taskMinutes,
+          calendarEventId: null,
+          emoji: pickEmoji(task.title, task.shape),
+        });
+
+        slot.usedMinutes += taskMinutes + SLOT_BUFFER_MINUTES;
+        scheduledTaskIds.add(task.id);
+        protectedSlotIdx = null; // No longer protected
+      }
+    }
+  }
+
+  // Collect unscheduled tasks
+  const unscheduledTasks = rankedTasks
+    .filter((t) => !scheduledTaskIds.has(t.id))
+    .map((t) => {
+      const taskMin = t.estimatedMinutes;
+      const maxAvailable = Math.max(
+        ...slotState.map((s) => s.minutes - s.usedMinutes),
+        0,
+      );
+      let reason = "no free slots";
+      if (planned.length >= MAX_WORK_BLOCKS) {
+        reason = `max ${MAX_WORK_BLOCKS} blocks per day reached`;
+      } else if (taskMin > maxAvailable) {
+        reason = `task needs ${taskMin}min but largest available slot is ${maxAvailable}min`;
+      }
+      return { taskId: t.id, taskTitle: t.title, reason };
+    });
+
+  log().info(
+    `[nightly-planner] Planned ${planned.length} blocks, ${unscheduledTasks.length} unscheduled`,
+  );
+
+  // ── Step 5: Clear old planning events from Lobs calendar ──────────────
+
   let eventsCleared = 0;
   try {
-    const existingPlannerEvents = await gcal.listEvents(
-      null, // auto-discover Lobs calendar
-      startOfDay(tomorrow).toISOString(),
-      endOfDay(addDays(rangeEnd, -1)).toISOString(),
+    const existingLobsEvents = await gcalService.listEvents(null, timeMin, timeMax);
+    const plannerEvents = existingLobsEvents.filter((e) =>
+      e.description?.includes(PLANNER_TAG),
     );
 
-    const plannerEvents = existingPlannerEvents.filter(
-      (e) => e.description?.includes(PLANNER_TAG),
-    );
-
-    for (const event of plannerEvents) {
-      const deleted = await gcal.deleteEvent(null, event.id);
+    for (const evt of plannerEvents) {
+      const deleted = await gcalService.deleteEvent(null, evt.id);
       if (deleted) eventsCleared++;
     }
 
-    log().info(`[nightly-planner] Cleared ${eventsCleared} old planner events`);
+    if (eventsCleared > 0) {
+      log().info(`[nightly-planner] Cleared ${eventsCleared} old planning events`);
+    }
   } catch (err) {
     log().warn(`[nightly-planner] Failed to clear old events: ${err}`);
   }
 
-  // ── 5. Plan each day ────────────────────────────────────────────────────
-  const allPlannedBlocks: NightlyPlannerResult["plannedBlocks"] = [];
-  const dayBreakdown: NightlyPlannerResult["dayBreakdown"] = [];
+  // ── Step 6: Write new events to Lobs calendar ────────────────────────
 
-  for (let dayOffset = 0; dayOffset < PLANNING_HORIZON_DAYS; dayOffset++) {
-    const dayDate = addDays(tomorrow, dayOffset);
-    const dayStr = formatDate(dayDate);
-
-    // Events for this specific day
-    const dayEvents = rafeEvents.filter((e) => {
-      const start = e.start.dateTime ?? e.start.date ?? "";
-      return start.startsWith(dayStr);
-    });
-
-    // Build busy blocks from calendar events + recurring blocks
-    const busyBlocks: BusyBlock[] = [
-      ...dayEvents.map(toBusyBlockFromRafeCalendar).filter(Boolean) as BusyBlock[],
-      ...getFixedBusyBlocks(dayDate),
-    ];
-
-    // Calculate free slots
-    const freeSlots = buildFreeSlots(dayDate, busyBlocks);
-    const totalFreeMinutes = freeSlots.reduce((sum, s) => sum + s.minutes, 0);
-
-    // Reserve breathing room — remove the largest slot from scheduling if possible
-    const slotsForScheduling = reserveBreathingRoom(freeSlots);
-
-    // Schedule tasks into this day's slots
-    const dayBlocks = scheduleTasksForDay(
-      slotsForScheduling,
-      rankedTasks,
-      dayStr,
-      MAX_BLOCKS_PER_DAY - allPlannedBlocks.filter((b) => b.day === dayStr).length,
-    );
-
-    allPlannedBlocks.push(...dayBlocks);
-    dayBreakdown.push({
-      date: dayStr,
-      existingEvents: dayEvents.length,
-      freeMinutes: totalFreeMinutes,
-      blocksScheduled: dayBlocks.length,
-    });
-  }
-
-  log().info(
-    `[nightly-planner] Planned ${allPlannedBlocks.length} work blocks across ${PLANNING_HORIZON_DAYS} days`,
-  );
-
-  // ── 6. Write events to Lobs Planning calendar ──────────────────────────
   let eventsCreated = 0;
-  for (const block of allPlannedBlocks) {
-    const task = rankedTasks.find((t) => t.id === block.taskId);
-    const emoji = task ? getTaskEmoji(task) : "📋";
-    const title = `${emoji} ${block.taskTitle}`;
-
-    const description = [
-      PLANNER_TAG,
-      `Task: ${block.taskTitle}`,
-      `Task ID: ${block.taskId}`,
-      `Duration: ${block.minutes}min`,
-      task?.priority ? `Priority: ${task.priority}` : null,
-      task?.dueDate ? `Due: ${task.dueDate}` : null,
-      task?.projectId ? `Project: ${task.projectId}` : null,
-    ]
-      .filter(Boolean)
-      .join("\n");
-
+  for (const block of planned) {
     try {
-      const eventId = await gcal.createEvent(null, {
-        title,
-        description,
+      const task = rankedTasks.find((t) => t.id === block.taskId);
+      const description = [
+        PLANNER_TAG,
+        `Task: ${block.taskTitle}`,
+        `Task ID: ${block.taskId}`,
+        `Duration: ${block.minutes}min`,
+        `Priority: ${task?.priority ?? "normal"}`,
+        task?.dueDate ? `Due: ${task.dueDate}` : null,
+        task?.projectId ? `Project: ${task.projectId}` : null,
+        "",
+        "Auto-generated by Lobs Nightly Planner",
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      const eventId = await gcalService.createEvent(null, {
+        title: `${block.emoji} ${block.taskTitle}`,
         startAt: block.start,
         endAt: block.end,
-        allDay: false,
+        description,
       });
 
       if (eventId) {
         block.calendarEventId = eventId;
         eventsCreated++;
+        log().info(
+          `[nightly-planner] Created: ${block.emoji} ${block.taskTitle} (${block.start} → ${block.end})`,
+        );
       }
     } catch (err) {
-      log().warn(`[nightly-planner] Failed to create event for ${block.taskTitle}: ${err}`);
-    }
-  }
-
-  log().info(`[nightly-planner] Created ${eventsCreated} calendar events`);
-
-  // ── 7. Identify unscheduled tasks ───────────────────────────────────────
-  const scheduledTaskIds = new Set(allPlannedBlocks.map((b) => b.taskId));
-  const unscheduledTasks = rankedTasks
-    .filter((t) => !scheduledTaskIds.has(t.id) && t.remainingMinutes > 0)
-    .map((t) => ({
-      taskId: t.id,
-      taskTitle: t.title,
-      reason:
-        t.score < 0
-          ? "blocked by dependencies"
-          : t.remainingMinutes > 180
-            ? "task too large — break it down"
-            : "no free slots available in the planning window",
-    }));
-
-  // ── 8. Build summary ───────────────────────────────────────────────────
-  const summary = buildSummary(allPlannedBlocks, unscheduledTasks, dayBreakdown, rankedTasks);
-
-  const result: NightlyPlannerResult = {
-    plannedAt: now.toISOString(),
-    targetDateRange: {
-      start: formatDate(tomorrow),
-      end: formatDate(addDays(rangeEnd, -1)),
-    },
-    eventsCreated,
-    eventsCleared,
-    plannedBlocks: allPlannedBlocks,
-    unscheduledTasks,
-    dayBreakdown,
-    summary,
-  };
-
-  log().info(`[nightly-planner] Run complete: ${eventsCreated} created, ${eventsCleared} cleared`);
-  return result;
-}
-
-// ─── Scheduling logic ─────────────────────────────────────────────────────────
-
-function reserveBreathingRoom(slots: PlannerSlot[]): PlannerSlot[] {
-  if (slots.length <= 1) return slots;
-
-  // Find the largest slot
-  const sorted = [...slots].sort((a, b) => b.minutes - a.minutes);
-  const largest = sorted[0];
-
-  // If the largest slot is big enough for breathing room, partially reserve it
-  if (largest.minutes >= BREATHING_ROOM_MINUTES + MIN_SLOT_MINUTES) {
-    // Shrink the slot to leave breathing room at the end
-    return slots.map((s) => {
-      if (s.start === largest.start && s.end === largest.end) {
-        const newEnd = new Date(
-          new Date(s.end).getTime() - BREATHING_ROOM_MINUTES * 60000,
-        );
-        return {
-          ...s,
-          end: newEnd.toISOString(),
-          minutes: s.minutes - BREATHING_ROOM_MINUTES,
-        };
-      }
-      return s;
-    });
-  }
-
-  // If we have a slot that's exactly breathing-room sized, skip it entirely
-  if (largest.minutes <= BREATHING_ROOM_MINUTES) {
-    return slots.filter(
-      (s) => !(s.start === largest.start && s.end === largest.end),
-    );
-  }
-
-  return slots;
-}
-
-function scheduleTasksForDay(
-  slots: PlannerSlot[],
-  rankedTasks: RankedTask[],
-  dayStr: string,
-  maxBlocks: number,
-): NightlyPlannerResult["plannedBlocks"] {
-  const blocks: NightlyPlannerResult["plannedBlocks"] = [];
-  const remainingSlots = slots.map((s) => ({ ...s }));
-  let blocksUsed = 0;
-
-  for (const task of rankedTasks) {
-    if (blocksUsed >= maxBlocks) break;
-    if (task.remainingMinutes <= 0) continue;
-
-    // If task has a due date, prefer scheduling it closer to the due date
-    // but still before it — don't schedule future-due tasks on day 1 if there's time
-    if (task.dueDate) {
-      const dueDate = task.dueDate.slice(0, 10);
-      const daysBefore = daysDiff(dayStr, dueDate);
-      // Skip if due date is more than 5 days away and this is a near day
-      // (let nearer-due tasks take priority on near days)
-      if (daysBefore > 5 && task.score < 500) continue;
-    }
-
-    // Find a slot that fits
-    const slotIdx = remainingSlots.findIndex((s) => s.minutes >= MIN_SLOT_MINUTES);
-    if (slotIdx === -1) break;
-
-    // Prefer a slot that fits the full task; fall back to partial
-    let targetIdx = remainingSlots.findIndex(
-      (s) => s.minutes >= task.remainingMinutes,
-    );
-    if (targetIdx === -1) targetIdx = slotIdx;
-
-    const slot = remainingSlots[targetIdx];
-    const allocation = Math.min(slot.minutes, task.remainingMinutes);
-    const start = new Date(slot.start);
-    const end = new Date(start.getTime() + allocation * 60000);
-
-    blocks.push({
-      taskId: task.id,
-      taskTitle: task.title,
-      day: dayStr,
-      start: start.toISOString(),
-      end: end.toISOString(),
-      minutes: allocation,
-      calendarEventId: null,
-    });
-
-    // Deduct from task's remaining time
-    task.remainingMinutes -= allocation;
-
-    // Update or remove slot
-    const leftoverMinutes = slot.minutes - allocation - SLOT_BUFFER_MINUTES;
-    if (leftoverMinutes >= MIN_SLOT_MINUTES) {
-      remainingSlots[targetIdx] = {
-        start: new Date(end.getTime() + SLOT_BUFFER_MINUTES * 60000).toISOString(),
-        end: slot.end,
-        minutes: leftoverMinutes,
-        source: "free",
-      };
-    } else {
-      remainingSlots.splice(targetIdx, 1);
-    }
-
-    blocksUsed++;
-  }
-
-  return blocks;
-}
-
-function daysDiff(dateA: string, dateB: string): number {
-  const a = new Date(dateA + "T00:00:00");
-  const b = new Date(dateB + "T00:00:00");
-  return Math.round((b.getTime() - a.getTime()) / 86400_000);
-}
-
-// ─── Summary builder ──────────────────────────────────────────────────────────
-
-function buildSummary(
-  blocks: NightlyPlannerResult["plannedBlocks"],
-  unscheduled: NightlyPlannerResult["unscheduledTasks"],
-  days: NightlyPlannerResult["dayBreakdown"],
-  rankedTasks: RankedTask[],
-): string {
-  const lines: string[] = [];
-
-  lines.push(`**📅 Weekly Plan** (${days[0]?.date} → ${days[days.length - 1]?.date})`);
-  lines.push("");
-
-  // Group blocks by day
-  for (const day of days) {
-    if (day.blocksScheduled === 0) continue;
-    const dayBlocks = blocks.filter((b) => b.day === day.date);
-    const dayLabel = formatDayLabel(new Date(day.date + "T12:00:00"));
-    lines.push(`**${dayLabel}** — ${day.blocksScheduled} block${day.blocksScheduled === 1 ? "" : "s"}, ${day.freeMinutes}min free`);
-    for (const block of dayBlocks) {
-      const task = rankedTasks.find((t) => t.id === block.taskId);
-      const emoji = task ? getTaskEmoji(task) : "📋";
-      lines.push(
-        `  ${emoji} ${block.taskTitle} (${formatTimeET(block.start)} – ${formatTimeET(block.end)}, ${block.minutes}min)`,
+      log().warn(
+        `[nightly-planner] Failed to create event for ${block.taskTitle}: ${err}`,
       );
     }
   }
 
-  if (unscheduled.length > 0) {
-    lines.push("");
-    lines.push(`⚠️ ${unscheduled.length} task${unscheduled.length === 1 ? "" : "s"} couldn't be scheduled:`);
-    for (const t of unscheduled.slice(0, 5)) {
-      lines.push(`  • ${t.taskTitle} — ${t.reason}`);
+  // ── Step 7: Build result ──────────────────────────────────────────────
+
+  const elapsed = Date.now() - startTime;
+  log().info(
+    `[nightly-planner] Completed in ${elapsed}ms — ${eventsCreated} events created`,
+  );
+
+  // Discord-friendly summary
+  const summaryLines: string[] = [
+    `📅 **Nightly Planner** — ${targetDate}`,
+    "",
+  ];
+
+  if (planned.length > 0) {
+    summaryLines.push(`**${planned.length} work blocks scheduled:**`);
+    for (const block of planned) {
+      summaryLines.push(
+        `• ${block.emoji} **${block.taskTitle}** — ${formatTimeET(block.start)} → ${formatTimeET(block.end)} (${block.minutes}min)`,
+      );
     }
   }
 
-  // Deadline warnings
-  const upcoming = rankedTasks.filter((t) => {
-    if (!t.dueDate) return false;
-    const days = daysDiff(formatDate(new Date()), t.dueDate.slice(0, 10));
-    return days >= 0 && days <= 3;
-  });
-  if (upcoming.length > 0) {
-    lines.push("");
-    lines.push("🔴 **Deadlines this week:**");
-    for (const t of upcoming) {
-      lines.push(`  • ${t.title} — due ${t.dueDate!.slice(0, 10)}`);
+  if (unscheduledTasks.length > 0) {
+    summaryLines.push("");
+    summaryLines.push(
+      `**${unscheduledTasks.length} tasks couldn't be scheduled:**`,
+    );
+    for (const t of unscheduledTasks.slice(0, 5)) {
+      summaryLines.push(`• ${t.taskTitle} — ${t.reason}`);
+    }
+    if (unscheduledTasks.length > 5) {
+      summaryLines.push(`• ...and ${unscheduledTasks.length - 5} more`);
     }
   }
 
-  return lines.join("\n");
+  summaryLines.push("");
+  summaryLines.push(
+    `📊 ${tomorrowEvents.length} calendar events | ${totalFreeMinutes}min free | ${eventsCleared} old plans cleared`,
+  );
+
+  const summary = summaryLines.join("\n");
+
+  return {
+    plannedAt: new Date().toISOString(),
+    targetDate,
+    eventsCreated,
+    eventsCleared,
+    plannedBlocks: planned.map((b) => ({
+      taskId: b.taskId,
+      taskTitle: b.taskTitle,
+      start: b.start,
+      end: b.end,
+      minutes: b.minutes,
+      calendarEventId: b.calendarEventId,
+    })),
+    unscheduledTasks,
+    tomorrowEvents: tomorrowEvents.length,
+    freeMinutes: totalFreeMinutes,
+    summary,
+  };
 }
