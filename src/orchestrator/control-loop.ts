@@ -1612,6 +1612,28 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
     }
   }
 
+  // ── Failure threshold / researcher escalation guard ──────────────────────
+  // Runs in the native-runner path before expensive context assembly.
+  // At ≥RESEARCHER_AUDIT_THRESHOLD effective failures, stop the retry loop and
+  // route to a researcher audit instead of burning more compute.
+  if (taskId) {
+    const guardResult = incrementAndCheckSpawnCount(taskId);
+    if (guardResult === "researcher") {
+      log().warn(
+        `[NATIVE_RUNNER] Task ${taskId.slice(0, 8)} hit failure threshold — escalated to researcher audit, aborting dispatch`
+      );
+      decrementPendingSpawns(projectId, req.agentType);
+      return;
+    }
+    if (guardResult === "blocked") {
+      log().warn(
+        `[NATIVE_RUNNER] Task ${taskId.slice(0, 8)} already escalated/blocked — refusing re-dispatch`
+      );
+      decrementPendingSpawns(projectId, req.agentType);
+      return;
+    }
+  }
+
   // ── LM Studio model availability preflight ──────────────────────────────
   // Check that the chosen model (and its fallbacks) are actually loaded in
   // LM Studio before we invest in context assembly or agent execution.
@@ -1920,6 +1942,125 @@ function spawnCountLimitForType(taskType: string | null | undefined, agentType?:
 }
 
 /**
+ * Failure threshold at which a task is escalated to a researcher audit
+ * instead of being silently auto-blocked.  Set to the same value as the
+ * default SPAWN_COUNT_LIMIT so every task gets a diagnosis before being
+ * declared permanently blocked.
+ *
+ * Prevents blind retry loops like the "4+ hours on phantom completion with
+ * 5 failed attempts" post-mortem (2026-03-24).
+ */
+const RESEARCHER_AUDIT_THRESHOLD = 3;
+
+/**
+ * Route a repeatedly-failing task to a researcher audit instead of silently
+ * blocking it.  Creates a new researcher task with:
+ *  - a structured failure diagnosis prompt
+ *  - the original task's title, notes and spawn/crash counters as context
+ *  - an inbox alert so the user knows escalation occurred
+ *
+ * The original task is marked workState="escalated" and its failureReason is
+ * updated.  The researcher task is set to status="active" so it is picked up
+ * on the next tick without human intervention.
+ */
+function routeToResearcherAudit(
+  taskId: string,
+  projectId: string | null | undefined,
+  taskTitle: string,
+  taskNotes: string | null | undefined,
+  effectiveFailCount: number,
+  spawnCount: number,
+  crashCount: number,
+  agentType: string,
+  lastFailureReason: string | null | undefined,
+): void {
+  const db = getDb();
+
+  const auditPrompt = [
+    `## Failure Threshold Escalation — Research Audit`,
+    ``,
+    `The following task has failed **${effectiveFailCount} times** (spawn_count=${spawnCount}, crash_count=${crashCount}) `,
+    `without a successful completion.  You are a researcher agent.  Your job is to diagnose *why* the task `,
+    `keeps failing and produce a structured report so a human (or the orchestrator) can decide what to do next.`,
+    ``,
+    `### Original Task`,
+    `- **ID:** \`${taskId}\``,
+    `- **Title:** ${taskTitle}`,
+    `- **Agent:** ${agentType}`,
+    `${taskNotes ? `- **Notes:**\n${taskNotes}` : ""}`,
+    `${lastFailureReason ? `- **Last failure reason:** ${lastFailureReason}` : ""}`,
+    ``,
+    `### What to investigate`,
+    `1. **Environmental issues** — missing tools, wrong working directory, broken dependencies, IPv6/IPv4 bind bugs, missing env vars`,
+    `2. **Task design issues** — ambiguous acceptance criteria, contradictory requirements, scope too large for one agent pass`,
+    `3. **Actual bugs** — code errors that need a specific fix (point to the file + line if possible)`,
+    `4. **Timeout / resource patterns** — did all failures time out?  Did they fail at the same step?`,
+    `5. **Infra vs. agent failures** — were any failures gateway crashes (crash_count=${crashCount}) vs. genuine agent errors?`,
+    ``,
+    `### Deliverables`,
+    `- Diagnosis category: environmental | task-design | actual-bug | mixed | unknown`,
+    `- Root cause summary (2-3 sentences)`,
+    `- Recommended next action: retry-with-fix | redesign-task | human-review | close-as-infeasible`,
+    `- If retry-with-fix: write the exact fix or updated task notes to unblock the original task`,
+    ``,
+    `Search memory, docs, logs, and the paw-hub inbox for context.  Write your findings to memory with category=finding.`,
+  ].join("\n");
+
+  const auditTitle = `[AUDIT] Failure diagnosis: ${taskTitle.slice(0, 80)}`;
+
+  try {
+    // Create the researcher audit task
+    const auditTaskId = `audit_${taskId.slice(0, 8)}_${Date.now()}`;
+    db.insert(tasksTable).values({
+      id: auditTaskId,
+      title: auditTitle,
+      status: "active",
+      workState: "not_started",
+      agent: "researcher",
+      projectId: projectId ?? null,
+      notes: auditPrompt,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }).run();
+
+    // Mark the original task as escalated (not permanently blocked — researcher may unblock it)
+    db.update(tasksTable).set({
+      workState: "escalated",
+      failureReason: `Escalated to researcher after ${effectiveFailCount} failures (spawn=${spawnCount}, crash=${crashCount}). Audit task: ${auditTaskId}. Blocked pending diagnosis.`,
+      updatedAt: new Date().toISOString(),
+    }).where(eq(tasksTable.id, taskId)).run();
+
+    // Inbox alert for the user
+    const alertContent = [
+      `Task **${taskTitle}** has failed ${effectiveFailCount} times and has been escalated to a researcher audit.`,
+      ``,
+      `- Original task: \`${taskId.slice(0, 8)}\``,
+      `- Audit task: \`${auditTaskId.slice(0, 16)}\``,
+      `- Agent: ${agentType}`,
+      `- Spawn count: ${spawnCount} | Crash count: ${crashCount} | Effective failures: ${effectiveFailCount}`,
+      lastFailureReason ? `- Last failure: ${lastFailureReason.slice(0, 200)}` : "",
+      ``,
+      `The researcher will diagnose environmental, task-design, and actual-bug issues and recommend next steps.`,
+    ].filter(Boolean).join("\n");
+
+    db.insert(inboxItems).values({
+      id: `escalation_alert_${taskId.slice(0, 8)}_${Date.now()}`,
+      title: `🔍 Failure escalation: ${taskTitle.slice(0, 80)}`,
+      content: alertContent,
+      summary: `Task ${taskId.slice(0, 8)} escalated after ${effectiveFailCount} failures — researcher audit created`,
+      isRead: false,
+      modifiedAt: new Date().toISOString(),
+    }).run();
+
+    log().warn(
+      `[ESCALATION] Task ${taskId.slice(0, 8)} escalated to researcher audit after ${effectiveFailCount} effective failures — audit task ${auditTaskId.slice(0, 16)} created`
+    );
+  } catch (e) {
+    log().error(`[ESCALATION] routeToResearcherAudit failed for task ${taskId.slice(0, 8)}: ${e}`);
+  }
+}
+
+/**
  * Increment spawn_count for a task and check if the effective fail count
  * has exceeded the per-type/per-agent limit.
  *
@@ -1929,13 +2070,22 @@ function spawnCountLimitForType(taskType: string | null | undefined, agentType?:
  * so they do NOT count as agent failures for the auto-block threshold.
  * Only genuine agent failures (succeeded=0, not crash-orphaned) accumulate effective_fail_count.
  *
- * Returns true if task was auto-blocked (effective_fail_count >= limit after increment).
+ * Returns:
+ *  - "ok"         — under threshold, proceed normally
+ *  - "researcher" — hit RESEARCHER_AUDIT_THRESHOLD; task escalated to researcher, caller should abort dispatch
+ *  - "blocked"    — already escalated/blocked (workState != "not_started"/"in_progress"), caller should abort
  */
-function incrementAndCheckSpawnCount(taskId: string): boolean {
+function incrementAndCheckSpawnCount(taskId: string): "ok" | "researcher" | "blocked" {
   const db = getDb();
   try {
     const task = db.select().from(tasksTable).where(eq(tasksTable.id, taskId)).get();
-    if (!task) return false;
+    if (!task) return "ok";
+
+    // If the task has already been escalated or blocked, do not re-escalate
+    if (task.workState === "escalated" || task.workState === "blocked") {
+      log().warn(`[SPAWN_GUARD] Task ${taskId.slice(0, 8)} is already ${task.workState} — refusing to re-dispatch`);
+      return "blocked";
+    }
 
     const limit = spawnCountLimitForType(task.shape, task.agent);
     const newSpawnCount = (task.spawnCount ?? 0) + 1;
@@ -1947,19 +2097,26 @@ function incrementAndCheckSpawnCount(taskId: string): boolean {
       updatedAt: new Date().toISOString(),
     }).where(eq(tasksTable.id, taskId)).run();
 
-    if (effectiveFailCount >= limit) {
-      // Auto-block the task to stop runaway agent failures
-      db.update(tasksTable).set({
-        workState: "blocked",
-        failureReason: `Auto-blocked: effective_fail_count=${effectiveFailCount} >= limit=${limit} (spawn=${newSpawnCount}, crash=${crashCount}, type=${task.shape ?? "other"}). Needs human review.`,
-        updatedAt: new Date().toISOString(),
-      }).where(eq(tasksTable.id, taskId)).run();
+    // Escalate at RESEARCHER_AUDIT_THRESHOLD (default 3) OR at the per-type limit,
+    // whichever comes first — so task types with a higher retry limit (e.g. feature=5)
+    // also get escalated at 3, not at 5.
+    const escalateAt = Math.min(RESEARCHER_AUDIT_THRESHOLD, limit);
 
-      log().warn(
-        `[SPAWN_GUARD] Task ${taskId.slice(0, 8)} auto-blocked — effective_fail=${effectiveFailCount} >= limit=${limit} (spawn=${newSpawnCount}, crash=${crashCount}, type=${task.shape ?? "other"})`
+    if (effectiveFailCount >= escalateAt) {
+      // ── Researcher escalation (replaces blind auto-block) ───────────────
+      routeToResearcherAudit(
+        taskId,
+        task.projectId,
+        task.title ?? "Untitled task",
+        task.notes,
+        effectiveFailCount,
+        newSpawnCount,
+        crashCount,
+        task.agent ?? "programmer",
+        task.failureReason,
       );
 
-      // ── Record failure outcome for learning system ─────────────────────────
+      // ── Record failure outcome for learning system ─────────────────────
       try {
         const taskCategory = inferTaskCategory(task.title ?? "");
         learningSvc.recordOutcome({
@@ -1970,13 +2127,14 @@ function incrementAndCheckSpawnCount(taskId: string): boolean {
         });
       } catch {}
 
-      return true;
+      return "researcher";
     }
-    log().debug?.(`[SPAWN_GUARD] Task ${taskId.slice(0, 8)} spawn=${newSpawnCount}, crash=${crashCount}, effective_fail=${effectiveFailCount}/${limit}`);
-    return false;
+
+    log().debug?.(`[SPAWN_GUARD] Task ${taskId.slice(0, 8)} spawn=${newSpawnCount}, crash=${crashCount}, effective_fail=${effectiveFailCount}/${escalateAt}`);
+    return "ok";
   } catch (e) {
     log().error(`[SPAWN_GUARD] incrementAndCheckSpawnCount error: ${e}`);
-    return false;
+    return "ok";
   }
 }
 
@@ -2474,17 +2632,29 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
     }
   }
 
-  // ── Spawn count guard ────────────────────────────────────────────────────
+  // ── Spawn count guard / failure-threshold escalation ────────────────────
   if (req.taskId) {
-    const autoBlocked = incrementAndCheckSpawnCount(req.taskId);
-    if (autoBlocked) {
+    const guardResult = incrementAndCheckSpawnCount(req.taskId);
+    if (guardResult === "researcher") {
+      // Task escalated to researcher audit — abort this dispatch
       decrementPendingSpawns(
         (taskCtx["projectId"] as string) ?? (taskCtx["project_id"] as string) ?? undefined,
         req.agentType
       );
       writeSpawnResult(req.runId, req.nodeId, {
         status: "failed",
-        error: `Task auto-blocked: spawn_count exceeded per-type limit (see task failure_reason for details)`,
+        error: `Task escalated to researcher audit after ${RESEARCHER_AUDIT_THRESHOLD}+ failures — see audit task for diagnosis`,
+      });
+      return;
+    }
+    if (guardResult === "blocked") {
+      decrementPendingSpawns(
+        (taskCtx["projectId"] as string) ?? (taskCtx["project_id"] as string) ?? undefined,
+        req.agentType
+      );
+      writeSpawnResult(req.runId, req.nodeId, {
+        status: "failed",
+        error: `Task already escalated/blocked — refusing re-dispatch (see task workState and failureReason)`,
       });
       return;
     }

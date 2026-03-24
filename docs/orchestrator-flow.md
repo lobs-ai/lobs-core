@@ -1,7 +1,7 @@
 # Orchestrator Control Loop — Architecture Reference
 
 **Source:** `~/lobs-plugin-lobs/src/orchestrator/`
-**Last Updated:** 2026-03-09
+**Last Updated:** 2026-03-24
 
 ---
 
@@ -55,7 +55,13 @@ The PAW plugin orchestrator is a TypeScript Node.js control loop that runs insid
               │ succeeded  │  │    failed     │              │
               │ (auto-     │  │               │──────────────┘
               │  closed)   │  │ escalate tier │  infra failure
-              └────────────┘  │ or auto-block │  (crash_count++)
+              └────────────┘  │ (model bump)  │  (crash_count++)
+                              └───────┬───────┘
+                                      │ effective_fail ≥ 3
+                                      ▼
+                              ┌───────────────┐
+                              │  escalated    │ ← new researcher
+                              │  (workState)  │   audit task created
                               └───────────────┘
 ```
 
@@ -74,7 +80,7 @@ When a workflow run reaches a `spawn_*` node, `processSpawnRequest()` is called:
 5. **Compliance gate** — compliance-flagged tasks use local-only model (no cloud fallback)
 6. **Escalation** — bumps model tier on repeated failures (`effective_fail_count = spawn_count - crash_count`)
 7. **Circuit-breaker model selection** — `chooseHealthyModel(fallbackChain, agentType)`
-8. **Spawn count guard** — auto-blocks task if `effective_fail_count ≥ per-type limit` (default 3)
+8. **Failure threshold / researcher escalation** — at `effective_fail_count ≥ RESEARCHER_AUDIT_THRESHOLD` (default 3), instead of blindly auto-blocking the task, a new researcher audit task is created with a structured diagnosis prompt. The original task is set to `work_state='escalated'` and an inbox alert is raised. The researcher diagnoses environmental vs. task-design vs. actual-bug root causes and recommends next steps.
 
 Spawn call routes through the **sink session** (`agent:sink:paw-orchestrator-v2`) so completion announcements don't pollute the main session:
 
@@ -104,7 +110,7 @@ A `worker_runs` row is inserted on accepted spawn. The `childSessionKey` is stor
 |---|---|---|
 | Max concurrent workers | 5 | `hasCapacity()` checked before every spawn |
 | Project+agent lock | 1 worker | `projectHasActiveWorker` + `projectHasPendingSpawn` |
-| Spawn count per task | 3 (agent default) | `incrementAndCheckSpawnCount()` |
+| Failure threshold | 3 (default) | `incrementAndCheckSpawnCount()` → routes to researcher audit at ≥3 effective failures |
 
 ---
 
@@ -122,7 +128,7 @@ Workers complete by finishing their session. The orchestrator detects this via:
 |---|---|---|
 | Gateway crash, stall watchdog, ghost orphan | `infra` | Increments `crash_count`; task reset to `not_started`; NOT counted against quality limit |
 | Agent error (bad output, tool failure) | `agent_quality` | Increments `spawn_count`; `effective_fail = spawn_count - crash_count` |
-| `effective_fail ≥ limit` | auto-block | Task set `work_state='blocked'` with `failure_reason`; inbox alert created |
+| `effective_fail ≥ RESEARCHER_AUDIT_THRESHOLD (3)` | researcher escalation | Task set `work_state='escalated'`; new researcher audit task created with structured diagnosis prompt; inbox alert raised. Prevents blind retry loops. |
 | Escalation tier advances | model bump | Retries use stronger model tier via `escalationModel()` |
 | All models circuit-open | requeue | Spawn skipped; task retried after circuit cooldown |
 | Task reaches `HUMAN` escalation tier | abort spawn | Task set `waiting_on`; human must intervene |

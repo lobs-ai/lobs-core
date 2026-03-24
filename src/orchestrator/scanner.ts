@@ -42,7 +42,9 @@ function hasUnresolvedBlockers(blockedBy: unknown, db: ReturnType<typeof getDb>)
 
   // Terminal statuses: task is done/closed/cancelled/rejected
   const TERMINAL_STATUSES = new Set(["completed", "closed", "cancelled", "rejected"]);
-  const TERMINAL_WORK_STATES = new Set(["completed", "done"]);
+  // "blocked" and "escalated" are also treated as terminal for blocker resolution:
+  // a dependent task should not wait forever on an escalated/blocked blocker.
+  const TERMINAL_WORK_STATES = new Set(["completed", "done", "blocked", "escalated"]);
 
   const blockers = db.select({ id: tasks.id, status: tasks.status, workState: tasks.workState })
     .from(tasks)
