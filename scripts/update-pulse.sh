@@ -63,6 +63,15 @@ ACTIVE_WORKERS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM worker_runs WHERE ended_at 
 TOKENS_IN=$(sqlite3 "$DB" "SELECT COALESCE(SUM(input_tokens), 0) FROM worker_runs WHERE started_at >= '$THIRTY_DAYS'")
 TOKENS_OUT=$(sqlite3 "$DB" "SELECT COALESCE(SUM(output_tokens), 0) FROM worker_runs WHERE started_at >= '$THIRTY_DAYS'")
 
+# ── Live workers (currently running) ──
+LIVE_WORKERS_JSON=$(sqlite3 -json "$DB" "
+  SELECT COALESCE(agent_type, 'unknown') as agent,
+    COALESCE(SUBSTR(model, 1, INSTR(model, '/') - 1), 'unknown') as provider,
+    CAST((strftime('%s','now') - strftime('%s', started_at)) AS INTEGER) as running_for_seconds
+  FROM worker_runs WHERE ended_at IS NULL
+  ORDER BY started_at ASC" 2>/dev/null || echo "[]")
+[ -z "$LIVE_WORKERS_JSON" ] && LIVE_WORKERS_JSON="[]"
+
 # ── Per-agent breakdown ──
 AGENT_JSON=$(sqlite3 -json "$DB" "
   SELECT COALESCE(agent_type, 'unknown') as agent, COUNT(*) as runs,
@@ -109,6 +118,7 @@ cat > "$OUT" << ENDJSON
     "output": $TOKENS_OUT,
     "total": $((TOKENS_IN + TOKENS_OUT))
   },
+  "live_workers": $LIVE_WORKERS_JSON,
   "recent_activity": $ACTIVITY_JSON,
   "generated_at": "$NOW"
 }
