@@ -447,6 +447,28 @@ class DiscordService {
     }
   }
 
+  /** Send a DM to a user by their Discord user ID */
+  async sendDm(userId: string, content: string): Promise<void> {
+    if (!this.client) {
+      console.warn("[discord] Bot not initialized, dropping DM");
+      return;
+    }
+    if (!userId || !/^\d+$/.test(userId)) {
+      console.warn(`[discord] Invalid userId for DM: ${userId}`);
+      return;
+    }
+    try {
+      const user = await this.client.users.fetch(userId);
+      const dmChannel = await user.createDM();
+      await dmChannel.send(content);
+      this.metrics.messagesSent++;
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[discord] sendDm failed to userId=${userId}: ${errMsg}`);
+      this.metrics.sendFailures++;
+    }
+  }
+
   /** Send a notification to the configured alerts channel */
   async alert(message: string): Promise<void> {
     if (this.config?.channels.alerts) {

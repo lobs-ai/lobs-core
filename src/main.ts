@@ -497,7 +497,16 @@ async function main() {
         if (channelId.startsWith("cron:")) return;
         // Vim channels are handled via WebSocket, not Discord
         if (channelId.startsWith("vim:")) return;
-        // System/cron channels are internal — route their output to the alerts Discord channel
+        // System channel (heartbeats, alerts, internal events) → owner DMs only, never a guild channel
+        if (channelId === "system" || channelId.startsWith("system:")) {
+          const ownerId = discordConfig.ownerId;
+          if (ownerId) {
+            await discordService.sendDm(ownerId, content);
+          } else {
+            console.warn("[main] system channel reply dropped — no ownerId configured in discord.json");
+          }
+          return;
+        }
         const resolvedChannelId = resolveDiscordChannel(channelId, discordConfig);
         if (!resolvedChannelId) return; // No Discord configured, drop silently
         await discordService.send(resolvedChannelId, content);
@@ -508,6 +517,8 @@ async function main() {
         if (channelId.startsWith("nexus:")) return;
         if (channelId.startsWith("cron:")) return;
         if (channelId.startsWith("vim:")) return;
+        // System channel — no typing indicator needed for DMs from system events
+        if (channelId === "system" || channelId.startsWith("system:")) return;
         const resolved = resolveDiscordChannel(channelId, discordConfig);
         if (!resolved) return;
         discordService.sendTyping(resolved).catch(() => {});
@@ -521,6 +532,14 @@ async function main() {
         if (channelId.startsWith("cron:")) return;
         // Vim channels are handled via WebSocket, not Discord
         if (channelId.startsWith("vim:")) return;
+        // System channel progress → owner DMs
+        if (channelId === "system" || channelId.startsWith("system:")) {
+          const ownerId = discordConfig.ownerId;
+          if (ownerId) {
+            await discordService.sendDm(ownerId, content);
+          }
+          return;
+        }
         const resolved = resolveDiscordChannel(channelId, discordConfig);
         if (!resolved) return;
         await discordService.send(resolved, content);
