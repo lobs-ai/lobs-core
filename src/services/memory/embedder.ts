@@ -19,6 +19,7 @@ interface EmbeddingResponse {
 }
 
 let config: MemoryConfig | null = null;
+const EMBEDDER_TIMEOUT_MS = 10_000;
 
 export function initEmbedder(cfg: MemoryConfig): void {
   config = cfg;
@@ -59,6 +60,7 @@ export async function embedBatch(texts: string[]): Promise<Float32Array[]> {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(EMBEDDER_TIMEOUT_MS),
     });
 
     if (!response.ok) {

@@ -169,8 +169,10 @@ interface AnthropicAuth {
 const ANTHROPIC_5XX_FAILOVER_THRESHOLD = 2;
 const ANTHROPIC_GLOBAL_5XX_QUARANTINE_THRESHOLD = 3;
 const ANTHROPIC_GLOBAL_5XX_QUARANTINE_MS = 10 * 60 * 1000;
-const ANTHROPIC_STREAM_INACTIVITY_TIMEOUT_MS = 4 * 60 * 1000; // 4m with no stream events before treating the stream as dead
-const ANTHROPIC_TIMEOUT_COOLDOWN_MS = 2 * 60 * 1000;
+const ANTHROPIC_STREAM_FIRST_EVENT_TIMEOUT_MS = 15 * 1000; // 15s to get first stream event (connection/key issue)
+const ANTHROPIC_STREAM_INACTIVITY_TIMEOUT_MS = 90 * 1000;  // 90s mid-stream silence before treating as dead
+const ANTHROPIC_FIRST_EVENT_TIMEOUT_COOLDOWN_MS = 15 * 1000; // 15s cooldown for first-event timeouts (likely transient)
+const ANTHROPIC_TIMEOUT_COOLDOWN_MS = 30 * 1000; // 30s cooldown for mid-stream timeouts
 const anthropicServerErrorsBySession = new Map<string, { keyIndex: number; count: number }>();
 const anthropicServerErrorsByKey = new Map<number, number>();
 const RATE_LIMIT_COOLDOWN_FLOOR_MS = 15 * 60 * 1000;
@@ -192,49 +194,57 @@ type AnthropicMessageStream = {
 export async function awaitAnthropicFinalMessageWithInactivityTimeout(
   stream: AnthropicMessageStream,
   sessionId?: string,
+  firstEventTimeoutMs = ANTHROPIC_STREAM_FIRST_EVENT_TIMEOUT_MS,
   inactivityTimeoutMs = ANTHROPIC_STREAM_INACTIVITY_TIMEOUT_MS,
 ): Promise<any> {
   let timeout: NodeJS.Timeout | undefined;
   let watchdog: NodeJS.Timeout | undefined;
   let lastActivityAt = Date.now();
+  let gotFirstEvent = false;
 
   const touch = () => {
     lastActivityAt = Date.now();
+    gotFirstEvent = true;
   };
 
   stream.on("connect", touch);
   stream.on("streamEvent", touch);
 
-  const timeoutError = (elapsedMs: number, source: "timeout" | "watchdog") =>
-    new Error(
-      `anthropic_stream_timeout${source === "watchdog" ? " (watchdog)" : ""} after ${Math.round(elapsedMs / 1000)}s ` +
+  const timeoutError = (elapsedMs: number, source: "timeout" | "watchdog", isFirstEvent: boolean) => {
+    const tag = isFirstEvent ? "anthropic_stream_first_event_timeout" : "anthropic_stream_timeout";
+    return new Error(
+      `${tag}${source === "watchdog" ? " (watchdog)" : ""} after ${Math.round(elapsedMs / 1000)}s ` +
       `session=${sessionId?.slice(0, 40) ?? "none"}`,
     );
+  };
 
   return await Promise.race([
     stream.finalMessage(),
     new Promise<never>((_, reject) => {
-      const checkForInactivity = (source: "timeout" | "watchdog") => {
+      const checkForTimeout = (source: "timeout" | "watchdog") => {
         const idleMs = Date.now() - lastActivityAt;
-        if (idleMs < inactivityTimeoutMs) return;
+        const effectiveTimeout = gotFirstEvent ? inactivityTimeoutMs : firstEventTimeoutMs;
+        if (idleMs < effectiveTimeout) return;
         stream.abort();
-        reject(timeoutError(idleMs, source));
+        reject(timeoutError(idleMs, source, !gotFirstEvent));
       };
 
-      // Primary: standard setTimeout that is re-armed by stream activity.
+      // Primary: setTimeout that re-arms with the appropriate timeout.
+      // Starts with firstEventTimeoutMs, switches to inactivityTimeoutMs once streaming.
       const armTimeout = () => {
         if (timeout) clearTimeout(timeout);
+        const effectiveTimeout = gotFirstEvent ? inactivityTimeoutMs : firstEventTimeoutMs;
         timeout = setTimeout(() => {
-          checkForInactivity("timeout");
+          checkForTimeout("timeout");
           armTimeout();
-        }, inactivityTimeoutMs);
+        }, effectiveTimeout);
       };
 
       armTimeout();
 
       // Backup: setInterval watchdog in case timers drift while the stream is stalled.
       watchdog = setInterval(() => {
-        checkForInactivity("watchdog");
+        checkForTimeout("watchdog");
       }, 10_000);
     }),
   ]).finally(() => {
@@ -593,12 +603,18 @@ class AnthropicClient implements LLMClient {
         const status = getHttpStatus(error);
 
         if (isTimeoutLikeError(error) && this.keyIndex !== undefined) {
+          // First-event timeout = stream never started. Likely transient — use short cooldown
+          // so the key recovers quickly. Mid-stream timeout = stream died — slightly longer cooldown.
+          const isFirstEventTimeout = message.includes("first_event_timeout");
+          const cooldownMs = isFirstEventTimeout
+            ? ANTHROPIC_FIRST_EVENT_TIMEOUT_COOLDOWN_MS
+            : ANTHROPIC_TIMEOUT_COOLDOWN_MS;
           keyPool.markFailed(
             "anthropic",
             this.keyIndex,
             message,
             "unknown",
-            ANTHROPIC_TIMEOUT_COOLDOWN_MS,
+            cooldownMs,
           );
           const rotated = keyPool.rotateSession(
             "anthropic",
@@ -606,9 +622,10 @@ class AnthropicClient implements LLMClient {
             `timeout:${this.keyLabel ?? `key-${this.keyIndex}`}`,
           );
           console.warn(
-            `[AnthropicClient] Timeout on key=${this.keyLabel ?? `key-${this.keyIndex ?? "unknown"}`} ` +
+            `[AnthropicClient] ${isFirstEventTimeout ? "First-event timeout" : "Stream timeout"} on ` +
+            `key=${this.keyLabel ?? `key-${this.keyIndex ?? "unknown"}`} ` +
             `rotated=${rotated} session=${this.sessionId.slice(0, 40)} ` +
-            `cooldown_ms=${ANTHROPIC_TIMEOUT_COOLDOWN_MS}`,
+            `cooldown_ms=${cooldownMs}`,
           );
         } else if (status === 401 || status === 403) {
           if (this.keyIndex !== undefined) {
@@ -1215,9 +1232,13 @@ class ResilientLLMClient implements LLMClient {
 
           if (isTimeoutLikeError(error)) {
             if (attempt < this.maxRetries && shouldRetry !== false) {
-              const waitTime = this.exponentialBackoff(attempt) * 1000;
+              // First-event timeouts already rotated the key — retry immediately (1s)
+              // since we're hitting a different key now. Mid-stream timeouts use normal backoff.
+              const isFirstEvent = message.includes("first_event_timeout");
+              const waitTime = isFirstEvent ? 1000 : this.exponentialBackoff(attempt) * 1000;
               console.warn(
-                `[ResilientLLMClient] Provider timeout for model ${model}, retrying in ${(waitTime / 1000).toFixed(1)}s ` +
+                `[ResilientLLMClient] ${isFirstEvent ? "First-event" : "Stream"} timeout for model ${model}, ` +
+                `retrying in ${(waitTime / 1000).toFixed(1)}s ` +
                 `(attempt ${attempt}/${this.maxRetries}) session=${this.sessionId?.slice(0, 40) ?? "none"}`,
               );
               await this.sleep(waitTime);

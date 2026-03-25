@@ -708,6 +708,17 @@ async function cmdHealth() {
   const lmOk = data.lm_studio === "ok";
   console.log(`LM Studio:     ${lmOk ? colorize("✓ ok", "green") : colorize("✗ down", "yellow")}`);
 
+  // Voice sidecar
+  const voice = data.voice as Record<string, unknown> | undefined;
+  if (voice?.enabled) {
+    const sttOk = voice.stt === "ok";
+    const ttsOk = voice.tts === "ok";
+    console.log(`Voice STT:     ${sttOk ? colorize("✓ ok", "green") : colorize("✗ down", "yellow")}`);
+    console.log(`Voice TTS:     ${ttsOk ? colorize("✓ ok", "green") : colorize("✗ down", "yellow")}`);
+  } else {
+    console.log(`Voice:         ${colorize("disabled", "dim")}`);
+  }
+
   // When LM Studio is down, surface the cross-link to full diagnostics.
   if (!lmOk) {
     console.log("");

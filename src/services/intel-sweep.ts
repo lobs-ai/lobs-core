@@ -239,6 +239,76 @@ function normalizeInsight(row: Record<string, unknown>): IntelInsight {
   };
 }
 
+// ── Quality / Language Filters ───────────────────────────────────────────
+
+/** Domains that are never useful as intel sources */
+const BLOCKED_DOMAINS = new Set([
+  "dict.leo.org",
+  "translate.google.com",
+  "www.autonomous.ai",         // standing desk company
+  "www.deepl.com",
+  "play.google.com",
+  "apps.apple.com",
+]);
+
+/** URL path patterns that indicate non-article pages (homepages, product pages, login) */
+const BLOCKED_PATH_PATTERNS = [
+  /^\/$/,                        // bare homepage
+  /^\/(office-chairs|standing-desks|pod-adus)\b/i,  // product categories
+  /^\/(login|signup|register|cart|checkout)\b/i,
+];
+
+/** TLD / domain patterns strongly associated with non-English content */
+const NON_ENGLISH_DOMAIN_PATTERNS = [
+  /\.cn$/,  /\.jp$/,  /\.kr$/,  /\.ru$/,  /\.de$/,  /\.fr$/,  /\.es$/,  /\.it$/,  /\.pt$/,  /\.br$/,
+  /\.tw$/,  /\.hk$/,  /\.th$/,  /\.vn$/,  /\.pl$/,  /\.cz$/,  /\.nl$/,  /\.se$/,  /\.no$/,  /\.fi$/,
+  /zhihu\.com$/,  /baidu\.com$/,  /csdn\.net$/,  /weixin\.qq\.com$/,
+  /naver\.com$/,  /daum\.net$/,  /hatena\.ne\.jp$/,
+];
+
+/** CJK / Cyrillic / Arabic / Thai / Korean character ranges */
+const NON_LATIN_RE = /[\u3000-\u9FFF\u{AC00}-\u{D7AF}\u0400-\u04FF\u0600-\u06FF\u0E00-\u0E7F]/u;
+
+/**
+ * Returns true if a candidate looks like a quality, English-language article or video.
+ * Rejects:
+ *  - blocked domains / product pages / homepages
+ *  - non-English TLDs or domains
+ *  - titles/snippets with significant non-Latin characters
+ *  - generic "what is X" explainer pages (too basic to be useful intel)
+ */
+function isQualityEnglishSource(url: string, title: string, snippet: string): boolean {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+
+    // Blocked domain
+    if (BLOCKED_DOMAINS.has(host)) return false;
+
+    // Non-English domain pattern
+    if (NON_ENGLISH_DOMAIN_PATTERNS.some(re => re.test(host))) return false;
+
+    // Blocked path pattern
+    if (BLOCKED_PATH_PATTERNS.some(re => re.test(u.pathname))) return false;
+
+    // Check title + snippet for non-Latin characters (CJK, Cyrillic, etc.)
+    const text = `${title} ${snippet}`;
+    const nonLatinMatches = text.match(NON_LATIN_RE);
+    if (nonLatinMatches) {
+      // If more than 10% of characters are non-Latin, reject
+      const nonLatinCount = [...text].filter(c => NON_LATIN_RE.test(c)).length;
+      if (nonLatinCount / text.length > 0.1) return false;
+    }
+
+    // Reject bare homepages (path is just "/" with no meaningful content indicator)
+    if (u.pathname === "/" && !u.search) return false;
+
+    return true;
+  } catch {
+    return false; // malformed URL → reject
+  }
+}
+
 /** Normalize a URL for dedup — strip trailing slashes, fragments, tracking params */
 function normalizeUrl(url: string): string {
   try {
@@ -457,13 +527,22 @@ export class IntelSweepService {
       }
     }
 
-    result.sourcesDiscovered = candidates.length;
+    // 3b. Filter out non-English, non-article, and low-quality results
+    const preFilterCount = candidates.length;
+    const filtered = candidates.filter(c => isQualityEnglishSource(c.url, c.title, c.snippet));
+    const rejected = preFilterCount - filtered.length;
+    if (rejected > 0) {
+      log().info(`[intel-sweep] Filtered out ${rejected}/${preFilterCount} low-quality/non-English candidates`);
+    }
+    const qualityCandidates = filtered;
+
+    result.sourcesDiscovered = qualityCandidates.length;
 
     // 4. Deduplicate and save new sources
     const newSources: IntelSource[] = [];
     const seen = new Set<string>();
 
-    for (const candidate of candidates) {
+    for (const candidate of qualityCandidates) {
       if (seen.has(candidate.url)) continue;
       seen.add(candidate.url);
 

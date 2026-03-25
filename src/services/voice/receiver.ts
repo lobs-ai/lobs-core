@@ -8,9 +8,15 @@
 
 import type { VoiceConnection } from "@discordjs/voice";
 import { EndBehaviorType } from "@discordjs/voice";
-import { OpusEncoder } from "@discordjs/opus";
+import opus from "@discordjs/opus";
 import type { VoiceConfig, Transcription } from "./types.js";
 import { VADProcessor } from "./vad.js";
+
+const { OpusEncoder } = opus;
+
+type OpusDecoder = {
+  decode(packet: Buffer): Buffer;
+};
 
 /** Discord voice audio: 48kHz, stereo, 16-bit, 20ms frames */
 const DISCORD_SAMPLE_RATE = 48000;
@@ -31,7 +37,7 @@ const MIN_SPEECH_MS = 300;
  */
 class UserReceiver {
   readonly userId: string;
-  private opus: OpusEncoder;
+  private opus: OpusDecoder;
   private vad: VADProcessor;
   private audioBuffer: Buffer[] = [];
   private bufferByteCount = 0;
@@ -245,12 +251,16 @@ export class VoiceReceiver {
   subscribeUser(userId: string): void {
     if (this.receivers.has(userId)) return;
 
-    console.log(`[voice:receiver] Subscribing to audio from ${userId}`);
-
     const receiver = new UserReceiver(userId, this.config, this.onTranscription);
     this.receivers.set(userId, receiver);
 
-    // Subscribe to this user's audio stream
+    this.createAudioSubscription(userId, receiver);
+  }
+
+  /** Create (or re-create) an audio stream subscription for a user */
+  private createAudioSubscription(userId: string, receiver: UserReceiver): void {
+    console.log(`[voice:receiver] Subscribing to audio from ${userId}`);
+
     const audioStream = this.connection.receiver.subscribe(userId, {
       end: {
         behavior: EndBehaviorType.AfterSilence,
@@ -263,13 +273,24 @@ export class VoiceReceiver {
     });
 
     audioStream.on("end", () => {
-      console.log(`[voice:receiver] Audio stream ended for ${userId}`);
-      // Don't destroy — user may speak again. Stream will be re-created by discord.js.
+      console.debug(`[voice:receiver] Audio stream ended for ${userId}, will re-subscribe on next speech`);
     });
 
     audioStream.on("error", (err: Error) => {
       console.error(`[voice:receiver] Audio stream error for ${userId}:`, err);
     });
+  }
+
+  /** Re-subscribe to a user's audio (called when they start speaking again) */
+  resubscribeUser(userId: string): void {
+    const receiver = this.receivers.get(userId);
+    if (!receiver) {
+      // New user — full subscribe
+      this.subscribeUser(userId);
+      return;
+    }
+    // Existing user whose stream ended — just create a new audio subscription
+    this.createAudioSubscription(userId, receiver);
   }
 
   /** Stop listening to a specific user */

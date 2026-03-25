@@ -143,16 +143,23 @@ const ENSURE_TABLE = `
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+`;
+
+const ENSURE_INDEXES = `
   CREATE INDEX IF NOT EXISTS idx_research_radar_status ON research_radar(status);
   CREATE INDEX IF NOT EXISTS idx_research_radar_novelty ON research_radar(novelty_score DESC);
   CREATE INDEX IF NOT EXISTS idx_research_radar_area ON research_radar(research_area);
   CREATE INDEX IF NOT EXISTS idx_research_radar_track ON research_radar(track);
 `;
 
-// Migration: add track column to existing tables
 const MIGRATE_TRACK = `
   ALTER TABLE research_radar ADD COLUMN track TEXT NOT NULL DEFAULT 'paper';
 `;
+
+function hasColumn(db: Database.Database, table: string, column: string): boolean {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return columns.some((entry) => entry.name === column);
+}
 
 // ── Service ──────────────────────────────────────────────────────────────
 
@@ -162,16 +169,14 @@ export class ResearchRadarService {
   constructor(db: Database.Database) {
     this.db = db;
     this.db.exec(ENSURE_TABLE);
-    // Safe migration — add track column if missing
-    try {
+
+    // Older installs created the table before `track` existed. Add the column
+    // before creating indexes or any `track`-dependent query will crash.
+    if (!hasColumn(this.db, "research_radar", "track")) {
       this.db.exec(MIGRATE_TRACK);
-    } catch {
-      // Column already exists — fine
     }
-    // Ensure index exists for track
-    try {
-      this.db.exec("CREATE INDEX IF NOT EXISTS idx_research_radar_track ON research_radar(track)");
-    } catch { /* already exists */ }
+
+    this.db.exec(ENSURE_INDEXES);
   }
 
   // ── CRUD ───────────────────────────────────────────────────────────

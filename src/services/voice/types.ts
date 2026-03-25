@@ -116,11 +116,16 @@ export interface TranscriptEntry {
   timestamp: number;
 }
 
+/** Voice pipeline mode */
+export type VoiceMode = "sidecar" | "realtime";
+
 /** Status of a voice session */
 export interface VoiceSessionStatus {
   guildId: string;
   channelId: string;
   channelName?: string;
+  /** Which pipeline is active */
+  mode: VoiceMode;
   triggerMode: TriggerMode;
   connectedSince: number;
   usersInChannel: number;

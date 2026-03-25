@@ -14,7 +14,7 @@ import { getModelConfig } from "../config/models.js";
 import { getToolDefinitions, executeTool } from "../runner/tools/index.js";
 import type { ToolName } from "../runner/types.js";
 import { getToolsForSession, getSessionType } from "../runner/tools/tool-sets.js";
-import { loadWorkspaceContext, buildSystemPrompt } from "./workspace-loader.js";
+import { loadWorkspaceContext, buildSystemPrompt, buildVoiceSystemPrompt } from "./workspace-loader.js";
 import { buildFallbackChain, resolveModelForTier, type ModelTier } from "../orchestrator/model-chooser.js";
 import Database from "better-sqlite3";
 import Anthropic from "@anthropic-ai/sdk";
@@ -1080,14 +1080,17 @@ export class MainAgent {
       // Reload system prompt AND workspace context fresh each turn
       // This ensures edits to SYSTEM_PROMPT.md, SOUL.md, USER.md, MEMORY.md, TOOLS.md
       // take effect immediately without restarting lobs-core
-      const freshSystemPrompt = buildSystemPrompt();
-      const freshContext = loadWorkspaceContext();
+      const isVoiceChannel = replyChannelId.startsWith("voice:");
+      const freshSystemPrompt = isVoiceChannel ? buildVoiceSystemPrompt() : buildSystemPrompt();
+      const freshContext = isVoiceChannel ? "" : loadWorkspaceContext(); // Voice sessions skip heavy context
 
       // Build system prompt — concise: identity + context + time
       // Tool descriptions come from the tool schemas (not hardcoded in prompt)
       const channelChatType = this.channelChatType.get(replyChannelId) || "unknown";
       let chatContextNote = "";
-      if (channelChatType === "group") {
+      if (isVoiceChannel) {
+        chatContextNote = "\n\nYou are in a LIVE VOICE CALL. Always respond — keep it short and conversational.";
+      } else if (channelChatType === "group") {
         chatContextNote = `\n\nYou are in a GROUP CHAT. Responding is OPTIONAL. Reply with just "NO_REPLY" (nothing else) if the message isn't directed at you or doesn't need your input. Only respond when mentioned, directly addressed, or when you have something genuinely useful to add. Don't respond just to acknowledge.`;
       } else {
         chatContextNote = `\n\nThis is a DIRECT conversation. You MUST always respond to every message. Never reply with "NO_REPLY" — the user is talking directly to you and expects a response.`;
@@ -1098,8 +1101,7 @@ export class MainAgent {
 
       const fullSystem = [
         freshSystemPrompt,
-        "",
-        freshContext,
+        ...(freshContext ? ["", freshContext] : []),
         "",
         `Current time: ${new Date().toLocaleString("en-US", {
           timeZone: "America/New_York",
@@ -1171,7 +1173,9 @@ export class MainAgent {
         `SELECT model_override FROM channel_sessions WHERE channel_id = ?`
       ).get(replyChannelId) as { model_override: string | null } | undefined;
       
-      let effectiveModel = sessionRow?.model_override || this.model;
+      // Voice channels default to "standard" tier (Sonnet 4.6) for low latency
+      const voiceModelDefault = isVoiceChannel ? "standard" : null;
+      let effectiveModel = sessionRow?.model_override || voiceModelDefault || this.model;
       
       // If the model is a tier name, resolve it to actual model
       if (["micro", "small", "medium", "standard", "strong"].includes(effectiveModel)) {

@@ -226,8 +226,64 @@ export async function handleIntelRequest(
 
   if (sub === "sweep") {
     if (method !== "POST") return error(res, "Method not allowed", 405);
-    // TODO: trigger the intel-sweep worker manually
-    return json(res, { message: "Manual sweep trigger not yet wired — use cron or run the worker directly" });
+
+    const body = (await parseBody(req)) as Record<string, unknown>;
+    const feedId = body.feedId ? String(body.feedId) : null;
+
+    if (feedId) {
+      // Single-feed sweep: call the service directly (fire and forget)
+      const intelSweep = (globalThis as any).__lobsIntelSweep;
+      if (!intelSweep) {
+        return error(res, "Intel sweep service not available", 503);
+      }
+
+      // Verify the feed exists
+      const feed = db.prepare("SELECT id, name FROM intel_feeds WHERE id = ? AND enabled = 1").get(feedId) as
+        | { id: string; name: string }
+        | undefined;
+      if (!feed) {
+        return error(res, "Feed not found or disabled", 404);
+      }
+
+      // Fire and forget — don't await
+      void intelSweep.sweepFeed(feedId).catch((err: unknown) => {
+        console.error(`[intel-sweep] Manual single-feed sweep failed (feed=${feedId}):`, err);
+      });
+
+      return json(res, {
+        status: "started",
+        feedId,
+        feedName: feed.name,
+        message: `Sweep started for feed "${feed.name}"`,
+      });
+    }
+
+    // Full sweep: trigger the intel-sweep worker via the registry
+    const workerRegistry = (globalThis as any).__lobsWorkerRegistry;
+    if (!workerRegistry) {
+      return error(res, "Worker registry not available", 503);
+    }
+
+    // Fire and forget — return immediately, sweep runs in background
+    void workerRegistry.runWorker("intel-sweep").catch((err: unknown) => {
+      console.error("[intel-sweep] Manual full sweep failed:", err);
+    });
+
+    return json(res, {
+      status: "started",
+      worker: "intel-sweep",
+      message: "Intel sweep started — check worker logs for progress",
+    });
+  }
+
+  // ── /api/intel/reset-failed — reset failed research queue items ─────
+  if (sub === "reset-failed") {
+    if (method !== "POST") return error(res, "Method not allowed", 405);
+    const { getResearchQueueService } = await import("../services/research-queue.js");
+    const rqs = getResearchQueueService();
+    if (!rqs) return error(res, "Research queue service not available", 503);
+    const count = rqs.resetFailed();
+    return json(res, { reset: count, message: `Reset ${count} failed items back to queued` });
   }
 
   return error(res, "Unknown intel sub-resource", 404);

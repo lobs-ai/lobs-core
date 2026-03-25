@@ -5,6 +5,8 @@ import { json } from "./index.js";
 import { isMemoryReady, getMemoryHealth } from "../services/memory/index.js";
 import { discordService } from "../services/discord.js";
 import { getKeyPool } from "../services/key-pool.js";
+import { loadVoiceConfig } from "../services/voice/index.js";
+import type { VoiceManager } from "../services/voice/index.js";
 
 const HOME = process.env.HOME ?? "";
 const PID_FILE = resolve(HOME, ".lobs/lobs.pid");
@@ -192,6 +194,31 @@ async function getServiceWarnings(): Promise<ServiceHealth[]> {
     });
   }
 
+  // Voice sidecar services
+  const voiceConfig = loadVoiceConfig();
+  if (voiceConfig.enabled) {
+    const vm = (globalThis as Record<string, unknown>).__lobsVoiceManager as VoiceManager | undefined;
+    if (vm) {
+      const voiceHealth = await vm.getSidecar().checkHealth();
+      if (!voiceHealth.stt) {
+        services.push({
+          id: "voice-stt", name: "Voice STT", status: "down",
+          message: `STT (whisper.cpp) not responding at ${voiceConfig.stt.url}`,
+          fix: "Run: cd ~/lobs/lobs-voice && bash scripts/start-all.sh",
+          severity: "warning",
+        });
+      }
+      if (!voiceHealth.tts) {
+        services.push({
+          id: "voice-tts", name: "Voice TTS", status: "down",
+          message: `TTS (Chatterbox) not responding at ${voiceConfig.tts.url}`,
+          fix: "Run: cd ~/lobs/lobs-voice && bash scripts/start-all.sh",
+          severity: "warning",
+        });
+      }
+    }
+  }
+
   return services;
 }
 
@@ -234,6 +261,24 @@ export async function handleHealthRequest(_req: IncomingMessage, res: ServerResp
     }
   }
 
+  // Voice sidecar
+  const voiceConfig = loadVoiceConfig();
+  let voiceInfo: Record<string, unknown> = { enabled: false };
+  if (voiceConfig.enabled) {
+    const vm = (globalThis as Record<string, unknown>).__lobsVoiceManager as VoiceManager | undefined;
+    if (vm) {
+      const voiceHealth = await vm.getSidecar().checkHealth();
+      voiceInfo = {
+        enabled: true,
+        autoStartSidecar: voiceConfig.autoStartSidecar,
+        stt: voiceHealth.stt ? "ok" : "down",
+        tts: voiceHealth.tts ? "ok" : "down",
+      };
+    } else {
+      voiceInfo = { enabled: true, status: "not initialized" };
+    }
+  }
+
   const body: Record<string, unknown> = {
     status,
     uptime: process.uptime(),
@@ -241,6 +286,7 @@ export async function handleHealthRequest(_req: IncomingMessage, res: ServerResp
     db: db ? "ok" : "error",
     memory: memoryInfo,
     lm_studio: lmStudio ? "ok" : "down",
+    voice: voiceInfo,
   };
 
   if (!lmStudio) {

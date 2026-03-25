@@ -235,14 +235,14 @@ Topic: ${input.item.topic ?? "none"}
 Source title: ${input.material.sourceTitle}
 Source URL: ${input.material.sourceUrl ?? "n/a"}
 
-Source text:
-${input.material.sourceText}`,
+Source text (first 6000 chars):
+${input.material.sourceText.slice(0, 6000)}`,
     {
       model,
       baseUrl: localCfg.baseUrl,
       maxTokens: 800,
       temperature: 0.1,
-      timeoutMs: 60_000,
+      timeoutMs: 120_000,
       systemPrompt: "You are a local background research worker. Produce compact factual summaries for downstream retrieval and task planning.",
     },
   );
@@ -388,6 +388,17 @@ export class ResearchQueueService {
       failed: Number(counts.failed ?? 0),
       briefs: Number(briefsRow.count ?? 0),
     };
+  }
+
+  /** Reset all failed items back to queued for retry */
+  resetFailed(): number {
+    const now = new Date().toISOString();
+    const result = this.db.prepare(
+      `UPDATE research_queue
+       SET status = 'queued', error = NULL, started_at = NULL, finished_at = NULL, updated_at = ?
+       WHERE status = 'failed'`,
+    ).run(now);
+    return result.changes;
   }
 
   async processNext(): Promise<ProcessResearchResult> {

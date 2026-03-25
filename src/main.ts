@@ -47,6 +47,7 @@ import { initIntelSweepService } from "./services/intel-sweep.js";
 import { initResearchRadarService } from "./services/research-radar.js";
 import { runLmStudioAlertCheck } from "./services/lm-studio-monitor.js";
 import { runDbMaintenance } from "./services/db-maintenance.js";
+import { VoiceManager } from "./services/voice/index.js";
 
 const HOME = process.env.HOME ?? "";
 const DB_PATH = resolve(HOME, ".lobs/lobs.db");
@@ -460,13 +461,12 @@ async function main() {
   // Purge archived chat sessions older than 30 days on startup
   purgeOldArchivedSessions();
 
-  // Initialize in-process memory service (replaces external Bun child process)
-  try {
-    await initMemory();
-  } catch (err) {
+  // Initialize in-process memory service in the background so memory indexing
+  // cannot block the main system from reaching the main agent + Discord/API.
+  void initMemory().catch((err) => {
     console.error("[memory] Failed to initialize memory service:", err);
     console.warn("[memory] Continuing without memory — grep fallback will be used");
-  }
+  });
 
   // Start imagine service (background, non-blocking)
   imagineService.start();
@@ -479,6 +479,12 @@ async function main() {
   
   // Export main agent globally so API handlers can access it
   (globalThis as any).__lobsMainAgent = mainAgent;
+
+  // Export worker registry globally so API handlers can trigger workers on demand
+  (globalThis as any).__lobsWorkerRegistry = workerRegistry;
+
+  // Export intel sweep service globally so the sweep API can target individual feeds
+  (globalThis as any).__lobsIntelSweep = intelSweep;
 
   const activityTimer = setInterval(async () => {
     const workers = getActiveWorkers();
@@ -509,7 +515,7 @@ async function main() {
   }, ACTIVITY_LOG_INTERVAL_MS);
   
   // Wire main agent into Discord slash commands
-  const { setMainAgentForCommands } = await import("./services/discord-commands.js");
+  const { setMainAgentForCommands, setVoiceManagerForCommands } = await import("./services/discord-commands.js");
   setMainAgentForCommands(mainAgent);
 
   // Wire cron events to main agent
@@ -528,8 +534,47 @@ async function main() {
       setMessageDiscord(discordService);
       setReactDiscord(discordService);
 
+      // ── Voice Manager ─────────────────────────────────────────────
+      let voiceManager: VoiceManager | null = null;
+      const discordClient = discordService.getClient();
+      if (discordClient) {
+        voiceManager = new VoiceManager(discordClient);
+        if (voiceManager.isEnabled) {
+          // Initialize sidecar services (auto-start if configured)
+          await voiceManager.initialize();
+
+          // Wire voice transcriptions → main agent
+          voiceManager.setMessageHandler(async (text, userId, displayName, channelId) => {
+            await mainAgent.handleMessage({
+              id: randomUUID(),
+              content: text,
+              authorId: userId,
+              authorName: displayName,
+              channelId, // voice:GUILD_ID
+              timestamp: Date.now(),
+              chatType: "dm", // Voice is direct-style (always respond)
+            });
+          });
+          console.log("[voice] VoiceManager initialized and wired to main agent");
+        } else {
+          console.log("[voice] Voice disabled in config — VoiceManager not activated");
+          voiceManager = null;
+        }
+      }
+      // Export for API/commands
+      (globalThis as any).__lobsVoiceManager = voiceManager;
+      if (voiceManager) {
+        setVoiceManagerForCommands(voiceManager);
+      }
+
       // Wire reply handler — agent replies go to Discord
       mainAgent.setReplyHandler(async (channelId, content) => {
+        // Voice channels — route to VoiceManager TTS, not Discord text
+        if (channelId.startsWith("voice:") && voiceManager) {
+          const guildId = channelId.replace("voice:", "");
+          await voiceManager.onVoiceReply(guildId, content);
+          return;
+        }
         // Nexus channels are handled via the API, not Discord
         if (channelId.startsWith("nexus:")) return;
         // Cron channels are internal — the agent sends to Discord via the message tool
@@ -556,6 +601,7 @@ async function main() {
         if (channelId.startsWith("nexus:")) return;
         if (channelId.startsWith("cron:")) return;
         if (channelId.startsWith("vim:")) return;
+        if (channelId.startsWith("voice:")) return; // No typing indicators in voice
         // System channel — no typing indicator needed for DMs from system events
         if (channelId === "system" || channelId.startsWith("system:")) return;
         const resolved = resolveDiscordChannel(channelId, discordConfig);
@@ -565,6 +611,8 @@ async function main() {
 
       // Wire progress handler — shows tool steps in DMs only
       mainAgent.setProgressHandler(async (channelId, content) => {
+        // Voice channels — suppress progress (tool steps are silent in voice)
+        if (channelId.startsWith("voice:")) return;
         // For Nexus channels, progress is delivered via the API (not Discord)
         if (channelId.startsWith("nexus:")) return;
         // Cron channels are internal
@@ -699,6 +747,10 @@ async function main() {
     
     stopDiskMonitor();
     imagineService.stop();
+    // Clean up voice sessions
+    const vm = (globalThis as any).__lobsVoiceManager as VoiceManager | null;
+    if (vm) vm.destroyAll();
+
     await shutdownMemory();
     await browserService.shutdown();
     await discordService.shutdown();

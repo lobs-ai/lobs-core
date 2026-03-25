@@ -144,6 +144,7 @@ export class RealtimeVoiceSession {
   private audioOutBytes = 0;
   private connected = false;
   private closing = false;
+  private reconnecting = false;
   private readonly config: RealtimeVoiceSessionConfig;
 
   /** Callback invoked when we get a user transcript (for logging/display) */
@@ -223,9 +224,11 @@ export class RealtimeVoiceSession {
     };
 
     // Create the session with the transport
+    // useInsecureApiKey is required for server-side API keys (vs ephemeral client tokens)
     this.transport = new OpenAIRealtimeWebSocket({
       apiKey: this.config.apiKey,
       model,
+      useInsecureApiKey: true,
     });
 
     this.session = new RealtimeSession(this.agent, {
@@ -283,8 +286,8 @@ export class RealtimeVoiceSession {
         pcm24kMono.byteOffset + pcm24kMono.byteLength,
       ) as ArrayBuffer;
 
-      // Send to OpenAI Realtime API
-      this.transport.sendAudio(arrayBuffer, { commit: false });
+      // Send to OpenAI Realtime API via the session (handles state checks)
+      this.session?.sendAudio(arrayBuffer);
     } catch {
       // Don't log audio decode errors — they happen naturally
       // during silence, user join/leave, or codec transitions
@@ -430,22 +433,22 @@ export class RealtimeVoiceSession {
 
     // Transport errors
     this.transport.on("error", (error: TransportError) => {
-      const msg =
-        error.error instanceof Error
-          ? error.error.message
-          : String(error.error ?? "Unknown transport error");
-      console.error(`${LOG_PREFIX} Transport error: ${msg}`);
-
-      // If the connection dropped, attempt to reconnect
-      if (!this.closing) {
-        void this.handleDisconnect();
+      let msg: string;
+      if (error.error instanceof Error) {
+        msg = error.error.message;
+      } else if (typeof error.error === "object" && error.error !== null) {
+        msg = JSON.stringify(error.error).slice(0, 500);
+      } else {
+        msg = String(error.error ?? "Unknown transport error");
       }
+      console.error(`${LOG_PREFIX} Transport error: ${msg}`);
     });
 
-    // Transport closed
-    this.transport.on("closed", () => {
-      if (!this.closing) {
-        console.warn(`${LOG_PREFIX} Transport closed unexpectedly`);
+    // Connection state changes — only source of reconnect triggers
+    this.transport.on("connection_change", (status: string) => {
+      console.log(`${LOG_PREFIX} Connection: ${status}`);
+      if (status === "disconnected" && !this.closing && !this.reconnecting) {
+        console.warn(`${LOG_PREFIX} Transport disconnected unexpectedly`);
         void this.handleDisconnect();
       }
     });
@@ -456,29 +459,42 @@ export class RealtimeVoiceSession {
     if (!this.session) return;
 
     // Log when the history is updated (gives us assistant transcripts)
-    this.session.on("history_updated", (history: unknown[]) => {
-      // The last item may contain the assistant's text transcript
-      const last = history[history.length - 1] as
-        | { role?: string; type?: string; content?: Array<{ transcript?: string }> }
-        | undefined;
-      if (last?.role === "assistant" && last.content) {
-        const transcript = last.content
-          .map((c) => c.transcript)
-          .filter(Boolean)
-          .join(" ")
-          .trim();
-        if (transcript) {
-          console.log(`${LOG_PREFIX} Assistant: "${transcript.slice(0, 200)}"`);
-          this.onAssistantTranscript?.(transcript);
-        }
+    this.session.on("history_updated", (history) => {
+      const last = history[history.length - 1];
+      if (!last || last.type !== "message") return;
+      if (!("role" in last) || last.role !== "assistant") return;
+
+      const transcript = last.content
+        .map((c) => ("transcript" in c ? c.transcript : null))
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+      if (transcript) {
+        console.log(`${LOG_PREFIX} Assistant: "${transcript.slice(0, 200)}"`);
+        this.onAssistantTranscript?.(transcript);
       }
     });
 
+    // Tool call logging
+    this.session.on("agent_tool_start", (_ctx, _agent, t, details) => {
+      const args = "arguments" in details.toolCall ? String(details.toolCall.arguments).slice(0, 100) : "";
+      console.log(`${LOG_PREFIX} Tool call: ${t.name}(${args})`);
+    });
+
+    this.session.on("agent_tool_end", (_ctx, _agent, t, result) => {
+      console.log(`${LOG_PREFIX} Tool result [${t.name}]: ${result.slice(0, 200)}`);
+    });
+
     // Session-level errors
-    this.session.on("error", (event: unknown) => {
-      const e = event as { error?: Error; message?: string };
-      const msg =
-        e.error?.message ?? e.message ?? "Unknown session error";
+    this.session.on("error", (event) => {
+      let msg: string;
+      if (event.error instanceof Error) {
+        msg = event.error.message;
+      } else if (typeof event.error === "object" && event.error !== null) {
+        msg = JSON.stringify(event.error).slice(0, 500);
+      } else {
+        msg = String(event.error ?? "Unknown session error");
+      }
       console.error(`${LOG_PREFIX} Session error: ${msg}`);
     });
   }
@@ -489,7 +505,8 @@ export class RealtimeVoiceSession {
 
   /** Handle an unexpected disconnect — try to reconnect once */
   private async handleDisconnect(): Promise<void> {
-    if (this.closing) return;
+    if (this.closing || this.reconnecting) return;
+    this.reconnecting = true;
 
     console.warn(`${LOG_PREFIX} Attempting reconnection...`);
     this.connected = false;
@@ -504,8 +521,10 @@ export class RealtimeVoiceSession {
 
     try {
       await this.connect();
+      this.reconnecting = false;
       console.log(`${LOG_PREFIX} Reconnected successfully`);
     } catch (err) {
+      this.reconnecting = false;
       console.error(
         `${LOG_PREFIX} Reconnection failed:`,
         err instanceof Error ? err.message : String(err),

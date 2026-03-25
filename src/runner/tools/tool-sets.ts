@@ -5,7 +5,7 @@
 
 import type { ToolName } from "../types.js";
 
-export type SessionType = "nexus" | "discord" | "system" | "dm";
+export type SessionType = "nexus" | "discord" | "system" | "dm" | "voice";
 
 // Nexus/API chat — no Discord tools needed
 const NEXUS_TOOLS: ToolName[] = [
@@ -37,6 +37,18 @@ const DISCORD_TOOLS: ToolName[] = [
   "react",
 ];
 
+// Voice sessions — conversational, lightweight but capable
+const VOICE_TOOLS: ToolName[] = [
+  "web_search",
+  "web_fetch",
+  "memory_search",
+  "memory_read",
+  "read",
+  "grep",
+  "glob",
+  "spawn_agent",
+];
+
 // System/proactive sessions — full access (needs to message users)
 const SYSTEM_TOOLS: ToolName[] = [
   ...DISCORD_TOOLS,
@@ -51,6 +63,8 @@ export function getToolsForSession(type: SessionType): ToolName[] {
       return DISCORD_TOOLS;
     case "dm":
       return DISCORD_TOOLS;
+    case "voice":
+      return VOICE_TOOLS;
     case "system":
       return SYSTEM_TOOLS;
     default:
@@ -64,6 +78,9 @@ export function getToolsForSession(type: SessionType): ToolName[] {
 export function getSessionType(channelId: string): SessionType {
   if (channelId.startsWith("nexus:") || channelId.startsWith("api-")) {
     return "nexus";
+  }
+  if (channelId.startsWith("voice:")) {
+    return "voice";
   }
   if (channelId === "system") {
     return "system";

@@ -63,7 +63,9 @@ export function loadDiscordConfig(): DiscordConfig | null {
     },
     ownerId: config?.ownerId ?? process.env.DISCORD_OWNER_ID,
     dmAllowFrom: config?.dmAllowFrom ?? [],
+    botAllowFrom: config?.botAllowFrom ?? [],
     channelPolicies: config?.channelPolicies ?? {},
+    guildPolicies: config?.guildPolicies ?? {},
   };
 
   return finalConfig;

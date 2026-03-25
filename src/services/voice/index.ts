@@ -26,6 +26,7 @@ export { buildRealtimeInstructions } from "./realtime-context.js";
 // Types
 export type {
   VoiceConfig,
+  VoiceMode,
   RealtimeConfig,
   VoiceSessionStatus,
   Transcription,

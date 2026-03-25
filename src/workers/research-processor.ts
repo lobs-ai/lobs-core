@@ -27,7 +27,7 @@ export class ResearchProcessorWorker extends BaseWorker {
     const alerts: WorkerResult["alerts"] = [];
     let processed = 0;
 
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 5; i++) {
       const result = await this.researchQueue.processNext();
       if (!result.processed) break;
 

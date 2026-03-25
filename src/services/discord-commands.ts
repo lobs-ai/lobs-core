@@ -506,17 +506,24 @@ async function handleVoiceCommand(interaction: ChatInputCommandInteraction): Pro
       }
 
       const uptime = Math.round((Date.now() - status.connectedSince) / 1000);
+      const isHealthy = status.sttHealthy && status.ttsHealthy;
+      const modeLabel = status.mode === 'realtime' ? '🔴 Realtime (OpenAI)' : '🔧 Sidecar (STT/TTS)';
       const embed = new EmbedBuilder()
         .setTitle('🎙️ Voice Status')
-        .setColor(status.sttHealthy && status.ttsHealthy ? 0x00ff00 : 0xff0000)
+        .setColor(isHealthy ? 0x00ff00 : 0xff0000)
         .addFields(
           { name: 'Channel', value: status.channelName ?? status.channelId, inline: true },
+          { name: 'Mode', value: modeLabel, inline: true },
           { name: 'Users', value: String(status.usersInChannel), inline: true },
           { name: 'Uptime', value: `${uptime}s`, inline: true },
-          { name: 'Trigger Mode', value: status.triggerMode, inline: true },
-          { name: 'Transcript', value: `${status.transcriptLength} entries`, inline: true },
-          { name: 'STT', value: status.sttHealthy ? '✅ Healthy' : '❌ Down', inline: true },
-          { name: 'TTS', value: status.ttsHealthy ? '✅ Healthy' : '❌ Down', inline: true },
+          ...(status.mode === 'sidecar' ? [
+            { name: 'Trigger Mode', value: status.triggerMode, inline: true },
+            { name: 'Transcript', value: `${status.transcriptLength} entries`, inline: true },
+            { name: 'STT', value: status.sttHealthy ? '✅ Healthy' : '❌ Down', inline: true },
+            { name: 'TTS', value: status.ttsHealthy ? '✅ Healthy' : '❌ Down', inline: true },
+          ] : [
+            { name: 'API', value: isHealthy ? '✅ Connected' : '❌ Disconnected', inline: true },
+          ]),
         )
         .setTimestamp();
 

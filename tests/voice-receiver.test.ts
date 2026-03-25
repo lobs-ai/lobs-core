@@ -20,12 +20,14 @@ vi.mock("@discordjs/voice", () => {
 
 vi.mock("@discordjs/opus", () => {
   return {
-    OpusEncoder: vi.fn().mockImplementation(() => ({
-      decode: vi.fn((buf: Buffer) => {
-        // Return a stereo 48kHz PCM stub (12 stereo samples = 48 bytes)
-        return Buffer.alloc(48, 0);
-      }),
-    })),
+    default: {
+      OpusEncoder: vi.fn().mockImplementation(() => ({
+        decode: vi.fn((buf: Buffer) => {
+          // Return a stereo 48kHz PCM stub (12 stereo samples = 48 bytes)
+          return Buffer.alloc(48, 0);
+        }),
+      })),
+    },
   };
 });
 

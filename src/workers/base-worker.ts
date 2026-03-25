@@ -161,7 +161,26 @@ export async function callLocalModelJSON<T>(
   options?: LocalCallOptions,
 ): Promise<{ data: T; tokensUsed: number }> {
   const { text, tokensUsed } = await callLocalModel(prompt, options);
-  const cleaned = text.replace(/```json?\n?/g, "").replace(/```/g, "").trim();
+
+  // Strip markdown fences
+  let cleaned = text.replace(/```json?\n?/g, "").replace(/```/g, "").trim();
+
+  // Strip thinking tokens (e.g. <thinking>...</thinking>, <think>...</think>)
+  cleaned = cleaned.replace(/<think(?:ing)?>\s*[\s\S]*?<\/think(?:ing)?>/gi, "").trim();
+
+  // If the model prefixed non-JSON text before the actual JSON object/array,
+  // try to find the first { or [ and parse from there.
+  if (cleaned && !/^\s*[{\[]/.test(cleaned)) {
+    const objStart = cleaned.indexOf("{");
+    const arrStart = cleaned.indexOf("[");
+    const start = objStart >= 0 && arrStart >= 0
+      ? Math.min(objStart, arrStart)
+      : Math.max(objStart, arrStart);
+    if (start >= 0) {
+      cleaned = cleaned.slice(start);
+    }
+  }
+
   const data = JSON.parse(cleaned) as T;
   return { data, tokensUsed };
 }
