@@ -8,15 +8,22 @@
 import { Client, REST, Routes, SlashCommandBuilder, EmbedBuilder, ChatInputCommandInteraction, AutocompleteInteraction } from "discord.js";
 import type { DiscordConfig } from "./discord.js";
 import type { MainAgent } from "./main-agent.js";
+import type { VoiceManager } from "./voice/index.js";
 import { getRawDb } from "../db/connection.js";
 import { getModelForTier } from "../config/models.js";
 import { getChannelModelOverride, getDefaultChatModel, getModelCatalog, isLoadedLocalModel, normalizeModelSelection, setChannelModelOverride } from "./model-catalog.js";
 
 let mainAgentRef: MainAgent | null = null;
+let voiceManagerRef: VoiceManager | null = null;
 
 /** Set the main agent reference for command handlers */
 export function setMainAgentForCommands(agent: MainAgent): void {
   mainAgentRef = agent;
+}
+
+/** Set the voice manager reference for voice commands */
+export function setVoiceManagerForCommands(manager: VoiceManager): void {
+  voiceManagerRef = manager;
 }
 
 /** Register slash commands with Discord */
@@ -68,6 +75,40 @@ export async function registerSlashCommands(client: Client, config: DiscordConfi
       .setName('help')
       .setDescription('Show available commands'),
     
+    new SlashCommandBuilder()
+      .setName('voice')
+      .setDescription('Voice channel commands')
+      .addSubcommand(sub =>
+        sub.setName('join')
+          .setDescription('Join a voice channel')
+          .addChannelOption(opt =>
+            opt.setName('channel')
+              .setDescription('Voice channel to join (defaults to your current channel)')
+              .setRequired(false)
+          )
+      )
+      .addSubcommand(sub =>
+        sub.setName('leave')
+          .setDescription('Leave the current voice channel')
+      )
+      .addSubcommand(sub =>
+        sub.setName('status')
+          .setDescription('Show voice session status')
+      )
+      .addSubcommand(sub =>
+        sub.setName('trigger')
+          .setDescription('Set when Lobs responds in voice')
+          .addStringOption(opt =>
+            opt.setName('mode')
+              .setDescription('Trigger mode')
+              .setRequired(true)
+              .addChoices(
+                { name: 'keyword — respond when name is said', value: 'keyword' },
+                { name: 'always — respond to everything', value: 'always' },
+              )
+          )
+      ),
+
     new SlashCommandBuilder()
       .setName('toolsteps')
       .setDescription('Control tool step visibility in this channel')
@@ -127,6 +168,9 @@ export async function handleSlashCommand(interaction: ChatInputCommandInteractio
         break;
       case 'toolsteps':
         await handleToolStepsCommand(interaction);
+        break;
+      case 'voice':
+        await handleVoiceCommand(interaction);
         break;
       default:
         await interaction.reply({ content: 'Unknown command', ephemeral: true });
@@ -349,6 +393,10 @@ async function handleHelpCommand(interaction: ChatInputCommandInteraction): Prom
       { name: '/model lmstudio', value: 'List currently loaded LM Studio models', inline: false },
       { name: '/model reset', value: 'Clear the channel override and use the default model', inline: false },
       { name: '/toolsteps [mode]', value: 'Control tool step visibility (on/compact/off)', inline: false },
+      { name: '/voice join [channel]', value: 'Join a voice channel (STT + TTS)', inline: false },
+      { name: '/voice leave', value: 'Leave the voice channel', inline: false },
+      { name: '/voice status', value: 'Show voice session status', inline: false },
+      { name: '/voice trigger <mode>', value: 'Set voice response trigger (keyword/always)', inline: false },
       { name: '/clear', value: 'Clear conversation history', inline: false },
       { name: '/help', value: 'Show this help message', inline: false },
     )
@@ -391,4 +439,106 @@ async function handleToolStepsCommand(interaction: ChatInputCommandInteraction):
   };
 
   await interaction.reply({ content: labels[mode] || `Tool steps set to: ${mode}`, ephemeral: true });
+}
+
+/** /voice - Voice channel commands */
+async function handleVoiceCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const subcommand = interaction.options.getSubcommand();
+
+  if (!voiceManagerRef) {
+    await interaction.reply({ content: '🔇 Voice module not initialized.', ephemeral: true });
+    return;
+  }
+
+  if (!voiceManagerRef.isEnabled) {
+    await interaction.reply({ content: '🔇 Voice is disabled. Enable it in `~/.lobs/config/voice.json`.', ephemeral: true });
+    return;
+  }
+
+  const guildId = interaction.guildId;
+  if (!guildId) {
+    await interaction.reply({ content: 'Voice commands only work in servers.', ephemeral: true });
+    return;
+  }
+
+  switch (subcommand) {
+    case 'join': {
+      await interaction.deferReply();
+
+      // Try specified channel, else user's current voice channel
+      let channelId = interaction.options.getChannel('channel')?.id;
+
+      if (!channelId) {
+        const member = interaction.guild?.members.cache.get(interaction.user.id);
+        channelId = member?.voice.channelId ?? undefined;
+
+        if (!channelId) {
+          await interaction.editReply('❌ Join a voice channel first, or specify one with the `channel` option.');
+          return;
+        }
+      }
+
+      const error = await voiceManagerRef.join(guildId, channelId);
+      if (error) {
+        await interaction.editReply(`❌ ${error}`);
+      } else {
+        const channel = interaction.guild?.channels.cache.get(channelId);
+        await interaction.editReply(`🎙️ Joined **${channel?.name ?? channelId}**. Say my name to talk to me!`);
+      }
+      break;
+    }
+
+    case 'leave': {
+      const error = await voiceManagerRef.leave(guildId);
+      if (error) {
+        await interaction.reply({ content: `❌ ${error}`, ephemeral: true });
+      } else {
+        await interaction.reply('👋 Left the voice channel.');
+      }
+      break;
+    }
+
+    case 'status': {
+      const status = await voiceManagerRef.getStatus(guildId);
+      if (!status) {
+        await interaction.reply({ content: '🔇 Not in a voice channel.', ephemeral: true });
+        return;
+      }
+
+      const uptime = Math.round((Date.now() - status.connectedSince) / 1000);
+      const embed = new EmbedBuilder()
+        .setTitle('🎙️ Voice Status')
+        .setColor(status.sttHealthy && status.ttsHealthy ? 0x00ff00 : 0xff0000)
+        .addFields(
+          { name: 'Channel', value: status.channelName ?? status.channelId, inline: true },
+          { name: 'Users', value: String(status.usersInChannel), inline: true },
+          { name: 'Uptime', value: `${uptime}s`, inline: true },
+          { name: 'Trigger Mode', value: status.triggerMode, inline: true },
+          { name: 'Transcript', value: `${status.transcriptLength} entries`, inline: true },
+          { name: 'STT', value: status.sttHealthy ? '✅ Healthy' : '❌ Down', inline: true },
+          { name: 'TTS', value: status.ttsHealthy ? '✅ Healthy' : '❌ Down', inline: true },
+        )
+        .setTimestamp();
+
+      await interaction.reply({ embeds: [embed], ephemeral: true });
+      break;
+    }
+
+    case 'trigger': {
+      const mode = interaction.options.getString('mode', true) as 'keyword' | 'always';
+      const ok = voiceManagerRef.setTriggerMode(guildId, mode);
+      if (!ok) {
+        await interaction.reply({ content: '❌ Not in a voice channel.', ephemeral: true });
+      } else {
+        const desc = mode === 'keyword'
+          ? '🗝️ Trigger mode: **keyword** — say "Lobs" to get a response'
+          : '📡 Trigger mode: **always** — responding to all speech';
+        await interaction.reply(desc);
+      }
+      break;
+    }
+
+    default:
+      await interaction.reply({ content: 'Unknown voice subcommand.', ephemeral: true });
+  }
 }

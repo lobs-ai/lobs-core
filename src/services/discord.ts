@@ -11,7 +11,10 @@ export interface DiscordConfig {
   };
   ownerId?: string;       // Primary owner's Discord user ID
   dmAllowFrom: string[];  // User IDs allowed to DM the bot
+  botAllowFrom: string[]; // Bot user IDs whose messages are accepted (not silently dropped)
   channelPolicies: Record<string, { allow: boolean; requireMention: boolean }>;
+  /** Guild-level allow policies — all channels in these guilds are allowed by default */
+  guildPolicies?: Record<string, { allow: boolean; requireMention: boolean }>;
 }
 
 /** Connection health states */
@@ -93,6 +96,7 @@ class DiscordService {
         GatewayIntentBits.DirectMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMessageReactions,
+        GatewayIntentBits.GuildVoiceStates,
       ],
       partials: [
         Partials.Channel,  // Required for DM messageCreate events
@@ -305,6 +309,7 @@ class DiscordService {
           GatewayIntentBits.DirectMessages,
           GatewayIntentBits.MessageContent,
           GatewayIntentBits.GuildMessageReactions,
+          GatewayIntentBits.GuildVoiceStates,
         ],
         partials: [Partials.Channel],
       });
@@ -523,7 +528,10 @@ class DiscordService {
     if (!this.client || !this.config) return;
 
     this.client.on("messageCreate", async (msg) => {
-      if (msg.author.bot) return; // Ignore bot messages
+      // Always ignore our own messages to prevent loops
+      if (msg.author.id === this.client!.user!.id) return;
+      // Ignore bot messages unless they're in the allow list
+      if (msg.author.bot && !this.config!.botAllowFrom.includes(msg.author.id)) return;
       this.metrics.messagesReceived++;
 
       // Filter DMs
@@ -533,10 +541,11 @@ class DiscordService {
           return; // Silently drop unauthorized DMs
         }
       } else {
-        // Filter guild channels
-        const policy = this.config!.channelPolicies[msg.channelId];
+        // Filter guild channels — check channel-specific policy first, then guild-level policy
+        const policy = this.config!.channelPolicies[msg.channelId]
+          ?? (msg.guildId ? this.config!.guildPolicies?.[msg.guildId] : undefined);
         if (!policy || !policy.allow) {
-          console.debug(`[discord] Dropping message from disallowed channel ${msg.channelId}`);
+          console.debug(`[discord] Dropping message from disallowed channel ${msg.channelId} guild=${msg.guildId}`);
           return; // Silently drop messages from disallowed channels
         }
 
@@ -749,6 +758,11 @@ class DiscordService {
       this.state = "disconnected";
       this.metrics.state = "disconnected";
     }
+  }
+
+  /** Get the underlying Discord.js client (for voice manager, etc.) */
+  getClient(): Client | null {
+    return this.client;
   }
 
   isConnected(): boolean {
