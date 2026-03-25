@@ -21,6 +21,18 @@ export function buildRealtimeSessionConfig(
     transcriptionModel,
   } = options;
 
+  const turnDetectionConfig =
+    turnDetection === "semantic_vad"
+      ? {
+          type: "semantic_vad" as const,
+          eagerness,
+          interruptResponse: true,
+        }
+      : {
+          type: "server_vad" as const,
+          interruptResponse: true,
+        };
+
   return {
     audio: {
       input: {
@@ -28,11 +40,7 @@ export function buildRealtimeSessionConfig(
           type: "audio/pcm" as const,
           rate: REALTIME_SAMPLE_RATE,
         },
-        turnDetection: {
-          type: turnDetection,
-          eagerness,
-          interruptResponse: true,
-        },
+        turnDetection: turnDetectionConfig,
         transcription: { model: transcriptionModel },
         noiseReduction: noiseReduction
           ? { type: noiseReduction }

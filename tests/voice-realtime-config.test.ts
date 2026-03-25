@@ -25,13 +25,29 @@ describe("buildRealtimeSessionConfig", () => {
 
     expect(config.audio?.input?.turnDetection).toMatchObject({
       type: "server_vad",
-      eagerness: "high",
       interruptResponse: true,
     });
+    expect(config.audio?.input?.turnDetection).not.toHaveProperty("eagerness");
     expect(config.audio?.input?.transcription).toEqual({
       model: "gpt-4o-transcribe",
     });
     expect(config.audio?.input?.noiseReduction).toBeUndefined();
     expect(config.audio?.output?.voice).toBe("ballad");
+  });
+
+  it("includes eagerness only for semantic_vad", () => {
+    const config = buildRealtimeSessionConfig({
+      voice: "ash",
+      turnDetection: "semantic_vad",
+      eagerness: "high",
+      noiseReduction: "near_field",
+      transcriptionModel: "gpt-4o-mini-transcribe",
+    });
+
+    expect(config.audio?.input?.turnDetection).toMatchObject({
+      type: "semantic_vad",
+      eagerness: "high",
+      interruptResponse: true,
+    });
   });
 });

@@ -13,5 +13,7 @@ describe("buildVoiceSystemPrompt", () => {
     expect(prompt).toContain("call write_note");
     expect(prompt).toContain("Never say a note was saved");
     expect(prompt).toContain("Never say you cannot save notes or files if write_note is available");
+    expect(prompt).toContain("Do not say you cannot see them");
+    expect(prompt).toContain("search_memory, read_file, write_note, and spawn_agent");
   });
 });

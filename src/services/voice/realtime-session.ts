@@ -458,6 +458,28 @@ export class RealtimeVoiceSession {
   private setupSessionEvents(): void {
     if (!this.session) return;
 
+    this.session.on("transport_event", (event) => {
+      if (event.type === "session.created" || event.type === "session.updated") {
+        const sessionData =
+          "session" in event && typeof event.session === "object" && event.session
+            ? (event.session as {
+                tools?: Array<{ name?: string; type?: string }>;
+                output_modalities?: string[];
+              })
+            : null;
+        const tools = Array.isArray(sessionData?.tools) ? sessionData.tools : [];
+        console.log(
+          `${LOG_PREFIX} ${event.type} output_modalities=${JSON.stringify(sessionData?.output_modalities ?? [])} tools=${tools.map((t) => `${t.name ?? "unknown"}:${t.type ?? "unknown"}`).join(", ") || "none"}`,
+        );
+      }
+
+      if (event.type === "function_call") {
+        console.log(
+          `${LOG_PREFIX} Raw function_call: ${event.name}(${String(event.arguments ?? "").slice(0, 200)})`,
+        );
+      }
+    });
+
     // Log when the history is updated (gives us assistant transcripts)
     this.session.on("history_updated", (history) => {
       const last = history[history.length - 1];
