@@ -128,7 +128,7 @@ export class ResearchRadarWorker extends BaseWorker {
 
       for (const idea of allIdeas) {
         // Skip ideas with missing required fields
-        if (!idea.title || !idea.thesis) continue;
+        if (!idea.title?.trim() || !idea.thesis?.trim()) continue;
 
         const similar = this.radar.hasSimilarIdea(idea.title, idea.track);
         if (similar) {

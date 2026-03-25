@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { getDb } from "../../db/connection.js";
 import { inboxItems } from "../../db/schema.js";
+import { executeSpawnAgent } from "../../runner/tools/agent-control.js";
 
 export interface RealtimeVoiceToolContext {
   enqueueBackgroundToolResult?: (job: {
@@ -23,6 +24,8 @@ export interface RealtimeVoiceToolContext {
     task: Promise<string>;
     startedAt: number;
   }) => void;
+  channelId?: string;
+  cwd?: string;
 }
 
 export function queueBackgroundVoiceTool(
@@ -278,37 +281,26 @@ export const spawnAgentTool = tool({
       .describe("Working directory for the agent (optional)"),
   }),
   execute: async (params, runContext?: RunContext<RealtimeVoiceToolContext>) => {
-    // Fire-and-forget: post to the orchestrator endpoint
-    // The agent runs asynchronously — we don't wait for it
     return queueBackgroundVoiceTool(
       "spawn_agent",
       `Starting a ${params.agent_type} subagent now.`,
       runContext,
       (async () => {
         try {
-          const orchUrl =
-            process.env.LOBS_ORCHESTRATOR_URL ?? "http://localhost:7410";
-          const body = {
-            task: params.task,
-            agentType: params.agent_type,
-            cwd: params.cwd,
-            source: "voice-realtime",
-          };
-
-          const response = await fetch(`${orchUrl}/api/agents/spawn`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-            signal: AbortSignal.timeout(5_000),
-          });
-
-          if (!response.ok) {
-            return `Failed to spawn agent: HTTP ${response.status}`;
-          }
-
-          return `Agent spawned: ${params.agent_type} agent is now working on "${params.task.slice(0, 100)}".`;
-        } catch (err) {
-          return `Failed to spawn agent: ${err instanceof Error ? err.message : String(err)}`;
+          const channelId = runContext?.context.channelId;
+          const cwd = params.cwd ?? runContext?.context.cwd;
+          return await executeSpawnAgent(
+            {
+              agent_type: params.agent_type,
+              task: params.task,
+              cwd,
+              model_tier: "small",
+            },
+            cwd,
+            channelId,
+          );
+        } catch {
+          return "Background delegation unavailable right now.";
         }
       })(),
     );

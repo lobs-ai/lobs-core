@@ -250,6 +250,8 @@ export class RealtimeVoiceSession {
         }) => {
           this.enqueueBackgroundToolResult(job);
         },
+        channelId: `voice:${this.config.guildId}`,
+        cwd: process.cwd(),
       },
     });
     this.session = session;
@@ -683,7 +685,6 @@ export class RealtimeVoiceSession {
           toolName: job.toolName,
           result,
           announce:
-            job.toolName === "spawn_agent" ||
             job.toolName === "write_note" ||
             !isFailure,
         };
