@@ -194,9 +194,16 @@ type AnthropicMessageStream = {
 export async function awaitAnthropicFinalMessageWithInactivityTimeout(
   stream: AnthropicMessageStream,
   sessionId?: string,
-  firstEventTimeoutMs = ANTHROPIC_STREAM_FIRST_EVENT_TIMEOUT_MS,
-  inactivityTimeoutMs = ANTHROPIC_STREAM_INACTIVITY_TIMEOUT_MS,
+  firstEventTimeoutOrInactivityMs = ANTHROPIC_STREAM_FIRST_EVENT_TIMEOUT_MS,
+  inactivityTimeoutMs?: number,
 ): Promise<any> {
+  const firstEventTimeoutMs =
+    inactivityTimeoutMs === undefined
+      ? ANTHROPIC_STREAM_FIRST_EVENT_TIMEOUT_MS
+      : firstEventTimeoutOrInactivityMs;
+  const effectiveInactivityTimeoutMs =
+    inactivityTimeoutMs ?? firstEventTimeoutOrInactivityMs;
+
   let timeout: NodeJS.Timeout | undefined;
   let watchdog: NodeJS.Timeout | undefined;
   let lastActivityAt = Date.now();
@@ -223,7 +230,7 @@ export async function awaitAnthropicFinalMessageWithInactivityTimeout(
     new Promise<never>((_, reject) => {
       const checkForTimeout = (source: "timeout" | "watchdog") => {
         const idleMs = Date.now() - lastActivityAt;
-        const effectiveTimeout = gotFirstEvent ? inactivityTimeoutMs : firstEventTimeoutMs;
+        const effectiveTimeout = gotFirstEvent ? effectiveInactivityTimeoutMs : firstEventTimeoutMs;
         if (idleMs < effectiveTimeout) return;
         stream.abort();
         reject(timeoutError(idleMs, source, !gotFirstEvent));
@@ -233,7 +240,7 @@ export async function awaitAnthropicFinalMessageWithInactivityTimeout(
       // Starts with firstEventTimeoutMs, switches to inactivityTimeoutMs once streaming.
       const armTimeout = () => {
         if (timeout) clearTimeout(timeout);
-        const effectiveTimeout = gotFirstEvent ? inactivityTimeoutMs : firstEventTimeoutMs;
+        const effectiveTimeout = gotFirstEvent ? effectiveInactivityTimeoutMs : firstEventTimeoutMs;
         timeout = setTimeout(() => {
           checkForTimeout("timeout");
           armTimeout();

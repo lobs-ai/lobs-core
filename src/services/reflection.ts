@@ -13,7 +13,14 @@ import { buildTaskContext } from "../util/task-context.js";
 import { classifyApprovalTier } from "../util/approval-tier.js";
 import { log } from "../util/logger.js";
 
-const REFLECTION_AGENTS = ["main"];
+const REFLECTION_AGENTS = [
+  "programmer",
+  "researcher",
+  "writer",
+  "architect",
+  "reviewer",
+  "main",
+];
 const QUALITY_MIN_LENGTH = 50;
 
 /** Slice a string without splitting surrogate pairs (avoids invalid JSON errors) */

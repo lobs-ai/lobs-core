@@ -14,7 +14,7 @@
  * - API: PATCH /api/tasks/:id accepts expected_artifacts
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { writeFileSync, mkdirSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
@@ -165,6 +165,7 @@ describe("checkArtifacts", () => {
   });
 
   it("expands ~ in paths", () => {
+    vi.stubEnv("HOME", tmpDir);
     const home = process.env["HOME"] ?? tmpdir();
     const p = join(home, `.artifact-check-test-${randomUUID()}.md`);
     try {
@@ -173,6 +174,7 @@ describe("checkArtifacts", () => {
       expect(checkArtifacts([{ path: tildeP }]).status).toBe("skip_all_present");
     } finally {
       rmSync(p, { force: true });
+      vi.unstubAllEnvs();
     }
   });
 });

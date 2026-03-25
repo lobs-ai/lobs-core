@@ -18,16 +18,14 @@ export async function buildRealtimeInstructions(): Promise<string> {
   const voicePrompt = buildVoiceSystemPrompt();
   const workspaceContext = loadWorkspaceContext("main");
   const toolCatalog = [
-    "Available tools in this live session right now:",
+    "Live tools in this session:",
     ...realtimeVoiceTools.map(
       (tool) => `- ${tool.name}: ${tool.description}`,
     ),
-    "If a request matches one of these tools, call the tool instead of merely describing it.",
-    "Do not say you cannot see your tools. Do not say you are unsure what tools are available.",
-    "Examples:",
-    '- If Rafe says "write this down", call write_note.',
-    '- If Rafe asks "what tools do you have", answer with the tool names directly.',
-    '- If Rafe asks about his life, projects, schedule, or preferences, use search_memory if needed before claiming you do not know.',
+    "If one clearly fits, use it.",
+    "Don't say you can't see your tools.",
+    'If Rafe says "write this down", use write_note.',
+    "If there's a bigger issue to work on, use spawn_agent.",
   ].join("\n");
   const parts: string[] = [voicePrompt, toolCatalog, workspaceContext];
 

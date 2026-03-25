@@ -13,6 +13,7 @@ import { z } from "zod";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
 import { getDb } from "../../db/connection.js";
 import { inboxItems } from "../../db/schema.js";
 
@@ -218,7 +219,12 @@ export const readFileTool = tool({
       runContext,
       (async () => {
         try {
-          const filePath = resolve(params.path);
+          const normalizedPath = params.path.startsWith("~/")
+            ? resolve(homedir(), params.path.slice(2))
+            : params.path === "~"
+              ? homedir()
+              : params.path;
+          const filePath = resolve(normalizedPath);
 
           if (!existsSync(filePath)) {
             return `File not found: ${params.path}`;

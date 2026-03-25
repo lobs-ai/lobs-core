@@ -45,6 +45,14 @@ const DISCORD_CHANNELS = 2;
 const REALTIME_SAMPLE_RATE = 24000;
 
 const LOG_PREFIX = "[voice:realtime]";
+const BACKGROUND_FOLLOW_UP_IDLE_MS = 1200;
+
+interface PendingBackgroundResult {
+  jobId: number;
+  toolName: string;
+  result: string;
+  announce: boolean;
+}
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -154,6 +162,8 @@ export class RealtimeVoiceSession {
     | { text: string; loggedAt: number }
     | null = null;
   private backgroundJobSeq = 0;
+  private pendingBackgroundResults: PendingBackgroundResult[] = [];
+  private backgroundFollowUpTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Callback invoked when we get a user transcript (for logging/display) */
   onUserTranscript?: (text: string) => void;
@@ -347,6 +357,7 @@ export class RealtimeVoiceSession {
   private onAudioInterrupted(): void {
     console.log(`${LOG_PREFIX} Audio interrupted by user`);
     this.endPlaybackStream("interrupted");
+    this.clearBackgroundFollowUpTimer();
 
     // Stop current Discord playback
     if (this.player.state.status === AudioPlayerStatus.Playing) {
@@ -382,6 +393,85 @@ export class RealtimeVoiceSession {
       `${LOG_PREFIX} Ending Discord playback turn=${turnId ?? "unknown"} reason=${reason}`,
     );
     stream.end();
+    if (reason === "audio_done") {
+      this.maybeScheduleBackgroundFollowUp();
+    }
+  }
+
+  private clearBackgroundFollowUpTimer(): void {
+    if (!this.backgroundFollowUpTimer) return;
+    clearTimeout(this.backgroundFollowUpTimer);
+    this.backgroundFollowUpTimer = null;
+  }
+
+  private injectBackgroundResultSilently(job: PendingBackgroundResult): void {
+    if (!this.transport) return;
+
+    this.transport.sendMessage(
+      {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text:
+              `Background tool result [${job.toolName}]${job.announce ? "" : " (silent only)"}:\n${job.result}\n\n` +
+              "This is context only. Do not respond yet.",
+          },
+        ],
+      },
+      {},
+      { triggerResponse: false },
+    );
+  }
+
+  private maybeScheduleBackgroundFollowUp(): void {
+    const hasAnnounceable = this.pendingBackgroundResults.some((r) => r.announce);
+    if (!hasAnnounceable || !this.session || !this.transport || !this.connected || this.closing) {
+      return;
+    }
+    if (this.playbackStream || this.player.state.status !== AudioPlayerStatus.Idle) {
+      return;
+    }
+    this.clearBackgroundFollowUpTimer();
+    this.backgroundFollowUpTimer = setTimeout(() => {
+      this.backgroundFollowUpTimer = null;
+      this.flushBackgroundFollowUpIfIdle();
+    }, BACKGROUND_FOLLOW_UP_IDLE_MS);
+  }
+
+  private flushBackgroundFollowUpIfIdle(): void {
+    if (!this.session || !this.transport || !this.connected || this.closing) return;
+    if (this.playbackStream || this.player.state.status !== AudioPlayerStatus.Idle) {
+      this.maybeScheduleBackgroundFollowUp();
+      return;
+    }
+    if (
+      this.lastUserTranscriptAt !== null &&
+      Date.now() - this.lastUserTranscriptAt < BACKGROUND_FOLLOW_UP_IDLE_MS
+    ) {
+      this.maybeScheduleBackgroundFollowUp();
+      return;
+    }
+
+    const announceable = this.pendingBackgroundResults.filter((r) => r.announce);
+    if (announceable.length === 0) return;
+    this.pendingBackgroundResults = this.pendingBackgroundResults.filter((r) => !r.announce);
+
+    const summary = announceable
+      .map((r) => `- ${r.toolName}: ${r.result.slice(0, 240)}`)
+      .join("\n");
+
+    this.transport.sendEvent({
+      type: "response.create",
+      response: {
+        instructions:
+          "One or more background tools finished. If the update materially helps the user right now, tell them in one short spoken update. " +
+          "Do not call tools for this follow-up. Do not investigate tool failures unless the user explicitly asked you to debug the tooling itself. " +
+          "If a tool failed, mention it briefly and move on.\n\n" +
+          `Finished background results:\n${summary}`,
+      },
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -424,6 +514,7 @@ export class RealtimeVoiceSession {
       ) {
         const text = event.transcript?.trim();
         if (text) {
+          this.clearBackgroundFollowUpTimer();
           this.lastUserTranscriptAt = Date.now();
           console.log(`${LOG_PREFIX} User: "${text}"`);
           this.onUserTranscript?.(text);
@@ -538,6 +629,11 @@ export class RealtimeVoiceSession {
       console.log(
         `${LOG_PREFIX} Player state ${oldState.status} -> ${newState.status}`,
       );
+      if (newState.status === AudioPlayerStatus.Idle) {
+        this.maybeScheduleBackgroundFollowUp();
+      } else {
+        this.clearBackgroundFollowUpTimer();
+      }
     });
 
     // Session-level errors
@@ -575,19 +671,25 @@ export class RealtimeVoiceSession {
           );
           return;
         }
-
-        this.session.sendMessage({
-          type: "message",
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text:
-                `Background result from ${job.toolName}:\n${result}\n\n` +
-                "Briefly tell the user the result out loud.",
-            },
-          ],
-        });
+        const lower = result.toLowerCase();
+        const isFailure =
+          lower.startsWith("failed") ||
+          lower.includes(" error") ||
+          lower.startsWith("file not found") ||
+          lower.startsWith("memory search failed") ||
+          lower.startsWith("read error");
+        const pendingResult: PendingBackgroundResult = {
+          jobId,
+          toolName: job.toolName,
+          result,
+          announce:
+            job.toolName === "spawn_agent" ||
+            job.toolName === "write_note" ||
+            !isFailure,
+        };
+        this.injectBackgroundResultSilently(pendingResult);
+        this.pendingBackgroundResults.push(pendingResult);
+        this.maybeScheduleBackgroundFollowUp();
       })
       .catch((err) => {
         console.error(
@@ -640,6 +742,7 @@ export class RealtimeVoiceSession {
     if (this.closing) return;
     this.closing = true;
     this.connected = false;
+    this.clearBackgroundFollowUpTimer();
 
     console.log(`${LOG_PREFIX} Closing session`);
 
@@ -656,6 +759,8 @@ export class RealtimeVoiceSession {
 
   /** Clean up transport and session references */
   private cleanup(): void {
+    this.clearBackgroundFollowUpTimer();
+    this.pendingBackgroundResults = [];
     // Close session
     if (this.session) {
       try {

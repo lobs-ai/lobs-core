@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { json } from "./index.js";
 import { isMemoryReady, getMemoryHealth } from "../services/memory/index.js";
+import { memoryServer } from "../services/memory-server.js";
 import { discordService } from "../services/discord.js";
 import { getKeyPool } from "../services/key-pool.js";
 import { loadVoiceConfig } from "../services/voice/index.js";
@@ -16,6 +17,15 @@ const GOOGLE_CREDENTIALS_FILE = resolve(HOME, ".lobs/credentials/client_secret.j
 async function checkLmStudio(): Promise<boolean> {
   try {
     const res = await fetch("http://localhost:1234/v1/models", { signal: AbortSignal.timeout(1000) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function checkMemoryServer(): Promise<boolean> {
+  try {
+    const res = await fetch("http://localhost:7420/healthz", { signal: AbortSignal.timeout(1000) });
     return res.ok;
   } catch {
     return false;
@@ -236,10 +246,13 @@ export async function handleHealthRequest(_req: IncomingMessage, res: ServerResp
   }
 
   // Default: full health check
-  const [memoryReady, lmStudio] = await Promise.all([
+  const [memoryReady, memoryServerReachable, lmStudio] = await Promise.all([
     Promise.resolve(isMemoryReady()),
+    checkMemoryServer(),
     checkLmStudio(),
   ]);
+  const memorySupervisor = memoryServer.getStatus();
+  const memoryServerOk = memoryReady || memoryServerReachable;
 
   const db = checkDb();
   const pid = getPid();
@@ -284,6 +297,14 @@ export async function handleHealthRequest(_req: IncomingMessage, res: ServerResp
     uptime: process.uptime(),
     pid: pid ?? process.pid,
     db: db ? "ok" : "error",
+    memory_server: memoryServerOk ? "ok" : "down",
+    memory_supervisor: {
+      pid: memorySupervisor.pid,
+      restarts: memorySupervisor.restartCount,
+      running: memorySupervisor.running,
+      last_healthy: memorySupervisor.lastHealthy,
+      uptime: memorySupervisor.uptime,
+    },
     memory: memoryInfo,
     lm_studio: lmStudio ? "ok" : "down",
     voice: voiceInfo,
