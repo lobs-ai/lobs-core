@@ -89,7 +89,7 @@ function scoreConversation(turns: ConversationTurn[]): { score: number; flags: s
   const systemMessages = turns.filter(t =>
     t.content.includes("[System Event]") ||
     t.content.includes("HEARTBEAT") ||
-    t.content === "NO_REPLY"
+    /\bNO_REPLY\b/.test(t.content)
   );
   if (systemMessages.length > 0) {
     score -= 0.1;
@@ -171,7 +171,7 @@ async function harvestMainAgentMessages(db: ReturnType<typeof getDb>): Promise<H
       const cleanTurns = convo.filter(t =>
         !t.content.startsWith("[Tool calls]") &&
         !t.content.startsWith("[Tool results]") &&
-        t.content !== "NO_REPLY" &&
+        !/\bNO_REPLY\b/.test(t.content) &&
         !t.content.includes("[System Event]") &&
         t.content.trim().length > 0
       );

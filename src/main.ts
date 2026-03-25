@@ -314,10 +314,10 @@ async function main() {
   const researchQueue = initResearchQueueService(getRawDb());
   const workerRegistry = new WorkerRegistry(getRawDb(), cronService);
   workerRegistry.register(new MemoryProcessorWorker());
-  workerRegistry.register(new ResearchProcessorWorker(researchQueue));
 
-  // Intelligence sweep system
+  // Intelligence sweep system (init before research processor so insights can flow)
   const intelSweep = initIntelSweepService(getRawDb(), researchQueue);
+  workerRegistry.register(new ResearchProcessorWorker(researchQueue, intelSweep));
   workerRegistry.register(new IntelSweepWorker(intelSweep));
 
   // Research radar — identifies novel paper opportunities from intel insights

@@ -1597,10 +1597,17 @@ export class MainAgent {
         }
 
         // In DM/Nexus, never suppress a response — override NO_REPLY
+        // Check for NO_REPLY anywhere in the response (model sometimes writes commentary + NO_REPLY)
         const isDirectChat = channelChatType !== "group";
-        const isNoReply = textResponse?.trim() === "NO_REPLY";
+        const containsNoReply = /\bNO_REPLY\b/.test(textResponse?.trim() || "");
+        const isNoReply = containsNoReply;
         const isRoutineHeartbeat = this.isRoutineHeartbeat(textResponse?.trim() || "");
         
+        // Strip NO_REPLY from response text if present (for cases where model writes "comment\n\nNO_REPLY")
+        if (containsNoReply && textResponse) {
+          textResponse = textResponse.replace(/\s*\bNO_REPLY\b\s*/g, "").trim();
+        }
+
         if (isNoReply && isDirectChat) {
           textResponse = "I'm here — what can I help with?";
         }

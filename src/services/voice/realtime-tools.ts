@@ -7,30 +7,64 @@
  */
 
 import { tool } from "@openai/agents-core";
+import type { RunContext } from "@openai/agents-core";
+import { backgroundResult } from "@openai/agents-realtime";
 import { z } from "zod";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
+export interface RealtimeVoiceToolContext {
+  enqueueBackgroundToolResult?: (job: {
+    toolName: string;
+    task: Promise<string>;
+    startedAt: number;
+  }) => void;
+}
+
+export function queueBackgroundVoiceTool(
+  toolName: string,
+  acknowledgement: string,
+  runContext: RunContext<RealtimeVoiceToolContext> | undefined,
+  task: Promise<string>,
+): Promise<string | ReturnType<typeof backgroundResult<string>>> {
+  const enqueue = runContext?.context.enqueueBackgroundToolResult;
+  if (!enqueue) return task;
+
+  enqueue({
+    toolName,
+    task,
+    startedAt: Date.now(),
+  });
+  return Promise.resolve(backgroundResult(acknowledgement));
+}
+
 // ---------------------------------------------------------------------------
 // Tool: get_datetime
 // ---------------------------------------------------------------------------
-export const getDatetimeTool = tool({
+export const getDatetimeTool = tool<z.ZodObject<{}>, RealtimeVoiceToolContext>({
   name: "get_datetime",
   description:
     "Get the current date, time, and day of the week. No parameters needed.",
   parameters: z.object({}),
-  execute: async () => {
-    const now = new Date();
-    return JSON.stringify({
-      iso: now.toISOString(),
-      local: now.toLocaleString("en-US", { timeZone: "America/New_York" }),
-      day: now.toLocaleDateString("en-US", {
-        timeZone: "America/New_York",
-        weekday: "long",
+  execute: async (_params, runContext) => {
+    return queueBackgroundVoiceTool(
+      "get_datetime",
+      "Checking the time now.",
+      runContext,
+      Promise.resolve().then(() => {
+        const now = new Date();
+        return JSON.stringify({
+          iso: now.toISOString(),
+          local: now.toLocaleString("en-US", { timeZone: "America/New_York" }),
+          day: now.toLocaleDateString("en-US", {
+            timeZone: "America/New_York",
+            weekday: "long",
+          }),
+          date: now.toLocaleDateString("en-US", { timeZone: "America/New_York" }),
+          time: now.toLocaleTimeString("en-US", { timeZone: "America/New_York" }),
+        });
       }),
-      date: now.toLocaleDateString("en-US", { timeZone: "America/New_York" }),
-      time: now.toLocaleTimeString("en-US", { timeZone: "America/New_York" }),
-    });
+    );
   },
 });
 
@@ -48,45 +82,52 @@ export const searchMemoryTool = tool({
       .optional()
       .describe("Maximum results to return (default 5)"),
   }),
-  execute: async (params) => {
+  execute: async (params, runContext?: RunContext<RealtimeVoiceToolContext>) => {
     const memoryUrl =
       process.env.LOBS_MEMORY_URL ?? "http://localhost:7420";
     const maxResults = params.max_results ?? 5;
 
-    try {
-      const resp = await fetch(`${memoryUrl}/search`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: params.query, limit: maxResults }),
-        signal: AbortSignal.timeout(8_000),
-      });
+    return queueBackgroundVoiceTool(
+      "search_memory",
+      `Checking memory for ${JSON.stringify(params.query)}.`,
+      runContext,
+      (async () => {
+        try {
+          const resp = await fetch(`${memoryUrl}/search`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ query: params.query, limit: maxResults }),
+            signal: AbortSignal.timeout(8_000),
+          });
 
-      if (!resp.ok) {
-        return `Memory search failed: HTTP ${resp.status}`;
-      }
+          if (!resp.ok) {
+            return `Memory search failed: HTTP ${resp.status}`;
+          }
 
-      const data = (await resp.json()) as {
-        results?: Array<{
-          path?: string;
-          content?: string;
-          score?: number;
-        }>;
-      };
-      const results = data.results ?? [];
+          const data = (await resp.json()) as {
+            results?: Array<{
+              path?: string;
+              content?: string;
+              score?: number;
+            }>;
+          };
+          const results = data.results ?? [];
 
-      if (results.length === 0) {
-        return "No results found.";
-      }
+          if (results.length === 0) {
+            return "No results found.";
+          }
 
-      return results
-        .map(
-          (r: { path?: string; content?: string; score?: number }, i: number) =>
-            `[${i + 1}] ${r.path ?? "unknown"} (score: ${(r.score ?? 0).toFixed(2)})\n${(r.content ?? "").slice(0, 500)}`,
-        )
-        .join("\n\n");
-    } catch (err) {
-      return `Memory search error: ${err instanceof Error ? err.message : String(err)}`;
-    }
+          return results
+            .map(
+              (r: { path?: string; content?: string; score?: number }, i: number) =>
+                `[${i + 1}] ${r.path ?? "unknown"} (score: ${(r.score ?? 0).toFixed(2)})\n${(r.content ?? "").slice(0, 500)}`,
+            )
+            .join("\n\n");
+        } catch (err) {
+          return `Memory search error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      })(),
+    );
   },
 });
 
@@ -100,49 +141,56 @@ export const webSearchTool = tool({
   parameters: z.object({
     query: z.string().describe("Search query"),
   }),
-  execute: async (params) => {
+  execute: async (params, runContext?: RunContext<RealtimeVoiceToolContext>) => {
     const searxUrl = process.env.SEARXNG_URL ?? "http://localhost:8888";
 
-    try {
-      const url = new URL("/search", searxUrl);
-      url.searchParams.set("q", params.query);
-      url.searchParams.set("format", "json");
-      url.searchParams.set("engines", "google,duckduckgo");
-      url.searchParams.set("categories", "general");
+    return queueBackgroundVoiceTool(
+      "web_search",
+      `Searching the web for ${JSON.stringify(params.query)}.`,
+      runContext,
+      (async () => {
+        try {
+          const url = new URL("/search", searxUrl);
+          url.searchParams.set("q", params.query);
+          url.searchParams.set("format", "json");
+          url.searchParams.set("engines", "google,duckduckgo");
+          url.searchParams.set("categories", "general");
 
-      const resp = await fetch(url.toString(), {
-        signal: AbortSignal.timeout(10_000),
-      });
+          const resp = await fetch(url.toString(), {
+            signal: AbortSignal.timeout(10_000),
+          });
 
-      if (!resp.ok) {
-        return `Web search failed: HTTP ${resp.status}`;
-      }
+          if (!resp.ok) {
+            return `Web search failed: HTTP ${resp.status}`;
+          }
 
-      const data = (await resp.json()) as {
-        results?: Array<{
-          title?: string;
-          url?: string;
-          content?: string;
-        }>;
-      };
-      const results = (data.results ?? []).slice(0, 5);
+          const data = (await resp.json()) as {
+            results?: Array<{
+              title?: string;
+              url?: string;
+              content?: string;
+            }>;
+          };
+          const results = (data.results ?? []).slice(0, 5);
 
-      if (results.length === 0) {
-        return "No web results found.";
-      }
+          if (results.length === 0) {
+            return "No web results found.";
+          }
 
-      return results
-        .map(
-          (
-            r: { title?: string; url?: string; content?: string },
-            i: number,
-          ) =>
-            `[${i + 1}] ${r.title ?? "Untitled"}\n${r.url ?? ""}\n${(r.content ?? "").slice(0, 300)}`,
-        )
-        .join("\n\n");
-    } catch (err) {
-      return `Web search error: ${err instanceof Error ? err.message : String(err)}`;
-    }
+          return results
+            .map(
+              (
+                r: { title?: string; url?: string; content?: string },
+                i: number,
+              ) =>
+                `[${i + 1}] ${r.title ?? "Untitled"}\n${r.url ?? ""}\n${(r.content ?? "").slice(0, 300)}`,
+            )
+            .join("\n\n");
+        } catch (err) {
+          return `Web search error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      })(),
+    );
   },
 });
 
@@ -160,37 +208,44 @@ export const readFileTool = tool({
       .optional()
       .describe("Maximum lines to return (default 100)"),
   }),
-  execute: async (params) => {
-    try {
-      const filePath = resolve(params.path);
+  execute: async (params, runContext?: RunContext<RealtimeVoiceToolContext>) => {
+    return queueBackgroundVoiceTool(
+      "read_file",
+      `Reading ${JSON.stringify(params.path)}.`,
+      runContext,
+      (async () => {
+        try {
+          const filePath = resolve(params.path);
 
-      if (!existsSync(filePath)) {
-        return `File not found: ${params.path}`;
-      }
+          if (!existsSync(filePath)) {
+            return `File not found: ${params.path}`;
+          }
 
-      const stat = statSync(filePath);
-      if (stat.isDirectory()) {
-        return `Path is a directory, not a file: ${params.path}`;
-      }
-      if (stat.size > 512 * 1024) {
-        return `File too large (${(stat.size / 1024).toFixed(0)}KB). Use max_lines to read a portion.`;
-      }
+          const stat = statSync(filePath);
+          if (stat.isDirectory()) {
+            return `Path is a directory, not a file: ${params.path}`;
+          }
+          if (stat.size > 512 * 1024) {
+            return `File too large (${(stat.size / 1024).toFixed(0)}KB). Use max_lines to read a portion.`;
+          }
 
-      const content = readFileSync(filePath, "utf-8");
-      const lines = content.split("\n");
-      const maxLines = params.max_lines ?? 100;
+          const content = readFileSync(filePath, "utf-8");
+          const lines = content.split("\n");
+          const maxLines = params.max_lines ?? 100;
 
-      if (lines.length > maxLines) {
-        return (
-          lines.slice(0, maxLines).join("\n") +
-          `\n\n--- Truncated at ${maxLines} lines (${lines.length} total) ---`
-        );
-      }
+          if (lines.length > maxLines) {
+            return (
+              lines.slice(0, maxLines).join("\n") +
+              `\n\n--- Truncated at ${maxLines} lines (${lines.length} total) ---`
+            );
+          }
 
-      return content;
-    } catch (err) {
-      return `Read error: ${err instanceof Error ? err.message : String(err)}`;
-    }
+          return content;
+        } catch (err) {
+          return `Read error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      })(),
+    );
   },
 });
 
@@ -213,36 +268,41 @@ export const spawnAgentTool = tool({
       .optional()
       .describe("Working directory for the agent (optional)"),
   }),
-  execute: async (params) => {
+  execute: async (params, runContext?: RunContext<RealtimeVoiceToolContext>) => {
     // Fire-and-forget: post to the orchestrator endpoint
     // The agent runs asynchronously — we don't wait for it
-    try {
-      const orchUrl =
-        process.env.LOBS_ORCHESTRATOR_URL ?? "http://localhost:7410";
-      const body = {
-        task: params.task,
-        agentType: params.agent_type,
-        cwd: params.cwd,
-        source: "voice-realtime",
-      };
+    return queueBackgroundVoiceTool(
+      "spawn_agent",
+      `Starting a ${params.agent_type} subagent now.`,
+      runContext,
+      (async () => {
+        try {
+          const orchUrl =
+            process.env.LOBS_ORCHESTRATOR_URL ?? "http://localhost:7410";
+          const body = {
+            task: params.task,
+            agentType: params.agent_type,
+            cwd: params.cwd,
+            source: "voice-realtime",
+          };
 
-      // Non-blocking: fire the request but don't await completion
-      fetch(`${orchUrl}/api/agents/spawn`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(5_000),
-      }).catch((err: unknown) => {
-        console.error(
-          "[voice:realtime] spawn_agent request failed:",
-          err instanceof Error ? err.message : String(err),
-        );
-      });
+          const response = await fetch(`${orchUrl}/api/agents/spawn`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(5_000),
+          });
 
-      return `Agent spawned: ${params.agent_type} agent is now working on "${params.task.slice(0, 100)}". I'll let you know when it's done.`;
-    } catch (err) {
-      return `Failed to spawn agent: ${err instanceof Error ? err.message : String(err)}`;
-    }
+          if (!response.ok) {
+            return `Failed to spawn agent: HTTP ${response.status}`;
+          }
+
+          return `Agent spawned: ${params.agent_type} agent is now working on "${params.task.slice(0, 100)}".`;
+        } catch (err) {
+          return `Failed to spawn agent: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      })(),
+    );
   },
 });
 

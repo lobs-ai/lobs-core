@@ -22,10 +22,14 @@ import type {
 } from "@openai/agents-realtime";
 import type { VoiceConnection, AudioPlayer } from "@discordjs/voice";
 import { createAudioResource, StreamType, AudioPlayerStatus } from "@discordjs/voice";
-import { Readable } from "node:stream";
+import { PassThrough } from "node:stream";
 import opus from "@discordjs/opus";
-import { realtimeVoiceTools } from "./realtime-tools.js";
+import {
+  realtimeVoiceTools,
+  type RealtimeVoiceToolContext,
+} from "./realtime-tools.js";
 import { buildRealtimeInstructions } from "./realtime-context.js";
+import { buildRealtimeSessionConfig } from "./realtime-config.js";
 
 const { OpusEncoder } = opus;
 
@@ -39,12 +43,6 @@ const DISCORD_CHANNELS = 2;
 
 /** OpenAI Realtime API audio format */
 const REALTIME_SAMPLE_RATE = 24000;
-
-/** Minimum bytes to buffer before flushing to Discord (~100ms of 24kHz mono PCM16) */
-const MIN_FLUSH_BYTES = REALTIME_SAMPLE_RATE * 2 * 0.1;
-
-/** Maximum audio buffer size before forced flush (~10s of audio) */
-const MAX_BUFFER_BYTES = REALTIME_SAMPLE_RATE * 2 * 10;
 
 const LOG_PREFIX = "[voice:realtime]";
 
@@ -71,6 +69,8 @@ export interface RealtimeVoiceSessionConfig {
   instructions?: string;
   /** Turn detection eagerness (default: medium) */
   eagerness?: "low" | "medium" | "high" | "auto";
+  /** Turn detection mode (default: semantic_vad) */
+  turnDetection?: "semantic_vad" | "server_vad";
   /** Noise reduction mode (default: near_field) */
   noiseReduction?: "near_field" | "far_field" | null;
   /** Transcription model (default: gpt-4o-mini-transcribe) */
@@ -134,18 +134,26 @@ function upsampleTo48kStereo(mono24k: Buffer): Buffer {
 // ---------------------------------------------------------------------------
 
 export class RealtimeVoiceSession {
-  private session: RealtimeSession | null = null;
-  private agent: RealtimeAgent | null = null;
+  private session: RealtimeSession<RealtimeVoiceToolContext> | null = null;
+  private agent: RealtimeAgent<RealtimeVoiceToolContext> | null = null;
   private transport: OpenAIRealtimeWebSocket | null = null;
   private readonly connection: VoiceConnection;
   private readonly player: AudioPlayer;
   private readonly opusDecoder: InstanceType<typeof OpusEncoder>;
-  private audioOutBuffer: Buffer[] = [];
-  private audioOutBytes = 0;
+  private playbackStream: PassThrough | null = null;
+  private playbackTurnSeq = 0;
+  private currentPlaybackTurnId: number | null = null;
   private connected = false;
   private closing = false;
   private reconnecting = false;
   private readonly config: RealtimeVoiceSessionConfig;
+  private connectStartedAt = 0;
+  private lastUserTranscriptAt: number | null = null;
+  private lastResponseCreatedAt: number | null = null;
+  private lastAssistantTranscript:
+    | { text: string; loggedAt: number }
+    | null = null;
+  private backgroundJobSeq = 0;
 
   /** Callback invoked when we get a user transcript (for logging/display) */
   onUserTranscript?: (text: string) => void;
@@ -171,10 +179,12 @@ export class RealtimeVoiceSession {
    */
   async connect(): Promise<void> {
     if (this.connected || this.closing) return;
+    this.connectStartedAt = Date.now();
 
     const model = this.config.model ?? "gpt-4o-realtime-preview";
     const voice = this.config.voice ?? "ash";
     const eagerness = this.config.eagerness ?? "medium";
+    const turnDetection = this.config.turnDetection ?? "semantic_vad";
     const noiseReduction = this.config.noiseReduction ?? "near_field";
     const transcriptionModel =
       this.config.transcriptionModel ?? "gpt-4o-mini-transcribe";
@@ -184,44 +194,28 @@ export class RealtimeVoiceSession {
       this.config.instructions ?? (await buildRealtimeInstructions());
 
     console.log(
-      `${LOG_PREFIX} Connecting to ${model} (voice=${voice}, eagerness=${eagerness})`,
+      `${LOG_PREFIX} Connecting to ${model} (voice=${voice}, turn_detection=${turnDetection}, eagerness=${eagerness})`,
+    );
+    console.log(
+      `${LOG_PREFIX} Instructions loaded: ${instructions.length} chars, includes SOUL=${instructions.includes("SOUL.md")}, USER=${instructions.includes("USER.md")}, MEMORY=${instructions.includes("MEMORY.md")}`,
     );
 
     // Create the RealtimeAgent with voice-appropriate tools
-    this.agent = new RealtimeAgent({
+    const agent = new RealtimeAgent<RealtimeVoiceToolContext>({
       name: "lobs-voice",
       instructions,
       tools: realtimeVoiceTools,
     });
+    this.agent = agent;
 
-    // Session configuration
-    const sessionConfig: Partial<RealtimeSessionConfig> = {
-      audio: {
-        input: {
-          format: {
-            type: "audio/pcm" as const,
-            rate: REALTIME_SAMPLE_RATE,
-          },
-          turnDetection: {
-            type: "semantic_vad" as const,
-            eagerness,
-            interruptResponse: true,
-          },
-          transcription: { model: transcriptionModel },
-          noiseReduction: noiseReduction
-            ? { type: noiseReduction }
-            : undefined,
-        },
-        output: {
-          format: {
-            type: "audio/pcm" as const,
-            rate: REALTIME_SAMPLE_RATE,
-          },
-          voice,
-        },
-      },
-      outputModalities: ["text", "audio"],
-    };
+    const sessionConfig: Partial<RealtimeSessionConfig> =
+      buildRealtimeSessionConfig({
+        voice,
+        turnDetection,
+        eagerness,
+        noiseReduction,
+        transcriptionModel,
+      });
 
     // Create the session with the transport
     // useInsecureApiKey is required for server-side API keys (vs ephemeral client tokens)
@@ -231,11 +225,21 @@ export class RealtimeVoiceSession {
       useInsecureApiKey: true,
     });
 
-    this.session = new RealtimeSession(this.agent, {
+    const session = new RealtimeSession<RealtimeVoiceToolContext>(agent, {
       transport: this.transport,
       config: sessionConfig,
       apiKey: this.config.apiKey,
+      context: {
+        enqueueBackgroundToolResult: (job: {
+          toolName: string;
+          task: Promise<string>;
+          startedAt: number;
+        }) => {
+          this.enqueueBackgroundToolResult(job);
+        },
+      },
     });
+    this.session = session;
 
     // Wire up transport events
     this.setupTransportEvents();
@@ -245,11 +249,13 @@ export class RealtimeVoiceSession {
 
     // Connect the session
     try {
-      await this.session.connect({
+      await session.connect({
         apiKey: this.config.apiKey,
       });
       this.connected = true;
-      console.log(`${LOG_PREFIX} Connected to OpenAI Realtime API`);
+      console.log(
+        `${LOG_PREFIX} Connected to OpenAI Realtime API in ${Date.now() - this.connectStartedAt}ms`,
+      );
     } catch (err) {
       console.error(
         `${LOG_PREFIX} Connection failed:`,
@@ -307,12 +313,13 @@ export class RealtimeVoiceSession {
 
     try {
       const chunk = Buffer.from(event.data);
-      this.audioOutBuffer.push(chunk);
-      this.audioOutBytes += chunk.length;
-
-      // Auto-flush if buffer gets large (prevents unbounded memory use)
-      if (this.audioOutBytes >= MAX_BUFFER_BYTES) {
-        this.flushAudioToDiscord();
+      if (chunk.length === 0) return;
+      this.ensurePlaybackStream();
+      const stereo48k = upsampleTo48kStereo(chunk);
+      if (stereo48k.length === 0) return;
+      const wrote = this.playbackStream?.write(stereo48k);
+      if (wrote === false) {
+        console.warn(`${LOG_PREFIX} Playback stream backpressure`);
       }
     } catch (err) {
       console.warn(
@@ -324,57 +331,10 @@ export class RealtimeVoiceSession {
 
   /**
    * Handle audio_done — OpenAI finished generating this response's audio.
-   * Flush any remaining buffered audio to Discord.
+   * End the current playback stream so Discord can finish the turn cleanly.
    */
   private onAudioDone(): void {
-    this.flushAudioToDiscord();
-  }
-
-  /**
-   * Flush buffered 24kHz mono PCM to Discord as 48kHz stereo PCM.
-   * Creates an AudioResource and plays it through the player.
-   */
-  private flushAudioToDiscord(): void {
-    if (
-      this.audioOutBuffer.length === 0 ||
-      this.audioOutBytes < MIN_FLUSH_BYTES
-    ) {
-      return;
-    }
-
-    try {
-      // Concatenate buffered chunks
-      const mono24k = Buffer.concat(this.audioOutBuffer);
-      this.audioOutBuffer = [];
-      this.audioOutBytes = 0;
-
-      // Upsample to Discord's expected format
-      const stereo48k = upsampleTo48kStereo(mono24k);
-
-      if (stereo48k.length === 0) return;
-
-      // Create a readable stream from the PCM buffer
-      const pcmBuffer = stereo48k;
-      const stream = new Readable({
-        read() {
-          this.push(pcmBuffer);
-          this.push(null);
-        },
-      });
-
-      // Create an AudioResource from raw s16le 48kHz stereo PCM
-      const resource = createAudioResource(stream, {
-        inputType: StreamType.Raw,
-      });
-
-      // Play through Discord
-      this.player.play(resource);
-    } catch (err) {
-      console.warn(
-        `${LOG_PREFIX} Audio flush error:`,
-        err instanceof Error ? err.message : String(err),
-      );
-    }
+    this.endPlaybackStream("audio_done");
   }
 
   /**
@@ -383,15 +343,42 @@ export class RealtimeVoiceSession {
    */
   private onAudioInterrupted(): void {
     console.log(`${LOG_PREFIX} Audio interrupted by user`);
-
-    // Clear pending audio buffer
-    this.audioOutBuffer = [];
-    this.audioOutBytes = 0;
+    this.endPlaybackStream("interrupted");
 
     // Stop current Discord playback
     if (this.player.state.status === AudioPlayerStatus.Playing) {
       this.player.stop(true);
     }
+  }
+
+  private ensurePlaybackStream(): void {
+    if (this.playbackStream) return;
+
+    const turnId = ++this.playbackTurnSeq;
+    const stream = new PassThrough();
+    this.playbackStream = stream;
+    this.currentPlaybackTurnId = turnId;
+
+    const resource = createAudioResource(stream, {
+      inputType: StreamType.Raw,
+      metadata: { turnId },
+    });
+
+    console.log(`${LOG_PREFIX} Starting Discord playback turn=${turnId}`);
+    this.player.play(resource);
+  }
+
+  private endPlaybackStream(reason: "audio_done" | "interrupted" | "close"): void {
+    const stream = this.playbackStream;
+    const turnId = this.currentPlaybackTurnId;
+    this.playbackStream = null;
+    this.currentPlaybackTurnId = null;
+    if (!stream) return;
+
+    console.log(
+      `${LOG_PREFIX} Ending Discord playback turn=${turnId ?? "unknown"} reason=${reason}`,
+    );
+    stream.end();
   }
 
   // -------------------------------------------------------------------------
@@ -419,12 +406,22 @@ export class RealtimeVoiceSession {
 
     // Catch-all for transport events — used for transcription events
     this.transport.on("*", (event: { type?: string; transcript?: string }) => {
+      if (event.type === "response.created") {
+        this.lastResponseCreatedAt = Date.now();
+        const latency =
+          this.lastUserTranscriptAt === null
+            ? "n/a"
+            : `${this.lastResponseCreatedAt - this.lastUserTranscriptAt}ms`;
+        console.log(`${LOG_PREFIX} Response created latency=${latency}`);
+      }
+
       if (
         event.type ===
         "conversation.item.input_audio_transcription.completed"
       ) {
         const text = event.transcript?.trim();
         if (text) {
+          this.lastUserTranscriptAt = Date.now();
           console.log(`${LOG_PREFIX} User: "${text}"`);
           this.onUserTranscript?.(text);
         }
@@ -470,6 +467,17 @@ export class RealtimeVoiceSession {
         .join(" ")
         .trim();
       if (transcript) {
+        if (
+          this.lastAssistantTranscript &&
+          this.lastAssistantTranscript.text === transcript &&
+          Date.now() - this.lastAssistantTranscript.loggedAt < 1000
+        ) {
+          return;
+        }
+        this.lastAssistantTranscript = {
+          text: transcript,
+          loggedAt: Date.now(),
+        };
         console.log(`${LOG_PREFIX} Assistant: "${transcript.slice(0, 200)}"`);
         this.onAssistantTranscript?.(transcript);
       }
@@ -485,6 +493,28 @@ export class RealtimeVoiceSession {
       console.log(`${LOG_PREFIX} Tool result [${t.name}]: ${result.slice(0, 200)}`);
     });
 
+    this.session.on("audio_start", () => {
+      const now = Date.now();
+      const userToAudio =
+        this.lastUserTranscriptAt === null
+          ? "n/a"
+          : `${now - this.lastUserTranscriptAt}ms`;
+      const responseToAudio =
+        this.lastResponseCreatedAt === null
+          ? "n/a"
+          : `${now - this.lastResponseCreatedAt}ms`;
+      console.log(
+        `${LOG_PREFIX} Audio start latency user_to_audio=${userToAudio} response_to_audio=${responseToAudio}`,
+      );
+    });
+
+    this.player.on("stateChange", (oldState, newState) => {
+      if (oldState.status === newState.status) return;
+      console.log(
+        `${LOG_PREFIX} Player state ${oldState.status} -> ${newState.status}`,
+      );
+    });
+
     // Session-level errors
     this.session.on("error", (event) => {
       let msg: string;
@@ -497,6 +527,49 @@ export class RealtimeVoiceSession {
       }
       console.error(`${LOG_PREFIX} Session error: ${msg}`);
     });
+  }
+
+  private enqueueBackgroundToolResult(job: {
+    toolName: string;
+    task: Promise<string>;
+    startedAt: number;
+  }): void {
+    const jobId = ++this.backgroundJobSeq;
+    console.log(`${LOG_PREFIX} Background tool #${jobId} queued: ${job.toolName}`);
+
+    void job.task
+      .then((result) => {
+        const durationMs = Date.now() - job.startedAt;
+        console.log(
+          `${LOG_PREFIX} Background tool #${jobId} complete: ${job.toolName} duration_ms=${durationMs} result_len=${result.length}`,
+        );
+
+        if (!this.session || !this.connected || this.closing) {
+          console.warn(
+            `${LOG_PREFIX} Dropping background tool #${jobId} result because session is not active`,
+          );
+          return;
+        }
+
+        this.session.sendMessage({
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text:
+                `Background result from ${job.toolName}:\n${result}\n\n` +
+                "Briefly tell the user the result out loud.",
+            },
+          ],
+        });
+      })
+      .catch((err) => {
+        console.error(
+          `${LOG_PREFIX} Background tool #${jobId} failed:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      });
   }
 
   // -------------------------------------------------------------------------
@@ -550,9 +623,7 @@ export class RealtimeVoiceSession {
       this.player.stop(true);
     }
 
-    // Clear audio buffer
-    this.audioOutBuffer = [];
-    this.audioOutBytes = 0;
+    this.endPlaybackStream("close");
 
     this.cleanup();
     console.log(`${LOG_PREFIX} Session closed`);

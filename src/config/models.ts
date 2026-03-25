@@ -36,7 +36,8 @@ export interface ModelConfig {
   /** Local model settings (LM Studio) */
   local: {
     baseUrl: string;
-    chatModel: string;      // For classification, summarization
+    chatModel: string;      // For classification, general use
+    summaryModel?: string;  // For structured JSON extraction (non-thinking preferred)
     embeddingModel: string;  // For vector embeddings
   };
 
@@ -226,5 +227,6 @@ export function getLocalConfig(): ModelConfig["local"] {
     ...local,
     // LM Studio API expects bare model IDs — strip the routing prefix
     chatModel: local.chatModel.replace(/^lmstudio\//, ""),
+    summaryModel: local.summaryModel?.replace(/^lmstudio\//, ""),
   };
 }

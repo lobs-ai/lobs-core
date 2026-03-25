@@ -46,13 +46,16 @@ class BrowserService {
    * Search via local SearXNG instance.
    * No CAPTCHAs, no rate limits, aggregates Google/Bing/DuckDuckGo/Brave/etc.
    */
-  async search(query: string, count: number = 5, options?: { language?: string; country?: string }): Promise<SearchResult[]> {
+  async search(query: string, count: number = 5, options?: { language?: string; country?: string; timeRange?: "day" | "week" | "month" | "year" }): Promise<SearchResult[]> {
     try {
       const params = new URLSearchParams({
         q: query,
         format: "json",
         language: options?.language || "en",
       });
+      if (options?.timeRange) {
+        params.set("time_range", options.timeRange);
+      }
 
       const response = await fetch(`${SEARXNG_URL}/search?${params.toString()}`, {
         headers: { Accept: "application/json" },

@@ -286,6 +286,27 @@ export async function handleIntelRequest(
     return json(res, { reset: count, message: `Reset ${count} failed items back to queued` });
   }
 
+  // ── /api/intel/run-worker — trigger any registered worker by ID ──────
+  if (sub === "run-worker") {
+    if (method !== "POST") return error(res, "Method not allowed", 405);
+    const body = (await parseBody(req)) as Record<string, unknown>;
+    const workerId = body.workerId ? String(body.workerId) : null;
+    if (!workerId) return error(res, "workerId is required", 400);
+
+    const workerRegistry = (globalThis as any).__lobsWorkerRegistry;
+    if (!workerRegistry) return error(res, "Worker registry not available", 503);
+
+    void workerRegistry.runWorker(workerId).catch((err: unknown) => {
+      console.error(`[run-worker] Manual run of "${workerId}" failed:`, err);
+    });
+
+    return json(res, {
+      status: "started",
+      worker: workerId,
+      message: `Worker "${workerId}" triggered — check worker logs for progress`,
+    });
+  }
+
   return error(res, "Unknown intel sub-resource", 404);
 }
 

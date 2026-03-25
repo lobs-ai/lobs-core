@@ -45,6 +45,8 @@ interface VoiceSessionBase {
   connection: VoiceConnection;
   player: AudioPlayer;
   connectedSince: number;
+  /** Timer that fires when the bot has been alone in the channel too long */
+  aloneTimer?: ReturnType<typeof setTimeout>;
 }
 
 /** Sidecar-mode session (STT + TTS via local services) */
@@ -63,6 +65,13 @@ interface RealtimeSessionEntry extends VoiceSessionBase {
 }
 
 type VoiceSession = SidecarSession | RealtimeSessionEntry;
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/** How long (ms) the bot stays in a channel alone before auto-leaving */
+const ALONE_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -172,6 +181,15 @@ export class VoiceManager {
         );
       }
     }
+
+    // Listen for voice state changes to detect when the bot is left alone
+    this.client.on("voiceStateUpdate", (_oldState, newState) => {
+      // Only care about changes in channels where we have a session
+      const guildId = newState.guild.id;
+      const session = this.sessions.get(guildId);
+      if (!session) return;
+      this.checkAloneInChannel(guildId);
+    });
   }
 
   /** Which mode is configured */
@@ -418,6 +436,7 @@ export class VoiceManager {
       apiKey,
       model: rc.model,
       voice: rc.voice,
+      turnDetection: rc.turnDetection,
       eagerness: rc.eagerness,
       noiseReduction: rc.noiseReduction,
       transcriptionModel: rc.transcriptionModel,
@@ -674,6 +693,63 @@ export class VoiceManager {
   }
 
   // -------------------------------------------------------------------------
+  // Alone detection
+  // -------------------------------------------------------------------------
+
+  /**
+   * Check if the bot is alone in its voice channel.
+   * If alone, start a 2-minute timer to auto-leave.
+   * If someone joins back, cancel the timer.
+   */
+  private checkAloneInChannel(guildId: string): void {
+    const session = this.sessions.get(guildId);
+    if (!session) return;
+
+    const guild = this.client.guilds.cache.get(guildId);
+    const channel = guild?.channels.cache.get(session.channelId) as
+      | VoiceChannel
+      | StageChannel
+      | undefined;
+    if (!channel) return;
+
+    const humanCount =
+      channel.members?.filter((m: GuildMember) => !m.user.bot).size ?? 0;
+
+    if (humanCount === 0) {
+      // Alone — start timer if not already running
+      if (!session.aloneTimer) {
+        console.log(
+          `[voice:manager] Alone in #${session.channelName} — will leave in ${ALONE_TIMEOUT_MS / 1000}s`,
+        );
+        session.aloneTimer = setTimeout(() => {
+          // Re-check in case someone joined between timer start and fire
+          const ch = guild?.channels.cache.get(session.channelId) as
+            | VoiceChannel
+            | StageChannel
+            | undefined;
+          const stillAlone =
+            (ch?.members?.filter((m: GuildMember) => !m.user.bot).size ?? 0) === 0;
+          if (stillAlone && this.sessions.has(guildId)) {
+            console.log(
+              `[voice:manager] Still alone in #${session.channelName} after ${ALONE_TIMEOUT_MS / 1000}s — leaving`,
+            );
+            this.leave(guildId);
+          }
+        }, ALONE_TIMEOUT_MS);
+      }
+    } else {
+      // Not alone — cancel timer if running
+      if (session.aloneTimer) {
+        console.log(
+          `[voice:manager] No longer alone in #${session.channelName} — cancelling leave timer`,
+        );
+        clearTimeout(session.aloneTimer);
+        session.aloneTimer = undefined;
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Cleanup
   // -------------------------------------------------------------------------
 
@@ -681,6 +757,12 @@ export class VoiceManager {
   private destroySession(guildId: string): void {
     const session = this.sessions.get(guildId);
     if (!session) return;
+
+    // Clear alone timer if active
+    if (session.aloneTimer) {
+      clearTimeout(session.aloneTimer);
+      session.aloneTimer = undefined;
+    }
 
     if (session.mode === "sidecar") {
       session.receiver.destroy();

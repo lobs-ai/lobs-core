@@ -214,7 +214,9 @@ async function defaultSummarize(input: {
   material: SourceMaterial;
 }): Promise<SummaryPayload & { tokensUsed: number; model: string }> {
   const localCfg = getLocalConfig();
-  const model = localCfg.chatModel;
+  // Use a non-thinking model for structured JSON extraction — thinking models
+  // waste tokens on reasoning preamble and often hit max_tokens before producing JSON.
+  const model = localCfg.summaryModel ?? localCfg.chatModel;
   const { data, tokensUsed } = await callLocalModelJSON<SummaryPayload>(
     `Read this research input and return strict JSON:
 {

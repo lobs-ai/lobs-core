@@ -249,6 +249,18 @@ const BLOCKED_DOMAINS = new Set([
   "www.deepl.com",
   "play.google.com",
   "apps.apple.com",
+  "www.reddit.com",            // community posts are low-signal and often stale
+  "old.reddit.com",
+  "www.quora.com",             // Q&A sites are rarely actionable intel
+  "stackoverflow.com",
+  "www.youtube.com",           // handled separately via youtube_channels
+  "twitter.com",
+  "x.com",
+  "www.amazon.com",
+  "www.ebay.com",
+  "www.udemy.com",             // course sales pages
+  "www.coursera.org",
+  "www.skillshare.com",
 ]);
 
 /** URL path patterns that indicate non-article pages (homepages, product pages, login) */
@@ -256,6 +268,7 @@ const BLOCKED_PATH_PATTERNS = [
   /^\/$/,                        // bare homepage
   /^\/(office-chairs|standing-desks|pod-adus)\b/i,  // product categories
   /^\/(login|signup|register|cart|checkout)\b/i,
+  /^\/(pricing|plans|contact|about|careers|jobs)\b/i,  // company pages, not content
 ];
 
 /** TLD / domain patterns strongly associated with non-English content */
@@ -302,6 +315,21 @@ function isQualityEnglishSource(url: string, title: string, snippet: string): bo
 
     // Reject bare homepages (path is just "/" with no meaningful content indicator)
     if (u.pathname === "/" && !u.search) return false;
+
+    // Reject generic "what is X" / "beginner guide" / listicle fluff
+    const lowerTitle = title.toLowerCase();
+    const fluffPatterns = [
+      /^what (?:is|are) /,
+      /beginner'?s? guide/,
+      /for dummies/,
+      /\btop \d+ /,
+      /\b\d+ best /,
+      /everything you need to know/,
+      /complete guide for beginners/,
+      /^introduction to /,
+      /^a guide to /,
+    ];
+    if (fluffPatterns.some(re => re.test(lowerTitle))) return false;
 
     return true;
   } catch {
@@ -474,7 +502,7 @@ export class IntelSweepService {
       try {
         // Add recency bias to find new content
         const recentQuery = `${query} ${this.getRecencyTerm()}`;
-        const results = await browserService.search(recentQuery, 8);
+        const results = await browserService.search(recentQuery, 8, { timeRange: "month" });
         for (const r of results) {
           if (r.url && r.title) {
             candidates.push({
@@ -662,6 +690,16 @@ export class IntelSweepService {
        LIMIT ?`,
     ).all(limit) as Array<Record<string, unknown>>;
     return rows.map(normalizeSource);
+  }
+
+  /**
+   * Find a source by its URL.
+   */
+  findSourceByUrl(url: string): IntelSource | null {
+    const row = this.db.prepare(
+      "SELECT * FROM intel_sources WHERE url = ? LIMIT 1",
+    ).get(url) as Record<string, unknown> | undefined;
+    return row ? normalizeSource(row) : null;
   }
 
   /**

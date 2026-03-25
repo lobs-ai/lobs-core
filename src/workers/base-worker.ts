@@ -168,21 +168,52 @@ export async function callLocalModelJSON<T>(
   // Strip thinking tokens (e.g. <thinking>...</thinking>, <think>...</think>)
   cleaned = cleaned.replace(/<think(?:ing)?>\s*[\s\S]*?<\/think(?:ing)?>/gi, "").trim();
 
-  // If the model prefixed non-JSON text before the actual JSON object/array,
-  // try to find the first { or [ and parse from there.
-  if (cleaned && !/^\s*[{\[]/.test(cleaned)) {
-    const objStart = cleaned.indexOf("{");
-    const arrStart = cleaned.indexOf("[");
-    const start = objStart >= 0 && arrStart >= 0
-      ? Math.min(objStart, arrStart)
-      : Math.max(objStart, arrStart);
-    if (start >= 0) {
-      cleaned = cleaned.slice(start);
+  // Try to extract the last complete JSON object or array from the text.
+  // This handles models that prefix "Thinking Process: ..." or other preamble
+  // where the JSON schema might appear inside the reasoning text.
+  const data = extractLastJSON<T>(cleaned);
+  if (data !== undefined) return { data, tokensUsed };
+
+  // Fallback: try parsing the whole thing
+  return { data: JSON.parse(cleaned) as T, tokensUsed };
+}
+
+/**
+ * Extract the last valid top-level JSON object or array from a string.
+ * Scans backwards to find the final `}` or `]`, then finds its matching
+ * opener using bracket counting. This skips JSON fragments that appear
+ * inside thinking/reasoning preamble.
+ */
+function extractLastJSON<T>(text: string): T | undefined {
+  // Find the last } or ]
+  for (let end = text.length - 1; end >= 0; end--) {
+    const ch = text[end];
+    if (ch !== "}" && ch !== "]") continue;
+
+    const open = ch === "}" ? "{" : "[";
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+
+    for (let i = end; i >= 0; i--) {
+      const c = text[i];
+      if (escape) { escape = false; continue; }
+      if (c === "\\" && inString) { escape = true; continue; }
+      if (c === '"' && !escape) { inString = !inString; continue; }
+      if (inString) continue;
+      if (c === ch) depth++;
+      if (c === open) depth--;
+      if (depth === 0) {
+        const candidate = text.slice(i, end + 1);
+        try {
+          return JSON.parse(candidate) as T;
+        } catch {
+          break; // This bracket pair wasn't valid JSON, try earlier
+        }
+      }
     }
   }
-
-  const data = JSON.parse(cleaned) as T;
-  return { data, tokensUsed };
+  return undefined;
 }
 
 // ── Abstract Base ────────────────────────────────────────────────────────

@@ -91,8 +91,8 @@ export class ResearchRadarWorker extends BaseWorker {
 
     // ── Phase 1: Gather recent insights ───────────────────────────────
     const recentInsights = this.intel.listInsights({
-      minRelevance: 0.4,
-      limit: 30,
+      minRelevance: 0.5,
+      limit: 15,
     });
 
     if (recentInsights.length < 3) {
@@ -113,10 +113,11 @@ export class ResearchRadarWorker extends BaseWorker {
     try {
       const prompt = this.buildIdentificationPrompt(recentInsights, existingIdeas);
       const { data, tokensUsed } = await callLocalModelJSON<IdeaIdentificationResponse>(prompt, {
-        maxTokens: 4096,
+        model: "qwen3.5-27b",
+        maxTokens: 2048,
         temperature: 0.6,
         systemPrompt: IDENTIFICATION_SYSTEM_PROMPT,
-        timeoutMs: 90_000,
+        timeoutMs: 300_000, // 5 min — complex analysis task
       });
       totalTokens += tokensUsed;
 
@@ -192,10 +193,11 @@ export class ResearchRadarWorker extends BaseWorker {
       try {
         const prompt = this.buildRefinementPrompt(idea, recentInsights);
         const { data, tokensUsed } = await callLocalModelJSON<IdeaRefinementResponse>(prompt, {
+          model: "qwen3.5-27b",
           maxTokens: 2048,
           temperature: 0.4,
           systemPrompt: REFINEMENT_SYSTEM_PROMPT,
-          timeoutMs: 60_000,
+          timeoutMs: 300_000,
         });
         totalTokens += tokensUsed;
 
@@ -277,103 +279,29 @@ export class ResearchRadarWorker extends BaseWorker {
   // ── Prompt Builders ─────────────────────────────────────────────────
 
   private buildIdentificationPrompt(insights: IntelInsight[], existing: ResearchRadarItem[]): string {
+    // Very compact — the local model needs a short, clear prompt
     const insightBlock = insights.map((i, idx) =>
-      `${idx + 1}. [${i.category ?? "general"}] ${i.title}\n   ${i.insight}`,
-    ).join("\n\n");
+      `${idx + 1}. ${i.title}: ${i.insight.slice(0, 120)}`,
+    ).join("\n");
 
-    const existingByTrack = {
-      paper: existing.filter(e => e.track === "paper"),
-      lobs: existing.filter(e => e.track === "lobs"),
-      product: existing.filter(e => e.track === "product"),
-    };
+    const existingTitles = existing.map(e => e.title).join(", ") || "None";
 
-    const formatExisting = (items: ResearchRadarItem[]) =>
-      items.length > 0
-        ? items.map(e => `- "${e.title}" (${e.status}, score: ${((e.noveltyScore + e.feasibilityScore + e.impactScore) / 3).toFixed(2)})`).join("\n")
-        : "None yet.";
-
-    return `## Recent Intelligence Insights
-
+    return `INSIGHTS:
 ${insightBlock}
 
-## Existing Ideas (avoid duplicates)
+EXISTING IDEAS (don't duplicate): ${existingTitles}
 
-### Papers
-${formatExisting(existingByTrack.paper)}
+CONTEXT: We run Lobs, a production AI agent with memory, tool use, multi-agent orchestration, intel pipeline, and cron workers. Built by a grad student at UMich.
 
-### Lobs Improvements
-${formatExisting(existingByTrack.lobs)}
+Identify 1-2 ideas per track. Skip a track if nothing novel.
 
-### Product Ideas
-${formatExisting(existingByTrack.product)}
+TRACKS:
+- papers: Research publishable at NeurIPS/ICML. Focus on what we can uniquely study with our live agent system.
+- lobsImprovements: Features to build that make our agent better. What are others doing that we're not?
+- products: Business ideas — SaaS, developer tools, platforms.
 
-## Your Task
-
-Analyze the insights above and identify opportunities across THREE tracks:
-
-### 🎓 Track 1: PAPERS (0-2 ideas)
-Novel research publishable at top venues (NeurIPS, ICML, AAAI, CHI, workshops).
-- What gaps exist in current research?
-- What can we uniquely study because we operate a living AI agent system?
-- What contrarian takes does the evidence support?
-- Focus on empirical work where we have data others don't.
-
-### 🔧 Track 2: LOBS IMPROVEMENTS (0-2 ideas)
-Things we should build to make Lobs a better agent system.
-- What capabilities are others building that we're missing?
-- What architectures or techniques are proving themselves in the wild?
-- What would make our agent meaningfully more capable or reliable?
-- Think: new tools, better memory, smarter planning, self-improvement, etc.
-
-### 💰 Track 3: PRODUCTS (0-2 ideas)
-Ideas for products, SaaS tools, companies, or things to sell.
-- What unmet needs do the insights reveal?
-- Where is there market demand but no good solution?
-- What could be a real business based on what we're seeing?
-- Think: developer tools, AI infrastructure, data products, platforms, etc.
-
-## Our System (Lobs)
-- Autonomous workers running on cron schedules
-- Memory systems (embedding search, daily journals, permanent learnings)
-- Multi-agent orchestration (spawning sub-agents for tasks)
-- Tool use (web search, file ops, code execution, GitHub, Discord, Google APIs)
-- Self-monitoring (usage tracking, worker health, error patterns)
-- Intel pipeline (web scraping → insight extraction → routing)
-- Built by a grad student at UMich (real academic publishing context)
-
-For each idea across ALL tracks, provide:
-- **thesis**: Core claim/pitch in 1-2 sentences
-- **gapAnalysis**: What's missing that this addresses
-- **ourAngle**: Why WE specifically can do this (our unique advantage)
-- **methodology**: For papers: research plan. For lobs: implementation plan. For products: go-to-market plan.
-- **keyExperiments**: For papers: experiments to run. For lobs: key milestones. For products: validation steps.
-
-Quality > quantity. If nothing novel emerges for a track, return an empty array.
-
-Respond with JSON:
-\`\`\`json
-{
-  "papers": [
-    {
-      "title": "...",
-      "thesis": "...",
-      "gapAnalysis": "...",
-      "ourAngle": "...",
-      "methodology": "...",
-      "keyExperiments": "...",
-      "noveltyScore": 0.8,
-      "feasibilityScore": 0.7,
-      "impactScore": 0.6,
-      "researchArea": "agentic_engineering",
-      "tags": ["memory", "self-improvement"],
-      "relatedWork": [{"url": "...", "title": "...", "relevance": "..."}]
-    }
-  ],
-  "lobsImprovements": [...],
-  "products": [...],
-  "themes": ["theme1", "theme2"]
-}
-\`\`\``;
+JSON only:
+{"papers":[{"title":"...","thesis":"...","gapAnalysis":"...","ourAngle":"...","methodology":"...","keyExperiments":"...","noveltyScore":0.8,"feasibilityScore":0.7,"impactScore":0.6,"tags":["x"]}],"lobsImprovements":[],"products":[],"themes":["theme1"]}`;
   }
 
   private buildRefinementPrompt(idea: ResearchRadarItem, recentInsights: IntelInsight[]): string {
@@ -455,29 +383,7 @@ function shouldPromote(idea: ResearchRadarItem, noveltyDelta: number): boolean {
 
 // ── System Prompts ───────────────────────────────────────────────────────
 
-const IDENTIFICATION_SYSTEM_PROMPT = `You are a strategic advisor for an AI agent project called Lobs. You identify opportunities across three domains:
-
-1. RESEARCH PAPERS — Novel academic contributions publishable at top venues
-2. LOBS IMPROVEMENTS — Technical capabilities to build into the agent system
-3. PRODUCT IDEAS — Commercial opportunities, SaaS tools, companies to build
-
-You work with a team that operates Lobs — a production AI agent system with:
-- Autonomous task execution, cron-scheduled workers
-- Hybrid memory (embeddings + structured DB + daily journals)
-- Multi-agent orchestration with sub-agent spawning
-- Real tool use: web search, GitHub, file I/O, code execution, Discord, Google APIs
-- Self-monitoring and telemetry
-- Intel pipeline (web scraping, insight extraction, research routing)
-
-The operator is a grad student at UMich (MS in CSE), so academic publishing is a real output channel.
-
-For PAPERS: Find gaps where this system gives unique empirical advantage. Avoid generic "apply X to Y."
-For LOBS: Find capabilities that would make the agent meaningfully better. Avoid trivial improvements.
-For PRODUCTS: Find market gaps with real demand. Avoid ideas that are already well-served.
-
-Be ruthlessly selective. Quality over quantity. An empty array is better than weak ideas.
-
-Always respond with valid JSON.`;
+const IDENTIFICATION_SYSTEM_PROMPT = `You identify opportunities from AI intel. Respond with valid JSON only. Be selective — empty arrays are fine.`;
 
 const REFINEMENT_SYSTEM_PROMPT = `You are a strategic advisor refining an idea for the Lobs AI agent project.
 
