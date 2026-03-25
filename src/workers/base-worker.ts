@@ -13,8 +13,9 @@
  */
 
 import { log } from "../util/logger.js";
-import { getLocalConfig } from "../config/models.js";
+import { getLocalConfig, getModelForTier } from "../config/models.js";
 import { isLocalModelAvailable } from "../runner/local-classifier.js";
+import { parseModelString, createClient } from "../runner/providers.js";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -214,6 +215,69 @@ function extractLastJSON<T>(text: string): T | undefined {
     }
   }
   return undefined;
+}
+
+// ── API Model Caller (for tasks that need smarter models) ────────────────
+
+export interface ApiCallOptions {
+  /** Model tier: "small" = Haiku, "standard" = Sonnet, "strong" = Opus */
+  tier?: string;
+  /** Or specify exact model string like "anthropic/claude-haiku-4-5" */
+  model?: string;
+  maxTokens?: number;
+  temperature?: number;
+  systemPrompt?: string;
+}
+
+/**
+ * Call a cloud API model (e.g. Claude Haiku) for tasks that need more intelligence
+ * than local models can provide. Use sparingly — costs money, but very little
+ * for Haiku on once-daily tasks.
+ */
+export async function callApiModel(
+  prompt: string,
+  options?: ApiCallOptions,
+): Promise<{ text: string; tokensUsed: number }> {
+  const modelStr = options?.model ?? getModelForTier(options?.tier ?? "small");
+  const config = parseModelString(modelStr);
+  const client = createClient(config);
+
+  const response = await client.createMessage({
+    model: config.modelId,
+    system: options?.systemPrompt ?? "",
+    messages: [{ role: "user", content: prompt }],
+    tools: [],
+    maxTokens: options?.maxTokens ?? 2048,
+  });
+
+  const text = response.content
+    .filter(b => b.type === "text")
+    .map(b => (b as { type: "text"; text: string }).text)
+    .join("");
+
+  const tokensUsed = (response.usage?.inputTokens ?? 0) + (response.usage?.outputTokens ?? 0);
+  return { text: text.trim(), tokensUsed };
+}
+
+/**
+ * Call API model and parse JSON response.
+ */
+export async function callApiModelJSON<T>(
+  prompt: string,
+  options?: ApiCallOptions,
+): Promise<{ data: T; tokensUsed: number }> {
+  const { text, tokensUsed } = await callApiModel(prompt, options);
+
+  // Strip markdown fences
+  let cleaned = text.replace(/```json?\n?/g, "").replace(/```/g, "").trim();
+
+  // Strip thinking tokens
+  cleaned = cleaned.replace(/<think(?:ing)?>\s*[\s\S]*?<\/think(?:ing)?>/gi, "").trim();
+
+  const data = extractLastJSON<T>(cleaned);
+  if (data !== undefined) return { data, tokensUsed };
+
+  return { data: JSON.parse(cleaned) as T, tokensUsed };
 }
 
 // ── Abstract Base ────────────────────────────────────────────────────────

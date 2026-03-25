@@ -1,4 +1,4 @@
-import type { RealtimeSessionConfig } from "@openai/agents-realtime";
+import type { RealtimeSessionConfig } from "@openai/agents/realtime";
 
 const REALTIME_SAMPLE_RATE = 24000;
 

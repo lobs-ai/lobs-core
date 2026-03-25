@@ -3,15 +3,18 @@
  *
  * These are a curated subset of the main agent's tools, optimized for
  * voice conversation: fast, read-only, non-destructive.
- * Uses the `tool()` function from @openai/agents-core (re-exported by agents-realtime).
+ * Uses the Realtime SDK's `tool()` helper so the definitions match the
+ * documented RealtimeAgent function-tool path.
  */
 
-import { tool } from "@openai/agents-core";
 import type { RunContext } from "@openai/agents-core";
-import { backgroundResult } from "@openai/agents-realtime";
+import { backgroundResult, tool } from "@openai/agents/realtime";
 import { z } from "zod";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { getDb } from "../../db/connection.js";
+import { inboxItems } from "../../db/schema.js";
 
 export interface RealtimeVoiceToolContext {
   enqueueBackgroundToolResult?: (job: {
@@ -44,7 +47,7 @@ export function queueBackgroundVoiceTool(
 export const getDatetimeTool = tool<z.ZodObject<{}>, RealtimeVoiceToolContext>({
   name: "get_datetime",
   description:
-    "Get the current date, time, and day of the week. No parameters needed.",
+    "Get the current date, time, and day of the week. Use this for time-sensitive questions instead of guessing.",
   parameters: z.object({}),
   execute: async (_params, runContext) => {
     return queueBackgroundVoiceTool(
@@ -74,7 +77,7 @@ export const getDatetimeTool = tool<z.ZodObject<{}>, RealtimeVoiceToolContext>({
 export const searchMemoryTool = tool({
   name: "search_memory",
   description:
-    "Search across indexed documents, notes, ADRs, and memory for relevant information. Returns matching snippets with file paths.",
+    "Search across memory, notes, docs, and indexed files. Use this for questions about Rafe, his life, his schedule, his projects, preferences, prior decisions, and internal docs before saying you do not know.",
   parameters: z.object({
     query: z.string().describe("Natural language search query"),
     max_results: z
@@ -137,7 +140,7 @@ export const searchMemoryTool = tool({
 export const webSearchTool = tool({
   name: "web_search",
   description:
-    "Search the web for current information. Returns a summary of search results.",
+    "Search the web for current external information. Use this only for current events or outside facts that would not be in memory or local files.",
   parameters: z.object({
     query: z.string().describe("Search query"),
   }),
@@ -200,7 +203,7 @@ export const webSearchTool = tool({
 export const readFileTool = tool({
   name: "read_file",
   description:
-    "Read the contents of a file. For quick lookups only — keep it short.",
+    "Read the contents of a specific file when you know or strongly suspect the relevant path. Use this for direct inspection of local docs, notes, or config files.",
   parameters: z.object({
     path: z.string().describe("Absolute or relative file path to read"),
     max_lines: z
@@ -255,7 +258,7 @@ export const readFileTool = tool({
 export const spawnAgentTool = tool({
   name: "spawn_agent",
   description:
-    "Delegate a task to a background subagent. Returns immediately with confirmation — the agent runs asynchronously. Use for heavy tasks like coding, research, or writing.",
+    "Delegate a substantial task to a background subagent. Use this for coding, deeper research, or writing work that would take longer than a quick voice answer.",
   parameters: z.object({
     task: z
       .string()
@@ -307,12 +310,50 @@ export const spawnAgentTool = tool({
 });
 
 // ---------------------------------------------------------------------------
+// Tool: write_note
+// ---------------------------------------------------------------------------
+export const writeNoteTool = tool({
+  name: "write_note",
+  description:
+    "Save a short note, reminder, idea, or follow-up item for later processing. Use this when Rafe asks you to remember something from the conversation or jot down a note.",
+  parameters: z.object({
+    title: z
+      .string()
+      .describe("A short title for the note"),
+    content: z
+      .string()
+      .describe("The actual note content to save"),
+  }),
+  execute: async (params, runContext?: RunContext<RealtimeVoiceToolContext>) => {
+    return queueBackgroundVoiceTool(
+      "write_note",
+      "Writing that down.",
+      runContext,
+      Promise.resolve().then(() => {
+        const db = getDb();
+        const id = randomUUID();
+        db.insert(inboxItems).values({
+          id,
+          title: params.title,
+          content: params.content,
+          type: "voice_note",
+          requiresAction: false,
+          actionStatus: "pending",
+          sourceAgent: "voice-realtime",
+        }).run();
+
+        return `Saved note: ${params.title}`;
+      }),
+    );
+  },
+});
+
+// ---------------------------------------------------------------------------
 // All voice tools
 // ---------------------------------------------------------------------------
 export const realtimeVoiceTools = [
-  getDatetimeTool,
   searchMemoryTool,
-  webSearchTool,
   readFileTool,
+  writeNoteTool,
   spawnAgentTool,
 ];

@@ -1,7 +1,7 @@
 /**
  * Realtime Voice Session — bridges Discord audio ↔ OpenAI Realtime API
  *
- * Uses the @openai/agents-realtime SDK to establish a WebSocket connection
+ * Uses the OpenAI Agents Realtime SDK to establish a WebSocket connection
  * to OpenAI's Realtime API, enabling speech-to-speech conversation without
  * local STT/TTS services.
  *
@@ -14,12 +14,12 @@ import {
   RealtimeAgent,
   RealtimeSession,
   OpenAIRealtimeWebSocket,
-} from "@openai/agents-realtime";
+} from "@openai/agents/realtime";
 import type {
   RealtimeSessionConfig,
   TransportLayerAudio,
   TransportError,
-} from "@openai/agents-realtime";
+} from "@openai/agents/realtime";
 import type { VoiceConnection, AudioPlayer } from "@discordjs/voice";
 import { createAudioResource, StreamType, AudioPlayerStatus } from "@discordjs/voice";
 import { PassThrough } from "node:stream";
@@ -198,6 +198,9 @@ export class RealtimeVoiceSession {
     );
     console.log(
       `${LOG_PREFIX} Instructions loaded: ${instructions.length} chars, includes SOUL=${instructions.includes("SOUL.md")}, USER=${instructions.includes("USER.md")}, MEMORY=${instructions.includes("MEMORY.md")}`,
+    );
+    console.log(
+      `${LOG_PREFIX} Tools loaded: ${realtimeVoiceTools.map((t) => t.name).join(", ")}`,
     );
 
     // Create the RealtimeAgent with voice-appropriate tools

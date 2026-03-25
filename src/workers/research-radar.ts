@@ -21,7 +21,7 @@ import type {
 import type { IntelSweepService, IntelInsight } from "../services/intel-sweep.js";
 import {
   BaseWorker,
-  callLocalModelJSON,
+  callApiModelJSON,
   type WorkerArtifact,
   type WorkerConfig,
   type WorkerContext,
@@ -112,12 +112,10 @@ export class ResearchRadarWorker extends BaseWorker {
 
     try {
       const prompt = this.buildIdentificationPrompt(recentInsights, existingIdeas);
-      const { data, tokensUsed } = await callLocalModelJSON<IdeaIdentificationResponse>(prompt, {
-        model: "qwen3.5-27b",
+      const { data, tokensUsed } = await callApiModelJSON<IdeaIdentificationResponse>(prompt, {
+        tier: "small",
         maxTokens: 2048,
-        temperature: 0.6,
         systemPrompt: IDENTIFICATION_SYSTEM_PROMPT,
-        timeoutMs: 300_000, // 5 min — complex analysis task
       });
       totalTokens += tokensUsed;
 
@@ -129,6 +127,9 @@ export class ResearchRadarWorker extends BaseWorker {
       ];
 
       for (const idea of allIdeas) {
+        // Skip ideas with missing required fields
+        if (!idea.title || !idea.thesis) continue;
+
         const similar = this.radar.hasSimilarIdea(idea.title, idea.track);
         if (similar) {
           this.radar.update(similar.id, {
@@ -143,16 +144,16 @@ export class ResearchRadarWorker extends BaseWorker {
           title: idea.title,
           thesis: idea.thesis,
           track: idea.track,
-          researchArea: idea.researchArea || "agentic_engineering",
+          researchArea: idea.researchArea || "agentic-systems",
           tags: idea.tags || [],
           gapAnalysis: idea.gapAnalysis,
           relatedWork: idea.relatedWork || [],
           ourAngle: idea.ourAngle,
           methodology: idea.methodology,
           keyExperiments: idea.keyExperiments,
-          noveltyScore: clamp(idea.noveltyScore, 0, 1),
-          feasibilityScore: clamp(idea.feasibilityScore, 0, 1),
-          impactScore: clamp(idea.impactScore, 0, 1),
+          noveltyScore: clamp(idea.noveltyScore ?? 0.5, 0, 1),
+          feasibilityScore: clamp(idea.feasibilityScore ?? 0.5, 0, 1),
+          impactScore: clamp(idea.impactScore ?? 0.5, 0, 1),
           sourceInsightIds: recentInsights.slice(0, 5).map(i => i.id),
           sourceFeedIds: [...new Set(recentInsights.map(i => i.feedId).filter(Boolean) as string[])],
         };
@@ -192,12 +193,10 @@ export class ResearchRadarWorker extends BaseWorker {
     for (const idea of staleIdeas) {
       try {
         const prompt = this.buildRefinementPrompt(idea, recentInsights);
-        const { data, tokensUsed } = await callLocalModelJSON<IdeaRefinementResponse>(prompt, {
-          model: "qwen3.5-27b",
+        const { data, tokensUsed } = await callApiModelJSON<IdeaRefinementResponse>(prompt, {
+          tier: "small",
           maxTokens: 2048,
-          temperature: 0.4,
           systemPrompt: REFINEMENT_SYSTEM_PROMPT,
-          timeoutMs: 300_000,
         });
         totalTokens += tokensUsed;
 

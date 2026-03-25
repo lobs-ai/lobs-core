@@ -6,6 +6,7 @@
  */
 
 import { buildVoiceSystemPrompt, loadWorkspaceContext } from "../workspace-loader.js";
+import { realtimeVoiceTools } from "./realtime-tools.js";
 
 /**
  * Build the instructions string for the RealtimeAgent.
@@ -16,7 +17,14 @@ import { buildVoiceSystemPrompt, loadWorkspaceContext } from "../workspace-loade
 export async function buildRealtimeInstructions(): Promise<string> {
   const voicePrompt = buildVoiceSystemPrompt();
   const workspaceContext = loadWorkspaceContext("main");
-  const parts: string[] = [voicePrompt, workspaceContext];
+  const toolCatalog = [
+    "Available tools:",
+    ...realtimeVoiceTools.map(
+      (tool) => `- ${tool.name}: ${tool.description}`,
+    ),
+    "If a request matches one of these tools, call the tool instead of merely describing it.",
+  ].join("\n");
+  const parts: string[] = [voicePrompt, toolCatalog, workspaceContext];
 
   // Add current time so the model knows when it is
   const now = new Date();
