@@ -212,6 +212,7 @@ export class CronService {
   // Unified tick interval
   private tickInterval?: NodeJS.Timeout;
   private running = false;
+  private tickRunning = false;
 
   // Event handler for agent jobs
   private onEvent: ((text: string, channelId?: string) => Promise<void>) | null = null;
@@ -664,6 +665,21 @@ export class CronService {
    * Both system and agent cron jobs use proper cron expression matching.
    */
   private async tick(): Promise<void> {
+    // Re-entrancy guard: if a previous tick is still running (e.g. slow
+    // agent jobs), skip this tick entirely.  Without this, concurrent ticks
+    // calling loadAgentJobs() can clear+repopulate the agentJobs Map while
+    // an earlier tick is iterating it, causing the Map iterator to restart
+    // and fire the same job multiple times.
+    if (this.tickRunning) return;
+    this.tickRunning = true;
+    try {
+      await this._tickInner();
+    } finally {
+      this.tickRunning = false;
+    }
+  }
+
+  private async _tickInner(): Promise<void> {
     const now = new Date();
     now.setSeconds(0);
     now.setMilliseconds(0);
@@ -687,7 +703,11 @@ export class CronService {
     // Reload from DB each tick to pick up newly added/changed jobs
     this.loadAgentJobs();
 
-    for (const [id, job] of this.agentJobs.entries()) {
+    // Snapshot the entries so iteration is stable even if the Map is
+    // mutated (defensive — the re-entrancy guard should prevent this).
+    const agentSnapshot = Array.from(this.agentJobs.entries());
+
+    for (const [id, job] of agentSnapshot) {
       if (!job.enabled) continue;
 
       switch (job.schedule.kind) {
