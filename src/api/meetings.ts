@@ -5,6 +5,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { json, error, parseBody, parseQuery } from "./index.js";
 import { MeetingsService } from "../services/meetings.js";
+import { handleLiveMeetingRequest } from "./live-meeting.js";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +22,11 @@ export async function handleMeetingsRequest(
   id: string | undefined,
   parts: string[],
 ): Promise<void> {
+
+  // Live meeting sub-routes — check first
+  if (id === "live" || parts[1] === "live") {
+    return handleLiveMeetingRequest(req, res, parts);
+  }
 
   // POST /api/meetings/transcribe
   if (id === "transcribe" && req.method === "POST") {
