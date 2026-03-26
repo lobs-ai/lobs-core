@@ -92,7 +92,7 @@ export async function handleSchedulerRequest(
       const schedule = body.schedule as string | undefined;
       const payload = body.payload as string | undefined;
       const enabled = body.enabled !== undefined ? Boolean(body.enabled) : true;
-      const payloadKind = (body.payload_kind as "agent" | "script") || "agent";
+      const payloadKind = (body.payload_kind as "agent" | "script" | "standup") || "agent";
 
       if (!name || !schedule || !payload) {
         return error(res, "Missing required fields: name, schedule, payload", 400);

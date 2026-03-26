@@ -23,6 +23,7 @@ import { exec as execCb } from "node:child_process";
 import { promisify } from "node:util";
 import type Database from "better-sqlite3";
 import { log } from "../util/logger.js";
+import { gatherStandupData } from "./standup-gatherer.js";
 
 const execAsync = promisify(execCb);
 
@@ -132,7 +133,7 @@ export interface AgentJob {
     tz?: string;         // timezone
   };
   payload: string;       // Text injected as system event (agent) or shell command (script)
-  payloadKind?: "agent" | "script"; // Execution mode (default: 'agent')
+  payloadKind?: "agent" | "script" | "standup"; // Execution mode (default: 'agent')
   enabled: boolean;
   lastFired?: string;    // ISO timestamp
   createdAt: string;
@@ -159,7 +160,7 @@ export interface CronJobView {
   lastRun: string | null;
   nextRun: string | null; // ISO timestamp of next scheduled run
   channelId?: string;     // Discord channel ID for agent jobs
-  payloadKind: "system" | "agent" | "script"; // Execution mode
+  payloadKind: "system" | "agent" | "script" | "standup"; // Execution mode
 }
 
 /**
@@ -821,6 +822,83 @@ export class CronService {
     }
   }
 
+  /**
+   * Inject pre-gathered standup data into the conversation as a tool_use/tool_result pair.
+   * The agent sees this as if it already called a "gather_standup_data" tool,
+   * so it can focus on analysis and writing the standup — not data gathering.
+   */
+  private async injectStandupData(conversationChannel: string, job: AgentJob): Promise<void> {
+    const gatherStart = Date.now();
+    log().info(`[cron] Gathering standup data for "${job.name}"...`);
+
+    let standupData: string;
+    try {
+      standupData = gatherStandupData();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log().warn(`[cron] Standup data gathering failed: ${msg}`);
+      standupData = `Error gathering standup data: ${msg}\n\nProceed with what you know from memory.`;
+    }
+
+    const gatherMs = Date.now() - gatherStart;
+    log().info(`[cron] Standup data gathered in ${gatherMs}ms (${standupData.length} chars)`);
+
+    // Insert as an assistant message with tool_use, then a user message with tool_result.
+    // This makes it look like the agent already called a tool and got results back.
+    const toolUseId = `toolu_standup_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    const now = new Date().toISOString();
+
+    // Assistant message: tool_use block
+    const toolUseContent = JSON.stringify([
+      {
+        type: "tool_use",
+        id: toolUseId,
+        name: "gather_standup_data",
+        input: {},
+      },
+    ]);
+
+    // User message: tool_result block
+    const toolResultContent = JSON.stringify([
+      {
+        type: "tool_result",
+        tool_use_id: toolUseId,
+        content: standupData,
+      },
+    ]);
+
+    try {
+      const insertStmt = this.db.prepare(
+        `INSERT INTO main_agent_messages
+           (id, role, content, channel_id, token_estimate, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      );
+
+      // Insert tool_use (assistant) slightly before tool_result (user)
+      insertStmt.run(
+        randomUUID(),
+        "assistant",
+        toolUseContent,
+        conversationChannel,
+        Math.ceil(toolUseContent.length / 4),
+        now,
+      );
+
+      insertStmt.run(
+        randomUUID(),
+        "user",
+        toolResultContent,
+        conversationChannel,
+        Math.ceil(standupData.length / 4),
+        new Date(Date.now() + 1).toISOString(), // 1ms later to preserve order
+      );
+
+      log().info(`[cron] Injected standup data as tool result into ${conversationChannel}`);
+    } catch (err) {
+      log().warn(`[cron] Failed to inject standup data: ${err}`);
+    }
+  }
+
   private async fireAgentJob(job: AgentJob, manual = false) {
     const jobKind = job.payloadKind === "script" ? "script" : "agent";
     log().info(`[cron] Firing ${jobKind} job: "${job.name}"${manual ? " (manual)" : ""}`);
@@ -856,7 +934,7 @@ export class CronService {
       return;
     }
 
-    // Agent jobs: fire text into the LLM via onEvent handler
+    // Agent/standup jobs: fire text into the LLM via onEvent handler
     if (this.onEvent) {
       try {
         // Each agent job runs in a dedicated internal channel so the LLM
@@ -877,6 +955,11 @@ export class CronService {
             .run(conversationChannel, conversationChannel);
         } catch {
           // table not present — no-op
+        }
+
+        // Standup jobs: gather data first and inject as tool result
+        if (job.payloadKind === "standup") {
+          await this.injectStandupData(conversationChannel, job);
         }
 
         // The agent uses the `message` tool to send to the actual Discord

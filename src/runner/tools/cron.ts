@@ -51,9 +51,9 @@ export const cronToolDefinition: ToolDefinition = {
       },
       payload_kind: {
         type: "string",
-        enum: ["agent", "script"],
+        enum: ["agent", "script", "standup"],
         description:
-          "Execution mode: 'agent' fires text into the LLM, 'script' runs a shell command directly without LLM. Default: 'agent'.",
+          "Execution mode: 'agent' fires text into the LLM, 'script' runs a shell command directly without LLM, 'standup' gathers project data (git, PRs, issues, tasks) first then fires the LLM with pre-loaded context. Default: 'agent'.",
       },
       channel_id: {
         type: "string",
@@ -108,7 +108,7 @@ export async function executeCronTool(
           everyMs: input.schedule_every_ms as number | undefined,
         },
         payload: (input.payload as string) || "",
-        payloadKind: (input.payload_kind as "agent" | "script") || "agent",
+        payloadKind: (input.payload_kind as "agent" | "script" | "standup") || "agent",
         enabled: true,
         channelId: (input.channel_id as string) || undefined,
       });
