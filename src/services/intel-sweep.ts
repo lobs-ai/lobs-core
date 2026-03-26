@@ -280,6 +280,13 @@ const BLOCKED_DOMAINS = new Set([
   "www.medium.com",
   "www.forbes.com",
   "www.entrepreneur.com",
+  // Academic journal homepages (not AI-specific)
+  "onlinelibrary.wiley.com",
+  "www.sciencedirect.com",
+  "www.springer.com",
+  "link.springer.com",
+  // Misc non-tech
+  "customer-service.on-running.com",
 ]);
 
 /** URL path patterns that indicate non-article pages (homepages, product pages, login) */
@@ -288,6 +295,9 @@ const BLOCKED_PATH_PATTERNS = [
   /^\/(office-chairs|standing-desks|pod-adus)\b/i,  // product categories
   /^\/(login|signup|register|cart|checkout)\b/i,
   /^\/(pricing|plans|contact|about|careers|jobs)\b/i,  // company pages, not content
+  /^\/(download|install|quickstart|getting-started|introduction)\b/i,  // docs/setup pages, not news
+  /^\/(docs|documentation|api-reference|reference)\/?$/i,  // doc homepages
+  /^\/(toc|current|archive|issue)\b/i,  // journal table-of-contents pages
 ];
 
 /** TLD / domain patterns strongly associated with non-English content */
@@ -309,33 +319,56 @@ const NON_LATIN_RE = /[\u3000-\u9FFF\u{AC00}-\u{D7AF}\u0400-\u04FF\u0600-\u06FF\
  *  - titles/snippets with significant non-Latin characters
  *  - generic "what is X" explainer pages (too basic to be useful intel)
  */
-/** AI/tech relevance keywords — at least one must appear in title+snippet */
-const RELEVANCE_KEYWORDS = [
-  // Core AI terms
-  "ai", "artificial intelligence", "machine learning", "deep learning", "neural",
-  "llm", "large language model", "language model", "transformer",
-  "gpt", "claude", "gemini", "llama", "mistral", "qwen", "phi",
-  // Agent terms
-  "agent", "agentic", "autonomous", "multi-agent", "tool use", "function calling",
-  "orchestration", "planning", "reasoning",
-  // ML/AI infrastructure
-  "inference", "fine-tuning", "fine tuning", "rag", "retrieval", "embedding",
-  "vector", "quantization", "gguf", "onnx", "tensorrt", "vllm",
-  // Relevant tools/frameworks
+/**
+ * AI/tech relevance check — requires STRONG AI signal, not just tangential keywords.
+ *
+ * Two-tier approach:
+ *  - STRONG keywords: A single match is enough (very specific to AI/ML)
+ *  - WEAK keywords: Need 2+ matches (words like "model", "research" appear in many domains)
+ */
+const STRONG_AI_KEYWORDS = [
+  // Specific AI/ML terms (won't appear on shoe stores or chemistry journals)
+  "artificial intelligence", "machine learning", "deep learning", "neural network",
+  "large language model", "language model", "generative ai",
+  "llm", "gpt-4", "gpt-5", "chatgpt", "claude", "gemini", "llama 3", "llama 4",
+  "mistral", "qwen", "phi-4", "deepseek",
+  "agentic", "multi-agent", "function calling", "tool use",
+  "fine-tuning", "fine tuning", "quantization", "gguf", "onnx", "tensorrt", "vllm",
   "langchain", "llamaindex", "crewai", "autogen", "semantic kernel",
-  "hugging face", "huggingface", "openai", "anthropic", "google deepmind",
-  "ollama", "lm studio", "mlx",
-  // Software engineering
-  "api", "sdk", "framework", "open source", "benchmark", "evaluation",
-  "developer tool", "code generation", "copilot",
-  // Research
-  "arxiv", "paper", "research", "neurips", "icml", "iclr", "acl",
+  "huggingface", "hugging face", "openai", "anthropic", "google deepmind",
+  "ollama", "lm studio", "mlx", "lmstudio",
+  "retrieval augmented generation", "vector database", "embedding model",
+  "prompt engineering", "chain of thought", "in-context learning",
+  "transformer architecture", "attention mechanism",
+  "arxiv", "neurips", "icml", "iclr",
+  "copilot", "cursor", "windsurf", "codeium",
 ];
 
-/** Returns true if title+snippet contain at least one AI/tech relevance keyword */
+const WEAK_AI_KEYWORDS = [
+  // These appear in many contexts — need multiple to signal AI relevance
+  "ai", "model", "inference", "agent", "autonomous", "benchmark",
+  "research", "paper", "framework", "open source", "evaluation",
+  "training", "dataset", "token", "embedding", "retrieval", "rag",
+  "api", "sdk", "neural", "transformer", "reasoning", "planning",
+];
+
+/** Returns true if title+snippet contain strong AI/tech relevance signal */
 function isRelevantToAI(title: string, snippet: string): boolean {
   const text = `${title} ${snippet}`.toLowerCase();
-  return RELEVANCE_KEYWORDS.some(kw => text.includes(kw));
+
+  // One strong keyword is enough
+  if (STRONG_AI_KEYWORDS.some(kw => text.includes(kw))) return true;
+
+  // Need 2+ weak keyword matches
+  let weakMatches = 0;
+  for (const kw of WEAK_AI_KEYWORDS) {
+    if (text.includes(kw)) {
+      weakMatches++;
+      if (weakMatches >= 2) return true;
+    }
+  }
+
+  return false;
 }
 
 function isQualityEnglishSource(url: string, title: string, snippet: string): boolean {
