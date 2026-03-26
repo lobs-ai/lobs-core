@@ -9,13 +9,12 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { eq } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { meetings } from "../db/schema.js";
 import { log } from "../util/logger.js";
-import { getGatewayConfig } from "../config/lobs.js";
 import { getModelForTier } from "../config/models.js";
+import { createResilientClient, parseModelString } from "../runner/providers.js";
 import { MeetingAnalysisService } from "./meeting-analysis.js";
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -88,63 +87,27 @@ async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
   return data.text?.trim() ?? "";
 }
 
-// ── Gateway / LLM analysis ──────────────────────────────────────────────
+// ── Direct LLM analysis ─────────────────────────────────────────────────
 
-async function gatewayInvoke(tool: string, args: Record<string, unknown>): Promise<unknown> {
-  const { port, token } = getGatewayConfig();
-  const r = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${token}`,
-    },
-    body: JSON.stringify({ tool, args, sessionKey: "agent:sink:live-meeting" }),
-  });
-  if (!r.ok) throw new Error(`Gateway ${tool} failed (${r.status}): ${await r.text()}`);
-  const data = (await r.json()) as Record<string, unknown>;
-  const result = data?.result as Record<string, unknown> | undefined;
-  return result?.details ?? result ?? data;
-}
+async function llmAnalyze(prompt: string): Promise<string> {
+  const model = getModelForTier("small");
+  const client = createResilientClient(model, { sessionId: "live-meeting" });
 
-async function spawnAndWait(task: string, timeoutMs = 120000): Promise<string> {
-  const outFile = `/tmp/live-meeting-analysis-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`;
-
-  const wrappedTask = `You are a live meeting analysis assistant. Your ONLY job is to analyze the transcript and write your analysis directly to a file.
-
-DO NOT reply with the analysis in chat. Instead, use the Write tool to write it to: ${outFile}
-
-Here is what to write:
-
-${task}
-
-Remember: Write the COMPLETE JSON analysis to ${outFile} using the Write tool. That file is your only output.`;
-
-  await gatewayInvoke("sessions/spawn", {
-    task: wrappedTask,
-    mode: "run",
-    model: getModelForTier("standard"),
-    thinking: "off",
-    runTimeoutSeconds: Math.floor(timeoutMs / 1000),
-    cleanup: "delete",
+  const response = await client.createMessage({
+    model: parseModelString(model).modelId,
+    system: "You are a live meeting analysis assistant. Return ONLY valid JSON — no markdown, no code fences, no extra text.",
+    messages: [{ role: "user", content: prompt }],
+    tools: [],
+    maxTokens: 4096,
   });
 
-  log().info("[LIVE_MEETING] Spawned analysis agent → " + outFile);
+  const text = response.content
+    ?.filter((b: any) => b.type === "text")
+    .map((b: any) => b.text)
+    .join("") ?? "";
 
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 3000));
-    if (existsSync(outFile)) {
-      const text = readFileSync(outFile, "utf-8").trim();
-      if (text.length > 20) {
-        log().info("[LIVE_MEETING] Got " + text.length + " chars from " + outFile);
-        try { unlinkSync(outFile); } catch { /* ignore */ }
-        return text;
-      }
-    }
-  }
-
-  try { unlinkSync(outFile); } catch { /* ignore */ }
-  throw new Error("Timed out waiting for live meeting analysis output");
+  if (!text) throw new Error("Empty response from LLM");
+  return text;
 }
 
 function buildAnalysisPrompt(
@@ -314,7 +277,7 @@ export class LiveMeetingService {
     try {
       const prompt = buildAnalysisPrompt(session.transcript, session);
 
-      const responseText = await spawnAndWait(prompt);
+      const responseText = await llmAnalyze(prompt);
 
       // Parse JSON from response
       const jsonMatch = responseText.match(/\{[\s\S]*\}/);

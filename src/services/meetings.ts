@@ -19,6 +19,7 @@ interface TranscribeOptions {
   projectId?: string;
   participants?: string[];
   meetingType?: string;
+  skipAnalysis?: boolean;
 }
 
 interface TranscriptResult {
@@ -75,11 +76,18 @@ export class MeetingsService {
     db.insert(meetings).values(record).run();
     log().info(`[MEETINGS] Stored meeting ${id} (${result.duration_seconds}s, ${result.language})`);
 
+    // Set analysisStatus to 'skipped' if requested
+    if (opts.skipAnalysis) {
+      db.update(meetings).set({ analysisStatus: 'skipped' }).where(eq(meetings.id, id)).run();
+    }
+
     const stored = db.select().from(meetings).where(eq(meetings.id, id)).get()!;
 
-    // Fire-and-forget analysis
-    const analysis = new MeetingAnalysisService();
-    analysis.analyze(id).catch(e => log().error(`[MEETINGS] Analysis trigger failed: ${e.message}`));
+    if (!opts.skipAnalysis) {
+      // Fire-and-forget analysis
+      const analysis = new MeetingAnalysisService();
+      analysis.analyze(id).catch(e => log().error(`[MEETINGS] Analysis trigger failed: ${e.message}`));
+    }
 
     return stored;
   }
@@ -106,5 +114,14 @@ export class MeetingsService {
   delete(id: string) {
     const db = getDb();
     db.delete(meetings).where(eq(meetings.id, id)).run();
+  }
+
+  /** Update meeting metadata (title, meetingType). */
+  update(id: string, updates: { title?: string; meetingType?: string }) {
+    const db = getDb();
+    const allowed: any = { updatedAt: new Date().toISOString() };
+    if (updates.title !== undefined) allowed.title = updates.title;
+    if (updates.meetingType !== undefined) allowed.meetingType = updates.meetingType;
+    db.update(meetings).set(allowed).where(eq(meetings.id, id)).run();
   }
 }

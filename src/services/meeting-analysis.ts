@@ -1,70 +1,38 @@
 /**
  * Meeting Analysis — post-transcription processing.
- * Spawns a session to analyze transcript, extract summary + action items.
+ * Uses direct Anthropic API calls to analyze transcript and extract action items.
  * Results stored back in meetings DB.
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { eq } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { meetings, meetingActionItems, tasks, inboxItems } from "../db/schema.js";
 import { log } from "../util/logger.js";
 import { classifyApprovalTier } from "../util/approval-tier.js";
 import { getModelForTier } from "../config/models.js";
-import { getGatewayConfig } from "../config/lobs.js";
+import { createResilientClient, parseModelString } from "../runner/providers.js";
 
-async function gatewayInvoke(tool: string, args: Record<string, unknown>): Promise<any> {
-  const { port, token } = getGatewayConfig();
-  const r = await fetch(`http://127.0.0.1:${port}/v2/invoke`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-    body: JSON.stringify({ tool, args, sessionKey: "agent:sink:paw-orchestrator-v2" }),
-  });
-  if (!r.ok) throw new Error(`Gateway ${tool} failed (${r.status}): ${await r.text()}`);
-  const data = (await r.json()) as any;
-  return data?.result?.details ?? data?.result ?? data;
-}
+async function llmAnalyze(prompt: string): Promise<string> {
+  const model = getModelForTier("standard");
+  const client = createResilientClient(model, { sessionId: "meeting-analysis" });
 
-async function spawnAndWait(task: string, timeoutMs = 300000): Promise<string> {
-  const outFile = `/tmp/yt-ai-meeting-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`;
-
-  const wrappedTask = `You are a meeting analysis writer. Your ONLY job is to write your analysis directly to a file.
-
-DO NOT reply with the analysis in chat. Instead, use the Write tool to write it to: ${outFile}
-
-Here is what to write:
-
-${task}
-
-Remember: Write the COMPLETE analysis to ${outFile} using the Write tool. That file is your only output.`;
-
-  const spawnResult = await gatewayInvoke("sessions/spawn", {
-    task: wrappedTask,
-    mode: "run",
-    model: getModelForTier("standard"),
-    thinking: "off",
-    runTimeoutSeconds: Math.floor(timeoutMs / 1000),
-    cleanup: "delete",
+  const response = await client.createMessage({
+    model: parseModelString(model).modelId,
+    system: "You are a meeting analysis assistant. Return ONLY valid JSON — no markdown, no code fences, no extra text.",
+    messages: [{ role: "user", content: prompt }],
+    tools: [],
+    maxTokens: 4096,
   });
 
-  log().info("[MEETING_ANALYSIS] Spawned agent → " + outFile);
+  // Extract text from response
+  const text = response.content
+    ?.filter((b: any) => b.type === "text")
+    .map((b: any) => b.text)
+    .join("") ?? "";
 
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 5000));
-    if (existsSync(outFile)) {
-      const text = readFileSync(outFile, "utf-8").trim();
-      if (text.length > 50) {
-        log().info("[MEETING_ANALYSIS] Got " + text.length + " chars from " + outFile);
-        try { unlinkSync(outFile); } catch {}
-        return text;
-      }
-    }
-  }
-
-  try { unlinkSync(outFile); } catch {}
-  throw new Error("Timed out waiting for analysis output file");
+  if (!text) throw new Error("Empty response from LLM");
+  return text;
 }
 
 const ANALYSIS_PROMPT = `You are analyzing a meeting transcript. Your job is to deeply understand what was discussed and produce a thorough analysis — not just extract what was explicitly said, but think about what should happen next.
@@ -124,7 +92,7 @@ export class MeetingAnalysisService {
 
     try {
       const prompt = ANALYSIS_PROMPT + meeting.transcript;
-      const responseText = await spawnAndWait(prompt);
+      const responseText = await llmAnalyze(prompt);
 
       // Parse JSON from response
       const jsonMatch = responseText.match(/\{[\s\S]*\}/);

@@ -78,6 +78,7 @@ export async function handleMeetingsRequest(
         projectId: metadata.projectId,
         participants: metadata.participants ? JSON.parse(metadata.participants) : undefined,
         meetingType: metadata.meetingType,
+        skipAnalysis: metadata.skipAnalysis === 'true',
       });
       return json(res, meeting, 201);
     } catch (e: any) {
@@ -106,6 +107,13 @@ export async function handleMeetingsRequest(
     const meeting = svc.get(id);
     if (!meeting) return error(res, "Meeting not found", 404);
     return json(res, meeting);
+  }
+
+  // PATCH /api/meetings/:id — update title/type
+  if (id && req.method === "PATCH") {
+    const body = (await parseBody(req)) as any;
+    svc.update(id, { title: body.title, meetingType: body.meetingType });
+    return json(res, { ok: true });
   }
 
   // DELETE /api/meetings/:id
