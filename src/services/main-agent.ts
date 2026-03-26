@@ -1138,11 +1138,19 @@ export class MainAgent {
       ].join("\n");
 
       // 3. Build LLM messages (with image content blocks when present)
+      const isGroupChat = channelChatType === "group";
       let messages: LLMMessage[] = history.map((m) => {
         const role = m.role as "user" | "assistant";
+        // In group chats, prefix user messages with author name so the LLM
+        // knows who is speaking (e.g. "[Marcus#1234]: hey")
+        const authorPrefix = (isGroupChat && role === "user" && m.author_name) ? `[${m.author_name}]: ` : "";
 
         // If content is already structured (reconstructed from metadata), pass through
         if (Array.isArray(m.content)) {
+          // For structured content in group chats, prepend author as a text block
+          if (authorPrefix) {
+            return { role, content: [{ type: "text", text: authorPrefix }, ...m.content] };
+          }
           return { role, content: m.content };
         }
 
@@ -1164,15 +1172,16 @@ export class MainAgent {
                 });
               }
               // Add text content if any
-              if (m.content) {
-                contentBlocks.push({ type: "text", text: m.content as string });
+              const text = authorPrefix + (m.content || "");
+              if (text) {
+                contentBlocks.push({ type: "text", text });
               }
               return { role, content: contentBlocks };
             }
           } catch { /* invalid metadata, fall through */ }
         }
 
-        return { role, content: m.content as string };
+        return { role, content: authorPrefix + (m.content as string) };
       });
 
       // 3b. Merge consecutive same-role messages (DB can have runs of
@@ -2001,6 +2010,7 @@ export class MainAgent {
     content: string | Array<Record<string, unknown>>;
     created_at: string;
     metadata?: string | null;
+    author_name?: string | null;
   }> {
     // Check for existing compaction summary
     const compaction = this.db.prepare(
@@ -2009,13 +2019,13 @@ export class MainAgent {
        ORDER BY created_at DESC LIMIT 1`
     ).get(channelId) as { id: string; summary: string; up_to_created_at: string } | undefined;
 
-    let rows: Array<{ role: string; content: string; created_at: string; metadata: string | null }>;
+    let rows: Array<{ role: string; content: string; created_at: string; metadata: string | null; author_name: string | null }>;
 
     if (compaction) {
       // Load only messages AFTER the compaction boundary
       rows = this.db
         .prepare(
-          `SELECT role, content, created_at, metadata FROM main_agent_messages
+          `SELECT role, content, created_at, metadata, author_name FROM main_agent_messages
            WHERE channel_id = ? AND created_at > ?
            ORDER BY created_at ASC LIMIT 200`,
         )
@@ -2024,7 +2034,7 @@ export class MainAgent {
       // No compaction — load all (up to 200)
       rows = this.db
         .prepare(
-          `SELECT role, content, created_at, metadata FROM main_agent_messages
+          `SELECT role, content, created_at, metadata, author_name FROM main_agent_messages
            WHERE channel_id = ?
            ORDER BY created_at DESC LIMIT 200`,
         )
@@ -2068,7 +2078,7 @@ export class MainAgent {
           }
         } catch { /* invalid metadata, fall through to text */ }
       }
-      return row as { role: string; content: string | Array<Record<string, unknown>>; created_at: string; metadata: string | null };
+      return row as { role: string; content: string | Array<Record<string, unknown>>; created_at: string; metadata: string | null; author_name?: string | null };
     });
 
     // Prepend compaction summary if we have one
