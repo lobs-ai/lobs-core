@@ -30,8 +30,13 @@ const NEXUS_TOOLS: ToolName[] = [
   "html_to_pdf",
 ];
 
-// Discord channel sessions — add unified discord tool
-const DISCORD_TOOLS: ToolName[] = [
+// Discord DM sessions — same as nexus (no discord tool needed, replies are inline)
+const DM_TOOLS: ToolName[] = [
+  ...NEXUS_TOOLS,
+];
+
+// Discord server/guild sessions — add unified discord tool for rich interactions
+const DISCORD_GUILD_TOOLS: ToolName[] = [
   ...NEXUS_TOOLS,
   "discord",
 ];
@@ -50,7 +55,7 @@ const VOICE_TOOLS: ToolName[] = [
 
 // System/proactive sessions — full access (needs to message users)
 const SYSTEM_TOOLS: ToolName[] = [
-  ...DISCORD_TOOLS,
+  ...DISCORD_GUILD_TOOLS,
   "cron",
 ];
 
@@ -59,9 +64,9 @@ export function getToolsForSession(type: SessionType): ToolName[] {
     case "nexus":
       return NEXUS_TOOLS;
     case "discord":
-      return DISCORD_TOOLS;
+      return DISCORD_GUILD_TOOLS;
     case "dm":
-      return DISCORD_TOOLS;
+      return DM_TOOLS;
     case "voice":
       return VOICE_TOOLS;
     case "system":

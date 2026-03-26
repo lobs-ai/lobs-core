@@ -85,6 +85,7 @@ interface PendingMessage {
   // Group chat metadata
   isDm?: boolean;         // true if DM, false if guild channel
   isMentioned?: boolean;  // true if bot was @mentioned
+  guildId?: string;       // Discord guild/server ID (only for guild messages)
   chatType?: "dm" | "group" | "nexus" | "system";
   // Attachments
   images?: ImageAttachment[];  // Image attachments to include in the message
@@ -120,6 +121,8 @@ export class MainAgent {
   private onProgress: ((channelId: string, content: string) => Promise<void>) | null = null;
   // Track chat type per channel for step visibility
   private channelChatType = new Map<string, string>();
+  // Track guild ID per channel (for Discord server context)
+  private channelGuildId = new Map<string, string>();
   // Batched tool progress for Discord — accumulates until near 2000 chars or turn ends
   private discordToolBatches = new Map<string, string[]>();
   private queueRecoveryTimer: NodeJS.Timeout;
@@ -795,6 +798,7 @@ export class MainAgent {
       "dm"  // Default to DM — group must be explicitly set
     );
     this.channelChatType.set(channelId, chatType);
+    if (msg.guildId) this.channelGuildId.set(channelId, msg.guildId);
 
     // Check if this specific channel is already being processed or at concurrency limit
     if (this.processingChannels.has(channelId) || this.processingChannels.size >= MAX_CONCURRENT_CHANNELS) {
@@ -1099,6 +1103,25 @@ export class MainAgent {
       // Per-channel project context (e.g. vim session README, AGENTS.md, etc.)
       const projectContext = this.channelProjectContext.get(replyChannelId);
 
+      // Build Discord context for guild sessions (channel ID, guild ID, latest message ID)
+      let discordContextNote = "";
+      if (channelChatType === "group") {
+        const guildId = this.channelGuildId.get(replyChannelId);
+        // Get the latest user message ID for this channel
+        const latestMsg = this.db.prepare(
+          `SELECT platform_message_id, author_name FROM main_agent_messages
+           WHERE channel_id = ? AND role = 'user' AND platform_message_id IS NOT NULL
+           ORDER BY created_at DESC LIMIT 1`
+        ).get(replyChannelId) as { platform_message_id: string; author_name: string } | undefined;
+        const parts = [`\n## Discord Context`, `Channel ID: ${replyChannelId}`];
+        if (guildId) parts.push(`Guild ID: ${guildId}`);
+        if (latestMsg?.platform_message_id) {
+          parts.push(`Latest message ID: ${latestMsg.platform_message_id} (from ${latestMsg.author_name})`);
+        }
+        parts.push(`Use the \`discord\` tool to react, fetch messages, create threads, etc.`);
+        discordContextNote = parts.join("\n");
+      }
+
       const fullSystem = [
         freshSystemPrompt,
         ...(freshContext ? ["", freshContext] : []),
@@ -1110,6 +1133,7 @@ export class MainAgent {
         })}`,
         `Session type: ${channelChatType}`,
         chatContextNote,
+        ...(discordContextNote ? [discordContextNote] : []),
         ...(projectContext ? ["", "## Project Context", projectContext] : []),
       ].join("\n");
 
@@ -1186,7 +1210,12 @@ export class MainAgent {
       }
       
       // Resolve tools based on session type
-      const sessionType = getSessionType(replyChannelId);
+      // For Discord channels, use chatType to distinguish DM vs guild (server)
+      // getSessionType only sees the channel ID string, but chatType knows the actual context
+      let sessionType = getSessionType(replyChannelId);
+      if (sessionType === "discord" && channelChatType === "dm") {
+        sessionType = "dm";
+      }
       let availableTools = getToolsForSession(sessionType);
 
       // Apply per-session tool overrides (nexus sessions store disabled tools in DB)

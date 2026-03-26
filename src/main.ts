@@ -646,6 +646,7 @@ async function main() {
           timestamp: Date.now(),
           isDm: msg.isDm,
           isMentioned: msg.isMentioned,
+          guildId: msg.guildId,
           chatType: msg.isDm ? "dm" : "group",
           images: msg.images,
         }).catch((err) => {

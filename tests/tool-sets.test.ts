@@ -108,11 +108,19 @@ describe("Tool Sets", () => {
       expect(systemTools.length).toBeGreaterThan(discordTools.length);
     });
 
-    it("should return same tools for discord and dm sessions", () => {
+    it("should exclude discord tool from DM sessions", () => {
+      const dmTools = getToolsForSession("dm");
+      expect(dmTools).not.toContain("discord");
+    });
+
+    it("should have more tools in guild sessions than DM sessions", () => {
       const discordTools = getToolsForSession("discord");
       const dmTools = getToolsForSession("dm");
       
-      expect(discordTools).toEqual(dmTools);
+      // Guild sessions add the discord tool
+      expect(discordTools.length).toBeGreaterThan(dmTools.length);
+      expect(discordTools).toContain("discord");
+      expect(dmTools).not.toContain("discord");
     });
   });
 });

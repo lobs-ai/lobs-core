@@ -48,7 +48,8 @@ class DiscordService {
   private messageHandler: ((message: {
     messageId: string; content: string; channelId: string;
     authorId: string; authorTag: string; isDm: boolean;
-    isMentioned: boolean; images?: Array<{ data: string; mediaType: string; filename?: string }>;
+    isMentioned: boolean; guildId?: string;
+    images?: Array<{ data: string; mediaType: string; filename?: string }>;
   }) => void) | null = null;
   private healthCheckTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectAttempts = 0;
@@ -512,7 +513,8 @@ class DiscordService {
   onMessage(handler: (message: {
     messageId: string; content: string; channelId: string;
     authorId: string; authorTag: string; isDm: boolean;
-    isMentioned: boolean; images?: Array<{ data: string; mediaType: string; filename?: string }>;
+    isMentioned: boolean; guildId?: string;
+    images?: Array<{ data: string; mediaType: string; filename?: string }>;
   }) => void): void {
     if (!this.client || !this.config) return;
     this.messageHandler = handler; // Store for reconnection
@@ -523,7 +525,8 @@ class DiscordService {
   private setupMessageListener(handler: (message: {
     messageId: string; content: string; channelId: string;
     authorId: string; authorTag: string; isDm: boolean;
-    isMentioned: boolean; images?: Array<{ data: string; mediaType: string; filename?: string }>;
+    isMentioned: boolean; guildId?: string;
+    images?: Array<{ data: string; mediaType: string; filename?: string }>;
   }) => void): void {
     if (!this.client || !this.config) return;
 
@@ -585,6 +588,7 @@ class DiscordService {
         authorTag: msg.author.tag,
         isDm,
         isMentioned,
+        guildId: msg.guildId ?? undefined,
         images: images?.length ? images : undefined,
       });
     });
