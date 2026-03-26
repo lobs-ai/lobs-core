@@ -1,18 +1,24 @@
 /**
  * Meetings Service — transcribe audio and store meeting transcripts.
- * Calls ~/lobs-meeting-transcriber/transcribe.py via child_process.
+ * Calls meeting-transcriber/transcribe.py (submodule) via child_process.
  */
 
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 import { eq, desc } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { meetings } from "../db/schema.js";
 import { log } from "../util/logger.js";
 import { MeetingAnalysisService } from "./meeting-analysis.js";
 
-const TRANSCRIBER_PATH = `${process.env.HOME}/lobs-meeting-transcriber/transcribe.py`;
-const PYTHON = `${process.env.HOME}/lobs-meeting-transcriber/.venv/bin/python3.12`;
+// Resolve paths relative to lobs-core root (works whether running from src/ or dist/)
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const LOBS_CORE_ROOT = resolve(__dirname, "../..");
+const TRANSCRIBER_DIR = resolve(LOBS_CORE_ROOT, "meeting-transcriber");
+const TRANSCRIBER_PATH = resolve(TRANSCRIBER_DIR, "transcribe.py");
+const PYTHON = resolve(TRANSCRIBER_DIR, ".venv/bin/python3");
 
 interface TranscribeOptions {
   title?: string;

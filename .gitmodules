@@ -4,3 +4,6 @@
 [submodule "nexus"]
 	path = nexus
 	url = git@github.com:lobs-ai/lobs-nexus.git
+[submodule "meeting-transcriber"]
+	path = meeting-transcriber
+	url = git@github.com:lobs-ai/lobs-meeting-transcriber.git
