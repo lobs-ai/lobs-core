@@ -287,6 +287,9 @@ const BLOCKED_DOMAINS = new Set([
   "link.springer.com",
   // Misc non-tech
   "customer-service.on-running.com",
+  // Law / education (false positives for "LLM")
+  "www.lsac.org",
+  "llm.law.harvard.edu",
 ]);
 
 /** URL path patterns that indicate non-article pages (homepages, product pages, login) */
@@ -295,9 +298,12 @@ const BLOCKED_PATH_PATTERNS = [
   /^\/(office-chairs|standing-desks|pod-adus)\b/i,  // product categories
   /^\/(login|signup|register|cart|checkout)\b/i,
   /^\/(pricing|plans|contact|about|careers|jobs)\b/i,  // company pages, not content
-  /^\/(download|install|quickstart|getting-started|introduction)\b/i,  // docs/setup pages, not news
+  /\/(download|install|quickstart|getting-started|introduction)\b/i,  // docs/setup pages, not news (anywhere in path)
   /^\/(docs|documentation|api-reference|reference)\/?$/i,  // doc homepages
-  /^\/(toc|current|archive|issue)\b/i,  // journal table-of-contents pages
+  /^\/(docs|documentation)\/(?!blog)/i,  // deep doc pages (except blog posts under /docs/)
+  /\/(toc|current|archive|issue)\b/i,  // journal table-of-contents pages
+  /\/topic\//i,  // topic index pages (e.g. news.mit.edu/topic/artificial-intelligence2)
+  /^\/(import|windows|linux|macos)\/?$/i,  // OS-specific install pages
 ];
 
 /** TLD / domain patterns strongly associated with non-English content */
@@ -352,9 +358,21 @@ const WEAK_AI_KEYWORDS = [
   "api", "sdk", "neural", "transformer", "reasoning", "planning",
 ];
 
+/** False-positive patterns — if matched, the source is NOT about AI despite keyword hits */
+const FALSE_POSITIVE_PATTERNS = [
+  /llm\s*(degree|program|law|master of laws|admission)/i,
+  /master of laws/i,
+  /law school/i,
+  /juris doctor/i,
+];
+
 /** Returns true if title+snippet contain strong AI/tech relevance signal */
 function isRelevantToAI(title: string, snippet: string): boolean {
   const text = `${title} ${snippet}`.toLowerCase();
+
+  // Check for false positives first
+  const rawText = `${title} ${snippet}`;
+  if (FALSE_POSITIVE_PATTERNS.some(re => re.test(rawText))) return false;
 
   // One strong keyword is enough
   if (STRONG_AI_KEYWORDS.some(kw => text.includes(kw))) return true;
