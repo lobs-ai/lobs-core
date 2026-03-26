@@ -9,6 +9,9 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { execSync } from "node:child_process";
+import { readFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { eq } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { meetings } from "../db/schema.js";
@@ -16,6 +19,10 @@ import { log } from "../util/logger.js";
 import { getModelForTier } from "../config/models.js";
 import { createResilientClient, parseModelString } from "../runner/providers.js";
 import { MeetingAnalysisService } from "./meeting-analysis.js";
+
+// ── Constants ────────────────────────────────────────────────────────────
+
+const LOBS_CORE_ROOT = resolve(new URL(import.meta.url).pathname, "../../..");
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -36,7 +43,7 @@ export interface ChunkMeta {
 }
 
 export interface Insight {
-  type: "note" | "action" | "flag" | "context" | "question";
+  type: "note" | "action" | "flag" | "context" | "question" | "research" | "suggestion";
   content: string;
   timestamp: string;
 }
@@ -62,6 +69,10 @@ export interface LiveSession {
   topics: string[];
   startedAt: string;
   stoppedAt: string | null;
+  /** Accumulated raw audio buffers (webm fragments). Chunk 0 has the header. */
+  audioBuffers: Buffer[];
+  /** Pending research tasks spawned from transcript analysis */
+  pendingResearch: Array<{ id: string; query: string; status: 'pending' | 'running' | 'done' }>;
 }
 
 // ── Whisper transcription ────────────────────────────────────────────────
@@ -70,7 +81,7 @@ const WHISPER_URL = "http://127.0.0.1:7423/v1/audio/transcriptions";
 
 async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
   const form = new FormData();
-  form.append("file", new Blob([new Uint8Array(audioBuffer)]), "chunk.webm");
+  form.append("file", new Blob([new Uint8Array(audioBuffer)], { type: "audio/webm" }), "chunk.webm");
   form.append("response_format", "json");
 
   const res = await fetch(WHISPER_URL, {
@@ -89,13 +100,15 @@ async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
 
 // ── Direct LLM analysis ─────────────────────────────────────────────────
 
-async function llmAnalyze(prompt: string): Promise<string> {
+async function llmAnalyze(prompt: string, systemPrompt?: string): Promise<string> {
   const model = getModelForTier("small");
   const client = createResilientClient(model, { sessionId: "live-meeting" });
 
+  const defaultSystem = `You are Lobs, Rafe's personal AI agent, analyzing a live meeting in real-time. Rafe is a grad student (MS CSE) at the University of Michigan, GSI for EECS 281/291, varsity Rocket League player, and interning at Microsoft this summer. You and Rafe are building an AI agent platform together (lobs-core, Nexus dashboard, PAW hosting platform with Marcus). You know Rafe well — write analysis as yourself with full context of who everyone is. Return ONLY valid JSON — no markdown, no code fences, no extra text.`;
+
   const response = await client.createMessage({
     model: parseModelString(model).modelId,
-    system: "You are a live meeting analysis assistant. Return ONLY valid JSON — no markdown, no code fences, no extra text.",
+    system: systemPrompt ?? defaultSystem,
     messages: [{ role: "user", content: prompt }],
     tools: [],
     maxTokens: 4096,
@@ -122,6 +135,10 @@ function buildAnalysisPrompt(
     ? `\n\nPRIOR ACTION ITEMS (do NOT repeat these — only produce NEW ones):\n${JSON.stringify(session.actionItems, null, 2)}`
     : "";
 
+  const priorResearchJson = session.pendingResearch.length > 0
+    ? `\n\nPRIOR RESEARCH QUERIES ALREADY SPAWNED (do NOT re-spawn these):\n${JSON.stringify(session.pendingResearch.map(r => r.query), null, 2)}`
+    : "";
+
   const priorSummary = session.runningSummary
     ? `\n\nPRIOR RUNNING SUMMARY:\n${session.runningSummary}`
     : "";
@@ -131,34 +148,189 @@ function buildAnalysisPrompt(
 - Participants: ${session.participants.length ? JSON.stringify(session.participants) : "unknown"}
 - Meeting type: ${session.meetingType}`;
 
-  return `Analyze this live meeting transcript. This is an incremental analysis pass — produce ONLY NEW insights and action items that weren't already captured. Also update the meeting metadata based on what you hear.
+  return `You are Lobs — Rafe's AI agent, an ACTIVE PARTICIPANT in this meeting, not a passive summarizer. Your job is to identify what you should DO right now to be genuinely useful.
 
-Return ONLY valid JSON (no markdown, no code fences) with this exact structure:
+Classify the transcript content into intents:
+
+- **immediate_research**: Something was mentioned that you should go look up RIGHT NOW — a file, PR, codebase question, architecture detail, recent git history, etc. Include a specific, actionable \`query\` describing exactly what to look up. This triggers you to actually go do the work.
+- **action_item**: A real commitment or deliverable someone said they would do AFTER the meeting. Only include things someone explicitly committed to. NOT things the system should do. NOT instructions for you.
+- **insight**: A genuine analytical observation — something non-obvious, a risk, a connection between topics, a technical concern. NOT a description of what just happened. NOT "user wants to X" or "system should Y" — those are useless meta-commentary.
+- **suggestion**: A proactive idea or recommendation you have based on what's being discussed.
+
+CRITICAL RULES:
+- NEVER produce insights like "User wants to test X" or "System should do Y" — those describe the meeting rather than adding value to it.
+- If someone mentions a bug → spawn immediate_research to investigate it.
+- If someone mentions a file → spawn immediate_research to read and summarize it.
+- If architecture is discussed → spawn immediate_research to pull relevant context.
+- action_item is ONLY for real human commitments ("I'll fix that by Friday") — NOT system tasks.
+- insight must be genuinely analytical — a risk, a non-obvious connection, a concern.
+- If there's nothing new or genuinely useful, return empty arrays. Do NOT fill space.
+
+Return ONLY valid JSON (no markdown, no code fences):
 
 {
-  "suggested_title": "a short descriptive title based on what the meeting is actually about",
-  "participants": ["name1", "name2"],
+  "suggested_title": "short descriptive title based on actual content",
+  "participants": ["name1"],
   "meeting_type": "standup|planning|review|retrospective|one-on-one|brainstorm|interview|lecture|other",
-  "insights": [{ "type": "note|action|flag|context|question", "content": "description", "timestamp": "HH:MM:SS" }],
-  "action_items": [{ "description": "specific task", "assignee": "person or null", "priority": "high|medium|low" }],
-  "running_summary": "brief updated summary of the entire discussion so far",
+  "intents": [
+    {
+      "type": "immediate_research",
+      "query": "specific thing to look up — e.g. 'read src/services/live-meeting.ts and summarize the processChunk flow'",
+      "reason": "why this is relevant to the conversation"
+    },
+    {
+      "type": "action_item",
+      "description": "specific deliverable someone committed to",
+      "assignee": "person or null",
+      "priority": "high|medium|low"
+    },
+    {
+      "type": "insight",
+      "content": "genuine analytical observation — non-obvious, useful",
+      "subtype": "note|flag|context|question"
+    },
+    {
+      "type": "suggestion",
+      "content": "proactive recommendation from you"
+    }
+  ],
+  "running_summary": "updated summary of the entire discussion so far",
   "topics": ["topic1", "topic2"]
 }
-
-Rules:
-- suggested_title: generate a concise, descriptive title for this meeting based on the actual content (e.g. "Sprint 12 Planning" or "API Auth Architecture Review"). Update it as the meeting evolves. Ignore the user-provided title if the content tells you something more specific.
-- participants: extract ALL people mentioned by name in the transcript. Include people who are speaking AND people who are referenced/mentioned. Use first names or however they're referred to. Merge with any previously known participants.
-- meeting_type: infer from the conversation content. Only change from the current value if the transcript clearly indicates a different type.
-- insights.type: "note" for key points, "action" for action items mentioned, "flag" for concerns/risks, "context" for background info, "question" for open questions
-- Only include NEW insights not already in the prior insights list
-- Only include NEW action items not already captured
-- Update the running_summary to cover the entire transcript so far
-- If there's nothing new since the last pass, return empty arrays but still update the summary and metadata
-- Be concise but specific
-${currentMeta}${priorInsightsJson}${priorActionsJson}${priorSummary}
+${currentMeta}${priorInsightsJson}${priorActionsJson}${priorResearchJson}${priorSummary}
 
 FULL TRANSCRIPT:
 ${transcript}`;
+}
+
+// ── Research execution ───────────────────────────────────────────────────
+
+async function executeResearch(sessionId: string, researchId: string, query: string): Promise<void> {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+
+  // Mark as running
+  const task = session.pendingResearch.find(r => r.id === researchId);
+  if (task) task.status = 'running';
+
+  try {
+    let context = '';
+
+    // Detect what kind of research this is
+    const fileMatch = query.match(/(?:read|check|look at|examine|inspect)\s+([^\s,]+\.[a-z]+)/i);
+    const gitMatch = query.match(/(?:PR|pull request|commit|branch|git log|git status)/i);
+    const dirMatch = query.match(/(?:list|show|find)\s+(?:files?\s+in\s+)?([^\s,]+\/)/i);
+
+    if (fileMatch) {
+      // Try to find and read the file
+      const filePath = fileMatch[1];
+      const candidates = [
+        resolve(LOBS_CORE_ROOT, filePath),
+        resolve(LOBS_CORE_ROOT, "src", filePath),
+        resolve(process.env.HOME || "~", filePath),
+      ];
+
+      for (const candidate of candidates) {
+        if (existsSync(candidate)) {
+          const content = readFileSync(candidate, "utf-8");
+          // Truncate if too long
+          context = content.length > 8000
+            ? content.slice(0, 8000) + "\n... [truncated]"
+            : content;
+          context = `File: ${candidate}\n\n${context}`;
+          break;
+        }
+      }
+
+      if (!context) {
+        // Try fd to find it
+        try {
+          const filename = filePath.split('/').pop() ?? filePath;
+          const found = execSync(
+            `fd "${filename}" "${LOBS_CORE_ROOT}" --max-results 3 2>/dev/null || true`,
+            { encoding: 'utf-8', timeout: 5000 }
+          ).trim();
+          if (found) {
+            const firstFile = found.split('\n')[0];
+            const content = readFileSync(firstFile, "utf-8");
+            context = content.length > 8000
+              ? content.slice(0, 8000) + "\n... [truncated]"
+              : content;
+            context = `File: ${firstFile}\n\n${context}`;
+          }
+        } catch {
+          // fd not available or file not found — continue to LLM fallback
+        }
+      }
+    }
+
+    if (gitMatch && !context) {
+      try {
+        const gitLog = execSync('git log --oneline -20', { encoding: 'utf-8', cwd: LOBS_CORE_ROOT, timeout: 5000 });
+        const gitStatus = execSync('git status --short', { encoding: 'utf-8', cwd: LOBS_CORE_ROOT, timeout: 5000 });
+        const gitBranch = execSync('git branch --show-current', { encoding: 'utf-8', cwd: LOBS_CORE_ROOT, timeout: 5000 });
+        context = `Current branch: ${gitBranch.trim()}\n\nGit status:\n${gitStatus}\n\nRecent commits:\n${gitLog}`;
+      } catch {
+        // git not available or not a git repo
+      }
+    }
+
+    if (dirMatch && !context) {
+      try {
+        const dir = dirMatch[1];
+        const listing = execSync(
+          `ls -la "${resolve(LOBS_CORE_ROOT, dir)}" 2>/dev/null || ls -la "${dir}" 2>/dev/null || true`,
+          { encoding: 'utf-8', timeout: 5000 }
+        );
+        context = `Directory listing for ${dir}:\n${listing}`;
+      } catch {
+        // directory not found
+      }
+    }
+
+    // Ask LLM to synthesize a useful response
+    const researchSystem = `You are Lobs, Rafe's AI agent. You're doing background research during a live meeting to bring back useful, specific information. Be direct and concrete — reference actual names, line numbers, patterns. Skip preamble like "I found" or "Here's what I found". Just deliver the info. 2-4 sentences max.`;
+
+    const researchPrompt = context
+      ? `Research task from a live meeting with Rafe:
+
+"${query}"
+
+Here's what was found:
+
+${context}
+
+Provide a concise, useful summary. Be specific — reference actual function names, line numbers, patterns you see.`
+      : `Research task from a live meeting with Rafe:
+
+"${query}"
+
+Based on your knowledge of the lobs-core project (TypeScript, Node.js, AI agent platform with Discord bot, Nexus dashboard, meeting analysis, PAW hosting platform, etc.), provide a concise, useful response. If you don't have enough context to give a good answer, say so briefly.`;
+
+    const result = await llmAnalyze(researchPrompt, researchSystem);
+
+    // Add result as a research insight
+    session.insights.push({
+      type: "research",
+      content: result,
+      timestamp: new Date().toISOString(),
+    });
+
+    if (task) task.status = 'done';
+    log().info(`[LIVE_MEETING] Research completed for ${sessionId}: "${query.slice(0, 60)}..."`);
+
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    log().error(`[LIVE_MEETING] Research failed for ${sessionId}: ${msg}`);
+    if (task) task.status = 'done';
+
+    // Still surface that we tried
+    session.insights.push({
+      type: "research",
+      content: `Tried to research "${query}" but hit an error: ${msg.slice(0, 100)}`,
+      timestamp: new Date().toISOString(),
+    });
+  }
 }
 
 // ── In-memory session store ──────────────────────────────────────────────
@@ -194,6 +366,8 @@ export class LiveMeetingService {
       topics: [],
       startedAt: new Date().toISOString(),
       stoppedAt: null,
+      audioBuffers: [],
+      pendingResearch: [],
     };
 
     sessions.set(session.id, session);
@@ -218,15 +392,28 @@ export class LiveMeetingService {
     const chunkIndex = session.chunks.length;
     log().info(`[LIVE_MEETING] Processing chunk ${chunkIndex} for session ${sessionId} (${audioBuffer.length} bytes)`);
 
-    // Transcribe via whisper.cpp
-    let text: string;
+    // Accumulate raw audio data — webm chunks after the first are continuation
+    // fragments without headers, so we must concat all and transcribe the full buffer.
+    session.audioBuffers.push(audioBuffer);
+    const fullAudioBuffer = Buffer.concat(session.audioBuffers);
+
+    // Get previous transcript length so we can extract only the new text
+    const previousTranscriptLength = session.transcript.length;
+
+    // Transcribe the FULL accumulated audio via whisper.cpp
+    let fullText: string;
     try {
-      text = await transcribeAudio(audioBuffer);
+      fullText = await transcribeAudio(fullAudioBuffer);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       log().error(`[LIVE_MEETING] Transcription failed for chunk ${chunkIndex}: ${msg}`);
       throw e;
     }
+
+    // Extract only the new portion of the transcript
+    const text = fullText.length > previousTranscriptLength
+      ? fullText.slice(previousTranscriptLength).trim()
+      : fullText.trim();
 
     // Calculate approximate timing based on chunk index (30s per chunk)
     const chunkDuration = 30;
@@ -242,8 +429,10 @@ export class LiveMeetingService {
     };
     session.chunks.push(chunk);
 
+    // Use the full whisper output as authoritative transcript
+    session.transcript = fullText;
+
     if (text) {
-      session.transcript += (session.transcript ? "\n\n" : "") + text;
       session.segments.push({
         start: startTime,
         end: endTime,
@@ -290,8 +479,19 @@ export class LiveMeetingService {
         suggested_title?: string;
         participants?: string[];
         meeting_type?: string;
-        insights?: Insight[];
-        action_items?: ActionItem[];
+        intents?: Array<{
+          type: 'immediate_research' | 'action_item' | 'insight' | 'suggestion';
+          // immediate_research
+          query?: string;
+          reason?: string;
+          // action_item
+          description?: string;
+          assignee?: string | null;
+          priority?: 'high' | 'medium' | 'low';
+          // insight
+          content?: string;
+          subtype?: 'note' | 'flag' | 'context' | 'question';
+        }>;
         running_summary?: string;
         topics?: string[];
       };
@@ -322,20 +522,51 @@ export class LiveMeetingService {
         session.meetingType = analysis.meeting_type;
       }
 
-      // Process new insights
-      if (analysis.insights?.length) {
-        for (const insight of analysis.insights) {
-          session.insights.push(insight);
+      // Process intents
+      if (analysis.intents?.length) {
+        for (const intent of analysis.intents) {
+          switch (intent.type) {
+            case 'immediate_research': {
+              if (!intent.query) break;
+              const id = randomUUID();
+              session.pendingResearch.push({ id, query: intent.query, status: 'pending' });
+              // Fire and forget — research runs independently of analysis lock
+              executeResearch(sessionId, id, intent.query).catch(e => {
+                log().error(`[LIVE_MEETING] Research execution error: ${e}`);
+              });
+              log().info(`[LIVE_MEETING] Spawned research: "${intent.query.slice(0, 60)}..."`);
+              break;
+            }
+            case 'action_item': {
+              if (!intent.description) break;
+              session.actionItems.push({
+                description: intent.description,
+                assignee: intent.assignee ?? null,
+                priority: intent.priority ?? 'medium',
+              });
+              break;
+            }
+            case 'insight': {
+              if (!intent.content) break;
+              session.insights.push({
+                type: intent.subtype ?? 'note',
+                content: intent.content,
+                timestamp: new Date().toISOString(),
+              });
+              break;
+            }
+            case 'suggestion': {
+              if (!intent.content) break;
+              session.insights.push({
+                type: 'suggestion',
+                content: intent.content,
+                timestamp: new Date().toISOString(),
+              });
+              break;
+            }
+          }
         }
-        log().info(`[LIVE_MEETING] ${analysis.insights.length} new insights for ${sessionId}`);
-      }
-
-      // Process new action items
-      if (analysis.action_items?.length) {
-        for (const item of analysis.action_items) {
-          session.actionItems.push(item);
-        }
-        log().info(`[LIVE_MEETING] ${analysis.action_items.length} new action items for ${sessionId}`);
+        log().info(`[LIVE_MEETING] Processed ${analysis.intents.length} intents for ${sessionId}`);
       }
 
       // Update running summary

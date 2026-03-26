@@ -17,6 +17,7 @@ import { homedir } from "node:os";
 import { getDb } from "../../db/connection.js";
 import { inboxItems } from "../../db/schema.js";
 import { executeSpawnAgent } from "../../runner/tools/agent-control.js";
+import type { DeferredActionQueue } from "./deferred-action-queue.js";
 
 export interface RealtimeVoiceToolContext {
   enqueueBackgroundToolResult?: (job: {
@@ -26,6 +27,8 @@ export interface RealtimeVoiceToolContext {
   }) => void;
   channelId?: string;
   cwd?: string;
+  /** Queue for deferred actions during live meetings */
+  deferredActionQueue?: DeferredActionQueue;
 }
 
 export function queueBackgroundVoiceTool(
@@ -347,6 +350,75 @@ export const writeNoteTool = tool({
 });
 
 // ---------------------------------------------------------------------------
+// Tool: defer_action
+// ---------------------------------------------------------------------------
+export const deferActionTool = tool({
+  name: "defer_action",
+  description:
+    "Queue an action item for after the meeting. Use this for tasks, investigations, follow-ups, or ideas that emerged from discussion but do NOT need immediate execution. Don't announce every deferral — just quietly log it unless someone explicitly asked you to write something down.",
+  parameters: z.object({
+    description: z
+      .string()
+      .describe("Clear, actionable description of what needs to be done"),
+    action_type: z
+      .enum([
+        "investigate",
+        "implement",
+        "write_doc",
+        "review_pr",
+        "research",
+        "fix_bug",
+        "other",
+      ])
+      .describe("Category of the action"),
+    priority: z
+      .enum(["high", "medium", "low"])
+      .describe("Urgency — high for blockers/bugs, medium for features, low for nice-to-haves"),
+    assignee: z
+      .string()
+      .optional()
+      .describe(
+        "Who should do this — lowercase first name. Default: lobs. Only assign to a person if it explicitly requires human action.",
+      ),
+    context: z
+      .string()
+      .optional()
+      .describe(
+        "Brief context from the discussion that prompted this action",
+      ),
+  }),
+  execute: async (params, runContext?: RunContext<RealtimeVoiceToolContext>) => {
+    const queue = runContext?.context.deferredActionQueue;
+    if (queue) {
+      queue.add({
+        description: params.description,
+        actionType: params.action_type,
+        priority: params.priority,
+        assignee: params.assignee ?? "lobs",
+        context: params.context,
+        timestamp: Date.now(),
+      });
+      return `Noted for after the meeting: ${params.description}`;
+    }
+    // Fallback: no queue available — save as inbox note instead
+    const db = getDb();
+    const id = randomUUID();
+    db.insert(inboxItems)
+      .values({
+        id,
+        title: `Deferred: ${params.description.slice(0, 80)}`,
+        content: `Action type: ${params.action_type}\nPriority: ${params.priority}\nAssignee: ${params.assignee ?? "lobs"}\n${params.context ? `Context: ${params.context}` : ""}\n\n${params.description}`,
+        type: "voice_note",
+        requiresAction: true,
+        actionStatus: "pending",
+        sourceAgent: "voice-realtime",
+      })
+      .run();
+    return `Saved as inbox item: ${params.description}`;
+  },
+});
+
+// ---------------------------------------------------------------------------
 // All voice tools
 // ---------------------------------------------------------------------------
 export const realtimeVoiceTools = [
@@ -354,4 +426,5 @@ export const realtimeVoiceTools = [
   readFileTool,
   writeNoteTool,
   spawnAgentTool,
+  deferActionTool,
 ];

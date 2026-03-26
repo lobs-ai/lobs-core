@@ -115,6 +115,7 @@ export async function handleLiveMeetingRequest(
       actionItems: session.actionItems,
       runningSummary: session.runningSummary,
       topics: session.topics,
+      pendingResearch: session.pendingResearch,
       startedAt: session.startedAt,
       stoppedAt: session.stoppedAt,
     });

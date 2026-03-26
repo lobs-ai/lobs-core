@@ -42,7 +42,7 @@ _Locked merge order — see `docs/paw-branch-merge-strategy.md` for full checkli
 | # | Repo | Branch | Deps | Blocker | Status |
 |---|------|--------|------|---------|--------|
 | 1 | **ship-api** | `fix/expose-gateway-token` | — | — | 🟡 Local only — push needed |
-| 2 | **lobs-sail** | `feat/tool-preflight-health-check` | — | Fix OpenClaw→Trident ref in TOOLS.md before push | 🟡 Local only — push needed |
+| 2 | **lobs-sail** | `feat/tool-preflight-health-check` | — | ✅ OpenClaw ref cleaned — ready to push | 🟡 Local only — push needed |
 | 3 | **paw-hub** | `fix/auto-provision-gateway-token` | ship-api | HARD dep: ship-api must be merged AND deployed | 🟡 Local only — push needed |
 | 4 | **paw-plugin** | `fix/orphan-timeout-flood  +  fix/chat-agent-identity` | — | Detached HEAD d2e2ba7 → branch first; cancel stale CI run | 🟡 Local only — push needed |
 

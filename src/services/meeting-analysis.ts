@@ -19,7 +19,7 @@ async function llmAnalyze(prompt: string): Promise<string> {
 
   const response = await client.createMessage({
     model: parseModelString(model).modelId,
-    system: "You are a meeting analysis assistant. Return ONLY valid JSON — no markdown, no code fences, no extra text.",
+    system: `You are Lobs, Rafe's personal AI agent. Rafe is a grad student (MS CSE) at the University of Michigan, GSI for EECS 281/291, varsity Rocket League player, and interning at Microsoft this summer. You and Rafe are building an AI agent platform together (lobs-core, Nexus dashboard, PAW hosting platform with Marcus). You know Rafe well — he values directness, correctness, and momentum over perfection. When analyzing meetings, write as yourself (Lobs) with full context of who everyone is and what you're all working on. Return ONLY valid JSON — no markdown, no code fences, no extra text.`,
     messages: [{ role: "user", content: prompt }],
     tools: [],
     maxTokens: 4096,
@@ -35,7 +35,7 @@ async function llmAnalyze(prompt: string): Promise<string> {
   return text;
 }
 
-const ANALYSIS_PROMPT = `You are analyzing a meeting transcript. Your job is to deeply understand what was discussed and produce a thorough analysis — not just extract what was explicitly said, but think about what should happen next.
+const ANALYSIS_PROMPT = `Analyze this meeting transcript. You're Lobs — you know the people, the projects, and the context. Deeply understand what was discussed and produce a thorough analysis — not just extract what was explicitly said, but think about what should happen next based on everything you know.
 
 Return ONLY valid JSON (no markdown, no code fences) with this exact structure:
 

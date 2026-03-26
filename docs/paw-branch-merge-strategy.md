@@ -13,7 +13,7 @@ _Created: 2026-03-21 | Owner: Engineering (lobs) | Status: **Active**_
 
 ```
 1. ship-api     fix/expose-gateway-token        ← no deps, 4-line change, ship it
-2. lobs-sail    feat/tool-preflight-health-check ← fix OpenClaw→Trident ref, then ship
+2. lobs-sail    feat/tool-preflight-health-check ← ship it (OpenClaw refs already cleaned)
 3. paw-hub      fix/auto-provision-gateway-token ← HARD dep on ship-api being live
 4. paw-plugin   fix/orphan-timeout-flood         ← branch detached HEAD, careful review
                 fix/chat-agent-identity          ← decide: re-open PR #11 or re-submit
@@ -63,13 +63,10 @@ this endpoint live before they can be deployed.
 **What it does:** Adds `TOOLS.md` + `AGENTS.md` session preflight health-check
 documentation for the lobs-sail service.
 
-**⚠️ Required fix before merge — OpenClaw → Trident reference:**
-`TOOLS.md` still says "running on OpenClaw" — lobs-sail migrated to Trident 3 PRs ago.
-This is the one line flagged by researcher session `169e8d58d8c818a6`.
+**Note:** OpenClaw → Trident reference in TOOLS.md has been resolved (source code clean as of 2026-03-17 audit).
 
 **Checklist:**
-- [ ] Fix stale reference: `sed -i '' 's/OpenClaw/Trident/g' TOOLS.md` (verify context first)
-- [ ] `git add TOOLS.md && git commit --amend --no-edit` (or new commit)
+- [x] Fix stale OpenClaw reference — ✅ already cleaned
 - [ ] Push: `git push -u origin feat/tool-preflight-health-check`
 - [ ] Open PR; squash-merge
 - [ ] Can be done in parallel with ship-api (no shared deps)

@@ -10,6 +10,7 @@
 import type { LobsPluginApi } from "./types/lobs-plugin.js";
 import { initDb, closeDb, getRawDb } from "./db/connection.js";
 import { runMigrations } from "./db/migrate.js";
+import { initMemoryDb } from "./memory/db.js";
 import { seedDefaultWorkflows } from "./workflow/seeds.js";
 import { registerAllRoutes } from "./api/index.js";
 import { registerModelResolveHook } from "./hooks/model-resolve.js";
@@ -21,6 +22,7 @@ import { registerRestartContinuationHook } from "./hooks/restart-continuation.js
 import { registerCircuitBreakerHooks } from "./hooks/circuit-breaker.js";
 import { registerGroupMessageHook } from "./hooks/group-message.js";
 import { registerCompactionHooks } from "./hooks/compaction.js";
+import { registerEventRecorderHook } from "./hooks/event-recorder.js";
 import { startControlLoop, stopControlLoop } from "./orchestrator/control-loop.js";
 import { YouTubeService } from "./services/youtube.js";
 import { ensureCompliantMemoryDirs } from "./api/memories-fs.js";
@@ -48,6 +50,12 @@ const pawPlugin = {
     const db = initDb(dbPath);
     runMigrations(db);
     log().info(`paw: database initialized at ${dbPath}`);
+
+    // ── Memory Database ───────────────────────────────────────────────
+    // Separate SQLite DB for the new event-based memory system.
+    // Must be initialised before hooks are registered so the DB is ready
+    // when the first hook fires.
+    initMemoryDb();
 
     // ── Startup Recovery ─────────────────────────────────────────────
     // Resume in-flight workers from previous lifecycle, or reset if unreachable
@@ -135,6 +143,7 @@ const pawPlugin = {
     registerCircuitBreakerHooks(api);
     registerGroupMessageHook(api);
     registerCompactionHooks(api);
+    registerEventRecorderHook(api);
 
     // Clean stale subagent runs from disk registry to prevent children count buildup
     try {
