@@ -29,8 +29,7 @@ import { discordService } from "./services/discord.js";
 import { loadDiscordConfig } from "./config/discord.js";
 import { MainAgent } from "./services/main-agent.js";
 import { loadWorkspaceContext, buildMainAgentPrompt } from "./services/workspace-loader.js";
-import { setDiscordService as setMessageDiscord } from "./runner/tools/message.js";
-import { setReactDiscord } from "./runner/tools/index.js";
+import { setDiscordToolDiscord } from "./runner/tools/index.js";
 import { validateAllConfigs } from "./config/validator.js";
 import { initMemory, shutdownMemory } from "./services/memory/index.js";
 import { imagineService } from "./services/imagine.js";
@@ -530,9 +529,8 @@ async function main() {
     try {
       await discordService.connect(discordConfig);
 
-      // Wire Discord to message and react tools
-      setMessageDiscord(discordService);
-      setReactDiscord(discordService);
+      // Wire Discord to unified discord tool
+      setDiscordToolDiscord(discordService);
 
       // ── Voice Manager ─────────────────────────────────────────────
       let voiceManager: VoiceManager | null = null;

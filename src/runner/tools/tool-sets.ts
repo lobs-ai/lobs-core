@@ -30,11 +30,10 @@ const NEXUS_TOOLS: ToolName[] = [
   "html_to_pdf",
 ];
 
-// Discord channel sessions — add message + react
+// Discord channel sessions — add unified discord tool
 const DISCORD_TOOLS: ToolName[] = [
   ...NEXUS_TOOLS,
-  "message",
-  "react",
+  "discord",
 ];
 
 // Voice sessions — conversational, lightweight but capable

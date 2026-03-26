@@ -149,27 +149,33 @@ Remember: Write the COMPLETE JSON analysis to ${outFile} using the Write tool. T
 
 function buildAnalysisPrompt(
   transcript: string,
-  priorInsights: Insight[],
-  priorActionItems: ActionItem[],
-  runningSummary: string,
+  session: LiveSession,
 ): string {
-  const priorInsightsJson = priorInsights.length > 0
-    ? `\n\nPRIOR INSIGHTS (do NOT repeat these — only produce NEW ones):\n${JSON.stringify(priorInsights, null, 2)}`
+  const priorInsightsJson = session.insights.length > 0
+    ? `\n\nPRIOR INSIGHTS (do NOT repeat these — only produce NEW ones):\n${JSON.stringify(session.insights, null, 2)}`
     : "";
 
-  const priorActionsJson = priorActionItems.length > 0
-    ? `\n\nPRIOR ACTION ITEMS (do NOT repeat these — only produce NEW ones):\n${JSON.stringify(priorActionItems, null, 2)}`
+  const priorActionsJson = session.actionItems.length > 0
+    ? `\n\nPRIOR ACTION ITEMS (do NOT repeat these — only produce NEW ones):\n${JSON.stringify(session.actionItems, null, 2)}`
     : "";
 
-  const priorSummary = runningSummary
-    ? `\n\nPRIOR RUNNING SUMMARY:\n${runningSummary}`
+  const priorSummary = session.runningSummary
+    ? `\n\nPRIOR RUNNING SUMMARY:\n${session.runningSummary}`
     : "";
 
-  return `Analyze this live meeting transcript. This is an incremental analysis pass — produce ONLY NEW insights and action items that weren't already captured.
+  const currentMeta = `\n\nCURRENT MEETING METADATA:
+- Title: "${session.title}"
+- Participants: ${session.participants.length ? JSON.stringify(session.participants) : "unknown"}
+- Meeting type: ${session.meetingType}`;
+
+  return `Analyze this live meeting transcript. This is an incremental analysis pass — produce ONLY NEW insights and action items that weren't already captured. Also update the meeting metadata based on what you hear.
 
 Return ONLY valid JSON (no markdown, no code fences) with this exact structure:
 
 {
+  "suggested_title": "a short descriptive title based on what the meeting is actually about",
+  "participants": ["name1", "name2"],
+  "meeting_type": "standup|planning|review|retrospective|one-on-one|brainstorm|interview|lecture|other",
   "insights": [{ "type": "note|action|flag|context|question", "content": "description", "timestamp": "HH:MM:SS" }],
   "action_items": [{ "description": "specific task", "assignee": "person or null", "priority": "high|medium|low" }],
   "running_summary": "brief updated summary of the entire discussion so far",
@@ -177,13 +183,16 @@ Return ONLY valid JSON (no markdown, no code fences) with this exact structure:
 }
 
 Rules:
+- suggested_title: generate a concise, descriptive title for this meeting based on the actual content (e.g. "Sprint 12 Planning" or "API Auth Architecture Review"). Update it as the meeting evolves. Ignore the user-provided title if the content tells you something more specific.
+- participants: extract ALL people mentioned by name in the transcript. Include people who are speaking AND people who are referenced/mentioned. Use first names or however they're referred to. Merge with any previously known participants.
+- meeting_type: infer from the conversation content. Only change from the current value if the transcript clearly indicates a different type.
 - insights.type: "note" for key points, "action" for action items mentioned, "flag" for concerns/risks, "context" for background info, "question" for open questions
 - Only include NEW insights not already in the prior insights list
 - Only include NEW action items not already captured
 - Update the running_summary to cover the entire transcript so far
-- If there's nothing new since the last pass, return empty arrays but still update the summary
+- If there's nothing new since the last pass, return empty arrays but still update the summary and metadata
 - Be concise but specific
-${priorInsightsJson}${priorActionsJson}${priorSummary}
+${currentMeta}${priorInsightsJson}${priorActionsJson}${priorSummary}
 
 FULL TRANSCRIPT:
 ${transcript}`;
@@ -303,12 +312,7 @@ export class LiveMeetingService {
 
     analysisLocks.set(sessionId, true);
     try {
-      const prompt = buildAnalysisPrompt(
-        session.transcript,
-        session.insights,
-        session.actionItems,
-        session.runningSummary,
-      );
+      const prompt = buildAnalysisPrompt(session.transcript, session);
 
       const responseText = await spawnAndWait(prompt);
 
@@ -320,11 +324,40 @@ export class LiveMeetingService {
       }
 
       const analysis = JSON.parse(jsonMatch[0]) as {
+        suggested_title?: string;
+        participants?: string[];
+        meeting_type?: string;
         insights?: Insight[];
         action_items?: ActionItem[];
         running_summary?: string;
         topics?: string[];
       };
+
+      // Update meeting metadata from LLM analysis
+      if (analysis.suggested_title && analysis.suggested_title.length > 2) {
+        const oldTitle = session.title;
+        session.title = analysis.suggested_title;
+        if (oldTitle !== session.title) {
+          log().info(`[LIVE_MEETING] Title updated: "${oldTitle}" → "${session.title}"`);
+        }
+      }
+
+      if (analysis.participants?.length) {
+        // Merge with existing — union of all detected participants
+        const existing = new Set(session.participants.map(p => p.toLowerCase()));
+        for (const p of analysis.participants) {
+          if (p && !existing.has(p.toLowerCase())) {
+            session.participants.push(p);
+            existing.add(p.toLowerCase());
+          }
+        }
+        log().info(`[LIVE_MEETING] Participants: [${session.participants.join(", ")}]`);
+      }
+
+      if (analysis.meeting_type && analysis.meeting_type !== session.meetingType) {
+        log().info(`[LIVE_MEETING] Meeting type: ${session.meetingType} → ${analysis.meeting_type}`);
+        session.meetingType = analysis.meeting_type;
+      }
 
       // Process new insights
       if (analysis.insights?.length) {

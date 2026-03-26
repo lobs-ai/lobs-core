@@ -158,6 +158,6 @@ function isDangerous(toolName: string, toolInput: string): boolean {
   if (toolName === "exec" || toolName === "Bash") {
     return DANGEROUS_PATTERNS.some(p => p.test(toolInput));
   }
-  if (toolName === "message" && /send/i.test(toolInput)) return true;
+  if (toolName === "discord" && /send/i.test(toolInput)) return true;
   return false;
 }

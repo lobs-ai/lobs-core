@@ -16,14 +16,13 @@ import { webSearchToolDefinition, webSearchTool, webFetchToolDefinition, webFetc
 import { memorySearchToolDefinition, memorySearchTool, memoryReadToolDefinition, memoryReadTool, memoryWriteToolDefinition, memoryWriteTool } from "./memory.js";
 import { AGENT_CONTROL_TOOLS, executeSpawnAgent, executeRunPipeline, executeListAgents } from "./agent-control.js";
 import { cronToolDefinition, executeCronTool } from "./cron.js";
-import { messageToolDefinition, executeMessageTool } from "./message.js";
-import { reactToolDefinition, executeReactTool, setDiscordService as setReactDiscord } from "./react.js";
+import { discordToolDefinition, executeDiscordTool, setDiscordService as setDiscordToolDiscord } from "./discord.js";
 import { processToolDefinition, processTool } from "./process.js";
 import { humanizeToolDefinition, humanizeTool } from "./humanize.js";
 import { imagineToolDefinition, imagineTool } from "./imagine.js";
 import { htmlToPdfToolDefinition, htmlToPdfTool } from "./html-to-pdf.js";
 
-export { setReactDiscord };
+export { setDiscordToolDiscord };
 
 export type { ToolSideEffects, ToolExecutorResult };
 
@@ -127,13 +126,9 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
     definition: cronToolDefinition,
     execute: (params) => executeCronTool(params),
   },
-  message: {
-    definition: messageToolDefinition,
-    execute: (params) => executeMessageTool(params),
-  },
-  react: {
-    definition: reactToolDefinition,
-    execute: (params) => executeReactTool(params),
+  discord: {
+    definition: discordToolDefinition,
+    execute: (params) => executeDiscordTool(params),
   },
   process: {
     definition: processToolDefinition,

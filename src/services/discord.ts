@@ -741,6 +741,151 @@ class DiscordService {
     }
   }
 
+  /** Fetch recent messages from a channel */
+  async fetchMessages(channelId: string, limit = 20, before?: string): Promise<Array<{
+    id: string; content: string; authorId: string; authorTag: string;
+    timestamp: string; attachments: number; embeds: number;
+  }>> {
+    if (!this.client || this.state !== "ready") return [];
+    if (!/^\d+$/.test(channelId)) return [];
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !channel.isTextBased()) return [];
+      const options: { limit: number; before?: string } = { limit: Math.min(limit, 100) };
+      if (before) options.before = before;
+      const messages = await (channel as TextChannel).messages.fetch(options);
+      return [...messages.values()].map(m => ({
+        id: m.id,
+        content: m.content,
+        authorId: m.author.id,
+        authorTag: m.author.tag,
+        timestamp: m.createdAt.toISOString(),
+        attachments: m.attachments.size,
+        embeds: m.embeds.length,
+      }));
+    } catch (err) {
+      console.error(`[discord] fetchMessages failed for ${channelId}:`, err);
+      return [];
+    }
+  }
+
+  /** Fetch a single message by ID */
+  async fetchMessage(channelId: string, messageId: string): Promise<{
+    id: string; content: string; authorId: string; authorTag: string;
+    timestamp: string; reactions: Array<{ emoji: string; count: number }>;
+    attachments: Array<{ name: string; url: string; size: number }>;
+  } | null> {
+    if (!this.client || this.state !== "ready") return null;
+    if (!/^\d+$/.test(channelId)) return null;
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !channel.isTextBased()) return null;
+      const msg = await (channel as TextChannel).messages.fetch(messageId);
+      return {
+        id: msg.id,
+        content: msg.content,
+        authorId: msg.author.id,
+        authorTag: msg.author.tag,
+        timestamp: msg.createdAt.toISOString(),
+        reactions: [...msg.reactions.cache.values()].map(r => ({
+          emoji: r.emoji.toString(),
+          count: r.count ?? 0,
+        })),
+        attachments: [...msg.attachments.values()].map(a => ({
+          name: a.name ?? "unknown",
+          url: a.url,
+          size: a.size,
+        })),
+      };
+    } catch (err) {
+      console.error(`[discord] fetchMessage failed for ${channelId}/${messageId}:`, err);
+      return null;
+    }
+  }
+
+  /** Create a thread from a message or as a standalone thread */
+  async createThread(channelId: string, name: string, messageId?: string, autoArchiveDuration?: number): Promise<{ threadId: string; name: string }> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(channelId)) throw new Error("Invalid channel ID");
+    const channel = await this.client.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased()) throw new Error("Channel not found or not text-based");
+
+    if (messageId) {
+      const msg = await (channel as TextChannel).messages.fetch(messageId);
+      const thread = await msg.startThread({
+        name,
+        autoArchiveDuration: (autoArchiveDuration ?? 1440) as 60 | 1440 | 4320 | 10080,
+      });
+      return { threadId: thread.id, name: thread.name };
+    } else {
+      const thread = await (channel as TextChannel).threads.create({
+        name,
+        autoArchiveDuration: (autoArchiveDuration ?? 1440) as 60 | 1440 | 4320 | 10080,
+      });
+      return { threadId: thread.id, name: thread.name };
+    }
+  }
+
+  /** List active threads in a channel */
+  async listThreads(channelId: string): Promise<Array<{
+    id: string; name: string; messageCount: number; memberCount: number;
+    archived: boolean; createdAt: string;
+  }>> {
+    if (!this.client || this.state !== "ready") return [];
+    if (!/^\d+$/.test(channelId)) return [];
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !("threads" in channel)) return [];
+      const active = await (channel as TextChannel).threads.fetchActive();
+      return [...active.threads.values()].map(t => ({
+        id: t.id,
+        name: t.name,
+        messageCount: t.messageCount ?? 0,
+        memberCount: t.memberCount ?? 0,
+        archived: t.archived ?? false,
+        createdAt: t.createdTimestamp ? new Date(t.createdTimestamp).toISOString() : "",
+      }));
+    } catch (err) {
+      console.error(`[discord] listThreads failed for ${channelId}:`, err);
+      return [];
+    }
+  }
+
+  /** Add a user to a thread */
+  async addThreadMember(threadId: string, userId: string): Promise<void> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(threadId)) throw new Error("Invalid thread ID");
+    const thread = await this.client.channels.fetch(threadId);
+    if (!thread || !thread.isThread()) throw new Error("Not a thread");
+    await thread.members.add(userId);
+  }
+
+  /** List channels in a guild */
+  async listChannels(guildId: string): Promise<Array<{
+    id: string; name: string; type: string; parentId: string | null; parentName: string | null;
+  }>> {
+    if (!this.client || this.state !== "ready") return [];
+    try {
+      const guild = await this.client.guilds.fetch(guildId);
+      const channels = await guild.channels.fetch();
+      const typeMap: Record<number, string> = {
+        0: "text", 1: "dm", 2: "voice", 4: "category", 5: "announcement",
+        10: "announcement_thread", 11: "public_thread", 12: "private_thread",
+        13: "stage", 15: "forum", 16: "media",
+      };
+      return [...channels.values()].filter(c => c !== null).map(c => ({
+        id: c!.id,
+        name: c!.name,
+        type: typeMap[c!.type] ?? `unknown(${c!.type})`,
+        parentId: c!.parentId,
+        parentName: c!.parent?.name ?? null,
+      }));
+    } catch (err) {
+      console.error(`[discord] listChannels failed for guild ${guildId}:`, err);
+      return [];
+    }
+  }
+
   /** Get health metrics for monitoring */
   getHealth(): HealthMetrics {
     return { ...this.metrics };
