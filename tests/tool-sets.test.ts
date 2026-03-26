@@ -42,15 +42,13 @@ describe("Tool Sets", () => {
     it("should exclude Discord tools from nexus sessions", () => {
       const tools = getToolsForSession("nexus");
       
-      expect(tools).not.toContain("message");
-      expect(tools).not.toContain("react");
+      expect(tools).not.toContain("discord");
     });
 
-    it("should include message and react in Discord sessions", () => {
+    it("should include discord tool in Discord sessions", () => {
       const tools = getToolsForSession("discord");
       
-      expect(tools).toContain("message");
-      expect(tools).toContain("react");
+      expect(tools).toContain("discord");
     });
 
     it("should include cron in system sessions", () => {
@@ -103,7 +101,7 @@ describe("Tool Sets", () => {
       const discordTools = getToolsForSession("discord");
       const systemTools = getToolsForSession("system");
       
-      // Discord should have more tools than nexus (adds message, react)
+      // Discord should have more tools than nexus (adds discord tool)
       expect(discordTools.length).toBeGreaterThan(nexusTools.length);
       
       // System should have more tools than discord (adds cron)
