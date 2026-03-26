@@ -289,7 +289,9 @@ const BLOCKED_DOMAINS = new Set([
   "customer-service.on-running.com",
   // Law / education (false positives for "LLM")
   "www.lsac.org",
+  "lsac.org",
   "llm.law.harvard.edu",
+  "docs.ollama.com",
 ]);
 
 /** URL path patterns that indicate non-article pages (homepages, product pages, login) */
@@ -303,7 +305,8 @@ const BLOCKED_PATH_PATTERNS = [
   /^\/(docs|documentation)\/(?!blog)/i,  // deep doc pages (except blog posts under /docs/)
   /\/(toc|current|archive|issue)\b/i,  // journal table-of-contents pages
   /\/topic\//i,  // topic index pages (e.g. news.mit.edu/topic/artificial-intelligence2)
-  /^\/(import|windows|linux|macos)\/?$/i,  // OS-specific install pages
+  /^\/(import|windows|linux|macos|upgrade|migrate)\/?$/i,  // OS-specific install/setup pages
+  /^\/(api|cli|sdk)\//i,  // API/CLI reference docs
 ];
 
 /** TLD / domain patterns strongly associated with non-English content */
