@@ -9,7 +9,9 @@ import { readFile } from "node:fs/promises";
 import { join, extname } from "node:path";
 import { log } from "../util/logger.js";
 
-const WEB_ROOT = process.env.NEXUS_WEB_ROOT || "/Users/lobs/lobs/lobs-nexus/dist";
+// Nexus is a submodule at lobs-core/nexus/. The compiled API lives at dist/api/,
+// so ../../nexus/dist resolves to lobs-core/nexus/dist.
+const WEB_ROOT = process.env.NEXUS_WEB_ROOT || join(import.meta.dirname, "../../nexus/dist");
 const ASSETS_ROOT = join(WEB_ROOT, "static");
 
 const MIME: Record<string, string> = {

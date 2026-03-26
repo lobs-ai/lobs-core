@@ -3,7 +3,7 @@
  *
  * Flow: Browser records 30s audio chunks → POST to backend → local whisper.cpp
  * transcribes → text appended to running transcript → LLM analyzes full
- * transcript → results pushed via SSE to frontend.
+ * transcript → frontend polls GET /api/meetings/live/:id for updates.
  *
  * Sessions are held in-memory. Only finalized meetings are persisted to the DB.
  */
@@ -48,13 +48,6 @@ export interface ActionItem {
   priority: "high" | "medium" | "low";
 }
 
-export interface LiveSessionEvent {
-  type: "transcript" | "insight" | "action_item" | "summary" | "status" | "error";
-  data: unknown;
-}
-
-type EventListener = (event: LiveSessionEvent) => void;
-
 export interface LiveSession {
   id: string;
   status: SessionStatus;
@@ -70,12 +63,6 @@ export interface LiveSession {
   topics: string[];
   startedAt: string;
   stoppedAt: string | null;
-
-  /** SSE listeners */
-  listeners: Set<EventListener>;
-  addListener(fn: EventListener): void;
-  removeListener(fn: EventListener): void;
-  emit(event: LiveSessionEvent): void;
 }
 
 // ── Whisper transcription ────────────────────────────────────────────────
@@ -202,54 +189,6 @@ FULL TRANSCRIPT:
 ${transcript}`;
 }
 
-// ── Session management ───────────────────────────────────────────────────
-
-function createSession(opts: {
-  title?: string;
-  participants?: string[];
-  meetingType?: string;
-}): LiveSession {
-  const listeners = new Set<EventListener>();
-
-  const session: LiveSession = {
-    id: randomUUID(),
-    status: "recording",
-    title: opts.title ?? "Live Meeting",
-    participants: opts.participants ?? [],
-    meetingType: opts.meetingType ?? "general",
-    transcript: "",
-    segments: [],
-    chunks: [],
-    insights: [],
-    actionItems: [],
-    runningSummary: "",
-    topics: [],
-    startedAt: new Date().toISOString(),
-    stoppedAt: null,
-    listeners,
-
-    addListener(fn: EventListener) {
-      listeners.add(fn);
-    },
-
-    removeListener(fn: EventListener) {
-      listeners.delete(fn);
-    },
-
-    emit(event: LiveSessionEvent) {
-      for (const fn of listeners) {
-        try {
-          fn(event);
-        } catch (e) {
-          log().error(`[LIVE_MEETING] Listener error: ${e}`);
-        }
-      }
-    },
-  };
-
-  return session;
-}
-
 // ── In-memory session store ──────────────────────────────────────────────
 
 const sessions = new Map<string, LiveSession>();
@@ -268,7 +207,23 @@ export class LiveMeetingService {
     participants?: string[];
     meetingType?: string;
   } = {}): { sessionId: string; status: SessionStatus } {
-    const session = createSession(opts);
+    const session: LiveSession = {
+      id: randomUUID(),
+      status: "recording",
+      title: opts.title ?? "Live Meeting",
+      participants: opts.participants ?? [],
+      meetingType: opts.meetingType ?? "general",
+      transcript: "",
+      segments: [],
+      chunks: [],
+      insights: [],
+      actionItems: [],
+      runningSummary: "",
+      topics: [],
+      startedAt: new Date().toISOString(),
+      stoppedAt: null,
+    };
+
     sessions.set(session.id, session);
     log().info(`[LIVE_MEETING] Started session ${session.id}: "${session.title}"`);
     return { sessionId: session.id, status: session.status };
@@ -298,7 +253,6 @@ export class LiveMeetingService {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       log().error(`[LIVE_MEETING] Transcription failed for chunk ${chunkIndex}: ${msg}`);
-      session.emit({ type: "error", data: { message: `Transcription failed: ${msg}`, chunkIndex } });
       throw e;
     }
 
@@ -324,12 +278,6 @@ export class LiveMeetingService {
         text,
       });
     }
-
-    // Emit transcript event
-    session.emit({
-      type: "transcript",
-      data: { text, chunkIndex, fullTranscript: session.transcript },
-    });
 
     // Fire LLM analysis in background (don't await — return transcription immediately)
     this.runAnalysis(sessionId).catch(e => {
@@ -382,7 +330,6 @@ export class LiveMeetingService {
       if (analysis.insights?.length) {
         for (const insight of analysis.insights) {
           session.insights.push(insight);
-          session.emit({ type: "insight", data: insight });
         }
         log().info(`[LIVE_MEETING] ${analysis.insights.length} new insights for ${sessionId}`);
       }
@@ -391,7 +338,6 @@ export class LiveMeetingService {
       if (analysis.action_items?.length) {
         for (const item of analysis.action_items) {
           session.actionItems.push(item);
-          session.emit({ type: "action_item", data: item });
         }
         log().info(`[LIVE_MEETING] ${analysis.action_items.length} new action items for ${sessionId}`);
       }
@@ -399,7 +345,6 @@ export class LiveMeetingService {
       // Update running summary
       if (analysis.running_summary) {
         session.runningSummary = analysis.running_summary;
-        session.emit({ type: "summary", data: { summary: analysis.running_summary } });
       }
 
       // Update topics
@@ -409,7 +354,6 @@ export class LiveMeetingService {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       log().error(`[LIVE_MEETING] Analysis error for ${sessionId}: ${msg}`);
-      session.emit({ type: "error", data: { message: `Analysis failed: ${msg}` } });
     } finally {
       analysisLocks.delete(sessionId);
     }
@@ -428,7 +372,6 @@ export class LiveMeetingService {
 
     session.status = "processing";
     session.stoppedAt = new Date().toISOString();
-    session.emit({ type: "status", data: { status: "processing" } });
 
     log().info(`[LIVE_MEETING] Stopping session ${sessionId}, ${session.chunks.length} chunks, ${session.transcript.length} chars`);
 
@@ -460,7 +403,6 @@ export class LiveMeetingService {
 
     // Mark session as completed
     session.status = "completed";
-    session.emit({ type: "status", data: { status: "completed", meetingId } });
 
     // Trigger full analysis via MeetingAnalysisService (fire-and-forget)
     const analysisSvc = new MeetingAnalysisService();
@@ -471,7 +413,7 @@ export class LiveMeetingService {
     // Get the stored record
     const stored = db.select().from(meetings).where(eq(meetings.id, meetingId)).get()!;
 
-    // Clean up session after a delay (keep it alive briefly for SSE clients to get final events)
+    // Clean up session after a delay (allow a few more polls to pick up final state)
     setTimeout(() => {
       sessions.delete(sessionId);
       analysisLocks.delete(sessionId);
@@ -486,21 +428,6 @@ export class LiveMeetingService {
    */
   getSession(sessionId: string): LiveSession | undefined {
     return sessions.get(sessionId);
-  }
-
-  /**
-   * Get insights since a given timestamp.
-   */
-  getInsights(sessionId: string, since?: string): Insight[] {
-    const session = sessions.get(sessionId);
-    if (!session) return [];
-
-    if (!since) return session.insights;
-
-    // Filter insights — since we don't have real timestamps on each insight,
-    // we compare the insight's timestamp field (HH:MM:SS format from LLM)
-    // This is best-effort; the SSE stream is the primary real-time channel.
-    return session.insights;
   }
 
   /**

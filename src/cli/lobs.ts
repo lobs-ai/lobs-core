@@ -5,7 +5,7 @@
  * Process management:
  *   lobs start                Start lobs-core (daemonized)
  *   lobs stop                 Stop the running instance
- *   lobs restart              Restart lobs-core
+ *   lobs restart              Pull submodules + build + restart (--no-pull, --no-build)
  *   lobs status               System overview (server, tasks, workers)
  *   lobs health               Detailed health check (DB, memory, LM Studio)
  *   lobs preflight            Session startup: health + LM Studio model-availability check
@@ -486,6 +486,26 @@ async function cmdStop() {
 }
 
 async function cmdBuild(): Promise<boolean> {
+  // Build Nexus (frontend dashboard) first
+  const nexusDir = resolve(LOBS_CORE_DIR, "nexus");
+  if (existsSync(resolve(nexusDir, "package.json"))) {
+    console.log(colorize("Building nexus...", "cyan"));
+    try {
+      execSync("npm run build", {
+        cwd: nexusDir,
+        encoding: "utf-8",
+        stdio: ["inherit", "pipe", "pipe"],
+        timeout: 60_000,
+      });
+      console.log(colorize("✓ Nexus build succeeded", "green"));
+    } catch (err: any) {
+      const stderr = err.stderr?.toString() || err.message;
+      console.error(colorize("✗ Nexus build failed (non-fatal):", "yellow"));
+      console.error(colorize(stderr.slice(-300), "dim"));
+    }
+  }
+
+  // Build lobs-core
   console.log(colorize("Building lobs-core...", "cyan"));
   try {
     execSync("npm run build", {
@@ -504,7 +524,31 @@ async function cmdBuild(): Promise<boolean> {
   }
 }
 
-async function cmdRestart(skipBuild = false, opts: { useLaunchd?: boolean } = {}) {
+function cmdUpdateSubmodules(): boolean {
+  console.log(colorize("Updating submodules...", "cyan"));
+  try {
+    execSync("git submodule foreach 'git checkout main && git pull origin main'", {
+      cwd: LOBS_CORE_DIR,
+      encoding: "utf-8",
+      stdio: ["inherit", "pipe", "pipe"],
+      timeout: 30_000,
+    });
+    console.log(colorize("✓ Submodules updated", "green"));
+    return true;
+  } catch (err: any) {
+    const stderr = err.stderr?.toString() || err.message;
+    console.error(colorize("✗ Submodule update failed:", "red"));
+    console.error(colorize(stderr.slice(-500), "dim"));
+    return false;
+  }
+}
+
+async function cmdRestart(skipBuild = false, skipPull = false, opts: { useLaunchd?: boolean } = {}) {
+  // Pull latest submodules unless --no-pull
+  if (!skipPull) {
+    cmdUpdateSubmodules();
+  }
+
   // Auto-build before restart unless --no-build
   if (!skipBuild) {
     const buildOk = await cmdBuild();
@@ -1270,7 +1314,7 @@ const subcommand = args[1];
       break;
 
     case "restart":
-      await cmdRestart(args.includes("--no-build"), { useLaunchd: args.includes("--launchd") });
+      await cmdRestart(args.includes("--no-build"), args.includes("--no-pull"), { useLaunchd: args.includes("--launchd") });
       break;
 
     case "build":
@@ -1343,7 +1387,7 @@ const subcommand = args[1];
       console.log(colorize("Process:", "cyan"));
       console.log("  lobs start [--launchd]   Start lobs-core (manual by default)");
       console.log("  lobs stop                Stop lobs-core and unload launchd");
-      console.log("  lobs restart             Build + restart (use --no-build to skip)");
+      console.log("  lobs restart             Pull submodules, build + restart (--no-build, --no-pull)");
       console.log("  lobs build               Build without restarting");
       console.log("  lobs status              System overview");
       console.log("  lobs health              Detailed health check");
