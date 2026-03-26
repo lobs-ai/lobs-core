@@ -20,7 +20,7 @@ import {
 } from "../services/intel-sweep.js";
 import {
   BaseWorker,
-  callLocalModelJSON,
+  callApiModelJSON,
   type WorkerArtifact,
   type WorkerConfig,
   type WorkerContext,
@@ -182,19 +182,29 @@ export class IntelSweepWorker extends BaseWorker {
           continue;
         }
 
-        // Use local model to extract insights
+        // Use API model (Haiku) for insight extraction
         const prompt = this.buildExtractionPrompt(source, brief);
-        const { data, tokensUsed } = await callLocalModelJSON<ExtractionResponse>(prompt, {
+        const { data, tokensUsed } = await callApiModelJSON<ExtractionResponse>(prompt, {
+          tier: "small",
           maxTokens: 1024,
-          temperature: 0.3,
           systemPrompt: EXTRACTION_SYSTEM_PROMPT,
-          timeoutMs: 60_000,
         });
 
         totalTokens += tokensUsed;
 
+        // Deduplicate insights — skip if title is too similar to an existing insight
+        const existingInsights = this.intelSweep.listInsights({ limit: 50 });
+        const existingTitles = new Set(existingInsights.map(i => i.title.toLowerCase().trim()));
+
         // Save extracted insights
         for (const insight of data.insights ?? []) {
+          // Skip if very similar title exists
+          const normalizedTitle = insight.title.toLowerCase().trim();
+          if (existingTitles.has(normalizedTitle)) continue;
+
+          // Skip low relevance
+          if ((insight.relevanceScore ?? 0) < 0.3) continue;
+
           this.intelSweep.addInsight({
             sourceId: source.id,
             feedId: source.feedId,
@@ -205,6 +215,7 @@ export class IntelSweepWorker extends BaseWorker {
             actionability: insight.actionability ?? "informational",
           });
           totalInsights++;
+          existingTitles.add(normalizedTitle); // prevent dupes within this batch too
         }
 
         // Mark source as processed
@@ -245,48 +256,32 @@ export class IntelSweepWorker extends BaseWorker {
   }
 
   private buildExtractionPrompt(source: IntelSource, brief: { summary: string; keyPoints: string; tags: string }): string {
-    return `Analyze the following research brief and extract actionable insights.
+    // If the brief flagged content as irrelevant, skip
+    if (brief.summary.includes("NOT_RELEVANT")) {
+      return `The following content was flagged as not relevant to AI/agents/ML. Return {"insights": []}.`;
+    }
+
+    return `Analyze this research brief and extract ONLY genuinely actionable insights for building AI agent systems.
 
 ## Source
 - **URL:** ${source.url}
 - **Title:** ${source.title ?? "Unknown"}
-- **Type:** ${source.sourceType}
 
-## Research Brief Summary
+## Brief Summary
 ${brief.summary}
 
 ## Key Points
 ${brief.keyPoints}
 
-## Tags
-${brief.tags}
+## Rules
+- Return 0-2 insights MAX. Quality over quantity. Empty array is fine.
+- Each insight must be specific and actionable, not generic ("AI is growing" is useless).
+- Focus on: concrete techniques, tools, architecture patterns, new capabilities, security issues, performance improvements.
+- Skip if the content is: generic overview, outdated (pre-2024), marketing fluff, or not about AI/agents/ML.
+- relevanceScore: 0.0-1.0 — be honest. Most things are 0.4-0.7. Reserve 0.8+ for genuinely important findings.
 
-## Instructions
-Extract 1-3 insights that are relevant to building AI agent systems, self-improvement of AI agents, or software engineering best practices.
-
-For each insight, provide:
-- **title**: A concise title (under 80 chars)
-- **insight**: A 1-3 sentence explanation of what's useful and how it could be applied
-- **category**: One of: self_improvement, new_tool, architecture_pattern, technique, project_idea, security, performance, other
-- **relevanceScore**: 0.0-1.0 how relevant this is to building better AI agent systems
-- **actionability**: "informational" (nice to know), "actionable" (could act on this), or "urgent" (should act now)
-
-If the content has nothing relevant, return an empty insights array.
-
-Respond with JSON only:
-\`\`\`json
-{
-  "insights": [
-    {
-      "title": "...",
-      "insight": "...",
-      "category": "...",
-      "relevanceScore": 0.8,
-      "actionability": "actionable"
-    }
-  ]
-}
-\`\`\``;
+JSON only:
+{"insights": [{"title": "...", "insight": "...", "category": "...", "relevanceScore": 0.7, "actionability": "actionable"}]}`;
   }
 
   // ── Phase 3: Routing ────────────────────────────────────────────────

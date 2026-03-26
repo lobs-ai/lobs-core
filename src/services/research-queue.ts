@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { browserService } from "./browser.js";
-import { callLocalModelJSON } from "../workers/base-worker.js";
-import { getLocalConfig } from "../config/models.js";
+import { callApiModelJSON } from "../workers/base-worker.js";
 
 export type ResearchSourceType = "url" | "text";
 export type ResearchQueueStatus = "queued" | "processing" | "completed" | "failed";
@@ -213,23 +212,19 @@ async function defaultSummarize(input: {
   item: ResearchQueueItem;
   material: SourceMaterial;
 }): Promise<SummaryPayload & { tokensUsed: number; model: string }> {
-  const localCfg = getLocalConfig();
-  // Use a non-thinking model for structured JSON extraction — thinking models
-  // waste tokens on reasoning preamble and often hit max_tokens before producing JSON.
-  const model = localCfg.summaryModel ?? localCfg.chatModel;
-  const { data, tokensUsed } = await callLocalModelJSON<SummaryPayload>(
+  const { data, tokensUsed } = await callApiModelJSON<SummaryPayload>(
     `Read this research input and return strict JSON:
 {
-  "summary": "2-5 sentence summary",
+  "summary": "2-5 sentence summary focusing on what's novel, important, or actionable",
   "keyPoints": ["3-8 concise factual bullets without bullet markers"],
-  "followUps": ["0-5 useful next research questions or actions without bullet markers"]
+  "followUps": ["0-3 useful next research questions or actions"]
 }
 
 Rules:
-- Focus on durable facts, changes, key takeaways, and implications.
+- Focus on novel findings, concrete techniques, tools, or architectural patterns.
+- If the content is not about AI, agents, ML, or software engineering, set summary to "NOT_RELEVANT" and return empty arrays.
 - Do not invent details not present in the source.
 - Keep keyPoints short and retrieval-friendly.
-- If this is a changelog or dependency update, highlight what changed and likely impact.
 - Return JSON only.
 
 Queue item title: ${input.item.title}
@@ -237,15 +232,12 @@ Topic: ${input.item.topic ?? "none"}
 Source title: ${input.material.sourceTitle}
 Source URL: ${input.material.sourceUrl ?? "n/a"}
 
-Source text (first 6000 chars):
-${input.material.sourceText.slice(0, 6000)}`,
+Source text (first 8000 chars):
+${input.material.sourceText.slice(0, 8000)}`,
     {
-      model,
-      baseUrl: localCfg.baseUrl,
+      tier: "small",  // Uses Haiku — cheap but much better than qwen3-4b
       maxTokens: 800,
-      temperature: 0.1,
-      timeoutMs: 120_000,
-      systemPrompt: "You are a local background research worker. Produce compact factual summaries for downstream retrieval and task planning.",
+      systemPrompt: "You are a research analyst for an AI agent platform. Produce compact factual summaries for downstream retrieval and task planning. If the content is irrelevant to AI/ML/agents/software, say so clearly.",
     },
   );
 
@@ -254,7 +246,7 @@ ${input.material.sourceText.slice(0, 6000)}`,
     keyPoints: parseJsonArray(data.keyPoints),
     followUps: parseJsonArray(data.followUps),
     tokensUsed,
-    model,
+    model: "haiku",
   };
 }
 

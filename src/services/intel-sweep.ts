@@ -261,6 +261,25 @@ const BLOCKED_DOMAINS = new Set([
   "www.udemy.com",             // course sales pages
   "www.coursera.org",
   "www.skillshare.com",
+  // Reference / dictionary sites
+  "www.merriam-webster.com",
+  "www.dictionary.com",
+  "www.thefreedictionary.com",
+  "en.wikipedia.org",           // too generic, not news
+  "www.investopedia.com",
+  // Job / social media sites
+  "www.indeed.com",
+  "www.linkedin.com",
+  "www.glassdoor.com",
+  "www.facebook.com",
+  "www.instagram.com",
+  "www.tiktok.com",
+  "www.pinterest.com",
+  // SEO spam / paywalled listicles
+  "medium.com",
+  "www.medium.com",
+  "www.forbes.com",
+  "www.entrepreneur.com",
 ]);
 
 /** URL path patterns that indicate non-article pages (homepages, product pages, login) */
@@ -290,6 +309,35 @@ const NON_LATIN_RE = /[\u3000-\u9FFF\u{AC00}-\u{D7AF}\u0400-\u04FF\u0600-\u06FF\
  *  - titles/snippets with significant non-Latin characters
  *  - generic "what is X" explainer pages (too basic to be useful intel)
  */
+/** AI/tech relevance keywords — at least one must appear in title+snippet */
+const RELEVANCE_KEYWORDS = [
+  // Core AI terms
+  "ai", "artificial intelligence", "machine learning", "deep learning", "neural",
+  "llm", "large language model", "language model", "transformer",
+  "gpt", "claude", "gemini", "llama", "mistral", "qwen", "phi",
+  // Agent terms
+  "agent", "agentic", "autonomous", "multi-agent", "tool use", "function calling",
+  "orchestration", "planning", "reasoning",
+  // ML/AI infrastructure
+  "inference", "fine-tuning", "fine tuning", "rag", "retrieval", "embedding",
+  "vector", "quantization", "gguf", "onnx", "tensorrt", "vllm",
+  // Relevant tools/frameworks
+  "langchain", "llamaindex", "crewai", "autogen", "semantic kernel",
+  "hugging face", "huggingface", "openai", "anthropic", "google deepmind",
+  "ollama", "lm studio", "mlx",
+  // Software engineering
+  "api", "sdk", "framework", "open source", "benchmark", "evaluation",
+  "developer tool", "code generation", "copilot",
+  // Research
+  "arxiv", "paper", "research", "neurips", "icml", "iclr", "acl",
+];
+
+/** Returns true if title+snippet contain at least one AI/tech relevance keyword */
+function isRelevantToAI(title: string, snippet: string): boolean {
+  const text = `${title} ${snippet}`.toLowerCase();
+  return RELEVANCE_KEYWORDS.some(kw => text.includes(kw));
+}
+
 function isQualityEnglishSource(url: string, title: string, snippet: string): boolean {
   try {
     const u = new URL(url);
@@ -500,8 +548,8 @@ export class IntelSweepService {
     // 1. Run search queries
     for (const query of feed.searchQueries) {
       try {
-        // Add recency bias to find new content
-        const recentQuery = `${query} ${this.getRecencyTerm()}`;
+        // timeRange: "month" parameter on the search handles recency
+        const recentQuery = query;
         const results = await browserService.search(recentQuery, 8, { timeRange: "month" });
         for (const r of results) {
           if (r.url && r.title) {
@@ -558,11 +606,17 @@ export class IntelSweepService {
     // 3b. Filter out non-English, non-article, and low-quality results
     const preFilterCount = candidates.length;
     const filtered = candidates.filter(c => isQualityEnglishSource(c.url, c.title, c.snippet));
-    const rejected = preFilterCount - filtered.length;
-    if (rejected > 0) {
-      log().info(`[intel-sweep] Filtered out ${rejected}/${preFilterCount} low-quality/non-English candidates`);
+    const qualityRejected = preFilterCount - filtered.length;
+    if (qualityRejected > 0) {
+      log().info(`[intel-sweep] Filtered out ${qualityRejected}/${preFilterCount} low-quality/non-English candidates`);
     }
-    const qualityCandidates = filtered;
+
+    // 3c. Filter for AI/tech relevance — must mention at least one relevant keyword
+    const qualityCandidates = filtered.filter(c => isRelevantToAI(c.title, c.snippet));
+    const relevanceRejected = filtered.length - qualityCandidates.length;
+    if (relevanceRejected > 0) {
+      log().info(`[intel-sweep] Filtered out ${relevanceRejected}/${filtered.length} candidates not relevant to AI/tech`);
+    }
 
     result.sourcesDiscovered = qualityCandidates.length;
 
@@ -847,14 +901,6 @@ export class IntelSweepService {
   }
 
   // ── Internal ───────────────────────────────────────────────────────
-
-  /** Get a recency search term to bias results toward recent content */
-  private getRecencyTerm(): string {
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = now.toLocaleString("en-US", { month: "long" });
-    return `${year} ${month}`;
-  }
 
   /** Fetch recent videos from a YouTube channel via SearXNG or direct scraping */
   private async fetchYouTubeRecent(channelId: string): Promise<Array<{ url: string; title: string; description: string }>> {
