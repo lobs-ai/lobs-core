@@ -272,7 +272,7 @@ describe("searchMemoriesFast()", () => {
   });
 
   it("multiple matches — results are sorted by score descending", async () => {
-    // Seed several memories that all match; order should be score-desc
+    // Seed several memories that all match; scores must be non-increasing
     insertMemory({ content: "Vitest is a fast unit testing framework" });
     insertMemory({ content: "Vitest vitest testing vitest fast tests" }); // heavier repetition
     insertMemory({ content: "unrelated content about cooking recipes" });
@@ -358,8 +358,7 @@ describe("searchMemoriesFast()", () => {
     insertMemory({ content: "caching strategy high confidence", confidence: 0.9 });
     insertMemory({ content: "caching strategy low confidence", confidence: 0.1 });
 
-    // Default minConfidence is 0.3, so 0.1 should be excluded automatically.
-    // Being explicit here for clarity.
+    // Explicitly set 0.5 so the 0.1-confidence memory is excluded
     const results = await searchMemoriesFast("caching strategy", {
       minConfidence: 0.5,
     });
@@ -395,15 +394,14 @@ describe("searchMemoriesFast()", () => {
   // ── Ranking ────────────────────────────────────────────────────────────────
 
   it("higher confidence memories rank above lower confidence ones (same FTS match)", async () => {
-    // Both have identical content so FTS rank is equal; confidence is the differentiator
-    // We need minConfidence: 0 so the low-confidence one isn't filtered out
+    // Both have identical content so FTS rank is equal; confidence drives importance score
     insertMemory({
       content: "identical linting rules memory text",
       confidence: 0.95,
     });
     insertMemory({
       content: "identical linting rules memory text",
-      confidence: 0.35, // above default 0.3 floor but clearly lower
+      confidence: 0.35, // above default 0.3 floor but meaningfully lower
     });
 
     const results = await searchMemoriesFast("linting rules memory", {
@@ -416,17 +414,17 @@ describe("searchMemoriesFast()", () => {
   });
 
   it("recently accessed memories rank higher than stale-access memories", async () => {
-    // Same content; different access recency — importance score should differ
+    // Same content + confidence; access recency drives importance score difference
     insertMemory({
       content: "redis cache usage patterns",
       confidence: 0.8,
-      last_accessed: daysAgo(1),    // accessed yesterday — high importance
+      last_accessed: daysAgo(1),   // accessed yesterday — high importance
       access_count: 10,
     });
     insertMemory({
       content: "redis cache usage patterns",
       confidence: 0.8,
-      last_accessed: daysAgo(600),  // not touched in ~2 years — low importance
+      last_accessed: daysAgo(600), // not touched in ~2 years — low importance
       access_count: 0,
     });
 
@@ -435,8 +433,7 @@ describe("searchMemoriesFast()", () => {
     });
     expect(results.length).toBe(2);
     // The recently-accessed one must rank first
-    const first = results[0].memory;
-    expect(first.access_count).toBe(10);
+    expect(results[0].memory.access_count).toBe(10);
   });
 });
 
@@ -675,7 +672,7 @@ describe("importanceScore()", () => {
       last_accessed: daysAgo(1),
       access_count: 5,
     });
-    // 0.95 * 0.5^(1/120) ≈ 0.95 * 0.994 ≈ 0.945
+    // decayed: 0.95 * 0.5^(1/120) ≈ 0.945; floor: 0.1 * log2(6) ≈ 0.258
     expect(importanceScore(loadMemory(id))).toBeGreaterThan(0.85);
   });
 
@@ -684,10 +681,9 @@ describe("importanceScore()", () => {
       confidence: 0.9,
       last_accessed: null,
       access_count: 0,
-      derived_at: daysAgo(1200), // ~3.3 years
+      derived_at: daysAgo(1200), // ~3.3 years old
     });
-    // Decayed: 0.9 * 0.5^(1200/120) = 0.9 * 0.5^10 ≈ 0.000879
-    // Floor: 0.1 * log2(1) = 0
+    // decayed: 0.9 * 0.5^(1200/120) = 0.9 * 0.5^10 ≈ 0.000879; floor: 0
     expect(importanceScore(loadMemory(id))).toBeLessThan(0.01);
   });
 
@@ -695,23 +691,20 @@ describe("importanceScore()", () => {
     // access_count = 31 → floor = 0.1 * log2(32) = 0.1 * 5 = 0.5
     const id = insertMemory({
       confidence: 0.1,
-      last_accessed: daysAgo(600), // stale access → heavy decay
+      last_accessed: daysAgo(600), // stale: 0.1 * 0.5^5 = 0.003
       access_count: 31,
     });
-    // Decayed: 0.1 * 0.5^(600/120) = 0.1 * 0.5^5 = 0.1 * 0.03125 = 0.003
-    // Floor: 0.5 → wins
     expect(importanceScore(loadMemory(id))).toBeGreaterThanOrEqual(0.5);
   });
 
   it("uses last_accessed over derived_at for the decay baseline", () => {
     const id = insertMemory({
       confidence: 0.8,
-      derived_at: daysAgo(500),      // old creation date
-      last_accessed: daysAgo(5),     // but recently touched
+      derived_at: daysAgo(500),   // old creation — would give ~0.8 * 2^-4.17 ≈ 0.053
+      last_accessed: daysAgo(5),  // but recently touched → ~0.78
       access_count: 1,
     });
-    // Decayed: 0.8 * 0.5^(5/120) ≈ 0.8 * 0.972 ≈ 0.78
-    // Would be much lower if derived_at (500d) were used
+    // decayed from last_accessed=5d: 0.8 * 0.5^(5/120) ≈ 0.78
     expect(importanceScore(loadMemory(id))).toBeGreaterThan(0.7);
   });
 
@@ -732,8 +725,7 @@ describe("importanceScore()", () => {
       last_accessed: daysAgo(120), // exactly one half-life ago
       access_count: 0,
     });
-    // Decayed: 0.8 * 0.5^(120/120) = 0.8 * 0.5 = 0.4
-    // Floor: 0.1 * log2(1) = 0
+    // decayed: 0.8 * 0.5^(120/120) = 0.8 * 0.5 = 0.4; floor: 0.1 * log2(1) = 0
     expect(importanceScore(loadMemory(id))).toBeCloseTo(0.4, 1);
   });
 });
