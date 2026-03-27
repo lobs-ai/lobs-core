@@ -864,7 +864,7 @@ export class MainAgent {
         metadata: { author: msg.authorName, authorId: msg.authorId, channel: channelId },
         scope: "session",
       });
-    } catch { /* never break message handling */ }
+    } catch (e) { console.warn(`[structured-memory] Failed to record user_input: ${e}`); }
 
     await this.processConversation(msg.channelId);
   }
@@ -1505,7 +1505,7 @@ export class MainAgent {
                 },
                 scope: "session",
               });
-            } catch { /* never break the main loop */ }
+            } catch (e) { console.warn(`[structured-memory] Failed to record tool event: ${e}`); }
 
             return {
               type: "tool_result" as const,
@@ -1770,7 +1770,7 @@ export class MainAgent {
             },
             scope: "session",
           });
-        } catch { /* never break completion flow */ }
+        } catch (e) { console.warn(`[structured-memory] Failed to record completion: ${e}`); }
 
         console.log(
           `[main-agent] Processing completed for ${this.channelTag(replyChannelId)} session=${sessionId} ` +
