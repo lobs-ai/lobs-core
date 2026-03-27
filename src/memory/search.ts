@@ -11,6 +11,7 @@
 
 import { getMemoryDb } from "./db.js";
 import { log } from "../util/logger.js";
+import { importanceScore } from "./gc.js";
 import type { Memory } from "./types.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -233,19 +234,13 @@ export async function searchMemoriesFast(
     // Normalize FTS rank to 0-1
     const maxRank = Math.max(...rows.map((r) => r.fts_rank));
 
-    // Find oldest and newest for recency normalization
-    const timestamps = rows.map((r) =>
-      new Date(r.derived_at).getTime(),
-    );
-    const minTs = Math.min(...timestamps);
-    const maxTs = Math.max(...timestamps);
-    const tsRange = maxTs - minTs || 1;
-
     const scored = rows.map((row) => {
       const ftsNorm = maxRank > 0 ? row.fts_rank / maxRank : 0;
       const decayed = decayedConfidence(row);
-      const recency = (new Date(row.derived_at).getTime() - minTs) / tsRange;
-      const score = ftsNorm * 0.6 + decayed * 0.2 + recency * 0.2;
+      const importance = importanceScore(row);
+      // importance (decayed confidence + access floor) replaces the raw
+      // confidence + recency signals, giving 40% weight to lifecycle-aware ranking
+      const score = ftsNorm * 0.6 + importance * 0.4;
       return { row, score, decayed };
     });
 
@@ -361,11 +356,6 @@ export async function searchMemoriesFull(
     );
 
     // Score each memory
-    const timestamps = allMemories.map((m) => new Date(m.derived_at).getTime());
-    const minTs = Math.min(...timestamps);
-    const maxTs = Math.max(...timestamps);
-    const tsRange = maxTs - minTs || 1;
-
     const scored = allMemories.map((m) => {
       const ftsNorm = ftsScores.get(m.id) ?? 0;
       const vecNorm = vectorScores.get(m.id) ?? 0;
@@ -377,15 +367,10 @@ export async function searchMemoriesFull(
       if (isFts && !isVector) score = ftsNorm * 0.8;
       if (!isFts && isVector) score = vecNorm * 0.8;
 
-      // Apply scoring bonuses
-      if (m.status === "active") score += 0.1;
-      if (m.confidence > 0.8) score += m.confidence * 0.15;
-      const freqBonus = Math.min(Math.log10(m.access_count + 1) * 0.05, 0.1);
-      score += freqBonus;
-
-      // Recency component
-      const recency = (new Date(m.derived_at).getTime() - minTs) / tsRange;
-      score += recency * 0.05;
+      // Lifecycle-aware importance replaces raw confidence + recency bonuses,
+      // giving 40% weight to memories that are well-accessed and recently relevant
+      const importance = importanceScore(m);
+      score += importance * 0.4;
 
       const matchType: StructuredMemoryResult["matchType"] =
         isFts && isVector ? "hybrid" : isFts ? "fts" : "vector";

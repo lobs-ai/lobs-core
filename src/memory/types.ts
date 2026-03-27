@@ -31,7 +31,7 @@ export interface Memory {
   agent_type: string | null;
   project_id: string | null;
   source_authority: number;
-  status: "active" | "superseded" | "expired";
+  status: "active" | "superseded" | "expired" | "stale" | "archived" | "contested";
   superseded_by: number | null;
   derived_at: string;
   last_validated: string | null;

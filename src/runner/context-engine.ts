@@ -558,6 +558,39 @@ export async function assembleContext(params: {
     console.warn(`[context-engine] Structured memory search failed: ${String(err)}`);
   }
 
+  // Surface unresolved conflicts (so the agent knows about contradictions)
+  try {
+    const { getUnresolvedConflicts } = await import("../memory/conflicts.js");
+    const conflicts = getUnresolvedConflicts(3); // max 3 conflicts per context
+
+    if (conflicts.length > 0) {
+      let conflictBlock = "## Memory Conflicts (need resolution)\n\n";
+      for (const { conflict, memoryA, memoryB } of conflicts) {
+        conflictBlock += `**Conflict #${conflict.id}** (${conflict.description}):\n`;
+        conflictBlock += `  A: [${memoryA.memory_type}, confidence ${memoryA.confidence}] ${memoryA.content}\n`;
+        conflictBlock += `  B: [${memoryB.memory_type}, confidence ${memoryB.confidence}] ${memoryB.content}\n\n`;
+      }
+
+      const conflictChunk: ContextChunk = {
+        source: "memory-conflicts",
+        content: conflictBlock,
+        score: 0.95, // conflicts are high priority
+        tokens: estimateTokens(conflictBlock),
+        category: "memory",
+      };
+
+      const memoryLayer = layers.find((l) => l.category === "memory");
+      if (memoryLayer) {
+        memoryLayer.chunks.unshift(conflictChunk); // prepend — high priority
+        memoryLayer.tokensUsed += conflictChunk.tokens;
+      } else {
+        layers.push(fillLayer("memory", [conflictChunk], budget.allocations.memory));
+      }
+    }
+  } catch {
+    // optional — conflict surfacing should never break context assembly
+  }
+
   // Context refs — explicit file references (loaded directly, not from search)
   if (params.contextRefs?.length) {
     const refChunks: ContextChunk[] = [];

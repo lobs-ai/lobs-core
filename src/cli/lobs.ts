@@ -1297,6 +1297,330 @@ async function cmdCron(subCmd?: string, extraArgs: string[] = []) {
   console.log("  run <id>                          Trigger immediate run");
 }
 
+// ── Memory Commands ───────────────────────────────────────────────────────────
+
+async function handleMemoryCommand(subCmd?: string, extraArgs: string[] = []): Promise<void> {
+  // Lazy-load getMemoryDb only when a memory command runs.
+  const { getMemoryDb } = await import("../memory/db.js");
+  const db = getMemoryDb();
+
+  // ── lobs memory list ──────────────────────────────────────────────────────
+  if (!subCmd || subCmd === "list") {
+    // Parse flags: --type <type> --limit <n>
+    let filterType: string | null = null;
+    let limit = 20;
+    for (let i = 0; i < extraArgs.length; i++) {
+      if (extraArgs[i] === "--type" && extraArgs[i + 1]) {
+        filterType = extraArgs[++i];
+      } else if (extraArgs[i] === "--limit" && extraArgs[i + 1]) {
+        limit = parseInt(extraArgs[++i], 10) || 20;
+      }
+    }
+
+    const query = filterType
+      ? db.prepare(
+          "SELECT * FROM memories WHERE status = 'active' AND memory_type = ? ORDER BY created_at DESC LIMIT ?",
+        )
+      : db.prepare(
+          "SELECT * FROM memories WHERE status = 'active' ORDER BY created_at DESC LIMIT ?",
+        );
+
+    const rows: any[] = filterType
+      ? (query.all(filterType, limit) as any[])
+      : (query.all(limit) as any[]);
+
+    console.log(colorize("\n=== Recent Active Memories ===\n", "bright"));
+
+    if (rows.length === 0) {
+      console.log(colorize("No active memories found.", "dim"));
+      return;
+    }
+
+    const idW = 5;
+    const typeW = 12;
+    const confW = 11;
+    const scopeW = 9;
+    const dateW = 12;
+    const header =
+      "ID".padEnd(idW) +
+      "Type".padEnd(typeW) +
+      "Confidence".padEnd(confW) +
+      "Scope".padEnd(scopeW) +
+      "Created".padEnd(dateW) +
+      "Content (truncated)";
+    console.log(colorize(header, "cyan"));
+    console.log(colorize("─".repeat(80), "dim"));
+
+    for (const row of rows) {
+      const id = String(row.id).padEnd(idW);
+      const type = (row.memory_type as string).padEnd(typeW);
+      const conf = String((row.confidence as number).toFixed(2)).padEnd(confW);
+      const scope = (row.scope as string).padEnd(scopeW);
+      const created = (row.created_at as string).slice(0, 10).padEnd(dateW);
+      const content = (row.content as string).replace(/\n/g, " ").slice(0, 60);
+      console.log(`${colorize(id, "gray")}${colorize(type, "yellow")}${conf}${scope}${colorize(created, "dim")}${content}`);
+    }
+    console.log("");
+    return;
+  }
+
+  // ── lobs memory show <id> ─────────────────────────────────────────────────
+  if (subCmd === "show") {
+    const id = parseInt(extraArgs[0] ?? "", 10);
+    if (!id) {
+      console.log(colorize("Usage: lobs memory show <id>", "yellow"));
+      return;
+    }
+
+    const row: any = db.prepare("SELECT * FROM memories WHERE id = ?").get(id);
+    if (!row) {
+      console.log(colorize(`Memory #${id} not found.`, "red"));
+      return;
+    }
+
+    const authorityLabel = ["0 (low)", "1 (system)", "2 (agent/explicit)", "3 (user preference)"][
+      row.source_authority as number
+    ] ?? String(row.source_authority);
+
+    console.log(colorize(`\nMemory #${row.id}`, "bright"));
+    console.log(`Type:             ${colorize(row.memory_type, "yellow")}`);
+    console.log(`Confidence:       ${row.confidence}`);
+    console.log(`Scope:            ${row.scope}`);
+    console.log(`Status:           ${row.status}`);
+    console.log(`Source Authority: ${authorityLabel}`);
+    console.log(`Created:          ${row.created_at}`);
+    console.log(`Last Accessed:    ${row.last_accessed ?? "never"}`);
+    console.log(`Access Count:     ${row.access_count}`);
+    if (row.expires_at) console.log(`Expires At:       ${row.expires_at}`);
+    if (row.project_id) console.log(`Project:          ${row.project_id}`);
+    console.log(`\nContent:\n${row.content}`);
+
+    // Evidence events
+    const evidence: any[] = db
+      .prepare(
+        `SELECT e.*, ev.event_type, ev.created_at AS event_created
+         FROM evidence e
+         JOIN events ev ON ev.id = e.event_id
+         WHERE e.memory_id = ?
+         ORDER BY e.created_at DESC
+         LIMIT 10`,
+      )
+      .all(id) as any[];
+
+    if (evidence.length > 0) {
+      console.log(`\nEvidence (${evidence.length} event${evidence.length !== 1 ? "s" : ""}):`);
+      for (const ev of evidence) {
+        console.log(
+          `  - Event #${ev.event_id}: ${ev.event_type} (${(ev.event_created as string).slice(0, 19)})`,
+        );
+      }
+    }
+    console.log("");
+    return;
+  }
+
+  // ── lobs memory conflicts ─────────────────────────────────────────────────
+  if (subCmd === "conflicts") {
+    const conflicts: any[] = db
+      .prepare(
+        "SELECT * FROM conflicts WHERE resolved_at IS NULL ORDER BY created_at DESC",
+      )
+      .all() as any[];
+
+    console.log(colorize("\n=== Unresolved Memory Conflicts ===\n", "bright"));
+
+    if (conflicts.length === 0) {
+      console.log(colorize("No unresolved conflicts.", "dim"));
+      console.log("");
+      return;
+    }
+
+    for (const conflict of conflicts) {
+      const memA: any = db.prepare("SELECT * FROM memories WHERE id = ?").get(conflict.memory_a);
+      const memB: any = db.prepare("SELECT * FROM memories WHERE id = ?").get(conflict.memory_b);
+      const detected = (conflict.created_at as string).slice(0, 10);
+      console.log(
+        colorize(`Conflict #${conflict.id}`, "bright") +
+          ` (${conflict.description}) — detected ${detected}`,
+      );
+      if (memA) {
+        console.log(
+          `  A: [${colorize(memA.memory_type, "yellow")}, ${memA.confidence}] ${(memA.content as string).replace(/\n/g, " ").slice(0, 100)}`,
+        );
+      }
+      if (memB) {
+        console.log(
+          `  B: [${colorize(memB.memory_type, "yellow")}, ${memB.confidence}] ${(memB.content as string).replace(/\n/g, " ").slice(0, 100)}`,
+        );
+      }
+      console.log("");
+    }
+    return;
+  }
+
+  // ── lobs memory resolve <conflict-id> <a|b|dismiss> ──────────────────────
+  if (subCmd === "resolve") {
+    const conflictId = parseInt(extraArgs[0] ?? "", 10);
+    const choice = extraArgs[1]?.toLowerCase();
+
+    if (!conflictId || !choice) {
+      console.log(colorize("Usage: lobs memory resolve <conflict-id> <a|b|dismiss>", "yellow"));
+      return;
+    }
+
+    const resolutionMap: Record<string, "choose_a" | "choose_b" | "dismiss"> = {
+      a: "choose_a",
+      b: "choose_b",
+      dismiss: "dismiss",
+    };
+
+    const resolution = resolutionMap[choice];
+    if (!resolution) {
+      console.log(colorize(`Unknown choice '${choice}'. Use: a, b, or dismiss`, "red"));
+      return;
+    }
+
+    const { resolveConflict } = await import("../memory/conflicts.js");
+    await resolveConflict(conflictId, resolution);
+
+    const resultMsg =
+      resolution === "choose_a"
+        ? "chose memory A, superseded memory B"
+        : resolution === "choose_b"
+          ? "chose memory B, superseded memory A"
+          : "dismissed both memories";
+
+    console.log(colorize(`✓ Resolved conflict #${conflictId}: ${resultMsg}.`, "green"));
+    return;
+  }
+
+  // ── lobs memory promote <id> <authority> ──────────────────────────────────
+  if (subCmd === "promote") {
+    const memId = parseInt(extraArgs[0] ?? "", 10);
+    const authority = parseInt(extraArgs[1] ?? "", 10) as 0 | 1 | 2 | 3;
+
+    if (!memId || isNaN(authority) || authority < 0 || authority > 3) {
+      console.log(colorize("Usage: lobs memory promote <id> <authority>", "yellow"));
+      console.log(colorize("  authority: 0 (low) | 1 (system) | 2 (agent/explicit) | 3 (user preference)", "dim"));
+      return;
+    }
+
+    const { promoteMemory } = await import("../memory/conflicts.js");
+    promoteMemory(memId, authority);
+    console.log(colorize(`✓ Memory #${memId} promoted to authority ${authority}.`, "green"));
+    return;
+  }
+
+  // ── lobs memory gc ────────────────────────────────────────────────────────
+  if (subCmd === "gc") {
+    console.log(colorize("Running memory GC...", "cyan"));
+    try {
+      const { runMemoryGC } = await import("../memory/gc.js");
+      const result = await runMemoryGC();
+      console.log(colorize("✓ GC complete", "green"));
+      console.log(`  Archived: ${(result as any).archived ?? (result as any).archivedCount ?? 0}`);
+      console.log(`  Stale:    ${(result as any).stale ?? (result as any).staleCount ?? 0}`);
+      console.log(`  Expired:  ${(result as any).expired ?? (result as any).expiredCount ?? 0}`);
+    } catch (err) {
+      if (String(err).includes("Cannot find module") || String(err).includes("ERR_MODULE_NOT_FOUND")) {
+        console.log(colorize("GC module not available yet.", "yellow"));
+      } else {
+        console.error(colorize(`GC error: ${String(err)}`, "red"));
+      }
+    }
+    return;
+  }
+
+  // ── lobs memory stats ─────────────────────────────────────────────────────
+  if (subCmd === "stats") {
+    // Count memories by status
+    const statusCounts: any[] = db
+      .prepare("SELECT status, COUNT(*) as cnt FROM memories GROUP BY status")
+      .all() as any[];
+
+    const byStatus: Record<string, number> = {};
+    let total = 0;
+    for (const row of statusCounts) {
+      byStatus[row.status] = row.cnt;
+      total += row.cnt;
+    }
+
+    // Count memories by type
+    const typeCounts: any[] = db
+      .prepare("SELECT memory_type, COUNT(*) as cnt FROM memories WHERE status = 'active' GROUP BY memory_type ORDER BY cnt DESC")
+      .all() as any[];
+
+    // Events count
+    const eventsRow: any = db.prepare("SELECT COUNT(*) as cnt FROM events").get();
+    const totalEvents: number = eventsRow?.cnt ?? 0;
+
+    // Reflection runs
+    const reflRow: any = db
+      .prepare("SELECT COUNT(*) as cnt, MAX(completed_at) as last FROM reflection_runs")
+      .get();
+    const reflCount: number = reflRow?.cnt ?? 0;
+    const reflLast: string | null = reflRow?.last ?? null;
+
+    // Unresolved conflicts
+    const conflRow: any = db
+      .prepare("SELECT COUNT(*) as cnt FROM conflicts WHERE resolved_at IS NULL")
+      .get();
+    const unresolvedConflicts: number = conflRow?.cnt ?? 0;
+
+    // DB size
+    const { statSync } = await import("node:fs"); // statSync not in the top-level static import
+    const dbPath = resolve(HOME, ".lobs/memory.db");
+    let dbSize = "unknown";
+    try {
+      const stat = statSync(dbPath);
+      const bytes = stat.size;
+      if (bytes > 1_000_000) {
+        dbSize = `${(bytes / 1_000_000).toFixed(1)} MB`;
+      } else if (bytes > 1_000) {
+        dbSize = `${(bytes / 1_000).toFixed(1)} KB`;
+      } else {
+        dbSize = `${bytes} B`;
+      }
+    } catch {
+      // DB path may differ
+    }
+
+    console.log(colorize("\nMemory System Stats", "bright"));
+    console.log(
+      `  Total memories: ${colorize(String(total), "bright")} (${byStatus.active ?? 0} active, ${byStatus.stale ?? 0} stale, ${byStatus.archived ?? 0} archived, ${byStatus.contested ?? 0} contested, ${byStatus.superseded ?? 0} superseded)`,
+    );
+
+    if (typeCounts.length > 0) {
+      const typeStr = typeCounts
+        .map((r: any) => `${r.cnt} ${r.memory_type}`)
+        .join(", ");
+      console.log(`  By type: ${typeStr}`);
+    }
+
+    console.log(`  Total events: ${totalEvents.toLocaleString()}`);
+    console.log(
+      `  Reflection runs: ${reflCount}${reflLast ? ` (last: ${reflLast.slice(0, 19)})` : ""}`,
+    );
+    console.log(
+      `  Unresolved conflicts: ${unresolvedConflicts > 0 ? colorize(String(unresolvedConflicts), "yellow") : colorize("0", "green")}`,
+    );
+    console.log(`  DB size: ${dbSize}`);
+    console.log("");
+    return;
+  }
+
+  // ── Unknown subcommand ────────────────────────────────────────────────────
+  console.log(colorize("Usage: lobs memory <subcommand> [options]\n", "yellow"));
+  console.log("  list [--type <type>] [--limit N]   List recent active memories");
+  console.log("  show <id>                          Show full memory details");
+  console.log("  conflicts                          List unresolved conflicts");
+  console.log("  resolve <conflict-id> <a|b|dismiss> Manually resolve a conflict");
+  console.log("  promote <id> <authority>           Promote memory authority (0-3)");
+  console.log("  gc                                 Run garbage collection");
+  console.log("  stats                              Memory system overview");
+  console.log("");
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
@@ -1373,6 +1697,10 @@ const subcommand = args[1];
 
     case "cron":
       await cmdCron(subcommand, args.slice(2));
+      break;
+
+    case "memory":
+      await handleMemoryCommand(subcommand, args.slice(2));
       break;
     
     case "init":
