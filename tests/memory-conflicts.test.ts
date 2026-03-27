@@ -299,16 +299,17 @@ describe("autoResolveConflicts()", () => {
 
   describe("Rule 4: both low confidence (<0.5) — mark both contested", () => {
     it("marks both memories as contested and counts as dismissed", async () => {
+      const ts = past(60); // shared timestamp so Rule 3 doesn't apply
       const idA = insertMemory({
         source_authority: 1,
         scope: "system",
-        derived_at: past(60),
+        derived_at: ts,
         confidence: 0.3,
       });
       const idB = insertMemory({
         source_authority: 1,
         scope: "system",
-        derived_at: past(60), // same timestamp so Rule 3 doesn't apply
+        derived_at: ts,
         confidence: 0.4,
       });
       const conflictId = insertConflict(idA, idB);
