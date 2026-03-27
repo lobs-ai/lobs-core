@@ -16,6 +16,8 @@ import { dirname } from "node:path";
 import type { ToolDefinition } from "../types.js";
 import { memorySearch } from "../../services/memory-client.js";
 import { ensureTodaysMemoryFile } from "../../services/memory-condenser.js";
+import { getMemoryDb } from "../../memory/db.js";
+import { log } from "../../util/logger.js";
 
 // ── memory_search ────────────────────────────────────────────────────────────
 
@@ -270,6 +272,21 @@ export async function memoryWriteTool(
 
     // Append to file
     appendFileSync(targetFile, entry, "utf-8");
+
+    // Also write to structured memories table when permanent=true
+    if (permanent && PERMANENT_CATEGORIES.includes(cat)) {
+      try {
+        const db = getMemoryDb();
+        // source_authority = 2: explicit agent statement
+        db.prepare(
+          `INSERT INTO memories (memory_type, content, confidence, scope, source_authority, derived_at, status)
+           VALUES (?, ?, ?, 'system', 2, ?, 'active')`,
+        ).run(cat, content, 0.9, new Date().toISOString());
+      } catch (dbErr) {
+        // Non-fatal — the flat file write already succeeded
+        log().warn(`[memory_write] Failed to write structured memory: ${String(dbErr)}`);
+      }
+    }
 
     const shortPath = targetFile.replace(homeDir, "~");
     return `Wrote to memory: ${shortPath}\nEntry: ${entry.trim()}`;

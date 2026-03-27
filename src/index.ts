@@ -23,6 +23,7 @@ import { registerCircuitBreakerHooks } from "./hooks/circuit-breaker.js";
 import { registerGroupMessageHook } from "./hooks/group-message.js";
 import { registerCompactionHooks } from "./hooks/compaction.js";
 import { registerEventRecorderHook } from "./hooks/event-recorder.js";
+import { registerReflectionTriggerHook } from "./hooks/reflection-trigger.js";
 import { startControlLoop, stopControlLoop } from "./orchestrator/control-loop.js";
 import { YouTubeService } from "./services/youtube.js";
 import { ensureCompliantMemoryDirs } from "./api/memories-fs.js";
@@ -144,6 +145,7 @@ const pawPlugin = {
     registerGroupMessageHook(api);
     registerCompactionHooks(api);
     registerEventRecorderHook(api);
+    registerReflectionTriggerHook();
 
     // Clean stale subagent runs from disk registry to prevent children count buildup
     try {
