@@ -20,6 +20,7 @@ import Database from "better-sqlite3";
 import Anthropic from "@anthropic-ai/sdk";
 import { compactMessages, findSafeSplitPoint, calculateContextSize } from "./compaction.js";
 import { LoopDetector } from "../runner/loop-detector.js";
+import { getEventRecorder } from "../memory/event-recorder.js";
 
 const MAX_HISTORY = 50;
 const MAX_CONTEXT_CHARS = 150_000; // Rough char budget for history
@@ -851,6 +852,20 @@ export class MainAgent {
       `[main-agent.inbound] channel=${this.channelTag(channelId)} msg=${msg.id.slice(0, 8)} accepted_for_processing=true`,
     );
 
+    // Record user input to structured memory
+    try {
+      const recorder = getEventRecorder();
+      recorder.recordEvent({
+        agentId: "main-agent",
+        agentType: "main",
+        sessionId: `main-agent:${channelId}`,
+        eventType: "user_input",
+        content: msg.content.substring(0, 500),
+        metadata: { author: msg.authorName, authorId: msg.authorId, channel: channelId },
+        scope: "session",
+      });
+    } catch { /* never break message handling */ }
+
     await this.processConversation(msg.channelId);
   }
 
@@ -1468,6 +1483,30 @@ export class MainAgent {
               isError: result.is_error,
               timestamp: Date.now(),
             } satisfies AgentStreamEvent);
+
+            // Record to structured memory (fire-and-forget, never throws)
+            try {
+              const recorder = getEventRecorder();
+              const isMutating = ["write", "edit", "memory_write"].includes(block.name)
+                || (block.name === "exec" && !/^\s*(ls|pwd|cat|echo|which|type|find|grep|wc|head|tail)\b/.test(String(block.input?.command ?? "")));
+              recorder.recordEvent({
+                agentId: "main-agent",
+                agentType: "main",
+                sessionId,
+                eventType: isMutating ? "action" : "tool_result",
+                content: `${block.name}: ${resultContent.substring(0, 300)}`,
+                metadata: {
+                  tool: block.name,
+                  isError: result.is_error,
+                  outputLength: resultContent.length,
+                  durationMs: Date.now() - toolStartedAt,
+                  ...(block.name === "exec" && block.input?.command ? { command: String(block.input.command).substring(0, 200) } : {}),
+                  ...((["read", "write", "edit", "ls"].includes(block.name) && block.input?.path) ? { path: String(block.input.path) } : {}),
+                },
+                scope: "session",
+              });
+            } catch { /* never break the main loop */ }
+
             return {
               type: "tool_result" as const,
               tool_use_id: result.tool_use_id,
@@ -1715,6 +1754,24 @@ export class MainAgent {
           channelId: replyChannelId,
           timestamp: Date.now(),
         } satisfies AgentStreamEvent);
+
+        // Record conversation completion to structured memory
+        try {
+          const recorder = getEventRecorder();
+          recorder.recordEvent({
+            agentId: "main-agent",
+            agentType: "main",
+            sessionId,
+            eventType: "observation",
+            content: textResponse ? textResponse.substring(0, 500) : "Conversation turn completed",
+            metadata: {
+              durationMs: Date.now() - conversationStartedAt,
+              iterations: loopIteration,
+            },
+            scope: "session",
+          });
+        } catch { /* never break completion flow */ }
+
         console.log(
           `[main-agent] Processing completed for ${this.channelTag(replyChannelId)} session=${sessionId} ` +
           `in ${Date.now() - conversationStartedAt}ms`,
