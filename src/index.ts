@@ -24,6 +24,7 @@ import { registerGroupMessageHook } from "./hooks/group-message.js";
 import { registerCompactionHooks } from "./hooks/compaction.js";
 import { registerEventRecorderHook } from "./hooks/event-recorder.js";
 import { registerReflectionTriggerHook } from "./hooks/reflection-trigger.js";
+import { runDailyReflection } from "./memory/daily-reflection.js";
 import { startControlLoop, stopControlLoop } from "./orchestrator/control-loop.js";
 import { YouTubeService } from "./services/youtube.js";
 import { ensureCompliantMemoryDirs } from "./api/memories-fs.js";
@@ -204,6 +205,24 @@ const pawPlugin = {
         const startupTimer = setTimeout(runExtraction, 30_000);
         const extractionTimer = setInterval(runExtraction, EXTRACTION_INTERVAL_MS);
         (globalThis as any).__learningExtractionTimers = { startupTimer, extractionTimer };
+
+        // ── Daily memory reflection ──────────────────────────────────────
+        // Fire at 03:00 local time each day. We check every minute and trigger
+        // once when the hour/minute matches — idempotent: the daily budget cap
+        // in runReflection() prevents double-execution if the process restarts
+        // within the same minute window.
+        let lastDailyReflectionDate = "";
+        const DAILY_REFLECTION_HOUR = 3; // 03:00 local time
+        const dailyReflectionTimer = setInterval(() => {
+          const now = new Date();
+          if (now.getHours() !== DAILY_REFLECTION_HOUR || now.getMinutes() !== 0) return;
+          const today = now.toISOString().slice(0, 10);
+          if (lastDailyReflectionDate === today) return; // already fired today
+          lastDailyReflectionDate = today;
+          log().info("[daily-reflection] Cron trigger firing");
+          void runDailyReflection();
+        }, 60_000); // check every minute
+        (globalThis as any).__dailyReflectionTimer = dailyReflectionTimer;
       },
       stop: () => {
         stopControlLoop();
@@ -216,6 +235,9 @@ const pawPlugin = {
             clearTimeout(timers.startupTimer);
             clearInterval(timers.extractionTimer);
           }
+        } catch {}
+        try {
+          clearInterval((globalThis as any).__dailyReflectionTimer);
         } catch {}
         closeDb();
       },

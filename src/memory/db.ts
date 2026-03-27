@@ -105,12 +105,14 @@ CREATE TABLE IF NOT EXISTS reflection_runs (
   started_at TEXT NOT NULL,
   completed_at TEXT,
   clusters_processed INTEGER DEFAULT 0,
+  events_processed INTEGER DEFAULT 0,
   memories_created INTEGER DEFAULT 0,
   memories_reinforced INTEGER DEFAULT 0,
   conflicts_detected INTEGER DEFAULT 0,
   tokens_used INTEGER DEFAULT 0,
   tier TEXT NOT NULL DEFAULT 'local',
-  status TEXT NOT NULL DEFAULT 'running'
+  status TEXT NOT NULL DEFAULT 'running',
+  skip_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS retrieval_log (
@@ -124,6 +126,19 @@ CREATE TABLE IF NOT EXISTS retrieval_log (
 
 CREATE INDEX IF NOT EXISTS idx_retrieval_memory ON retrieval_log(memory_id);
 CREATE INDEX IF NOT EXISTS idx_retrieval_time ON retrieval_log(timestamp);
+
+CREATE TABLE IF NOT EXISTS gc_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  memory_id INTEGER NOT NULL,
+  from_status TEXT NOT NULL,
+  to_status TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (memory_id) REFERENCES memories(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gc_log_memory ON gc_log(memory_id);
+CREATE INDEX IF NOT EXISTS idx_gc_log_time ON gc_log(created_at);
 
 -- FTS5 full-text index for memories.content (porter stemmer for better recall)
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, content_rowid='id', tokenize='porter');
@@ -168,6 +183,21 @@ export function initMemoryDb(dbPath?: string): Database.Database {
 
   // Apply schema (idempotent — all statements use IF NOT EXISTS)
   db.exec(SCHEMA_SQL);
+
+  // ── Additive migrations ───────────────────────────────────────────────────
+  // Existing DBs won't pick up new columns from CREATE TABLE IF NOT EXISTS.
+  // Each ALTER TABLE is wrapped in try/catch — it fails silently if the column
+  // already exists (SQLite error: "duplicate column name").
+  const addColumnIfMissing = (table: string, column: string, definition: string): void => {
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    } catch {
+      // Column already exists — ignore
+    }
+  };
+
+  addColumnIfMissing("reflection_runs", "events_processed", "INTEGER DEFAULT 0");
+  addColumnIfMissing("reflection_runs", "skip_reason", "TEXT");
 
   _db = db;
   log().info(`[memory-db] Opened memory database at ${resolvedPath}`);

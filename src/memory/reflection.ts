@@ -21,14 +21,21 @@ const MIN_EVENTS_TO_REFLECT = 10;
 /** Default daily cap on new memories across all reflection runs */
 const DEFAULT_DAILY_MAX_MEMORIES = 50;
 
+/** Token budget per session reflection (prevents runaway LLM spend) */
+const SESSION_TOKEN_BUDGET = 4_000;
+
 /** Minimum signal score to be considered "high-signal" */
 const HIGH_SIGNAL_THRESHOLD = 0.7;
+
+/** Maximum new memories we'll create from a single cluster */
+const MAX_NEW_MEMORIES_PER_CLUSTER = 5;
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
 export interface ReflectionResult {
   runId: string;
   clustersProcessed: number;
+  eventsProcessed: number;
   memoriesCreated: number;
   memoriesReinforced: number;
   conflictsDetected: number;
@@ -107,6 +114,33 @@ function gatherUnreflectedEvents(opts: {
   return db.prepare(sql).all(...params) as MemoryEvent[];
 }
 
+// ── Skipped run recording ────────────────────────────────────────────────────
+
+/**
+ * Write a 'skipped' row to reflection_runs for audit trail.
+ * Skipped runs are first-class — they explain "why didn't reflection run?"
+ */
+function recordSkippedRun(
+  runId: string,
+  trigger: "session_end" | "daily" | "manual",
+  skipReason: string,
+): void {
+  const db = getMemoryDb();
+  const now = new Date().toISOString();
+  try {
+    db.prepare(
+      `INSERT INTO reflection_runs
+         (id, trigger, started_at, completed_at, tier, status, skip_reason,
+          events_processed, clusters_processed, memories_created, memories_reinforced,
+          conflicts_detected, tokens_used)
+       VALUES (?, ?, ?, ?, 'local', 'skipped', ?, 0, 0, 0, 0, 0, 0)`,
+    ).run(runId, trigger, now, now, skipReason);
+  } catch (err) {
+    // Non-fatal — skipped run recording should never crash the caller
+    log().warn(`[reflection] Failed to record skipped run ${runId}: ${String(err)}`);
+  }
+}
+
 // ── Main entry point ─────────────────────────────────────────────────────────
 
 export async function runReflection(opts: {
@@ -118,16 +152,21 @@ export async function runReflection(opts: {
   const runId = randomUUID();
   const maxMemories = opts.maxMemories ?? DEFAULT_DAILY_MAX_MEMORIES;
 
-  const skipped = (reason: string): ReflectionResult => ({
-    runId,
-    clustersProcessed: 0,
-    memoriesCreated: 0,
-    memoriesReinforced: 0,
-    conflictsDetected: 0,
-    tokensUsed: 0,
-    skipped: true,
-    skipReason: reason,
-  });
+  const skipped = (reason: string): ReflectionResult => {
+    recordSkippedRun(runId, opts.trigger, reason);
+    log().debug?.(`[reflection] Run ${runId} skipped: ${reason}`);
+    return {
+      runId,
+      clustersProcessed: 0,
+      eventsProcessed: 0,
+      memoriesCreated: 0,
+      memoriesReinforced: 0,
+      conflictsDetected: 0,
+      tokensUsed: 0,
+      skipped: true,
+      skipReason: reason,
+    };
+  };
 
   // ── Gather events ──────────────────────────────────────────────────────────
 
@@ -167,9 +206,12 @@ export async function runReflection(opts: {
   const startedAt = new Date().toISOString();
 
   db.prepare(
-    `INSERT INTO reflection_runs (id, trigger, started_at, tier, status)
-     VALUES (?, ?, ?, 'local', 'running')`,
-  ).run(runId, opts.trigger, startedAt);
+    `INSERT INTO reflection_runs
+       (id, trigger, started_at, tier, status,
+        events_processed, clusters_processed, memories_created, memories_reinforced,
+        conflicts_detected, tokens_used)
+     VALUES (?, ?, ?, 'local', 'running', ?, 0, 0, 0, 0, 0)`,
+  ).run(runId, opts.trigger, startedAt, events.length);
 
   resetTokenCounter();
 
@@ -195,11 +237,25 @@ export async function runReflection(opts: {
     for (const cluster of clusters) {
       if (budgetRemaining <= 0) break;
 
+      // Enforce session token budget — stop processing more clusters if exceeded
+      if (getTotalTokensUsed() >= SESSION_TOKEN_BUDGET) {
+        log().info(
+          `[reflection] Run ${runId} — token budget exhausted (${getTotalTokensUsed()} >= ${SESSION_TOKEN_BUDGET}), ` +
+            `stopping after ${clustersProcessed} clusters`,
+        );
+        break;
+      }
+
       // Skip low-priority clusters
       if (cluster.priority === "skip") continue;
 
       let candidates = await extractMemories(cluster);
       if (candidates.length === 0) continue;
+
+      // Enforce per-cluster cap (prevents any single cluster from dominating)
+      if (candidates.length > MAX_NEW_MEMORIES_PER_CLUSTER) {
+        candidates = candidates.slice(0, MAX_NEW_MEMORIES_PER_CLUSTER);
+      }
 
       // Enforce remaining daily budget on candidates
       if (candidates.length > budgetRemaining) {
@@ -224,6 +280,7 @@ export async function runReflection(opts: {
     db.prepare(
       `UPDATE reflection_runs SET
          completed_at = ?,
+         events_processed = ?,
          clusters_processed = ?,
          memories_created = ?,
          memories_reinforced = ?,
@@ -233,6 +290,7 @@ export async function runReflection(opts: {
        WHERE id = ?`,
     ).run(
       completedAt,
+      events.length,
       clustersProcessed,
       memoriesCreated,
       memoriesReinforced,
@@ -242,7 +300,7 @@ export async function runReflection(opts: {
     );
 
     log().info(
-      `[reflection] Run ${runId} complete: ${clustersProcessed} clusters, ` +
+      `[reflection] Run ${runId} complete: ${events.length} events, ${clustersProcessed} clusters, ` +
         `${memoriesCreated} new, ${memoriesReinforced} reinforced, ${conflictsDetected} conflicts, ` +
         `${tokensUsed} tokens`,
     );
@@ -250,6 +308,7 @@ export async function runReflection(opts: {
     return {
       runId,
       clustersProcessed,
+      eventsProcessed: events.length,
       memoriesCreated,
       memoriesReinforced,
       conflictsDetected,
@@ -259,18 +318,37 @@ export async function runReflection(opts: {
   } catch (err) {
     log().error(`[reflection] Run ${runId} failed: ${String(err)}`);
 
-    // Mark as failed
+    // Mark as failed with whatever partial stats we have
     try {
       db.prepare(
-        `UPDATE reflection_runs SET completed_at = ?, status = 'failed' WHERE id = ?`,
-      ).run(new Date().toISOString(), runId);
+        `UPDATE reflection_runs SET
+           completed_at = ?,
+           events_processed = ?,
+           clusters_processed = ?,
+           memories_created = ?,
+           memories_reinforced = ?,
+           conflicts_detected = ?,
+           tokens_used = ?,
+           status = 'failed'
+         WHERE id = ?`,
+      ).run(
+        new Date().toISOString(),
+        events.length,
+        clustersProcessed,
+        memoriesCreated,
+        memoriesReinforced,
+        conflictsDetected,
+        getTotalTokensUsed(),
+        runId,
+      );
     } catch {
-      // ignore
+      // ignore — the run record itself may be missing
     }
 
     return {
       runId,
       clustersProcessed,
+      eventsProcessed: events.length,
       memoriesCreated,
       memoriesReinforced,
       conflictsDetected,
