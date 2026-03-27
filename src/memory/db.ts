@@ -1,5 +1,5 @@
 /**
- * Memory database — separate SQLite instance at ~/.lobs/memory.db.
+ * Memory database — separate SQLite instance at ~/.lobs/structured-memory.db.
  *
  * Manages its own connection lifecycle, schema creation, and WAL setup.
  * Uses better-sqlite3 directly (same as lobs.db) rather than drizzle-orm,
@@ -17,7 +17,7 @@ let _db: Database.Database | null = null;
 /**
  * Default path for the memory database.
  */
-export const DEFAULT_MEMORY_DB_PATH = resolve(homedir(), ".lobs", "memory.db");
+export const DEFAULT_MEMORY_DB_PATH = resolve(homedir(), ".lobs", "structured-memory.db");
 
 /**
  * DDL for all memory tables and indexes.
