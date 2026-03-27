@@ -1772,6 +1772,24 @@ export class MainAgent {
           });
         } catch (e) { console.warn(`[structured-memory] Failed to record completion: ${e}`); }
 
+        // Fire reflection after conversation ends (main agent doesn't use agent-loop hooks)
+        try {
+          const { runReflection } = await import("../memory/reflection.js");
+          setImmediate(() => {
+            void runReflection({ trigger: "session_end", sessionId }).then(result => {
+              if (result.skipped) {
+                console.debug(`[reflection] Session ${sessionId} skipped: ${result.skipReason}`);
+              } else {
+                console.log(
+                  `[reflection] Session ${sessionId} — ` +
+                  `${result.eventsProcessed} events, ${result.memoriesCreated} new memories, ` +
+                  `${result.memoriesReinforced} reinforced, ${result.conflictsDetected} conflicts`
+                );
+              }
+            }).catch(err => console.warn(`[reflection] Failed: ${err}`));
+          });
+        } catch (e) { console.warn(`[structured-memory] Failed to trigger reflection: ${e}`); }
+
         console.log(
           `[main-agent] Processing completed for ${this.channelTag(replyChannelId)} session=${sessionId} ` +
           `in ${Date.now() - conversationStartedAt}ms`,
