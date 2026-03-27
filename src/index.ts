@@ -57,7 +57,12 @@ const pawPlugin = {
     // Separate SQLite DB for the new event-based memory system.
     // Must be initialised before hooks are registered so the DB is ready
     // when the first hook fires.
-    initMemoryDb();
+    try {
+      initMemoryDb();
+      log().info("[memory-db] Structured memory database ready");
+    } catch (e) {
+      log().error(`[memory-db] Failed to init structured memory: ${e}`);
+    }
 
     // ── Startup Recovery ─────────────────────────────────────────────
     // Resume in-flight workers from previous lifecycle, or reset if unreachable
