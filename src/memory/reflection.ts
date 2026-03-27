@@ -39,7 +39,7 @@ export interface ReflectionResult {
 
 // ── Skip condition helpers ────────────────────────────────────────────────────
 
-function countTodayReflections(): number {
+function _countTodayReflections(): number {
   const db = getMemoryDb();
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
   const row = db
