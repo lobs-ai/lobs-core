@@ -32,6 +32,10 @@ import { loadWorkspaceContext, buildMainAgentPrompt } from "./services/workspace
 import { setDiscordToolDiscord } from "./runner/tools/index.js";
 import { validateAllConfigs } from "./config/validator.js";
 import { initMemory, shutdownMemory } from "./services/memory/index.js";
+import { initMemoryDb } from "./memory/db.js";
+import { registerEventRecorderHook } from "./hooks/event-recorder.js";
+import { registerReflectionTriggerHook } from "./hooks/reflection-trigger.js";
+import { runDailyReflection } from "./memory/daily-reflection.js";
 import { imagineService } from "./services/imagine.js";
 import { countActiveWorkers, getActiveWorkers } from "./orchestrator/worker-manager.js";
 import { runStartupTelemetry, startDiskSpaceMonitor } from "./services/restart-telemetry.js";
@@ -290,6 +294,14 @@ async function main() {
     console.warn(`Migration warning: ${err}`);
   }
 
+  // Structured memory DB (separate from lobs.db)
+  try {
+    initMemoryDb();
+    console.log("Structured memory database ready");
+  } catch (err) {
+    console.warn(`Structured memory init warning: ${err}`);
+  }
+
   // Seed default workflows
   try {
     seedDefaultWorkflows();
@@ -300,6 +312,13 @@ async function main() {
   // Initialize hook system and tool gating
   console.log("Initializing hook system...");
   initToolGate();
+
+  // Register structured memory hooks (event recording + reflection trigger)
+  // These wire into the runner lifecycle via HookRegistry — must come after
+  // initMemoryDb() and initToolGate().
+  registerEventRecorderHook(null as never);  // _api param is unused
+  registerReflectionTriggerHook();
+  console.log("Structured memory hooks registered (event recorder + reflection trigger)");
 
   // Load skills
   console.log("Loading skills...");
@@ -445,6 +464,20 @@ async function main() {
       }
     },
   });
+
+  // Daily reflection — run at 03:00 local time, after daily db-maintenance
+  let lastDailyReflectionDate = "";
+  const DAILY_REFLECTION_HOUR = 3;
+  const dailyReflectionTimer = setInterval(() => {
+    const now = new Date();
+    if (now.getHours() !== DAILY_REFLECTION_HOUR || now.getMinutes() !== 0) return;
+    const today = now.toISOString().slice(0, 10);
+    if (lastDailyReflectionDate === today) return;
+    lastDailyReflectionDate = today;
+    log().info("[daily-reflection] Cron trigger firing");
+    void runDailyReflection();
+  }, 60_000);
+  (globalThis as any).__dailyReflectionTimer = dailyReflectionTimer;
 
   // Event handler wired after mainAgent is created (see below)
   cronService.start();
@@ -745,6 +778,7 @@ async function main() {
     }
     
     stopDiskMonitor();
+    clearInterval(dailyReflectionTimer);
     imagineService.stop();
     // Clean up voice sessions
     const vm = (globalThis as any).__lobsVoiceManager as VoiceManager | null;
