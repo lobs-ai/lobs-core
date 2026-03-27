@@ -42,6 +42,7 @@ describe("queueBackgroundVoiceTool", () => {
       "read_file",
       "write_note",
       "spawn_agent",
+      "defer_action",
     ]);
   });
 });
