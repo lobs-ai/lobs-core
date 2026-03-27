@@ -124,6 +124,20 @@ CREATE TABLE IF NOT EXISTS retrieval_log (
 
 CREATE INDEX IF NOT EXISTS idx_retrieval_memory ON retrieval_log(memory_id);
 CREATE INDEX IF NOT EXISTS idx_retrieval_time ON retrieval_log(timestamp);
+
+-- FTS5 full-text index for memories.content (porter stemmer for better recall)
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, content_rowid='id', tokenize='porter');
+
+-- Keep memories_fts in sync with the memories table
+CREATE TRIGGER IF NOT EXISTS memories_fts_insert AFTER INSERT ON memories BEGIN
+  INSERT INTO memories_fts(rowid, content) VALUES (NEW.id, NEW.content);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_fts_update AFTER UPDATE OF content ON memories BEGIN
+  UPDATE memories_fts SET content = NEW.content WHERE rowid = NEW.id;
+END;
+CREATE TRIGGER IF NOT EXISTS memories_fts_delete AFTER DELETE ON memories BEGIN
+  DELETE FROM memories_fts WHERE rowid = OLD.id;
+END;
 `;
 
 /**

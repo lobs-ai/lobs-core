@@ -354,6 +354,9 @@ interface MemorySearchResult {
 function categorizeResult(result: MemorySearchResult): ContextChunk["category"] {
   const path = result.path.toLowerCase();
 
+  // Structured memory entries from memory.db
+  if (path.startsWith("memory-db:")) return "memory";
+
   // Session transcripts
   if (path.includes("/sessions/") || path.endsWith(".jsonl")) return "session";
 
@@ -369,6 +372,23 @@ function categorizeResult(result: MemorySearchResult): ContextChunk["category"] 
 
   // Default to project
   return "project";
+}
+
+/**
+ * Format a structured memory for injection into the context block.
+ * The format communicates confidence and evidence count to the model.
+ */
+function formatStructuredMemory(
+  memory: import("../memory/types.js").Memory,
+  evidenceCount: number,
+  confidence: number,
+): string {
+  const status = memory.status !== "active" ? ` | ${memory.status}` : "";
+  const contested = memory.status === "superseded" ? " | contested" : "";
+  return (
+    `[Memory: ${memory.memory_type} | confidence: ${confidence.toFixed(2)} | evidence: ${evidenceCount}${status}${contested}]\n` +
+    memory.content
+  );
 }
 
 // ── Context Assembly ─────────────────────────────────────────────────────────
@@ -483,6 +503,60 @@ export async function assembleContext(params: {
   }));
 
   layers.push(fillLayer("session", sessionChunks, budget.allocations.session));
+
+  // Structured memory search (from memory.db — separate from document search above)
+  try {
+    const { searchMemoriesFast, searchMemoriesFull, decayedConfidence } = await import(
+      "../memory/search.js"
+    );
+
+    // Use slow path (FTS + vector) for tasks that benefit from semantic depth
+    const useSlowPath = (["research", "debugging", "architecture"] as string[]).includes(
+      classification.taskType,
+    );
+    const searchFn = useSlowPath ? searchMemoriesFull : searchMemoriesFast;
+
+    const structuredResults = await searchFn(params.task, {
+      maxResults: 5,
+      projectId: classification.project,
+      minConfidence: 0.4,
+    });
+
+    if (structuredResults.length > 0) {
+      const structuredChunks: ContextChunk[] = structuredResults.map((result) => {
+        const m = result.memory;
+        const decayed = decayedConfidence(m);
+        const formatted = formatStructuredMemory(m, result.evidenceCount, decayed);
+        return {
+          source: `memory-db:${m.id}`,
+          content: formatted,
+          // Structured memories get a small boost over file-based results
+          score: Math.min(result.score + 0.1, 1),
+          tokens: estimateTokens(formatted),
+          category: "memory" as const,
+        };
+      });
+
+      // Merge into the existing memory layer
+      const memoryLayer = layers.find((l) => l.category === "memory");
+      if (memoryLayer) {
+        memoryLayer.chunks.push(...structuredChunks);
+        // Re-sort by score so best items float to the top
+        memoryLayer.chunks.sort((a, b) => b.score - a.score);
+        memoryLayer.tokensUsed = memoryLayer.chunks.reduce(
+          (sum, c) => sum + c.tokens,
+          0,
+        );
+      } else {
+        layers.push(
+          fillLayer("memory", structuredChunks, budget.allocations.memory),
+        );
+      }
+    }
+  } catch (err) {
+    // Structured memory search is optional — log and continue
+    console.warn(`[context-engine] Structured memory search failed: ${String(err)}`);
+  }
 
   // Context refs — explicit file references (loaded directly, not from search)
   if (params.contextRefs?.length) {

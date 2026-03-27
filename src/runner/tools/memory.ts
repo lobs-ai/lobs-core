@@ -102,7 +102,29 @@ export async function memorySearchTool(
       lines.push("");
     }
 
-    return lines.join("\n");
+    let output = lines.join("\n");
+
+    // Augment with structured memories from memory.db
+    try {
+      const { searchMemoriesFast } = await import("../../memory/search.js");
+      const structuredResults = await searchMemoriesFast(query, {
+        maxResults: 3,
+        minConfidence: 0.4,
+      });
+
+      if (structuredResults.length > 0) {
+        output += "\n\n## Structured Memories\n\n";
+        for (const r of structuredResults) {
+          const m = r.memory;
+          output += `[Memory #${m.id}: ${m.memory_type} | confidence: ${m.confidence.toFixed(2)} | score: ${r.score.toFixed(2)}]\n`;
+          output += `${m.content}\n\n`;
+        }
+      }
+    } catch {
+      // Optional — don't fail the tool if structured search fails
+    }
+
+    return output;
   } catch (error) {
     return `Memory search error: ${error instanceof Error ? error.message : String(error)}`;
   }
@@ -277,11 +299,54 @@ export async function memoryWriteTool(
     if (permanent && PERMANENT_CATEGORIES.includes(cat)) {
       try {
         const db = getMemoryDb();
+        const now = new Date().toISOString();
+
+        // Map category to memory_type
+        const typeMap: Record<string, string> = {
+          learning: "learning",
+          decision: "decision",
+          finding: "fact",
+          note: "learning",
+        };
+        const memoryType = typeMap[cat] ?? "learning";
+
         // source_authority = 2: explicit agent statement
         db.prepare(
-          `INSERT INTO memories (memory_type, content, confidence, scope, source_authority, derived_at, status)
-           VALUES (?, ?, ?, 'system', 2, ?, 'active')`,
-        ).run(cat, content, 0.9, new Date().toISOString());
+          `INSERT INTO memories (memory_type, content, confidence, scope, source_authority, derived_at, last_validated, status, access_count)
+           VALUES (?, ?, 0.9, 'system', 2, ?, ?, 'active', 0)`,
+        ).run(memoryType, content, now, now);
+
+        // Fire-and-forget: generate and store embedding
+        const lastRow = db.prepare("SELECT last_insert_rowid() as id").get() as { id: number };
+        const newMemoryId = lastRow.id;
+
+        void (async () => {
+          try {
+            const resp = await fetch("http://localhost:1234/v1/embeddings", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                model: "text-embedding-qwen3-embedding-4b",
+                input: content,
+              }),
+              signal: AbortSignal.timeout(10_000),
+            });
+            if (resp.ok) {
+              const data = (await resp.json()) as {
+                data?: Array<{ embedding?: number[] }>;
+              };
+              const raw = data.data?.[0]?.embedding;
+              if (raw && Array.isArray(raw)) {
+                const embedding = new Float32Array(raw);
+                db.prepare(
+                  "INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding) VALUES (?, ?)",
+                ).run(newMemoryId, Buffer.from(embedding.buffer));
+              }
+            }
+          } catch {
+            // Embedding is optional — memory is still saved
+          }
+        })();
       } catch (dbErr) {
         // Non-fatal — the flat file write already succeeded
         log().warn(`[memory_write] Failed to write structured memory: ${String(dbErr)}`);
