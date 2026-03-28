@@ -24,6 +24,7 @@ import { registerGroupMessageHook } from "./hooks/group-message.js";
 import { registerCompactionHooks } from "./hooks/compaction.js";
 import { registerEventRecorderHook } from "./hooks/event-recorder.js";
 import { registerReflectionTriggerHook } from "./hooks/reflection-trigger.js";
+import { cleanupStaleRuns } from "./memory/reflection.js";
 import { runDailyReflection } from "./memory/daily-reflection.js";
 import { startControlLoop, stopControlLoop } from "./orchestrator/control-loop.js";
 import { YouTubeService } from "./services/youtube.js";
@@ -60,6 +61,13 @@ const pawPlugin = {
     try {
       initMemoryDb();
       log().info("[memory-db] Structured memory database ready");
+
+      // Clean up reflection runs stuck in "running" from a previous process
+      try {
+        cleanupStaleRuns();
+      } catch (e) {
+        log().warn(`[memory-db] Failed to cleanup stale reflection runs: ${e}`);
+      }
     } catch (e) {
       log().error(`[memory-db] Failed to init structured memory: ${e}`);
     }

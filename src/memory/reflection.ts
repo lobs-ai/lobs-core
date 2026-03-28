@@ -30,6 +30,12 @@ const HIGH_SIGNAL_THRESHOLD = 0.7;
 /** Maximum new memories we'll create from a single cluster */
 const MAX_NEW_MEMORIES_PER_CLUSTER = 5;
 
+/** Maximum wall-clock time for a single reflection run (ms) */
+const MAX_REFLECTION_DURATION_MS = 2 * 60 * 1000; // 2 minutes
+
+/** Runs stuck in "running" longer than this are abandoned on startup (ms) */
+const STALE_RUN_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
+
 // ── Public types ─────────────────────────────────────────────────────────────
 
 export interface ReflectionResult {
@@ -141,6 +147,33 @@ function recordSkippedRun(
   }
 }
 
+// ── Stale run cleanup ────────────────────────────────────────────────────────
+
+/**
+ * Mark any "running" reflection runs older than STALE_RUN_THRESHOLD_MS as "abandoned".
+ * Call on startup to clean up zombies from previous process lifetimes.
+ */
+export function cleanupStaleRuns(): number {
+  const db = getMemoryDb();
+  const cutoff = new Date(Date.now() - STALE_RUN_THRESHOLD_MS).toISOString();
+
+  // ISO 8601 strings sort lexicographically, so direct comparison works
+  const result = db.prepare(
+    `UPDATE reflection_runs
+     SET status = 'abandoned',
+         completed_at = datetime('now'),
+         skip_reason = 'marked abandoned: exceeded max run time'
+     WHERE status = 'running'
+     AND started_at < ?`,
+  ).run(cutoff);
+
+  const cleaned = (result as { changes: number }).changes;
+  if (cleaned > 0) {
+    log().info(`[reflection] Cleaned up ${cleaned} stale 'running' reflection run(s)`);
+  }
+  return cleaned;
+}
+
 // ── Main entry point ─────────────────────────────────────────────────────────
 
 export async function runReflection(opts: {
@@ -236,6 +269,15 @@ export async function runReflection(opts: {
 
     for (const cluster of clusters) {
       if (budgetRemaining <= 0) break;
+
+      // Wall-clock timeout — hard stop to prevent zombie runs
+      if (Date.now() - Date.parse(startedAt) > MAX_REFLECTION_DURATION_MS) {
+        log().info(
+          `[reflection] Run ${runId} — wall-clock timeout (${MAX_REFLECTION_DURATION_MS}ms), ` +
+            `stopping after ${clustersProcessed} clusters`,
+        );
+        break;
+      }
 
       // Enforce session token budget — stop processing more clusters if exceeded
       if (getTotalTokensUsed() >= SESSION_TOKEN_BUDGET) {
