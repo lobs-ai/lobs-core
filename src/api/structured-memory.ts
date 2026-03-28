@@ -13,6 +13,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { json, error, parseQuery, parseBody } from "./index.js";
 import { getMemoryDb } from "../memory/db.js";
 import { consolidateMemories } from "../memory/consolidation.js";
+import { searchMemoriesFast, searchMemoriesFull } from "../memory/search.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -291,6 +292,74 @@ function handleEvents(res: ServerResponse, query: Record<string, string>): void 
 }
 
 // ---------------------------------------------------------------------------
+// Route: GET /api/structured-memory/search
+// ---------------------------------------------------------------------------
+
+async function handleSearch(res: ServerResponse, query: Record<string, string>): Promise<void> {
+  const q = (query.q ?? "").trim();
+  if (!q) {
+    error(res, 'Missing required query param: q', 400);
+    return;
+  }
+
+  const mode = query.mode === "full" ? "full" : "fast";
+  const limit = Math.max(1, Math.min(parseInt(query.limit ?? "10", 10) || 10, 50));
+  const minConfidence = query.minConfidence != null
+    ? Math.max(0, Math.min(1, parseFloat(query.minConfidence) || 0.3))
+    : 0.3;
+  const includeSuperseded = query.includeSuperseded === "true";
+  const scope = query.scope || undefined;
+
+  const memoryTypes = query.types
+    ? query.types.split(",").map(t => t.trim()).filter(Boolean)
+    : undefined;
+
+  const opts = {
+    maxResults: limit,
+    memoryTypes,
+    scope,
+    minConfidence,
+    includeSuperseded,
+  };
+
+  const t0 = Date.now();
+
+  let results;
+  if (mode === "full") {
+    results = await searchMemoriesFull(q, opts);
+  } else {
+    results = await searchMemoriesFast(q, opts);
+  }
+
+  const elapsed = Date.now() - t0;
+
+  const formatted = results.map(r => ({
+    id: r.memory.id,
+    memory_type: r.memory.memory_type,
+    title: r.memory.title,
+    content: r.memory.content,
+    confidence: r.memory.confidence,
+    scope: r.memory.scope,
+    status: r.memory.status,
+    score: r.score,
+    matchType: r.matchType,
+    evidenceCount: r.evidenceCount,
+    access_count: r.memory.access_count,
+    created_at: r.memory.created_at,
+    derived_at: r.memory.derived_at,
+    last_accessed: r.memory.last_accessed,
+  }));
+
+  json(res, {
+    results: formatted,
+    query: q,
+    mode,
+    count: formatted.length,
+    elapsedMs: elapsed,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Route: POST /api/structured-memory/conflicts/:id/resolve
 // ---------------------------------------------------------------------------
 
@@ -406,6 +475,9 @@ export async function handleStructuredMemoryRequest(
       break;
     case "memories":
       handleMemories(res, query);
+      break;
+    case "search":
+      await handleSearch(res, query);
       break;
     case "conflicts":
       handleConflicts(res, query);
