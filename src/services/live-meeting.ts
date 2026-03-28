@@ -10,7 +10,7 @@
 
 import { randomUUID } from "node:crypto";
 import { execSync } from "node:child_process";
-import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
 import { eq } from "drizzle-orm";
@@ -20,6 +20,7 @@ import { log } from "../util/logger.js";
 import { getModelForTier } from "../config/models.js";
 import { createResilientClient, parseModelString } from "../runner/providers.js";
 import { MeetingAnalysisService } from "./meeting-analysis.js";
+import { loadWorkspaceContext } from "./workspace-loader.js";
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -81,8 +82,7 @@ export interface LiveSession {
 // ── Meeting Context Loader ───────────────────────────────────────────────
 
 const HOME = homedir();
-const AGENTS_DIR = join(HOME, ".lobs", "agents", "main");
-const CONTEXT_DIR = join(AGENTS_DIR, "context");
+const CONTEXT_DIR = join(HOME, ".lobs", "agents", "main", "context");
 const SHARED_MEMORY_DIR = join(HOME, "lobs-shared-memory");
 
 /**
@@ -108,63 +108,43 @@ function dateString(offsetDays: number): string {
 /**
  * Load fresh context for a live meeting session.
  *
- * Gathers:
- * - MEMORY.md (project index, people, system overview)
- * - USER.md (Rafe's schedule, preferences)
- * - Today's memory file (what was worked on today)
- * - Yesterday's memory file (recent context)
- * - Recent shared learnings (system-wide decisions)
- * - Active project summaries
+ * Uses the same workspace-loader that Nexus/Discord sessions use to load
+ * SOUL.md, USER.md, MEMORY.md, TOOLS.md — the full identity. Then layers on
+ * today's/yesterday's memory and shared learnings for recent context.
  *
- * Returns a single context string to inject into the meeting system prompt.
- * This runs once at session start so every analysis call has fresh awareness.
+ * The result: the meeting analysis LLM acts like the same Lobs Rafe talks to
+ * everywhere else, not a generic meeting summarizer.
  */
 function loadMeetingContext(): string {
   const sections: string[] = [];
 
-  // 1. MEMORY.md — project index, people, system layout
-  const memoryMd = safeRead(join(AGENTS_DIR, "MEMORY.md"));
-  if (memoryMd) {
-    sections.push(`## Project & System Overview\n${memoryMd}`);
+  // 1. Core identity — SOUL.md, USER.md, MEMORY.md, TOOLS.md via workspace loader
+  //    This is the same context the main agent gets in Nexus/Discord sessions.
+  try {
+    const workspaceCtx = loadWorkspaceContext("main");
+    if (workspaceCtx) {
+      sections.push(workspaceCtx);
+    }
+  } catch (e) {
+    log().warn(`[LIVE_MEETING] Failed to load workspace context: ${e}`);
   }
 
-  // 2. USER.md — schedule, preferences (trimmed to essentials)
-  const userMd = safeRead(join(AGENTS_DIR, "USER.md"), 2000);
-  if (userMd) {
-    sections.push(`## About Rafe\n${userMd}`);
-  }
-
-  // 3. Today's memory — what was worked on, recent context
+  // 2. Today's memory — what was worked on, recent context
   const todayMem = safeRead(join(CONTEXT_DIR, "memory", `${dateString(0)}.md`));
   if (todayMem) {
     sections.push(`## Today's Activity (${dateString(0)})\n${todayMem}`);
   }
 
-  // 4. Yesterday's memory — recent continuity
+  // 3. Yesterday's memory — recent continuity
   const yesterdayMem = safeRead(join(CONTEXT_DIR, "memory", `${dateString(-1)}.md`), 2000);
   if (yesterdayMem) {
     sections.push(`## Yesterday's Activity (${dateString(-1)})\n${yesterdayMem}`);
   }
 
-  // 5. Shared learnings — system-wide decisions and patterns
+  // 4. Shared learnings — system-wide decisions and patterns
   const learnings = safeRead(join(SHARED_MEMORY_DIR, "learnings.md"), 2000);
   if (learnings) {
     sections.push(`## System Learnings\n${learnings}`);
-  }
-
-  // 6. Active project files — grab first ~1500 chars of each
-  try {
-    const contextFiles = existsSync(CONTEXT_DIR) ? readdirSync(CONTEXT_DIR) : [];
-    const projectFiles = contextFiles.filter(f => f.startsWith("PROJECT-") && f.endsWith(".md"));
-    for (const pf of projectFiles) {
-      const content = safeRead(join(CONTEXT_DIR, pf), 1500);
-      if (content) {
-        const projectName = pf.replace("PROJECT-", "").replace(".md", "");
-        sections.push(`## Project: ${projectName}\n${content}`);
-      }
-    }
-  } catch {
-    // Skip if context dir doesn't exist
   }
 
   if (sections.length === 0) {
@@ -203,22 +183,27 @@ async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
 
 /**
  * Build the meeting system prompt, injecting session context when available.
- * The context includes fresh project data, recent memory, schedule, and learnings
- * loaded once at session start.
+ *
+ * Uses the same identity context as Nexus/Discord sessions (SOUL.md, USER.md,
+ * MEMORY.md, TOOLS.md) so the meeting analysis LLM is the same Lobs — same
+ * personality, same knowledge of Rafe, same awareness of projects and people.
  */
 function buildMeetingSystemPrompt(sessionContext?: string): string {
-  const base = `You are Lobs, Rafe's personal AI agent, analyzing a live meeting in real-time. You know Rafe well — write analysis as yourself with full context of who everyone is. Return ONLY valid JSON — no markdown, no code fences, no extra text.`;
+  const meetingRole = `You are Lobs, sitting in on a live meeting with Rafe. You're the same Lobs he talks to on Nexus and Discord — same personality, same knowledge, same relationship. You're analyzing the meeting transcript in real-time to surface useful insights.
 
-  if (!sessionContext) return base;
+Session type: live meeting analysis
 
-  return `${base}
+Your job: Extract structured insights from the transcript as it grows. You're not summarizing for a stranger — you're noting things that matter to Rafe based on what you know about his projects, schedule, and priorities.
 
----
-# Your Current Context
-The following is your fresh knowledge loaded at the start of this meeting session. Use it to understand references, names, projects, and recent decisions discussed in the meeting.
+Output format: Return ONLY valid JSON — no markdown, no code fences, no extra text.`;
 
-${sessionContext}
----`;
+  if (!sessionContext) return meetingRole;
+
+  return `${sessionContext}
+
+${meetingRole}
+
+Current time: ${new Date().toLocaleString("en-US", { timeZone: "America/New_York", dateStyle: "full", timeStyle: "short" })}`;
 }
 
 async function llmAnalyze(prompt: string, systemPrompt?: string): Promise<string> {
@@ -408,10 +393,10 @@ async function executeResearch(sessionId: string, researchId: string, query: str
     }
 
     // Ask LLM to synthesize a useful response — include session context if available
-    const sessionCtx = session.sessionContext
-      ? `\n\nYour current context:\n${session.sessionContext}`
-      : "";
-    const researchSystem = `You are Lobs, Rafe's AI agent. You're doing background research during a live meeting to bring back useful, specific information. Be direct and concrete — reference actual names, line numbers, patterns. Skip preamble like "I found" or "Here's what I found". Just deliver the info. 2-4 sentences max.${sessionCtx}`;
+    const researchRole = `You are Lobs, doing background research during a live meeting with Rafe. Be direct and concrete — reference actual names, line numbers, patterns. Skip preamble. Just deliver the info. 2-4 sentences max.`;
+    const researchSystem = session.sessionContext
+      ? `${session.sessionContext}\n\n${researchRole}`
+      : researchRole;
 
     const researchPrompt = context
       ? `Research task from a live meeting with Rafe:
