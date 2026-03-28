@@ -562,9 +562,17 @@ class DiscordService {
       const isDm = !msg.guildId;
       const isMentioned = msg.mentions.has(this.client!.user!);
 
-      // Build content: message text + any text file attachments
+      // Build content: message text + embeds + any text file attachments
       let content = msg.content;
       let images: Array<{ data: string; mediaType: string; filename?: string }> | undefined;
+
+      // Convert embeds to text — Discord embed messages have empty msg.content
+      if (msg.embeds.length > 0) {
+        const embedText = this.embedsToText(msg.embeds);
+        if (embedText) {
+          content = content ? `${content}\n\n${embedText}` : embedText;
+        }
+      }
 
       if (msg.attachments.size > 0) {
         const textAttachments = await this.fetchTextAttachments(msg.attachments);
@@ -592,6 +600,46 @@ class DiscordService {
         images: images?.length ? images : undefined,
       });
     });
+  }
+
+  /**
+   * Convert Discord embeds to a readable text representation.
+   * Handles title, description, fields, footer, author, and URL.
+   * Used when msg.content is empty but the message has rich embed data.
+   */
+  private embedsToText(embeds: import("discord.js").Embed[]): string {
+    const parts: string[] = [];
+
+    for (const embed of embeds) {
+      const lines: string[] = [];
+
+      if (embed.author?.name) {
+        lines.push(`Author: ${embed.author.name}`);
+      }
+      if (embed.title) {
+        lines.push(`Title: ${embed.title}`);
+      }
+      if (embed.url) {
+        lines.push(`URL: ${embed.url}`);
+      }
+      if (embed.description) {
+        lines.push(embed.description);
+      }
+      for (const field of embed.fields) {
+        if (field.name && field.value) {
+          lines.push(`${field.name}: ${field.value}`);
+        }
+      }
+      if (embed.footer?.text) {
+        lines.push(`Footer: ${embed.footer.text}`);
+      }
+
+      if (lines.length > 0) {
+        parts.push(lines.join("\n"));
+      }
+    }
+
+    return parts.join("\n\n---\n\n");
   }
 
   /** Fetch text content from Discord message attachments */

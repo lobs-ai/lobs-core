@@ -2183,7 +2183,17 @@ export class MainAgent {
       return [...summaryMessages, ...reconstructed];
     }
 
-    return reconstructed;
+    // Filter out messages with empty content — Anthropic API rejects them.
+    // This can happen if a Discord embed message was stored before the embed-to-text
+    // conversion was in place (msg.content was "" for embed-only messages).
+    const filtered = reconstructed.filter(row => {
+      const c = row.content;
+      if (typeof c === "string") return c.trim().length > 0;
+      if (Array.isArray(c)) return c.length > 0;
+      return false;
+    });
+
+    return filtered;
   }
 
   /**

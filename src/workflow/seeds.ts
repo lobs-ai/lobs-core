@@ -88,7 +88,7 @@ const DEFAULT_WORKFLOWS = [
   {
     name: "task-router",
     description: "Master task router: checks capacity and routes tasks to the correct agent workflow.",
-    trigger: { type: "task_match", agent_types: ["programmer", "researcher", "writer", "architect", "reviewer", "inbox-responder"] },
+    trigger: { type: "task_match", agent_types: ["programmer", "researcher", "writer", "architect", "reviewer", "inbox-responder", "main"] },
     is_active: true,
     nodes: [
       {
@@ -124,6 +124,7 @@ const DEFAULT_WORKFLOWS = [
             { match: 'taskField("agent") == "architect"', goto: "spawn_architect" },
             { match: 'taskField("agent") == "reviewer"', goto: "spawn_reviewer" },
             { match: 'taskField("agent") == "inbox-responder"', goto: "spawn_inbox" },
+            { match: 'taskField("agent") == "main"', goto: "spawn_main" },
           ],
           default: "llm_classify",
         },
@@ -139,6 +140,7 @@ const DEFAULT_WORKFLOWS = [
             { id: "spawn_writer", description: "Documentation, content, summaries, write-ups" },
             { id: "spawn_architect", description: "System design, architecture, technical strategy" },
             { id: "spawn_reviewer", description: "Code review, quality checks, feedback" },
+            { id: "spawn_main", description: "General tasks, system work, coordination, anything not fitting other categories" },
           ],
           model_tier: "micro",
         },
@@ -320,6 +322,13 @@ const DEFAULT_WORKFLOWS = [
         on_failure: { retry: 0, abort_on: ["spawn_error"] },
       },
       {
+        id: "spawn_main",
+        type: "spawn_agent",
+        config: { agent_type: "main" },
+        on_success: "done",
+        on_failure: { retry: 1, abort_on: ["spawn_error"] },
+      },
+      {
         id: "done",
         type: "cleanup",
         config: {
@@ -333,6 +342,7 @@ const DEFAULT_WORKFLOWS = [
             "spawn_reviewer.childSessionKey",
             "spawn_reviewer_post.childSessionKey",
             "spawn_inbox.childSessionKey",
+            "spawn_main.childSessionKey",
           ],
         },
       },
