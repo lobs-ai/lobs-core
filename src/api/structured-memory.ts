@@ -12,6 +12,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { json, error, parseQuery, parseBody } from "./index.js";
 import { getMemoryDb } from "../memory/db.js";
+import { consolidateMemories } from "../memory/consolidation.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -358,6 +359,15 @@ async function handleResolveConflict(
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/structured-memory/consolidate
+// ---------------------------------------------------------------------------
+
+async function handleConsolidate(res: ServerResponse): Promise<void> {
+  const stats = await consolidateMemories();
+  json(res, { ok: true, ...stats });
+}
+
+// ---------------------------------------------------------------------------
 // Main dispatcher
 // ---------------------------------------------------------------------------
 
@@ -375,6 +385,10 @@ export async function handleStructuredMemoryRequest(
     const resolveMatch = route.match(/^conflicts\/(\d+)\/resolve$/);
     if (resolveMatch) {
       await handleResolveConflict(req, res, parseInt(resolveMatch[1], 10));
+      return;
+    }
+    if (route === "consolidate") {
+      await handleConsolidate(res);
       return;
     }
     error(res, "Not found", 404);

@@ -66,6 +66,20 @@ Output ONLY a JSON array. No prose, no markdown fences. Each element:
   "evidenceEventIds": [<event id numbers>]
 }
 
+IMPORTANT — Quality filters (reject these):
+- Ephemeral state: branch names, test counts, "system is working", process status
+- Implementation narration: "initialized X", "wired Y into Z", "registered hook"
+- Redundant architecture: don't re-describe how the memory system works — it already knows
+- Version-specific: exact version numbers or timing data that will be stale tomorrow
+- Meta-observations: observations about the extraction/memory process itself
+
+KEEP only memories that a future agent session would genuinely benefit from:
+- User preferences and corrections (highest value)
+- Architectural decisions with rationale (WHY, not just WHAT)
+- Hard-won debugging insights (what was wrong, why it was hard to find)
+- External system gotchas (API quirks, service limitations)
+- Project-specific domain knowledge
+
 Rules:
 - Only extract memories that would be useful in future sessions
 - Skip routine/ephemeral actions (file reads, directory listings)

@@ -9,10 +9,14 @@
 
 import { getMemoryDb } from "./db.js";
 import { log } from "../util/logger.js";
+import { parseModelString, createClient } from "../runner/providers.js";
 import type { MemoryCandidate } from "./extractor.js";
 import type { Memory, Conflict } from "./types.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
+
+const CLASSIFICATION_MODEL = "anthropic/claude-haiku-4-5";
+const CLASSIFICATION_MAX_TOKENS = 16;
 
 const EMBED_URL = "http://localhost:1234/v1/embeddings";
 const EMBED_MODEL = "text-embedding-qwen3-embedding-4b";
@@ -116,25 +120,65 @@ function levenshteinSimilarity(a: string, b: string): number {
   return 1 - dp[m][n] / Math.max(m, n);
 }
 
-// ── Contradiction detection ──────────────────────────────────────────────────
+// ── Relationship classification ───────────────────────────────────────────────
+
+export type RelationshipClass = "duplicate" | "update" | "contradiction" | "complementary";
 
 /**
- * Rough heuristic: check for negation patterns between two strings.
- * This is intentionally simple — a real system would use NLI models.
+ * Use Claude Haiku to classify the relationship between two memories.
+ *
+ * - duplicate: same information, different words → reinforce existing
+ * - update: newer info supersedes older → create new, supersede old
+ * - contradiction: genuinely conflicting claims → create conflict
+ * - complementary: related but distinct info → both are fine, create new
+ *
+ * Falls back to "complementary" on any error so we never crash or drop data.
  */
-function likelyContradicts(existing: string, candidate: string): boolean {
-  const negations = ["not ", "never ", "don't ", "shouldn't ", "avoid ", "no longer ", "instead "];
+export async function classifyRelationship(
+  existing: string,
+  candidate: string,
+): Promise<RelationshipClass> {
+  const systemPrompt =
+    `Classify the relationship between two memory statements. ` +
+    `Reply with exactly one word: duplicate, update, contradiction, or complementary.\n` +
+    `duplicate = same info, different words. ` +
+    `update = candidate supersedes existing. ` +
+    `contradiction = genuinely conflicting. ` +
+    `complementary = related but distinct.`;
 
-  const ex = existing.toLowerCase();
-  const ca = candidate.toLowerCase();
+  const userPrompt =
+    `Existing: "${existing.slice(0, 300)}"\nCandidate: "${candidate.slice(0, 300)}"`;
 
-  for (const neg of negations) {
-    if ((ex.includes(neg) && !ca.includes(neg)) || (!ex.includes(neg) && ca.includes(neg))) {
-      return true;
-    }
+  try {
+    const config = parseModelString(CLASSIFICATION_MODEL);
+    const client = createClient(config);
+
+    const response = await client.createMessage({
+      model: config.modelId,
+      system: systemPrompt,
+      messages: [{ role: "user", content: userPrompt }],
+      tools: [],
+      maxTokens: CLASSIFICATION_MAX_TOKENS,
+    });
+
+    const text = (response.content as Array<{ type: string; text?: string }>)
+      .filter((b) => b.type === "text")
+      .map((b) => b.text ?? "")
+      .join("")
+      .toLowerCase()
+      .trim();
+
+    if (text.startsWith("duplicate")) return "duplicate";
+    if (text.startsWith("update")) return "update";
+    if (text.startsWith("contradiction")) return "contradiction";
+    if (text.startsWith("complementary")) return "complementary";
+
+    log().warn(`[reconciler] Unexpected classification response: "${text}" — defaulting to complementary`);
+    return "complementary";
+  } catch (err) {
+    log().warn(`[reconciler] classifyRelationship failed: ${String(err)} — defaulting to complementary`);
+    return "complementary";
   }
-
-  return false;
 }
 
 // ── DB helpers ───────────────────────────────────────────────────────────────
@@ -262,41 +306,14 @@ export async function reconcile(
       // Update in-memory cache
       bestMatch.memory.confidence = newConfidence;
     } else if (bestSimilarity > CONFLICT_THRESHOLD && bestMatch) {
-      // ── Potential conflict zone ──
-      if (likelyContradicts(bestMatch.content, candidate.content)) {
-        // Create new memory and record conflict
-        const newMemory = await createMemory(candidate, reflectionRunId);
-        if (newMemory) {
-          result.newMemories.push(newMemory);
-          newMemoryCount++;
+      // ── Potential conflict zone — ask LLM to classify ──
+      const relationship = await classifyRelationship(bestMatch.content, candidate.content);
+      log().debug?.(
+        `[reconciler] Similarity ${bestSimilarity.toFixed(2)} → LLM says: ${relationship}`,
+      );
 
-          // Record the conflict
-          const conflictDescription = `Possible contradiction: "${bestMatch.content.slice(0, 80)}" vs "${candidate.content.slice(0, 80)}"`;
-          const now = new Date().toISOString();
-
-          db.prepare(
-            `INSERT INTO conflicts (memory_a, memory_b, description, created_at)
-             VALUES (?, ?, ?, ?)`,
-          ).run(bestMatch.memory.id, newMemory.id, conflictDescription, now);
-
-          // Retrieve the conflict row
-          const conflictRow = db
-            .prepare(`SELECT * FROM conflicts WHERE memory_a = ? AND memory_b = ?`)
-            .get(bestMatch.memory.id, newMemory.id) as Conflict | undefined;
-
-          if (conflictRow) {
-            result.conflicts.push(conflictRow);
-          }
-
-          // Update cache
-          existing.push({
-            memory: newMemory,
-            embedding: candidateEmbedding,
-            content: newMemory.content,
-          });
-        }
-      } else {
-        // Similar but not contradicting → reinforce
+      if (relationship === "duplicate") {
+        // Same info, different words → reinforce existing
         const newConfidence = Math.min(1.0, bestMatch.memory.confidence + REINFORCE_BUMP);
 
         db.transaction(() => {
@@ -322,6 +339,67 @@ export async function reconcile(
 
         result.reinforcedMemories.push({ ...bestMatch.memory, confidence: newConfidence });
         bestMatch.memory.confidence = newConfidence;
+      } else if (relationship === "update") {
+        // Candidate supersedes existing → create new, mark old as superseded
+        const newMemory = await createMemory(candidate, reflectionRunId);
+        if (newMemory) {
+          result.newMemories.push(newMemory);
+          newMemoryCount++;
+
+          // Supersede the old memory
+          db.prepare(
+            `UPDATE memories SET status = 'superseded', superseded_by = ?, updated_at = ? WHERE id = ?`,
+          ).run(newMemory.id, new Date().toISOString(), bestMatch.memory.id);
+          bestMatch.memory.status = "superseded";
+
+          existing.push({
+            memory: newMemory,
+            embedding: candidateEmbedding,
+            content: newMemory.content,
+          });
+        }
+      } else if (relationship === "contradiction") {
+        // Genuinely conflicting → create new memory and record conflict
+        const newMemory = await createMemory(candidate, reflectionRunId);
+        if (newMemory) {
+          result.newMemories.push(newMemory);
+          newMemoryCount++;
+
+          const conflictDescription = `Possible contradiction: "${bestMatch.content.slice(0, 80)}" vs "${candidate.content.slice(0, 80)}"`;
+          const now = new Date().toISOString();
+
+          db.prepare(
+            `INSERT INTO conflicts (memory_a, memory_b, description, created_at)
+             VALUES (?, ?, ?, ?)`,
+          ).run(bestMatch.memory.id, newMemory.id, conflictDescription, now);
+
+          const conflictRow = db
+            .prepare(`SELECT * FROM conflicts WHERE memory_a = ? AND memory_b = ?`)
+            .get(bestMatch.memory.id, newMemory.id) as Conflict | undefined;
+
+          if (conflictRow) {
+            result.conflicts.push(conflictRow);
+          }
+
+          existing.push({
+            memory: newMemory,
+            embedding: candidateEmbedding,
+            content: newMemory.content,
+          });
+        }
+      } else {
+        // complementary — related but distinct → create new without conflict
+        const newMemory = await createMemory(candidate, reflectionRunId);
+        if (newMemory) {
+          result.newMemories.push(newMemory);
+          newMemoryCount++;
+
+          existing.push({
+            memory: newMemory,
+            embedding: candidateEmbedding,
+            content: newMemory.content,
+          });
+        }
       }
     } else {
       // ── Novel memory — create new ──

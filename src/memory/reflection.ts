@@ -10,6 +10,7 @@ import { getMemoryDb } from "./db.js";
 import { clusterEvents } from "./clustering.js";
 import { extractMemories, getTotalTokensUsed, resetTokenCounter } from "./extractor.js";
 import { reconcile } from "./reconciler.js";
+import { autoResolveConflicts } from "./conflicts.js";
 import { log } from "../util/logger.js";
 import type { MemoryEvent } from "./types.js";
 
@@ -313,6 +314,16 @@ export async function runReflection(opts: {
       budgetRemaining -= reconciled.newMemories.length;
 
       clustersProcessed++;
+    }
+
+    // ── Auto-resolve conflicts created during this run ──────────────────────
+    try {
+      const resolved = await autoResolveConflicts();
+      if (resolved.resolved > 0) {
+        log().info(`[reflection] Auto-resolved ${resolved.resolved} conflicts (${resolved.escalated} escalated, ${resolved.dismissed} dismissed)`);
+      }
+    } catch (err) {
+      log().warn(`[reflection] autoResolveConflicts failed: ${String(err)}`);
     }
 
     const tokensUsed = getTotalTokensUsed();
