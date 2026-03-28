@@ -199,18 +199,26 @@ type MemoryCategory = (typeof VALID_CATEGORIES)[number];
 /** Categories that can be written to permanent memory */
 const PERMANENT_CATEGORIES: MemoryCategory[] = ["learning", "decision", "finding"];
 
+/** Max content length for a single memory entry (characters). Entries beyond this are truncated. */
+const MAX_MEMORY_CONTENT_LENGTH = 1000;
+
 export const memoryWriteToolDefinition: ToolDefinition = {
   name: "memory_write",
   description:
     "Write to memory. By default writes to today's daily memory file. " +
     "Use permanent=true for lasting learnings/decisions that should persist forever. " +
-    "Events and notes always go to the daily file.",
+    "Events and notes always go to the daily file.\n\n" +
+    "IMPORTANT: Keep entries concise — 2-4 sentences max. Write the *what* and *why*, not implementation details. " +
+    "Bad: listing every file, function name, threshold value, and checklist item. " +
+    "Good: 'Built health monitoring with 4 probes, integrated into control loop. Design doc at X.' " +
+    "If details matter, they belong in docs/code, not memory. Memory is for recall, not documentation. " +
+    "Entries over 1000 characters are automatically truncated.",
   input_schema: {
     type: "object",
     properties: {
       content: {
         type: "string",
-        description: "What to remember",
+        description: "What to remember — keep concise (2-4 sentences, under 1000 chars). Focus on what happened and why, not implementation details.",
       },
       category: {
         type: "string",
@@ -235,7 +243,7 @@ export const memoryWriteToolDefinition: ToolDefinition = {
 export async function memoryWriteTool(
   params: Record<string, unknown>,
 ): Promise<string> {
-  const content = params.content as string;
+  let content = params.content as string;
   const category = params.category as string;
 
   if (!content || typeof content !== "string") {
@@ -244,6 +252,13 @@ export async function memoryWriteTool(
 
   if (!category || !(VALID_CATEGORIES as readonly string[]).includes(category)) {
     return `Error: category must be one of: ${VALID_CATEGORIES.join(", ")}`;
+  }
+
+  // Truncate oversized entries
+  let truncated = false;
+  if (content.length > MAX_MEMORY_CONTENT_LENGTH) {
+    content = content.slice(0, MAX_MEMORY_CONTENT_LENGTH).trimEnd() + "…";
+    truncated = true;
   }
 
   const cat = category as MemoryCategory;
@@ -354,7 +369,8 @@ export async function memoryWriteTool(
     }
 
     const shortPath = targetFile.replace(homeDir, "~");
-    return `Wrote to memory: ${shortPath}\nEntry: ${entry.trim()}`;
+    const truncNote = truncated ? " (truncated — keep entries under 1000 chars)" : "";
+    return `Wrote to memory: ${shortPath}${truncNote}\nEntry: ${entry.trim()}`;
   } catch (error) {
     return `Error writing to memory: ${error instanceof Error ? error.message : String(error)}`;
   }
