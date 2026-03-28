@@ -16,7 +16,7 @@ import type { MemoryEvent } from "./types.js";
 const LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions";
 const LM_STUDIO_MODEL = "qwen/qwen3.5-9b";
 const MAX_CONTENT_CHARS = 6000; // ~1.5k tokens of event content
-const REQUEST_TIMEOUT_MS = 60_000;
+const REQUEST_TIMEOUT_MS = 90_000;
 
 // ── Evidence thresholds ──────────────────────────────────────────────────────
 
@@ -45,7 +45,8 @@ export interface MemoryCandidate {
 
 // ── Prompt construction ──────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are a memory extraction assistant. Your job is to identify durable, reusable memories from agent activity logs.
+const SYSTEM_PROMPT = `/no_think
+You are a memory extraction assistant. Your job is to identify durable, reusable memories from agent activity logs.
 
 Memory types:
 - learning: Something discovered through trial and error or observation
@@ -103,6 +104,7 @@ interface LmStudioRequest {
   temperature: number;
   max_tokens: number;
   stream: false;
+  chat_template_kwargs?: Record<string, unknown>;
 }
 
 interface LmStudioResponse {
@@ -123,8 +125,12 @@ async function callLmStudio(
     model: LM_STUDIO_MODEL,
     messages,
     temperature: 0.2,
-    max_tokens: 1024,
+    max_tokens: 4096,
     stream: false,
+    // Disable Qwen 3.5's chain-of-thought thinking mode.
+    // Without this, the model burns all tokens on internal reasoning
+    // and never outputs the JSON array we need.
+    chat_template_kwargs: { enable_thinking: false },
   };
 
   const controller = new AbortController();
@@ -155,8 +161,10 @@ async function callLmStudio(
 // ── Response parsing ─────────────────────────────────────────────────────────
 
 function parseJsonArray(text: string): unknown[] {
-  // Strip markdown code fences if present
+  // Strip thinking tags (Qwen 3.5 may include <think>...</think> blocks)
+  // and markdown code fences if present
   const cleaned = text
+    .replace(/<think>[\s\S]*?<\/think>/g, "")
     .replace(/^```(?:json)?\s*/m, "")
     .replace(/\s*```\s*$/m, "")
     .trim();

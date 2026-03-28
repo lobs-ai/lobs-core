@@ -21,8 +21,10 @@ const MIN_EVENTS_TO_REFLECT = 10;
 /** Default daily cap on new memories across all reflection runs */
 const DEFAULT_DAILY_MAX_MEMORIES = 50;
 
-/** Token budget per session reflection (prevents runaway LLM spend) */
-const SESSION_TOKEN_BUDGET = 4_000;
+/** Token budget per session reflection (prevents runaway LLM spend).
+ *  Qwen 3.5 uses ~800-1200 tokens per call on chain-of-thought thinking,
+ *  so a single cluster extraction is ~1500 tokens total. Budget for ~8 clusters. */
+const SESSION_TOKEN_BUDGET = 12_000;
 
 /** Minimum signal score to be considered "high-signal" */
 const HIGH_SIGNAL_THRESHOLD = 0.7;
