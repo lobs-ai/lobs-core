@@ -1554,4 +1554,11 @@ export function runMigrations(db: PawDB): void {
   // Added: 2026-03-19 — "Delete" now archives. Sessions with archived_at set are
   // hidden from the default list but can be unarchived. Hard-deleted after 30 days.
   try { db.run(sql`ALTER TABLE chat_sessions ADD COLUMN archived_at TEXT`); } catch {}
+
+  // ── Live meeting insights + topics persistence ───────────────────────────
+  // Added: 2026-03-28 — Store rich live-session data (notes, flags, questions,
+  // suggestions, research, action items) and topic list so they survive after
+  // the session ends and are visible in the Meetings history tab.
+  try { db.run(sql`ALTER TABLE meetings ADD COLUMN insights TEXT`); } catch {}
+  try { db.run(sql`ALTER TABLE meetings ADD COLUMN topics TEXT`); } catch {}
 }

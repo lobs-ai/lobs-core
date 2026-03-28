@@ -171,6 +171,12 @@ describe("Migration integrity", () => {
       expect(cols).toContain("source");
     });
 
+    test("meetings table has insights and topics columns", () => {
+      const cols = columnNames("meetings");
+      expect(cols).toContain("insights");
+      expect(cols).toContain("topics");
+    });
+
     test("plugins table has expected columns", () => {
       const cols = columnNames("plugins");
       expect(cols).toContain("id");

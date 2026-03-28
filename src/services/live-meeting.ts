@@ -10,8 +10,9 @@
 
 import { randomUUID } from "node:crypto";
 import { execSync } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { resolve, join } from "node:path";
+import { homedir } from "node:os";
 import { eq } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { meetings } from "../db/schema.js";
@@ -73,6 +74,106 @@ export interface LiveSession {
   audioBuffers: Buffer[];
   /** Pending research tasks spawned from transcript analysis */
   pendingResearch: Array<{ id: string; query: string; status: 'pending' | 'running' | 'done' }>;
+  /** Fresh context loaded at session start — projects, recent memory, schedule */
+  sessionContext: string;
+}
+
+// ── Meeting Context Loader ───────────────────────────────────────────────
+
+const HOME = homedir();
+const AGENTS_DIR = join(HOME, ".lobs", "agents", "main");
+const CONTEXT_DIR = join(AGENTS_DIR, "context");
+const SHARED_MEMORY_DIR = join(HOME, "lobs-shared-memory");
+
+/**
+ * Safely read a file, returning null if it doesn't exist or fails.
+ */
+function safeRead(path: string, maxLen = 4000): string | null {
+  try {
+    if (!existsSync(path)) return null;
+    const content = readFileSync(path, "utf-8").trim();
+    return content.length > maxLen ? content.slice(0, maxLen) + "\n...(truncated)" : content;
+  } catch { return null; }
+}
+
+/**
+ * Get a date string in YYYY-MM-DD format for the given offset from today.
+ */
+function dateString(offsetDays: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + offsetDays);
+  return d.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+}
+
+/**
+ * Load fresh context for a live meeting session.
+ *
+ * Gathers:
+ * - MEMORY.md (project index, people, system overview)
+ * - USER.md (Rafe's schedule, preferences)
+ * - Today's memory file (what was worked on today)
+ * - Yesterday's memory file (recent context)
+ * - Recent shared learnings (system-wide decisions)
+ * - Active project summaries
+ *
+ * Returns a single context string to inject into the meeting system prompt.
+ * This runs once at session start so every analysis call has fresh awareness.
+ */
+function loadMeetingContext(): string {
+  const sections: string[] = [];
+
+  // 1. MEMORY.md — project index, people, system layout
+  const memoryMd = safeRead(join(AGENTS_DIR, "MEMORY.md"));
+  if (memoryMd) {
+    sections.push(`## Project & System Overview\n${memoryMd}`);
+  }
+
+  // 2. USER.md — schedule, preferences (trimmed to essentials)
+  const userMd = safeRead(join(AGENTS_DIR, "USER.md"), 2000);
+  if (userMd) {
+    sections.push(`## About Rafe\n${userMd}`);
+  }
+
+  // 3. Today's memory — what was worked on, recent context
+  const todayMem = safeRead(join(CONTEXT_DIR, "memory", `${dateString(0)}.md`));
+  if (todayMem) {
+    sections.push(`## Today's Activity (${dateString(0)})\n${todayMem}`);
+  }
+
+  // 4. Yesterday's memory — recent continuity
+  const yesterdayMem = safeRead(join(CONTEXT_DIR, "memory", `${dateString(-1)}.md`), 2000);
+  if (yesterdayMem) {
+    sections.push(`## Yesterday's Activity (${dateString(-1)})\n${yesterdayMem}`);
+  }
+
+  // 5. Shared learnings — system-wide decisions and patterns
+  const learnings = safeRead(join(SHARED_MEMORY_DIR, "learnings.md"), 2000);
+  if (learnings) {
+    sections.push(`## System Learnings\n${learnings}`);
+  }
+
+  // 6. Active project files — grab first ~1500 chars of each
+  try {
+    const contextFiles = existsSync(CONTEXT_DIR) ? readdirSync(CONTEXT_DIR) : [];
+    const projectFiles = contextFiles.filter(f => f.startsWith("PROJECT-") && f.endsWith(".md"));
+    for (const pf of projectFiles) {
+      const content = safeRead(join(CONTEXT_DIR, pf), 1500);
+      if (content) {
+        const projectName = pf.replace("PROJECT-", "").replace(".md", "");
+        sections.push(`## Project: ${projectName}\n${content}`);
+      }
+    }
+  } catch {
+    // Skip if context dir doesn't exist
+  }
+
+  if (sections.length === 0) {
+    return "";
+  }
+
+  const ctx = sections.join("\n\n");
+  log().info(`[LIVE_MEETING] Loaded session context: ${ctx.length} chars, ${sections.length} sections`);
+  return ctx;
 }
 
 // ── Whisper transcription ────────────────────────────────────────────────
@@ -100,15 +201,33 @@ async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
 
 // ── Direct LLM analysis ─────────────────────────────────────────────────
 
+/**
+ * Build the meeting system prompt, injecting session context when available.
+ * The context includes fresh project data, recent memory, schedule, and learnings
+ * loaded once at session start.
+ */
+function buildMeetingSystemPrompt(sessionContext?: string): string {
+  const base = `You are Lobs, Rafe's personal AI agent, analyzing a live meeting in real-time. You know Rafe well — write analysis as yourself with full context of who everyone is. Return ONLY valid JSON — no markdown, no code fences, no extra text.`;
+
+  if (!sessionContext) return base;
+
+  return `${base}
+
+---
+# Your Current Context
+The following is your fresh knowledge loaded at the start of this meeting session. Use it to understand references, names, projects, and recent decisions discussed in the meeting.
+
+${sessionContext}
+---`;
+}
+
 async function llmAnalyze(prompt: string, systemPrompt?: string): Promise<string> {
   const model = getModelForTier("small");
   const client = createResilientClient(model, { sessionId: "live-meeting" });
 
-  const defaultSystem = `You are Lobs, Rafe's personal AI agent, analyzing a live meeting in real-time. Rafe is a grad student (MS CSE) at the University of Michigan, GSI for EECS 281/291, varsity Rocket League player, and interning at Microsoft this summer. You and Rafe are building an AI agent platform together (lobs-core, Nexus dashboard, PAW hosting platform with Marcus). You know Rafe well — write analysis as yourself with full context of who everyone is. Return ONLY valid JSON — no markdown, no code fences, no extra text.`;
-
   const response = await client.createMessage({
     model: parseModelString(model).modelId,
-    system: systemPrompt ?? defaultSystem,
+    system: systemPrompt ?? buildMeetingSystemPrompt(),
     messages: [{ role: "user", content: prompt }],
     tools: [],
     maxTokens: 4096,
@@ -288,8 +407,11 @@ async function executeResearch(sessionId: string, researchId: string, query: str
       }
     }
 
-    // Ask LLM to synthesize a useful response
-    const researchSystem = `You are Lobs, Rafe's AI agent. You're doing background research during a live meeting to bring back useful, specific information. Be direct and concrete — reference actual names, line numbers, patterns. Skip preamble like "I found" or "Here's what I found". Just deliver the info. 2-4 sentences max.`;
+    // Ask LLM to synthesize a useful response — include session context if available
+    const sessionCtx = session.sessionContext
+      ? `\n\nYour current context:\n${session.sessionContext}`
+      : "";
+    const researchSystem = `You are Lobs, Rafe's AI agent. You're doing background research during a live meeting to bring back useful, specific information. Be direct and concrete — reference actual names, line numbers, patterns. Skip preamble like "I found" or "Here's what I found". Just deliver the info. 2-4 sentences max.${sessionCtx}`;
 
     const researchPrompt = context
       ? `Research task from a live meeting with Rafe:
@@ -351,6 +473,9 @@ export class LiveMeetingService {
     participants?: string[];
     meetingType?: string;
   } = {}): { sessionId: string; status: SessionStatus } {
+    // Load fresh context at session start — projects, memory, schedule, learnings
+    const sessionContext = loadMeetingContext();
+
     const session: LiveSession = {
       id: randomUUID(),
       status: "recording",
@@ -368,10 +493,11 @@ export class LiveMeetingService {
       stoppedAt: null,
       audioBuffers: [],
       pendingResearch: [],
+      sessionContext,
     };
 
     sessions.set(session.id, session);
-    log().info(`[LIVE_MEETING] Started session ${session.id}: "${session.title}"`);
+    log().info(`[LIVE_MEETING] Started session ${session.id}: "${session.title}" (context: ${sessionContext.length} chars)`);
     return { sessionId: session.id, status: session.status };
   }
 
@@ -466,7 +592,9 @@ export class LiveMeetingService {
     try {
       const prompt = buildAnalysisPrompt(session.transcript, session);
 
-      const responseText = await llmAnalyze(prompt);
+      // Use session-specific system prompt with loaded context
+      const systemPrompt = buildMeetingSystemPrompt(session.sessionContext || undefined);
+      const responseText = await llmAnalyze(prompt, systemPrompt);
 
       // Parse JSON from response
       const jsonMatch = responseText.match(/\{[\s\S]*\}/);
@@ -608,6 +736,19 @@ export class LiveMeetingService {
     // Insert into meetings DB
     const db = getDb();
     const meetingId = randomUUID();
+
+    // Combine live-session insights + action items into a single persisted array
+    const allInsights = [
+      ...session.insights,
+      ...session.actionItems.map(a => ({
+        type: 'action' as const,
+        content: a.description,
+        assignee: a.assignee,
+        priority: a.priority,
+        timestamp: new Date().toISOString(),
+      })),
+    ];
+
     const record = {
       id: meetingId,
       title: session.title,
@@ -623,6 +764,8 @@ export class LiveMeetingService {
       meetingType: session.meetingType,
       summary: session.runningSummary || null,
       analysisStatus: "pending",
+      insights: allInsights.length > 0 ? JSON.stringify(allInsights) : null,
+      topics: session.topics.length > 0 ? JSON.stringify(session.topics) : null,
     };
 
     db.insert(meetings).values(record).run();

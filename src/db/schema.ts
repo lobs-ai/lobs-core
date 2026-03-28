@@ -727,6 +727,8 @@ export const meetings = sqliteTable("meetings", {
   meetingType: text("meeting_type").default("general"),
   summary: text("summary"),
   analysisStatus: text("analysis_status").default("pending"), // pending/processing/completed/failed
+  insights: text("insights"),       // JSON array of live session insights
+  topics: text("topics"),           // JSON array of topic strings
   ...timestamps,
 });
 
