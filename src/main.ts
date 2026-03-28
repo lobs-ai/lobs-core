@@ -667,14 +667,14 @@ async function main() {
       discordService.onMessage((msg) => {
         console.log(
           `[discord->main-agent] inbound id=${msg.messageId.slice(0, 8)} channel=${msg.channelId.slice(0, 16)} ` +
-          `dm=${msg.isDm} mentioned=${msg.isMentioned} len=${msg.content.length}`,
+          `dm=${msg.isDm} mentioned=${msg.isMentioned} author=${msg.displayName} len=${msg.content.length}`,
         );
         mainAgent.handleMessage({
           id: randomUUID(),
           messageId: msg.messageId,
           content: msg.content,
           authorId: msg.authorId,
-          authorName: msg.authorTag,
+          authorName: msg.displayName,
           channelId: msg.channelId,
           timestamp: Date.now(),
           isDm: msg.isDm,

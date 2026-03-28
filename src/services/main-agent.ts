@@ -1154,11 +1154,13 @@ export class MainAgent {
 
       // 3. Build LLM messages (with image content blocks when present)
       const isGroupChat = channelChatType === "group";
+      const isDiscordSession = replyChannelId.match(/^\d+$/); // Discord channel IDs are snowflakes
       let messages: LLMMessage[] = history.map((m) => {
         const role = m.role as "user" | "assistant";
-        // In group chats, prefix user messages with author name so the LLM
-        // knows who is speaking (e.g. "[Marcus#1234]: hey")
-        const authorPrefix = (isGroupChat && role === "user" && m.author_name) ? `[${m.author_name}]: ` : "";
+        // Prefix user messages with author name so the LLM knows who is speaking.
+        // Always include for Discord sessions (both DM and group) since the agent
+        // needs to know whether it's talking to Rafe, Marcus, Virt, etc.
+        const authorPrefix = ((isDiscordSession || isGroupChat) && role === "user" && m.author_name) ? `[${m.author_name}]: ` : "";
 
         // If content is already structured (reconstructed from metadata), pass through
         if (Array.isArray(m.content)) {

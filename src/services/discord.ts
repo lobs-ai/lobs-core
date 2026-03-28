@@ -47,7 +47,7 @@ class DiscordService {
   private readyPromise: Promise<void> | null = null;
   private messageHandler: ((message: {
     messageId: string; content: string; channelId: string;
-    authorId: string; authorTag: string; isDm: boolean;
+    authorId: string; authorTag: string; displayName: string; isDm: boolean;
     isMentioned: boolean; guildId?: string;
     images?: Array<{ data: string; mediaType: string; filename?: string }>;
   }) => void) | null = null;
@@ -512,7 +512,7 @@ class DiscordService {
   /** Register event handler for messages (stored for reconnection) */
   onMessage(handler: (message: {
     messageId: string; content: string; channelId: string;
-    authorId: string; authorTag: string; isDm: boolean;
+    authorId: string; authorTag: string; displayName: string; isDm: boolean;
     isMentioned: boolean; guildId?: string;
     images?: Array<{ data: string; mediaType: string; filename?: string }>;
   }) => void): void {
@@ -524,7 +524,7 @@ class DiscordService {
   /** Internal: set up the messageCreate listener */
   private setupMessageListener(handler: (message: {
     messageId: string; content: string; channelId: string;
-    authorId: string; authorTag: string; isDm: boolean;
+    authorId: string; authorTag: string; displayName: string; isDm: boolean;
     isMentioned: boolean; guildId?: string;
     images?: Array<{ data: string; mediaType: string; filename?: string }>;
   }) => void): void {
@@ -583,9 +583,13 @@ class DiscordService {
         images = await this.fetchImageAttachments(msg.attachments);
       }
 
+      // Use the most human-readable name available:
+      // Guild nickname > global display name > username
+      const displayName = msg.member?.displayName || msg.author.displayName || msg.author.username;
+
       console.info(
         `[discord] Accepted inbound message channel=${msg.channelId} dm=${isDm} ` +
-        `mentioned=${isMentioned} author=${msg.author.tag} len=${content.length}`,
+        `mentioned=${isMentioned} author=${displayName} (${msg.author.tag}) len=${content.length}`,
       );
 
       handler({
@@ -594,6 +598,7 @@ class DiscordService {
         channelId: msg.channelId,
         authorId: msg.author.id,
         authorTag: msg.author.tag,
+        displayName,
         isDm,
         isMentioned,
         guildId: msg.guildId ?? undefined,
@@ -795,7 +800,7 @@ class DiscordService {
 
   /** Fetch recent messages from a channel */
   async fetchMessages(channelId: string, limit = 20, before?: string): Promise<Array<{
-    id: string; content: string; authorId: string; authorTag: string;
+    id: string; content: string; authorId: string; authorTag: string; displayName: string;
     timestamp: string; attachments: number; embeds: number;
   }>> {
     if (!this.client || this.state !== "ready") return [];
@@ -811,6 +816,7 @@ class DiscordService {
         content: m.content,
         authorId: m.author.id,
         authorTag: m.author.tag,
+        displayName: m.member?.displayName || m.author.displayName || m.author.username,
         timestamp: m.createdAt.toISOString(),
         attachments: m.attachments.size,
         embeds: m.embeds.length,
@@ -823,7 +829,7 @@ class DiscordService {
 
   /** Fetch a single message by ID */
   async fetchMessage(channelId: string, messageId: string): Promise<{
-    id: string; content: string; authorId: string; authorTag: string;
+    id: string; content: string; authorId: string; authorTag: string; displayName: string;
     timestamp: string; reactions: Array<{ emoji: string; count: number }>;
     attachments: Array<{ name: string; url: string; size: number }>;
   } | null> {
@@ -838,6 +844,7 @@ class DiscordService {
         content: msg.content,
         authorId: msg.author.id,
         authorTag: msg.author.tag,
+        displayName: msg.member?.displayName || msg.author.displayName || msg.author.username,
         timestamp: msg.createdAt.toISOString(),
         reactions: [...msg.reactions.cache.values()].map(r => ({
           emoji: r.emoji.toString(),
