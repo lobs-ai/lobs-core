@@ -20,20 +20,20 @@ import type { MemoryEvent } from "./types.js";
 const MIN_EVENTS_TO_REFLECT = 10;
 
 /** Default daily cap on new memories across all reflection runs */
-const DEFAULT_DAILY_MAX_MEMORIES = 50;
+const DEFAULT_DAILY_MAX_MEMORIES = 200;
 
 /** Token budget per session reflection (prevents runaway LLM spend).
- *  Using Haiku: ~500-800 tokens per cluster (input + output). Budget for ~10 clusters. */
-const SESSION_TOKEN_BUDGET = 8_000;
+ *  Using Haiku: ~500-800 tokens per cluster (input + output). Budget for ~30 clusters. */
+const SESSION_TOKEN_BUDGET = 25_000;
 
 /** Minimum signal score to be considered "high-signal" */
-const HIGH_SIGNAL_THRESHOLD = 0.7;
+const HIGH_SIGNAL_THRESHOLD = 0.6;
 
 /** Maximum new memories we'll create from a single cluster */
 const MAX_NEW_MEMORIES_PER_CLUSTER = 5;
 
 /** Maximum wall-clock time for a single reflection run (ms) */
-const MAX_REFLECTION_DURATION_MS = 2 * 60 * 1000; // 2 minutes
+const MAX_REFLECTION_DURATION_MS = 5 * 60 * 1000; // 5 minutes
 
 /** Runs stuck in "running" longer than this are abandoned on startup (ms) */
 const STALE_RUN_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
@@ -219,7 +219,7 @@ export async function runReflection(opts: {
 
   const hasHighSignal = events.some((e) => e.signal_score > HIGH_SIGNAL_THRESHOLD);
   if (!hasHighSignal) {
-    return skipped("no high-signal events (signal_score > 0.7)");
+    return skipped(`no high-signal events (signal_score > ${HIGH_SIGNAL_THRESHOLD})`);
   }
 
   const hasInterestingEvents = events.some((e) =>

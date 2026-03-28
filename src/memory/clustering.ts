@@ -23,6 +23,9 @@ const PROJECT_MERGE_GAP_MS = 10 * 60 * 1000; // 10 minutes
 /** Minimum shared entity count to trigger entity-overlap merge */
 const ENTITY_OVERLAP_THRESHOLD = 2;
 
+/** Max events per cluster — larger clusters are split to avoid content truncation in extraction */
+const MAX_CLUSTER_SIZE = 80;
+
 // ── Public types ─────────────────────────────────────────────────────────────
 
 export interface EventCluster {
@@ -224,9 +227,16 @@ export function clusterEvents(events: MemoryEvent[]): EventCluster[] {
       continue;
     }
 
+    // ── Size-based split: prevent oversized clusters ──
+    if (current.events.length >= MAX_CLUSTER_SIZE) {
+      clusters.push(current);
+      current = newCluster(event, entities);
+      continue;
+    }
+
     // ── Merge rules ──
 
-    // Rule 1: Same session_id → always same cluster
+    // Rule 1: Same session_id → same cluster (unless size limit hit above)
     if (
       event.session_id !== null &&
       current.sessionId !== null &&
