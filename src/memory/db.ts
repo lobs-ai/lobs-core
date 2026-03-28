@@ -48,6 +48,7 @@ CREATE INDEX IF NOT EXISTS idx_events_signal ON events(signal_score) WHERE signa
 CREATE TABLE IF NOT EXISTS memories (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   memory_type TEXT NOT NULL,
+  title TEXT,
   content TEXT NOT NULL,
   confidence REAL NOT NULL DEFAULT 0.5,
   scope TEXT NOT NULL DEFAULT 'system',
@@ -198,6 +199,7 @@ export function initMemoryDb(dbPath?: string): Database.Database {
 
   addColumnIfMissing("reflection_runs", "events_processed", "INTEGER DEFAULT 0");
   addColumnIfMissing("reflection_runs", "skip_reason", "TEXT");
+  addColumnIfMissing("memories", "title", "TEXT");
 
   _db = db;
   log().info(`[memory-db] Opened memory database at ${resolvedPath}`);

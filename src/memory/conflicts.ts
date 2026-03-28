@@ -269,11 +269,12 @@ export async function resolveConflict(
         const insertResult = db
           .prepare(
             `INSERT INTO memories
-               (memory_type, content, confidence, scope, source_authority, derived_at, status)
-             VALUES (?, ?, ?, ?, ?, ?, 'active')`,
+               (memory_type, title, content, confidence, scope, source_authority, derived_at, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`,
           )
           .run(
             memA.memory_type,
+            memA.title || memB.title || null,
             mergedContent,
             newConfidence,
             memA.scope,

@@ -358,11 +358,12 @@ async function createMemory(
       const result = db
         .prepare(
           `INSERT INTO memories
-             (memory_type, content, confidence, scope, source_authority, reflection_run_id, derived_at, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`,
+             (memory_type, title, content, confidence, scope, source_authority, reflection_run_id, derived_at, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
         )
         .run(
           candidate.memoryType,
+          candidate.title || null,
           candidate.content,
           candidate.confidence,
           candidate.scope,

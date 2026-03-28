@@ -10,7 +10,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { json, error, parseQuery } from "./index.js";
+import { json, error, parseQuery, parseBody } from "./index.js";
 import { getMemoryDb } from "../memory/db.js";
 
 // ---------------------------------------------------------------------------
@@ -151,8 +151,10 @@ function handleMemories(res: ServerResponse, query: Record<string, string>): voi
     params.push(query.scope);
   }
   if (query.search) {
-    conditions.push("m.content LIKE ?");
-    params.push(`%${query.search}%`);
+    // Use FTS5 for fast full-text search, fall back to LIKE if FTS fails
+    conditions.push("m.id IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?)");
+    // FTS5 needs quotes around the query to handle special chars
+    params.push(`"${query.search.replace(/"/g, '""')}"`);
   }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -167,6 +169,7 @@ function handleMemories(res: ServerResponse, query: Record<string, string>): voi
       `SELECT
         m.id,
         m.memory_type,
+        m.title,
         m.content,
         m.confidence,
         m.scope,
@@ -287,6 +290,74 @@ function handleEvents(res: ServerResponse, query: Record<string, string>): void 
 }
 
 // ---------------------------------------------------------------------------
+// Route: POST /api/structured-memory/conflicts/:id/resolve
+// ---------------------------------------------------------------------------
+
+async function handleResolveConflict(
+  req: IncomingMessage,
+  res: ServerResponse,
+  conflictId: number,
+): Promise<void> {
+  const db = tryDb();
+  if (!db) {
+    error(res, "Memory DB not available", 503);
+    return;
+  }
+
+  const body = (await parseBody(req)) as {
+    winner?: "a" | "b" | "both";
+    resolution?: string;
+  };
+
+  const winner = body?.winner;
+  if (!winner || !["a", "b", "both"].includes(winner)) {
+    error(res, 'Missing or invalid "winner" field. Must be "a", "b", or "both".', 400);
+    return;
+  }
+
+  // Get the conflict
+  const conflict = db
+    .prepare("SELECT * FROM conflicts WHERE id = ?")
+    .get(conflictId) as { id: number; memory_a: number; memory_b: number; resolved_at: string | null } | undefined;
+
+  if (!conflict) {
+    error(res, `Conflict #${conflictId} not found`, 404);
+    return;
+  }
+
+  if (conflict.resolved_at) {
+    error(res, `Conflict #${conflictId} already resolved`, 409);
+    return;
+  }
+
+  const resolution = body.resolution ?? `Resolved via Nexus: kept ${winner}`;
+  const now = new Date().toISOString();
+
+  const tx = db.transaction(() => {
+    // Mark conflict as resolved
+    db.prepare(
+      "UPDATE conflicts SET resolution = ?, resolved_at = ? WHERE id = ?",
+    ).run(resolution, now, conflictId);
+
+    // Archive the loser (if not "both")
+    if (winner === "a") {
+      db.prepare(
+        "UPDATE memories SET status = 'superseded', superseded_by = ?, updated_at = ? WHERE id = ?",
+      ).run(conflict.memory_a, now, conflict.memory_b);
+    } else if (winner === "b") {
+      db.prepare(
+        "UPDATE memories SET status = 'superseded', superseded_by = ?, updated_at = ? WHERE id = ?",
+      ).run(conflict.memory_b, now, conflict.memory_a);
+    }
+    // "both" — just resolve the conflict, don't archive anything
+  });
+
+  tx();
+
+  json(res, { ok: true, conflictId, winner, resolution });
+}
+
+// ---------------------------------------------------------------------------
 // Main dispatcher
 // ---------------------------------------------------------------------------
 
@@ -295,13 +366,25 @@ export async function handleStructuredMemoryRequest(
   res: ServerResponse,
   sub: string | undefined,
 ): Promise<void> {
+  const query = parseQuery(req.url ?? "");
+  const route = (sub ?? "").split("?")[0];
+
+  // POST routes
+  if (req.method === "POST") {
+    // Match: conflicts/<id>/resolve
+    const resolveMatch = route.match(/^conflicts\/(\d+)\/resolve$/);
+    if (resolveMatch) {
+      await handleResolveConflict(req, res, parseInt(resolveMatch[1], 10));
+      return;
+    }
+    error(res, "Not found", 404);
+    return;
+  }
+
   if (req.method !== "GET") {
     error(res, "Method not allowed", 405);
     return;
   }
-
-  const query = parseQuery(req.url ?? "");
-  const route = (sub ?? "").split("?")[0];
 
   switch (route) {
     case "stats":

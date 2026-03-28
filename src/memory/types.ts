@@ -25,6 +25,7 @@ export interface MemoryEvent {
 export interface Memory {
   id: number;
   memory_type: string;
+  title: string | null;
   content: string;
   confidence: number;
   scope: string;

@@ -34,6 +34,7 @@ const EVIDENCE_THRESHOLDS: Record<
 // ── Public types ─────────────────────────────────────────────────────────────
 
 export interface MemoryCandidate {
+  title: string;
   content: string;
   memoryType: "learning" | "decision" | "pattern" | "preference" | "fact";
   confidence: number;
@@ -56,6 +57,7 @@ Memory types:
 
 Output ONLY a JSON array. No prose, no markdown fences. Each element:
 {
+  "title": "<short 3-8 word title for this memory>",
   "content": "<concise memory text, 1-3 sentences>",
   "memoryType": "learning|decision|pattern|preference|fact",
   "confidence": <0.0-1.0>,
@@ -140,6 +142,7 @@ function validateCandidate(raw: unknown): MemoryCandidate | null {
   if (typeof raw !== "object" || raw === null) return null;
   const obj = raw as Record<string, unknown>;
 
+  const title = typeof obj.title === "string" ? obj.title.trim() : "";
   const content = typeof obj.content === "string" ? obj.content.trim() : "";
   if (!content) return null;
 
@@ -165,7 +168,7 @@ function validateCandidate(raw: unknown): MemoryCandidate | null {
     ? (obj.evidenceEventIds as unknown[]).filter((id) => typeof id === "number").map(Number)
     : [];
 
-  return { content, memoryType, confidence, sourceAuthority, scope, evidenceEventIds };
+  return { title, content, memoryType, confidence, sourceAuthority, scope, evidenceEventIds };
 }
 
 // ── Threshold filtering ──────────────────────────────────────────────────────
