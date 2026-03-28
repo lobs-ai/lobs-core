@@ -18,6 +18,7 @@ import { assembleBrainDumpContext, formatBrainDumpContext } from "../services/co
 import { logTrainingExample } from "../services/training-data.js";
 import { findDuplicateTask } from "../util/task-dedup.js";
 import { triageIncomingItem, triageHeuristic } from "../services/intake-triage.js";
+import { syncSuggestionStatus } from "./suggestions.js";
 
 const learningSvc = new LearningService();
 
@@ -337,7 +338,9 @@ Return ONLY valid JSON:
       const body = await parseBody(req) as Record<string, unknown>;
       if (!body.status) return error(res, "status required");
       db.update(tasks).set({ status: body.status as string, updatedAt: new Date().toISOString() }).where(eq(tasks.id, id)).run();
-      return json(res, db.select().from(tasks).where(eq(tasks.id, id)).get());
+      const updated = db.select().from(tasks).where(eq(tasks.id, id)).get() as Record<string, unknown>;
+      syncSuggestionStatus(updated).catch(() => {});
+      return json(res, updated);
     }
     if (sub === "work-state" && req.method === "PATCH") {
       const body = await parseBody(req) as Record<string, unknown>;
@@ -509,8 +512,9 @@ Return ONLY valid JSON:
         }
       }
       db.update(tasks).set(update).where(eq(tasks.id, id)).run();
-      const updated = db.select().from(tasks).where(eq(tasks.id, id)).get();
-      return json(res, normalizeTask(updated as Record<string, unknown>));
+      const updated = db.select().from(tasks).where(eq(tasks.id, id)).get() as Record<string, unknown>;
+      if ("status" in body) syncSuggestionStatus(updated).catch(() => {});
+      return json(res, normalizeTask(updated));
     }
     if (req.method === "DELETE") {
       db.delete(tasks).where(eq(tasks.id, id)).run();
