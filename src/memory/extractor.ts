@@ -1,22 +1,22 @@
 /**
- * Memory extractor — uses a local LLM (LM Studio) to extract candidate
- * memories from event clusters.
+ * Memory extractor — uses Claude Haiku to extract candidate memories
+ * from event clusters during reflection.
  *
- * Makes direct HTTP calls to http://localhost:1234/v1/chat/completions.
- * Never calls Anthropic/OpenAI APIs. Never crashes — all errors are caught
- * and return empty arrays.
+ * Uses the shared provider infrastructure (parseModelString/createClient)
+ * so it benefits from key rotation, error handling, etc.
+ * Never crashes — all errors are caught and return empty arrays.
  */
 
 import { log } from "../util/logger.js";
+import { parseModelString, createClient } from "../runner/providers.js";
 import type { EventCluster } from "./clustering.js";
 import type { MemoryEvent } from "./types.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions";
-const LM_STUDIO_MODEL = "qwen/qwen3.5-9b";
+const EXTRACTION_MODEL = "anthropic/claude-haiku-4-5";
 const MAX_CONTENT_CHARS = 6000; // ~1.5k tokens of event content
-const REQUEST_TIMEOUT_MS = 90_000;
+const MAX_RESPONSE_TOKENS = 2048;
 
 // ── Evidence thresholds ──────────────────────────────────────────────────────
 
@@ -45,8 +45,7 @@ export interface MemoryCandidate {
 
 // ── Prompt construction ──────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `/no_think
-You are a memory extraction assistant. Your job is to identify durable, reusable memories from agent activity logs.
+const SYSTEM_PROMPT = `You are a memory extraction assistant. Your job is to identify durable, reusable memories from agent activity logs.
 
 Memory types:
 - learning: Something discovered through trial and error or observation
@@ -93,78 +92,36 @@ function formatEvent(event: MemoryEvent): string {
 
 // ── LLM call ─────────────────────────────────────────────────────────────────
 
-interface LmStudioMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
-}
-
-interface LmStudioRequest {
-  model: string;
-  messages: LmStudioMessage[];
-  temperature: number;
-  max_tokens: number;
-  stream: false;
-  chat_template_kwargs?: Record<string, unknown>;
-}
-
-interface LmStudioResponse {
-  choices?: Array<{
-    message?: {
-      content?: string;
-    };
-  }>;
-  usage?: {
-    total_tokens?: number;
-  };
-}
-
-async function callLmStudio(
-  messages: LmStudioMessage[],
+async function callHaiku(
+  systemPrompt: string,
+  userPrompt: string,
 ): Promise<{ text: string; tokensUsed: number }> {
-  const body: LmStudioRequest = {
-    model: LM_STUDIO_MODEL,
-    messages,
-    temperature: 0.2,
-    max_tokens: 4096,
-    stream: false,
-    // Disable Qwen 3.5's chain-of-thought thinking mode.
-    // Without this, the model burns all tokens on internal reasoning
-    // and never outputs the JSON array we need.
-    chat_template_kwargs: { enable_thinking: false },
-  };
+  const config = parseModelString(EXTRACTION_MODEL);
+  const client = createClient(config);
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const response = await client.createMessage({
+    model: config.modelId,
+    system: systemPrompt,
+    messages: [{ role: "user", content: userPrompt }],
+    tools: [],
+    maxTokens: MAX_RESPONSE_TOKENS,
+  });
 
-  try {
-    const response = await fetch(LM_STUDIO_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
+  const text = (response.content as Array<{ type: string; text?: string }>)
+    .filter((b) => b.type === "text")
+    .map((b) => b.text || "")
+    .join("");
 
-    if (!response.ok) {
-      throw new Error(`LM Studio HTTP ${response.status}: ${response.statusText}`);
-    }
+  const tokensUsed =
+    (response.usage?.inputTokens ?? 0) + (response.usage?.outputTokens ?? 0);
 
-    const data = (await response.json()) as LmStudioResponse;
-    const text = data.choices?.[0]?.message?.content ?? "";
-    const tokensUsed = data.usage?.total_tokens ?? 0;
-
-    return { text, tokensUsed };
-  } finally {
-    clearTimeout(timeout);
-  }
+  return { text, tokensUsed };
 }
 
 // ── Response parsing ─────────────────────────────────────────────────────────
 
 function parseJsonArray(text: string): unknown[] {
-  // Strip thinking tags (Qwen 3.5 may include <think>...</think> blocks)
-  // and markdown code fences if present
   const cleaned = text
-    .replace(/<think>[\s\S]*?<\/think>/g, "")
     .replace(/^```(?:json)?\s*/m, "")
     .replace(/\s*```\s*$/m, "")
     .trim();
@@ -240,9 +197,9 @@ export function resetTokenCounter(): void {
 }
 
 /**
- * Extract candidate memories from an event cluster using a local LLM.
+ * Extract candidate memories from an event cluster using Claude Haiku.
  *
- * Returns an empty array if the LLM is unavailable or returns unparseable output.
+ * Returns an empty array if the API is unavailable or returns unparseable output.
  * Never throws.
  */
 export async function extractMemories(cluster: EventCluster): Promise<MemoryCandidate[]> {
@@ -251,15 +208,12 @@ export async function extractMemories(cluster: EventCluster): Promise<MemoryCand
   const userPrompt = buildUserPrompt(cluster);
 
   try {
-    const { text, tokensUsed } = await callLmStudio([
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: userPrompt },
-    ]);
+    const { text, tokensUsed } = await callHaiku(SYSTEM_PROMPT, userPrompt);
 
     _totalTokensUsed += tokensUsed;
 
     if (!text.trim()) {
-      log().warn("[extractor] LM Studio returned empty response");
+      log().warn("[extractor] Haiku returned empty response");
       return [];
     }
 
@@ -273,13 +227,13 @@ export async function extractMemories(cluster: EventCluster): Promise<MemoryCand
       candidates.push(candidate);
     }
 
+    log().info(
+      `[extractor] Extracted ${candidates.length} candidates from cluster (${cluster.events.length} events, ${tokensUsed} tokens)`,
+    );
+
     return candidates;
   } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      log().warn("[extractor] LM Studio request timed out");
-    } else {
-      log().warn(`[extractor] Extraction failed: ${String(err)}`);
-    }
+    log().warn(`[extractor] Extraction failed: ${String(err)}`);
     return [];
   }
 }
