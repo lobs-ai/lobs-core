@@ -26,17 +26,13 @@ import type {
 const ROUTINE_TOOLS = new Set(["ls"]);
 
 /**
- * High-signal tools whose output is worth indexing and surfacing later.
+ * High-signal tools whose output indicates the agent sought external info.
+ * File read/write/edit are mechanical (git is the record), not high-signal.
  */
 const MEANINGFUL_TOOLS = new Set([
   "memory_search",
   "web_search",
   "web_fetch",
-  "grep",
-  "code_search",
-  "read",
-  "write",
-  "edit",
 ]);
 
 /**
@@ -75,35 +71,36 @@ export function classifySignalScore(
     case "tool_result": {
       const toolName = typeof metadata?.tool === "string" ? metadata.tool : "";
 
-      if (ROUTINE_TOOLS.has(toolName)) return 0.3;
+      if (ROUTINE_TOOLS.has(toolName)) return 0.2;
 
       if (toolName === "exec") {
-        // Inspect the command for navigation patterns
         const cmd = typeof metadata?.command === "string" ? metadata.command : "";
-        if (NAVIGATION_COMMAND_RE.test(cmd)) return 0.3;
-        return 0.7; // meaningful exec (build, test, git, etc.)
+        if (NAVIGATION_COMMAND_RE.test(cmd)) return 0.2;
+        return 0.3; // exec results are routine — git/logs are the record
       }
 
+      // External info-seeking tools are genuinely high-signal
       if (MEANINGFUL_TOOLS.has(toolName)) return 0.7;
 
-      // Unknown tool — treat as routine
+      // Code navigation tools (grep, read, etc.) are routine
       return 0.3;
     }
 
     case "action": {
+      // Actions are things the agent DID (tool calls, file edits, commands).
+      // Most are routine mechanical work — the code/git is the record, not memory.
+      // Only elevate actions that indicate something non-obvious happened.
       const toolName = typeof metadata?.tool === "string" ? metadata.tool : "";
       const cmd = typeof metadata?.command === "string" ? metadata.command : "";
 
-      // File mutations are meaningful
-      if (toolName === "write" || toolName === "edit") return 0.6;
-
-      // Exec navigation
+      // Navigation / listing commands are noise
       if (toolName === "exec" && NAVIGATION_COMMAND_RE.test(cmd)) return 0.2;
 
-      // Other exec (git commit, npm install, etc.)
-      if (toolName === "exec") return 0.6;
+      // File mutations, builds, git ops, queries — routine work, git is the record
+      if (toolName === "write" || toolName === "edit") return 0.3;
+      if (toolName === "exec") return 0.3;
 
-      return 0.3;
+      return 0.2;
     }
 
     default:
