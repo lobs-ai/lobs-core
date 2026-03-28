@@ -1,8 +1,10 @@
 /**
  * Reflection runner — orchestrates the full memory extraction pipeline.
  *
- * Entry point for all reflection triggers (session_end, daily, manual).
- * Runs asynchronously via setImmediate — never blocks the agent.
+ * Philosophy: no artificial caps or timeouts. If something is important, it gets
+ * a memory. We process every cluster, retrying on errors with backoff. The only
+ * filter is importance — routine tool calls and low-signal noise get skipped,
+ * but everything meaningful gets through.
  */
 
 import { randomUUID } from "node:crypto";
@@ -17,32 +19,25 @@ import type { MemoryEvent } from "./types.js";
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /** Minimum events in scope before we bother reflecting */
-const MIN_EVENTS_TO_REFLECT = 10;
-
-/** Default daily cap on new memories across all reflection runs */
-const DEFAULT_DAILY_MAX_MEMORIES = 200;
-
-/** Token budget per session reflection (prevents runaway LLM spend).
- *  Using Haiku: ~500-800 tokens per cluster (input + output). Budget for ~30 clusters. */
-const SESSION_TOKEN_BUDGET = 25_000;
-
-/** Minimum signal score to be considered "high-signal" */
-const HIGH_SIGNAL_THRESHOLD = 0.6;
+const MIN_EVENTS_TO_REFLECT = 5;
 
 /** Maximum new memories we'll create from a single cluster */
 const MAX_NEW_MEMORIES_PER_CLUSTER = 5;
 
-/** Maximum wall-clock time for a single reflection run (ms) */
-const MAX_REFLECTION_DURATION_MS = 5 * 60 * 1000; // 5 minutes
-
 /** Runs stuck in "running" longer than this are abandoned on startup (ms) */
-const STALE_RUN_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
+const STALE_RUN_THRESHOLD_MS = 15 * 60 * 1000; // 15 minutes
+
+/** Retry backoff config for LLM errors */
+const MAX_RETRIES = 3;
+const BASE_BACKOFF_MS = 2000; // 2s, 4s, 8s
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
 export interface ReflectionResult {
   runId: string;
   clustersProcessed: number;
+  clustersSkipped: number;
+  clustersErrored: number;
   eventsProcessed: number;
   memoriesCreated: number;
   memoriesReinforced: number;
@@ -50,34 +45,6 @@ export interface ReflectionResult {
   tokensUsed: number;
   skipped: boolean;
   skipReason?: string;
-}
-
-// ── Skip condition helpers ────────────────────────────────────────────────────
-
-function _countTodayReflections(): number {
-  const db = getMemoryDb();
-  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-  const row = db
-    .prepare(
-      `SELECT COUNT(*) as count FROM reflection_runs
-       WHERE started_at >= ? AND status = 'completed'`,
-    )
-    .get(`${today}T00:00:00`) as { count: number };
-  return row.count;
-}
-
-function countTodayCreatedMemories(): number {
-  const db = getMemoryDb();
-  const today = new Date().toISOString().slice(0, 10);
-
-  // Sum memories_created across completed reflection runs today
-  const row = db
-    .prepare(
-      `SELECT COALESCE(SUM(memories_created), 0) as total FROM reflection_runs
-       WHERE started_at >= ? AND status = 'completed'`,
-    )
-    .get(`${today}T00:00:00`) as { total: number };
-  return row.total;
 }
 
 // ── Event gathering ──────────────────────────────────────────────────────────
@@ -93,7 +60,6 @@ function gatherUnreflectedEvents(opts: {
 }): MemoryEvent[] {
   const db = getMemoryDb();
 
-  // Events not yet referenced in evidence table
   const conditions: string[] = [
     `e.id NOT IN (SELECT DISTINCT event_id FROM evidence WHERE event_id IS NOT NULL)`,
   ];
@@ -112,11 +78,11 @@ function gatherUnreflectedEvents(opts: {
     params.push(opts.until);
   }
 
+  // No hard limit — get everything unreflected
   const sql = `
     SELECT * FROM events e
     WHERE ${conditions.join(" AND ")}
     ORDER BY e.timestamp ASC
-    LIMIT 2000
   `;
 
   return db.prepare(sql).all(...params) as MemoryEvent[];
@@ -124,10 +90,6 @@ function gatherUnreflectedEvents(opts: {
 
 // ── Skipped run recording ────────────────────────────────────────────────────
 
-/**
- * Write a 'skipped' row to reflection_runs for audit trail.
- * Skipped runs are first-class — they explain "why didn't reflection run?"
- */
 function recordSkippedRun(
   runId: string,
   trigger: "session_end" | "daily" | "manual",
@@ -144,22 +106,16 @@ function recordSkippedRun(
        VALUES (?, ?, ?, ?, 'local', 'skipped', ?, 0, 0, 0, 0, 0, 0)`,
     ).run(runId, trigger, now, now, skipReason);
   } catch (err) {
-    // Non-fatal — skipped run recording should never crash the caller
     log().warn(`[reflection] Failed to record skipped run ${runId}: ${String(err)}`);
   }
 }
 
 // ── Stale run cleanup ────────────────────────────────────────────────────────
 
-/**
- * Mark any "running" reflection runs older than STALE_RUN_THRESHOLD_MS as "abandoned".
- * Call on startup to clean up zombies from previous process lifetimes.
- */
 export function cleanupStaleRuns(): number {
   const db = getMemoryDb();
   const cutoff = new Date(Date.now() - STALE_RUN_THRESHOLD_MS).toISOString();
 
-  // ISO 8601 strings sort lexicographically, so direct comparison works
   const result = db.prepare(
     `UPDATE reflection_runs
      SET status = 'abandoned',
@@ -176,16 +132,49 @@ export function cleanupStaleRuns(): number {
   return cleaned;
 }
 
+// ── Retry helper ─────────────────────────────────────────────────────────────
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  label: string,
+): Promise<{ result: T; ok: true } | { ok: false; error: string }> {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const result = await fn();
+      return { result, ok: true };
+    } catch (err) {
+      const errMsg = String(err);
+      if (attempt < MAX_RETRIES) {
+        const backoff = BASE_BACKOFF_MS * Math.pow(2, attempt);
+        log().warn(
+          `[reflection] ${label} failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}), ` +
+            `retrying in ${backoff}ms: ${errMsg}`,
+        );
+        await sleep(backoff);
+      } else {
+        log().error(
+          `[reflection] ${label} failed after ${MAX_RETRIES + 1} attempts: ${errMsg}`,
+        );
+        return { ok: false, error: errMsg };
+      }
+    }
+  }
+  // Unreachable, but TS needs it
+  return { ok: false, error: "exhausted retries" };
+}
+
 // ── Main entry point ─────────────────────────────────────────────────────────
 
 export async function runReflection(opts: {
   trigger: "session_end" | "daily" | "manual";
   sessionId?: string;
   eventRange?: { since: string; until: string };
-  maxMemories?: number;
 }): Promise<ReflectionResult> {
   const runId = randomUUID();
-  const maxMemories = opts.maxMemories ?? DEFAULT_DAILY_MAX_MEMORIES;
 
   const skipped = (reason: string): ReflectionResult => {
     recordSkippedRun(runId, opts.trigger, reason);
@@ -193,6 +182,8 @@ export async function runReflection(opts: {
     return {
       runId,
       clustersProcessed: 0,
+      clustersSkipped: 0,
+      clustersErrored: 0,
       eventsProcessed: 0,
       memoriesCreated: 0,
       memoriesReinforced: 0,
@@ -211,28 +202,8 @@ export async function runReflection(opts: {
     until: opts.eventRange?.until,
   });
 
-  // ── Skip conditions ────────────────────────────────────────────────────────
-
   if (events.length < MIN_EVENTS_TO_REFLECT) {
     return skipped(`only ${events.length} events in scope (min ${MIN_EVENTS_TO_REFLECT})`);
-  }
-
-  const hasHighSignal = events.some((e) => e.signal_score > HIGH_SIGNAL_THRESHOLD);
-  if (!hasHighSignal) {
-    return skipped(`no high-signal events (signal_score > ${HIGH_SIGNAL_THRESHOLD})`);
-  }
-
-  const hasInterestingEvents = events.some((e) =>
-    ["error", "decision", "user_input"].includes(e.event_type),
-  );
-  if (!hasInterestingEvents) {
-    return skipped("no errors, decisions, or user_input events");
-  }
-
-  // Daily budget check
-  const memoriesCreatedToday = countTodayCreatedMemories();
-  if (memoriesCreatedToday >= maxMemories) {
-    return skipped(`daily memory budget exhausted (${memoriesCreatedToday}/${maxMemories})`);
   }
 
   // ── Start reflection run ────────────────────────────────────────────────────
@@ -251,6 +222,8 @@ export async function runReflection(opts: {
   resetTokenCounter();
 
   let clustersProcessed = 0;
+  let clustersSkipped = 0;
+  let clustersErrored = 0;
   let memoriesCreated = 0;
   let memoriesReinforced = 0;
   let conflictsDetected = 0;
@@ -264,54 +237,59 @@ export async function runReflection(opts: {
     const priorityOrder = { high: 0, medium: 1, skip: 2 };
     clusters.sort((a, b) => priorityOrder[a.priority] - priorityOrder[b.priority]);
 
-    // ── Process clusters ────────────────────────────────────────────────────
+    log().info(
+      `[reflection] Run ${runId}: ${events.length} events → ${clusters.length} clusters ` +
+        `(${clusters.filter((c) => c.priority === "high").length} high, ` +
+        `${clusters.filter((c) => c.priority === "medium").length} medium, ` +
+        `${clusters.filter((c) => c.priority === "skip").length} skip)`,
+    );
 
-    const remainingBudget = maxMemories - memoriesCreatedToday;
-    let budgetRemaining = remainingBudget;
+    // ── Process every non-skip cluster ──────────────────────────────────────
 
     for (const cluster of clusters) {
-      if (budgetRemaining <= 0) break;
-
-      // Wall-clock timeout — hard stop to prevent zombie runs
-      if (Date.now() - Date.parse(startedAt) > MAX_REFLECTION_DURATION_MS) {
-        log().info(
-          `[reflection] Run ${runId} — wall-clock timeout (${MAX_REFLECTION_DURATION_MS}ms), ` +
-            `stopping after ${clustersProcessed} clusters`,
-        );
-        break;
+      // Skip low-priority clusters (all events below 0.5 signal)
+      if (cluster.priority === "skip") {
+        clustersSkipped++;
+        continue;
       }
 
-      // Enforce session token budget — stop processing more clusters if exceeded
-      if (getTotalTokensUsed() >= SESSION_TOKEN_BUDGET) {
-        log().info(
-          `[reflection] Run ${runId} — token budget exhausted (${getTotalTokensUsed()} >= ${SESSION_TOKEN_BUDGET}), ` +
-            `stopping after ${clustersProcessed} clusters`,
-        );
-        break;
+      // Extract with retry+backoff
+      const extractResult = await withRetry(
+        () => extractMemories(cluster),
+        `cluster ${cluster.id} extraction`,
+      );
+
+      if (!extractResult.ok) {
+        clustersErrored++;
+        continue;
       }
 
-      // Skip low-priority clusters
-      if (cluster.priority === "skip") continue;
+      let candidates = extractResult.result;
+      if (candidates.length === 0) {
+        clustersProcessed++;
+        continue;
+      }
 
-      let candidates = await extractMemories(cluster);
-      if (candidates.length === 0) continue;
-
-      // Enforce per-cluster cap (prevents any single cluster from dominating)
+      // Per-cluster cap to prevent a single cluster from dominating
       if (candidates.length > MAX_NEW_MEMORIES_PER_CLUSTER) {
         candidates = candidates.slice(0, MAX_NEW_MEMORIES_PER_CLUSTER);
       }
 
-      // Enforce remaining daily budget on candidates
-      if (candidates.length > budgetRemaining) {
-        candidates = candidates.slice(0, budgetRemaining);
+      // Reconcile with retry+backoff
+      const reconcileResult = await withRetry(
+        () => reconcile(candidates, runId),
+        `cluster ${cluster.id} reconciliation`,
+      );
+
+      if (!reconcileResult.ok) {
+        clustersErrored++;
+        continue;
       }
 
-      const reconciled = await reconcile(candidates, runId);
-
+      const reconciled = reconcileResult.result;
       memoriesCreated += reconciled.newMemories.length;
       memoriesReinforced += reconciled.reinforcedMemories.length;
       conflictsDetected += reconciled.conflicts.length;
-      budgetRemaining -= reconciled.newMemories.length;
 
       clustersProcessed++;
     }
@@ -320,7 +298,10 @@ export async function runReflection(opts: {
     try {
       const resolved = await autoResolveConflicts();
       if (resolved.resolved > 0) {
-        log().info(`[reflection] Auto-resolved ${resolved.resolved} conflicts (${resolved.escalated} escalated, ${resolved.dismissed} dismissed)`);
+        log().info(
+          `[reflection] Auto-resolved ${resolved.resolved} conflicts ` +
+            `(${resolved.escalated} escalated, ${resolved.dismissed} dismissed)`,
+        );
       }
     } catch (err) {
       log().warn(`[reflection] autoResolveConflicts failed: ${String(err)}`);
@@ -354,14 +335,17 @@ export async function runReflection(opts: {
     );
 
     log().info(
-      `[reflection] Run ${runId} complete: ${events.length} events, ${clustersProcessed} clusters, ` +
-        `${memoriesCreated} new, ${memoriesReinforced} reinforced, ${conflictsDetected} conflicts, ` +
-        `${tokensUsed} tokens`,
+      `[reflection] Run ${runId} complete: ${events.length} events, ` +
+        `${clustersProcessed} processed / ${clustersSkipped} skipped / ${clustersErrored} errored, ` +
+        `${memoriesCreated} new, ${memoriesReinforced} reinforced, ` +
+        `${conflictsDetected} conflicts, ${tokensUsed} tokens`,
     );
 
     return {
       runId,
       clustersProcessed,
+      clustersSkipped,
+      clustersErrored,
       eventsProcessed: events.length,
       memoriesCreated,
       memoriesReinforced,
@@ -372,7 +356,6 @@ export async function runReflection(opts: {
   } catch (err) {
     log().error(`[reflection] Run ${runId} failed: ${String(err)}`);
 
-    // Mark as failed with whatever partial stats we have
     try {
       db.prepare(
         `UPDATE reflection_runs SET
@@ -396,12 +379,14 @@ export async function runReflection(opts: {
         runId,
       );
     } catch {
-      // ignore — the run record itself may be missing
+      // ignore
     }
 
     return {
       runId,
       clustersProcessed,
+      clustersSkipped,
+      clustersErrored,
       eventsProcessed: events.length,
       memoriesCreated,
       memoriesReinforced,

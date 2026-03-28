@@ -2,9 +2,12 @@
  * Memory extractor — uses Claude Haiku to extract candidate memories
  * from event clusters during reflection.
  *
- * Uses the shared provider infrastructure (parseModelString/createClient)
- * so it benefits from key rotation, error handling, etc.
- * Never crashes — all errors are caught and return empty arrays.
+ * Philosophy: importance is the only filter. Tool calls, routine file reads,
+ * and mechanical actions are noise. Decisions, learnings, user preferences,
+ * debugging insights, and architectural choices are signal. The LLM decides
+ * what matters — we don't pre-filter or truncate aggressively.
+ *
+ * Errors are thrown (not swallowed) so the caller can retry with backoff.
  */
 
 import { log } from "../util/logger.js";
@@ -15,8 +18,14 @@ import type { MemoryEvent } from "./types.js";
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const EXTRACTION_MODEL = "anthropic/claude-haiku-4-5";
-const MAX_CONTENT_CHARS = 6000; // ~1.5k tokens of event content
 const MAX_RESPONSE_TOKENS = 2048;
+
+/**
+ * Max chars of event content to send per extraction call.
+ * Haiku has 200k context — we can afford to be generous.
+ * ~4 chars/token → 15k chars ≈ 3.75k input tokens. Cheap.
+ */
+const MAX_CONTENT_CHARS = 15_000;
 
 // ── Evidence thresholds ──────────────────────────────────────────────────────
 
@@ -24,11 +33,11 @@ const EVIDENCE_THRESHOLDS: Record<
   MemoryCandidate["memoryType"],
   { minEvents: number; minConfidence: number }
 > = {
-  learning: { minEvents: 2, minConfidence: 0.6 },
-  decision: { minEvents: 1, minConfidence: 0.8 },
-  pattern: { minEvents: 3, minConfidence: 0.5 },
-  preference: { minEvents: 2, minConfidence: 0.7 },
-  fact: { minEvents: 1, minConfidence: 0.9 },
+  learning: { minEvents: 1, minConfidence: 0.6 },
+  decision: { minEvents: 1, minConfidence: 0.7 },
+  pattern: { minEvents: 2, minConfidence: 0.5 },
+  preference: { minEvents: 1, minConfidence: 0.7 },
+  fact: { minEvents: 1, minConfidence: 0.8 },
 };
 
 // ── Public types ─────────────────────────────────────────────────────────────
@@ -46,19 +55,37 @@ export interface MemoryCandidate {
 
 // ── Prompt construction ──────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are a memory extraction assistant. Your job is to identify durable, reusable memories from agent activity logs.
+const SYSTEM_PROMPT = `You are a memory extraction assistant for an AI agent called Lobs. Your job is to identify important, durable memories from agent activity logs.
 
 Memory types:
-- learning: Something discovered through trial and error or observation
-- decision: An explicit choice made (architecture, approach, tool selection)
-- pattern: Recurring behavior or structure worth recognizing
-- preference: Stable preference (user or system) about how things should be done
-- fact: A concrete, verifiable fact (version number, config value, URL, etc.)
+- learning: Something discovered through experience — debugging insights, API quirks, what worked/didn't
+- decision: An explicit choice made — architecture, approach, tool selection, and WHY
+- pattern: Recurring behavior worth recognizing across sessions
+- preference: User or system preference about how things should be done
+- fact: Concrete, durable fact — project structure, URLs, key configurations
+
+IMPORTANT — What counts as important:
+- User preferences and corrections (HIGHEST value — never miss these)
+- Architectural decisions with rationale
+- Hard-won debugging insights (what was wrong, why it was hard to find)
+- External system quirks (API behavior, service limitations, gotchas)
+- Project-specific domain knowledge that future sessions need
+- Errors and how they were resolved
+- Configuration discoveries
+
+SKIP — Not important:
+- Routine tool calls (file reads, directory listings, grep results) unless they reveal something unexpected
+- "System is working" / "build succeeded" / "tests pass" — ephemeral status
+- Implementation narration ("initialized X", "wired Y") — the code is the record
+- Observations about the memory system itself (meta-circular waste)
+- Version-specific timing data that's stale tomorrow
+
+If the events contain nothing important, return an empty array []. That's fine.
 
 Output ONLY a JSON array. No prose, no markdown fences. Each element:
 {
-  "title": "<short 3-8 word title for this memory>",
-  "content": "<concise memory text, 1-3 sentences>",
+  "title": "<short 3-8 word title>",
+  "content": "<concise memory, 1-3 sentences>",
   "memoryType": "learning|decision|pattern|preference|fact",
   "confidence": <0.0-1.0>,
   "sourceAuthority": <0 or 1>,
@@ -66,48 +93,69 @@ Output ONLY a JSON array. No prose, no markdown fences. Each element:
   "evidenceEventIds": [<event id numbers>]
 }
 
-IMPORTANT — Quality filters (reject these):
-- Ephemeral state: branch names, test counts, "system is working", process status
-- Implementation narration: "initialized X", "wired Y into Z", "registered hook"
-- Redundant architecture: don't re-describe how the memory system works — it already knows
-- Version-specific: exact version numbers or timing data that will be stale tomorrow
-- Meta-observations: observations about the extraction/memory process itself
-
-KEEP only memories that a future agent session would genuinely benefit from:
-- User preferences and corrections (highest value)
-- Architectural decisions with rationale (WHY, not just WHAT)
-- Hard-won debugging insights (what was wrong, why it was hard to find)
-- External system gotchas (API quirks, service limitations)
-- Project-specific domain knowledge
-
 Rules:
-- Only extract memories that would be useful in future sessions
-- Skip routine/ephemeral actions (file reads, directory listings)
-- Confidence 0.9+ only for directly stated facts or decisions
-- sourceAuthority=1 only when agent explicitly states a memory/decision
-- evidenceEventIds must contain at least the IDs of supporting events`;
+- Confidence 0.9+ only for directly stated facts or explicit decisions
+- sourceAuthority=1 only when the user explicitly states something
+- evidenceEventIds must reference actual event IDs from the input
+- Prefer fewer, higher-quality memories over many weak ones`;
 
+/**
+ * Build the user prompt from a cluster.
+ * Pre-filters obvious noise (low-signal tool_result events) to maximize
+ * the useful content within our char budget.
+ */
 function buildUserPrompt(cluster: EventCluster): string {
   const eventLines: string[] = [];
   let chars = 0;
 
-  for (const event of cluster.events) {
+  // First pass: include all high-signal events and non-tool events
+  const prioritized = [...cluster.events].sort((a, b) => {
+    // User input always first
+    if (a.event_type === "user_input" && b.event_type !== "user_input") return -1;
+    if (b.event_type === "user_input" && a.event_type !== "user_input") return 1;
+    // Then errors/decisions
+    if (a.event_type === "error" && b.event_type !== "error") return -1;
+    if (b.event_type === "error" && a.event_type !== "error") return 1;
+    if (a.event_type === "decision" && b.event_type !== "decision") return -1;
+    if (b.event_type === "decision" && a.event_type !== "decision") return 1;
+    // Then by signal score descending
+    return b.signal_score - a.signal_score;
+  });
+
+  for (const event of prioritized) {
+    // Skip very low-signal tool results — they're noise (routine reads, listings)
+    if (
+      event.event_type === "tool_result" &&
+      event.signal_score < 0.4 &&
+      chars > MAX_CONTENT_CHARS * 0.3 // only skip if we already have decent content
+    ) {
+      continue;
+    }
+
     const line = formatEvent(event);
-    if (chars + line.length > MAX_CONTENT_CHARS) break;
+    if (chars + line.length > MAX_CONTENT_CHARS) continue; // skip, don't break — try smaller events
     eventLines.push(line);
     chars += line.length;
   }
 
-  return `Extract memories from these agent events (cluster priority: ${cluster.priority} — ${cluster.reason}):\n\n${eventLines.join("\n")}`;
+  return `Extract important memories from these agent events (cluster: ${cluster.priority} priority — ${cluster.reason}):\n\n${eventLines.join("\n")}`;
 }
 
 function formatEvent(event: MemoryEvent): string {
-  const ts = event.timestamp.slice(0, 19); // "YYYY-MM-DDTHH:MM:SS"
-  return `[${event.id}] ${ts} ${event.event_type.toUpperCase()} (score=${event.signal_score.toFixed(1)}): ${event.content}`;
+  const ts = event.timestamp.slice(0, 19);
+  // Truncate very long individual event content (some tool results are huge)
+  const content =
+    event.content.length > 500
+      ? event.content.slice(0, 500) + "…"
+      : event.content;
+  return `[${event.id}] ${ts} ${event.event_type.toUpperCase()} (signal=${event.signal_score.toFixed(1)}): ${content}`;
 }
 
 // ── LLM call ─────────────────────────────────────────────────────────────────
 
+/**
+ * Call Haiku for extraction. Throws on error so caller can retry.
+ */
 async function callHaiku(
   systemPrompt: string,
   userPrompt: string,
@@ -142,11 +190,10 @@ function parseJsonArray(text: string): unknown[] {
     .replace(/\s*```\s*$/m, "")
     .trim();
 
-  // Find the JSON array
   const start = cleaned.indexOf("[");
   const end = cleaned.lastIndexOf("]");
   if (start === -1 || end === -1 || end <= start) {
-    throw new Error(`No JSON array found in response: ${cleaned.slice(0, 100)}`);
+    throw new Error(`No JSON array found in response: ${cleaned.slice(0, 200)}`);
   }
 
   return JSON.parse(cleaned.slice(start, end + 1)) as unknown[];
@@ -202,7 +249,6 @@ function meetsThreshold(candidate: MemoryCandidate, clusterEventCount: number): 
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
-/** Tokens used across all extraction calls in the current process lifetime */
 let _totalTokensUsed = 0;
 
 export function getTotalTokensUsed(): number {
@@ -216,41 +262,45 @@ export function resetTokenCounter(): void {
 /**
  * Extract candidate memories from an event cluster using Claude Haiku.
  *
- * Returns an empty array if the API is unavailable or returns unparseable output.
- * Never throws.
+ * THROWS on LLM errors so the caller can retry with backoff.
+ * Returns empty array only when there's genuinely nothing to extract.
  */
 export async function extractMemories(cluster: EventCluster): Promise<MemoryCandidate[]> {
   if (cluster.events.length === 0) return [];
 
   const userPrompt = buildUserPrompt(cluster);
 
-  try {
-    const { text, tokensUsed } = await callHaiku(SYSTEM_PROMPT, userPrompt);
+  const { text, tokensUsed } = await callHaiku(SYSTEM_PROMPT, userPrompt);
 
-    _totalTokensUsed += tokensUsed;
+  _totalTokensUsed += tokensUsed;
 
-    if (!text.trim()) {
-      log().warn("[extractor] Haiku returned empty response");
-      return [];
-    }
-
-    const rawItems = parseJsonArray(text);
-    const candidates: MemoryCandidate[] = [];
-
-    for (const item of rawItems) {
-      const candidate = validateCandidate(item);
-      if (!candidate) continue;
-      if (!meetsThreshold(candidate, cluster.events.length)) continue;
-      candidates.push(candidate);
-    }
-
-    log().info(
-      `[extractor] Extracted ${candidates.length} candidates from cluster (${cluster.events.length} events, ${tokensUsed} tokens)`,
-    );
-
-    return candidates;
-  } catch (err) {
-    log().warn(`[extractor] Extraction failed: ${String(err)}`);
+  if (!text.trim()) {
+    log().warn("[extractor] Haiku returned empty response");
     return [];
   }
+
+  let rawItems: unknown[];
+  try {
+    rawItems = parseJsonArray(text);
+  } catch (parseErr) {
+    log().warn(`[extractor] Failed to parse Haiku response: ${String(parseErr)}`);
+    // Parse failures aren't retryable — Haiku just gave bad JSON. Return empty.
+    return [];
+  }
+
+  const candidates: MemoryCandidate[] = [];
+
+  for (const item of rawItems) {
+    const candidate = validateCandidate(item);
+    if (!candidate) continue;
+    if (!meetsThreshold(candidate, cluster.events.length)) continue;
+    candidates.push(candidate);
+  }
+
+  log().info(
+    `[extractor] Extracted ${candidates.length} candidates from cluster ` +
+      `(${cluster.events.length} events, ${tokensUsed} tokens)`,
+  );
+
+  return candidates;
 }

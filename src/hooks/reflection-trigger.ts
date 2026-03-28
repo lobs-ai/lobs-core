@@ -13,7 +13,7 @@ import { log } from "../util/logger.js";
  *  Mirrors MIN_EVENTS_TO_REFLECT in reflection.ts — used here for a fast-path
  *  skip before we even spin up setImmediate.
  */
-const MIN_EVENTS_FAST_PATH = 10;
+const MIN_EVENTS_FAST_PATH = 5;
 
 export function registerReflectionTriggerHook(): void {
   const registry = getHookRegistry();

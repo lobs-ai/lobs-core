@@ -15,7 +15,7 @@ import { log } from "../util/logger.js";
 
 /**
  * Run a full daily reflection over all events recorded since midnight today.
- * Safe to call multiple times — the daily budget cap prevents duplicate memory creation.
+ * Safe to call multiple times — unreflected-event tracking prevents duplicate processing.
  */
 export async function runDailyReflection(): Promise<void> {
   const now = new Date();
@@ -33,7 +33,6 @@ export async function runDailyReflection(): Promise<void> {
         since: since.toISOString(),
         until: now.toISOString(),
       },
-      maxMemories: 50,
     });
 
     if (result.skipped) {
