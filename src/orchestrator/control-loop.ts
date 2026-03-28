@@ -27,7 +27,7 @@ import { inferProjectId } from "../util/project-inference.js";
 import { workflowRuns, workerRuns as workerRunsTable, tasks as tasksTable, inboxItems } from "../db/schema.js";
 import { maybeFlushTriageQueue } from "./triage.js";
 import { buildTaskContext } from "../util/task-context.js";
-import { findReadyTasks } from "./scanner.js";
+import { findReadyTasks, findRetryableTasks } from "./scanner.js";
 import {
   hasCapacity,
   projectHasActiveWorker,
@@ -514,6 +514,22 @@ async function runTick(): Promise<void> {
     }
   } catch (e) {
     log().error(`orchestrator: scan phase error: ${e}`);
+  }
+
+  // ── 4b. Retry blocked tasks ────────────────────────────────────────────────
+  // Tasks that failed with work_state=blocked and retry_count<3 get reset to
+  // not_started so they can be re-dispatched on the next scan cycle.
+  try {
+    if (hasCapacity()) {
+      const retryable = findRetryableTasks(3);
+      for (const task of retryable) {
+        if (!hasCapacity()) break;
+        log().info(`orchestrator: resetting blocked task ${task.id.slice(0, 8)} (${task.title.slice(0, 40)}) for retry (attempt ${(task.retryCount ?? 0) + 1})`);
+        getRawDb().prepare(`UPDATE tasks SET work_state = 'not_started', retry_count = retry_count + 1, failure_reason = NULL, updated_at = datetime('now') WHERE id = ?`).run(task.id);
+      }
+    }
+  } catch (e) {
+    log().error(`orchestrator: retry scan error: ${e}`);
   }
 
   // ── 5a. Worker liveness check (progress-based) ─────────────────────────────
