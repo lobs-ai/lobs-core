@@ -24,8 +24,8 @@ const EMBED_TIMEOUT_MS = 15_000;
 
 /** Similarity above this → reinforce existing memory */
 const REINFORCE_THRESHOLD = 0.9;
-/** Similarity above this → potential conflict zone */
-const CONFLICT_THRESHOLD = 0.7;
+/** Similarity above this → potential conflict zone (LLM classifies relationship) */
+const CONFLICT_THRESHOLD = 0.55;
 /** Confidence bump on reinforce */
 const REINFORCE_BUMP = 0.05;
 

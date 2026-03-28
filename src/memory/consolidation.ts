@@ -22,7 +22,7 @@ import type { Memory } from "./types.js";
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const CONSOLIDATION_MODEL = "anthropic/claude-haiku-4-5";
-const SIMILARITY_THRESHOLD = 0.8;
+const SIMILARITY_THRESHOLD = 0.75;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
