@@ -157,7 +157,7 @@ async function buildCollectionSyncPlan(collection: Collection): Promise<Collecti
       absolute: true,
       nodir: true,
       ignore: collection.exclude || [
-        "node_modules/**", ".git/**", "dist/**", "build/**",
+        "**/node_modules/**", "**/.git/**", "**/dist/**", "**/build/**",
         "**/venv/**", "**/site-packages/**", "**/.venv/**",
         "**/tools-venv/**", "**/__pycache__/**",
       ],
