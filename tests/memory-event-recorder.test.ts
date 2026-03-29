@@ -99,24 +99,24 @@ describe("classifySignalScore — event type rules", () => {
 });
 
 describe("classifySignalScore — tool_result", () => {
-  it("routine tool (ls) → 0.3", () => {
-    expect(classifySignalScore("tool_result", { tool: "ls" })).toBe(0.3);
+  it("routine tool (ls) → 0.2", () => {
+    expect(classifySignalScore("tool_result", { tool: "ls" })).toBe(0.2);
   });
 
-  it("meaningful tool (read) → 0.7", () => {
-    expect(classifySignalScore("tool_result", { tool: "read" })).toBe(0.7);
+  it("code tool (read) → 0.3 (routine, git is the record)", () => {
+    expect(classifySignalScore("tool_result", { tool: "read" })).toBe(0.3);
   });
 
-  it("meaningful tool (write) → 0.7", () => {
-    expect(classifySignalScore("tool_result", { tool: "write" })).toBe(0.7);
+  it("code tool (write) → 0.3 (routine, git is the record)", () => {
+    expect(classifySignalScore("tool_result", { tool: "write" })).toBe(0.3);
   });
 
-  it("meaningful tool (grep) → 0.7", () => {
-    expect(classifySignalScore("tool_result", { tool: "grep" })).toBe(0.7);
+  it("code tool (grep) → 0.3 (routine, git is the record)", () => {
+    expect(classifySignalScore("tool_result", { tool: "grep" })).toBe(0.3);
   });
 
-  it("meaningful tool (edit) → 0.7", () => {
-    expect(classifySignalScore("tool_result", { tool: "edit" })).toBe(0.7);
+  it("code tool (edit) → 0.3 (routine, git is the record)", () => {
+    expect(classifySignalScore("tool_result", { tool: "edit" })).toBe(0.3);
   });
 
   it("meaningful tool (memory_search) → 0.7", () => {
@@ -127,32 +127,32 @@ describe("classifySignalScore — tool_result", () => {
     expect(classifySignalScore("tool_result", { tool: "web_search" })).toBe(0.7);
   });
 
-  it("exec + navigation command (ls) → 0.3", () => {
-    expect(classifySignalScore("tool_result", { tool: "exec", command: "ls -la" })).toBe(0.3);
+  it("exec + navigation command (ls) → 0.2", () => {
+    expect(classifySignalScore("tool_result", { tool: "exec", command: "ls -la" })).toBe(0.2);
   });
 
-  it("exec + navigation command (pwd) → 0.3", () => {
-    expect(classifySignalScore("tool_result", { tool: "exec", command: "pwd" })).toBe(0.3);
+  it("exec + navigation command (pwd) → 0.2", () => {
+    expect(classifySignalScore("tool_result", { tool: "exec", command: "pwd" })).toBe(0.2);
   });
 
-  it("exec + navigation command (cd) → 0.3", () => {
-    expect(classifySignalScore("tool_result", { tool: "exec", command: "cd /tmp" })).toBe(0.3);
+  it("exec + navigation command (cd) → 0.2", () => {
+    expect(classifySignalScore("tool_result", { tool: "exec", command: "cd /tmp" })).toBe(0.2);
   });
 
-  it("exec + navigation command (echo) → 0.3", () => {
-    expect(classifySignalScore("tool_result", { tool: "exec", command: "echo hello" })).toBe(0.3);
+  it("exec + navigation command (echo) → 0.2", () => {
+    expect(classifySignalScore("tool_result", { tool: "exec", command: "echo hello" })).toBe(0.2);
   });
 
-  it("exec + meaningful command (git commit) → 0.7", () => {
-    expect(classifySignalScore("tool_result", { tool: "exec", command: "git commit -m 'feat: add tests'" })).toBe(0.7);
+  it("exec + meaningful command (git commit) → 0.3", () => {
+    expect(classifySignalScore("tool_result", { tool: "exec", command: "git commit -m 'feat: add tests'" })).toBe(0.3);
   });
 
-  it("exec + meaningful command (npm test) → 0.7", () => {
-    expect(classifySignalScore("tool_result", { tool: "exec", command: "npm test" })).toBe(0.7);
+  it("exec + meaningful command (npm test) → 0.3", () => {
+    expect(classifySignalScore("tool_result", { tool: "exec", command: "npm test" })).toBe(0.3);
   });
 
-  it("exec + meaningful command (tsc --noEmit) → 0.7", () => {
-    expect(classifySignalScore("tool_result", { tool: "exec", command: "tsc --noEmit" })).toBe(0.7);
+  it("exec + meaningful command (tsc --noEmit) → 0.3", () => {
+    expect(classifySignalScore("tool_result", { tool: "exec", command: "tsc --noEmit" })).toBe(0.3);
   });
 
   it("unknown tool → 0.3 (treated as routine)", () => {
@@ -165,12 +165,12 @@ describe("classifySignalScore — tool_result", () => {
 });
 
 describe("classifySignalScore — action", () => {
-  it("write tool → 0.6", () => {
-    expect(classifySignalScore("action", { tool: "write" })).toBe(0.6);
+  it("write tool → 0.3 (routine, git is the record)", () => {
+    expect(classifySignalScore("action", { tool: "write" })).toBe(0.3);
   });
 
-  it("edit tool → 0.6", () => {
-    expect(classifySignalScore("action", { tool: "edit" })).toBe(0.6);
+  it("edit tool → 0.3 (routine, git is the record)", () => {
+    expect(classifySignalScore("action", { tool: "edit" })).toBe(0.3);
   });
 
   it("exec + navigation command (ls) → 0.2", () => {
@@ -181,16 +181,16 @@ describe("classifySignalScore — action", () => {
     expect(classifySignalScore("action", { tool: "exec", command: "pwd" })).toBe(0.2);
   });
 
-  it("exec + meaningful command (git commit) → 0.6", () => {
-    expect(classifySignalScore("action", { tool: "exec", command: "git commit -am fix" })).toBe(0.6);
+  it("exec + meaningful command (git commit) → 0.3 (routine, git is the record)", () => {
+    expect(classifySignalScore("action", { tool: "exec", command: "git commit -am fix" })).toBe(0.3);
   });
 
-  it("exec + meaningful command (npm install) → 0.6", () => {
-    expect(classifySignalScore("action", { tool: "exec", command: "npm install lodash" })).toBe(0.6);
+  it("exec + meaningful command (npm install) → 0.3 (routine, git is the record)", () => {
+    expect(classifySignalScore("action", { tool: "exec", command: "npm install lodash" })).toBe(0.3);
   });
 
-  it("unknown action tool → 0.3 (fallthrough)", () => {
-    expect(classifySignalScore("action", { tool: "some_other_tool" })).toBe(0.3);
+  it("unknown action tool → 0.2 (fallthrough)", () => {
+    expect(classifySignalScore("action", { tool: "some_other_tool" })).toBe(0.2);
   });
 });
 
@@ -248,7 +248,7 @@ describe("EventRecorder.recordEvent — basic insertion", () => {
 
     const db = getMemoryDb();
     const row = db.prepare("SELECT signal_score FROM events").get() as { signal_score: number };
-    expect(row.signal_score).toBe(0.7); // meaningful exec
+    expect(row.signal_score).toBe(0.3); // exec results are routine — git is the record
   });
 
   it("handles missing optional fields (sessionId, metadata, projectId)", () => {
