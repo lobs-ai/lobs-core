@@ -7,17 +7,34 @@
  */
 
 import { appendFileSync, mkdirSync, existsSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { log } from "../../util/logger.js";
-import { runAgent, type AgentSpec } from "../agent-loop.js";
-import { parseModelString } from "../providers.js";
+import { runAgent, calculateCost } from "../agent-loop.js";
+import type { AgentSpec } from "../agent-loop.js";
+import { getModelForTier } from "../../config/models.js";
 import type { ToolDefinition, ToolName } from "../types.js";
 
 const HOME = process.env.HOME ?? "";
 
+// Rich tracking for active spawned agents
+interface ActiveAgent {
+  type: string;
+  task: string;
+  startedAt: number;
+  modelTier: string;
+  model: string;
+  abortController: AbortController;
+  /** Queue of messages to inject into the agent's conversation */
+  messageQueue: string[];
+  /** Progress tracking */
+  turns: number;
+  lastActivity: number;
+  costUsd: number;
+}
+
 // In-memory tracking for active spawned agents
-const activeAgents = new Map<string, { type: string; task: string; startedAt: number }>();
+const activeAgents = new Map<string, ActiveAgent>();
 
 // Default tools each agent type gets
 const AGENT_DEFAULT_TOOLS: Record<string, ToolName[]> = {
@@ -27,9 +44,6 @@ const AGENT_DEFAULT_TOOLS: Record<string, ToolName[]> = {
   writer: ["read", "write", "edit", "memory_search", "memory_read", "memory_write"],
   architect: ["read", "write", "memory_search", "memory_read", "memory_write"],
 };
-
-// Model tier mapping (simplified — orchestrator has the full version)
-import { getModelForTier } from "../../config/models.js";
 
 export const AGENT_CONTROL_TOOLS: ToolDefinition[] = [
   {
@@ -64,7 +78,7 @@ Returns immediately with a run ID. The agent works in the background and announc
         model_tier: {
           type: "string",
           enum: ["micro", "small", "medium", "standard", "strong"],
-          description: "Model tier. Default: small for most work, micro for simple tasks, strong for complex reasoning.",
+          description: "Model tier. Default: standard for most work, small for simple/mechanical tasks, micro for trivial tasks. Only use strong for genuinely exceptional reasoning needs.",
         },
         cwd: {
           type: "string",
@@ -85,7 +99,7 @@ Returns immediately with a run ID. The agent works in the background and announc
   },
   {
     name: "list_agents",
-    description: `List all currently running spawned agents.
+    description: `[Deprecated: use check_agents instead] List all currently running spawned agents.
 
 Returns information about active background agents including their run IDs, types, tasks, and how long they've been running.`,
     input_schema: {
@@ -140,6 +154,52 @@ Pipeline stops if any stage fails.`,
       required: ["pipeline", "task"],
     },
   },
+  {
+    name: "check_agents",
+    description: `Check status of spawned subagents. Shows all active agents with their progress, turns, cost, and duration. Can also check a specific agent by run ID.`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        run_id: {
+          type: "string",
+          description: "Optional: specific agent run ID to check. Omit to see all active agents.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "message_agent",
+    description: `Send a message to a running subagent. The message will be injected into the agent's conversation as a user message on its next turn. Use this to provide additional context, redirect the agent, or give feedback while it's working.`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        run_id: {
+          type: "string",
+          description: "The agent's run ID",
+        },
+        message: {
+          type: "string",
+          description: "Message to inject into the agent's conversation",
+        },
+      },
+      required: ["run_id", "message"],
+    },
+  },
+  {
+    name: "stop_agent",
+    description: `Stop a running subagent. The agent will be gracefully terminated at the end of its current turn.`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        run_id: {
+          type: "string",
+          description: "The agent's run ID to stop",
+        },
+      },
+      required: ["run_id"],
+    },
+  },
 ];
 
 // Built-in pipeline definitions
@@ -169,7 +229,7 @@ export async function executeSpawnAgent(
 ): Promise<string> {
   const agentType = input.agent_type as string;
   const task = input.task as string;
-  const modelTier = (input.model_tier as string) ?? "small";
+  const modelTier = (input.model_tier as string) ?? "standard";
   // If no cwd specified, try to find the right repo for the task
   const defaultCwd = parentCwd ?? HOME;
   const cwd = (input.cwd as string) ?? defaultCwd;
@@ -189,8 +249,25 @@ export async function executeSpawnAgent(
   }
 
   const runId = randomUUID().slice(0, 8);
-  
+
   log().info(`[AGENT_TOOL] Spawning ${agentType} (id=${runId}, model=${modelTier}, timeout=${timeout}s)`);
+
+  // Create abort controller for this agent
+  const abortController = new AbortController();
+
+  // Track the spawned agent with rich metadata
+  activeAgents.set(runId, {
+    type: agentType,
+    task: task.slice(0, 200),
+    startedAt: Date.now(),
+    modelTier,
+    model,
+    abortController,
+    messageQueue: [],
+    turns: 0,
+    lastActivity: Date.now(),
+    costUsd: 0,
+  });
 
   const spec: AgentSpec = {
     agent: agentType,
@@ -200,14 +277,25 @@ export async function executeSpawnAgent(
     cwd,
     timeout,
     ...(maxTurns != null && { maxTurns }),
+    abortSignal: abortController.signal,
+    onProgress: (progress) => {
+      const agent = activeAgents.get(runId);
+      if (agent) {
+        agent.turns = progress.turn;
+        agent.lastActivity = Date.now();
+        if (progress.usage) {
+          agent.costUsd = calculateCost(model, progress.usage);
+        }
+      }
+    },
+    getInjectedMessages: () => {
+      const agent = activeAgents.get(runId);
+      if (!agent || agent.messageQueue.length === 0) return [];
+      const msgs = [...agent.messageQueue];
+      agent.messageQueue.length = 0; // drain
+      return msgs;
+    },
   };
-
-  // Track the spawned agent
-  activeAgents.set(runId, {
-    type: agentType,
-    task: task.slice(0, 200),
-    startedAt: Date.now(),
-  });
 
   // Capture the channelId for completion callback (so results go back to the right channel)
   const originChannel = channelId;
@@ -253,7 +341,7 @@ export async function executeSpawnAgent(
         result.succeeded ? "Output:" : `Error: ${result.error || result.stopReason}`,
         result.output.slice(0, 3000),
       ].join("\n");
-      
+
       mainAgent.handleSystemEvent(announcement, originChannel).catch((err: any) => {
         console.error("[spawn_agent] Failed to announce completion:", err);
       });
@@ -281,6 +369,7 @@ export async function executeSpawnAgent(
 
 /**
  * Execute the list_agents tool.
+ * @deprecated Use executeCheckAgents instead.
  */
 export async function executeListAgents(): Promise<string> {
   if (activeAgents.size === 0) {
@@ -301,6 +390,96 @@ export async function executeListAgents(): Promise<string> {
   }
 
   return lines.join("\n");
+}
+
+/**
+ * Execute the check_agents tool — rich status for all or one agent.
+ */
+export async function executeCheckAgents(input: Record<string, unknown>): Promise<string> {
+  const runId = input.run_id as string | undefined;
+
+  if (activeAgents.size === 0) {
+    return "No agents currently running.";
+  }
+
+  const now = Date.now();
+
+  function formatAgent(id: string, info: ActiveAgent, detailed: boolean): string {
+    const elapsedMs = now - info.startedAt;
+    const elapsedSeconds = Math.floor(elapsedMs / 1000);
+    const elapsedMin = Math.floor(elapsedSeconds / 60);
+    const elapsedSec = elapsedSeconds % 60;
+    const elapsed = elapsedMin > 0 ? `${elapsedMin}m ${elapsedSec}s` : `${elapsedSec}s`;
+
+    const lastActivityAgo = Math.floor((now - info.lastActivity) / 1000);
+    const lastActivityStr = lastActivityAgo < 5
+      ? "just now"
+      : lastActivityAgo < 60
+        ? `${lastActivityAgo}s ago`
+        : `${Math.floor(lastActivityAgo / 60)}m ago`;
+
+    const lines: string[] = [
+      `• ${id} — ${info.type} [${info.modelTier}]`,
+      `  Running: ${elapsed} | Turns: ${info.turns} | Cost: $${info.costUsd.toFixed(4)} | Last activity: ${lastActivityStr}`,
+      `  Task: ${info.task.slice(0, 120)}${info.task.length > 120 ? "…" : ""}`,
+    ];
+
+    if (detailed) {
+      lines.push(`  Model: ${info.model}`);
+      if (info.messageQueue.length > 0) {
+        lines.push(`  Pending messages: ${info.messageQueue.length} queued`);
+      }
+    }
+
+    return lines.join("\n");
+  }
+
+  // Single agent detail
+  if (runId) {
+    const info = activeAgents.get(runId);
+    if (!info) {
+      return `No active agent with run ID: ${runId}\n(It may have already completed or never existed.)`;
+    }
+    return formatAgent(runId, info, true);
+  }
+
+  // All agents
+  const lines: string[] = [`Active agents (${activeAgents.size}):\n`];
+  for (const [id, info] of activeAgents.entries()) {
+    lines.push(formatAgent(id, info, false));
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Execute the message_agent tool — queue a message for injection.
+ */
+export async function executeMessageAgent(input: Record<string, unknown>): Promise<string> {
+  const runId = input.run_id as string;
+  const message = input.message as string;
+
+  const agent = activeAgents.get(runId);
+  if (!agent) {
+    return `❌ No active agent with run ID: ${runId}\n(It may have already completed or never existed.)`;
+  }
+
+  agent.messageQueue.push(message);
+  return `✉️ Message queued for agent ${runId} (${agent.type})\nIt will be injected at the start of the agent's next turn.\nMessage: ${message.slice(0, 200)}${message.length > 200 ? "…" : ""}`;
+}
+
+/**
+ * Execute the stop_agent tool — abort a running agent.
+ */
+export async function executeStopAgent(input: Record<string, unknown>): Promise<string> {
+  const runId = input.run_id as string;
+
+  const agent = activeAgents.get(runId);
+  if (!agent) {
+    return `❌ No active agent with run ID: ${runId}\n(It may have already completed or never existed.)`;
+  }
+
+  agent.abortController.abort();
+  return `🛑 Stop signal sent to agent ${runId} (${agent.type})\nThe agent will finish its current turn and then stop gracefully.`;
 }
 
 /**

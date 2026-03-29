@@ -204,6 +204,18 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
         }
       }
 
+      // Check for injected messages from parent agent (via message_agent tool)
+      if (spec.getInjectedMessages) {
+        const injected = spec.getInjectedMessages();
+        for (const msg of injected) {
+          messages.push({
+            role: "user",
+            content: [{ type: "text", text: `[Message from parent agent]: ${msg}` }],
+          });
+          console.debug(`[agent-loop] run=${runId} injected message from parent`);
+        }
+      }
+
       // Emit before_llm_call hook
       const beforeLlmEvent = await hookRegistry.emit({
         hookName: "before_llm_call",
@@ -670,7 +682,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
 /**
  * Calculate cost based on model pricing.
  */
-function calculateCost(model: string, usage: TokenUsage): number {
+export function calculateCost(model: string, usage: TokenUsage): number {
   const costEntry = Object.entries(COSTS).find(([key]) => model.includes(key));
   if (!costEntry) return 0;
 

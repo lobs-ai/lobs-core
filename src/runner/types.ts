@@ -47,9 +47,15 @@ export interface AgentSpec {
    * after a restart without losing progress.
    */
   abortSignal?: AbortSignal;
+  /**
+   * Optional function to drain injected messages from the parent agent.
+   * Called at the start of each turn; returned messages are prepended as
+   * user messages before the LLM call. Used by message_agent tool.
+   */
+  getInjectedMessages?: () => string[];
 }
 
-export type ToolName = "exec" | "read" | "write" | "edit" | "ls" | "grep" | "glob" | "find_files" | "code_search" | "web_search" | "web_fetch" | "memory_search" | "memory_read" | "memory_write" | "spawn_agent" | "run_pipeline" | "list_agents" | "cron" | "discord" | "process" | "humanize" | "imagine" | "html_to_pdf";
+export type ToolName = "exec" | "read" | "write" | "edit" | "ls" | "grep" | "glob" | "find_files" | "code_search" | "web_search" | "web_fetch" | "memory_search" | "memory_read" | "memory_write" | "spawn_agent" | "run_pipeline" | "list_agents" | "check_agents" | "message_agent" | "stop_agent" | "cron" | "discord" | "process" | "humanize" | "imagine" | "html_to_pdf";
 
 export interface AgentContext {
   taskId?: string;

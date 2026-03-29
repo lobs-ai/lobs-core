@@ -14,7 +14,7 @@ import { findFilesToolDefinition, findFilesTool } from "./find-files.js";
 import { codeSearchToolDefinition, codeSearchTool } from "./code-search.js";
 import { webSearchToolDefinition, webSearchTool, webFetchToolDefinition, webFetchTool } from "./web.js";
 import { memorySearchToolDefinition, memorySearchTool, memoryReadToolDefinition, memoryReadTool, memoryWriteToolDefinition, memoryWriteTool } from "./memory.js";
-import { AGENT_CONTROL_TOOLS, executeSpawnAgent, executeRunPipeline, executeListAgents } from "./agent-control.js";
+import { AGENT_CONTROL_TOOLS, executeSpawnAgent, executeRunPipeline, executeListAgents, executeCheckAgents, executeMessageAgent, executeStopAgent } from "./agent-control.js";
 import { cronToolDefinition, executeCronTool } from "./cron.js";
 import { discordToolDefinition, executeDiscordTool, setDiscordService as setDiscordToolDiscord } from "./discord.js";
 import { processToolDefinition, processTool } from "./process.js";
@@ -121,6 +121,18 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   list_agents: {
     definition: () => getAgentControlDefinition("list_agents"),
     execute: (params) => executeListAgents(),
+  },
+  check_agents: {
+    definition: () => getAgentControlDefinition("check_agents"),
+    execute: (params) => executeCheckAgents(params),
+  },
+  message_agent: {
+    definition: () => getAgentControlDefinition("message_agent"),
+    execute: (params) => executeMessageAgent(params),
+  },
+  stop_agent: {
+    definition: () => getAgentControlDefinition("stop_agent"),
+    execute: (params) => executeStopAgent(params),
   },
   cron: {
     definition: cronToolDefinition,
