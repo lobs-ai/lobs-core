@@ -329,8 +329,25 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
           console.debug(
             `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} continue_after=max_tokens attempt=${continuationCount}`,
           );
-          messages.push({ role: "assistant", content: response.content as LLMMessage["content"] });
-          messages.push({ role: "user", content: [{ type: "text", text: "Continue from where you left off." }] });
+          // The assistant message was already pushed above. If it contains
+          // incomplete tool_use blocks (common when max_tokens truncates mid-
+          // tool-call), we must provide tool_result stubs before asking the
+          // model to continue, otherwise the API rejects the request.
+          const pendingToolUses = response.content.filter(
+            (block): block is { type: "tool_use"; id: string; name: string; input: Record<string, unknown> } =>
+              block.type === "tool_use"
+          );
+          if (pendingToolUses.length > 0) {
+            const toolResults = pendingToolUses.map((tc) => ({
+              type: "tool_result" as const,
+              tool_use_id: tc.id,
+              content: "Request was truncated (max_tokens). Please retry this tool call.",
+              is_error: true,
+            }));
+            messages.push({ role: "user", content: toolResults as unknown as LLMMessage["content"] });
+          } else {
+            messages.push({ role: "user", content: [{ type: "text", text: "Continue from where you left off." }] });
+          }
           continue;
         }
         // Exhausted continuation attempts — treat as complete

@@ -12,6 +12,7 @@ import { log } from "../util/logger.js";
 import { classifyApprovalTier } from "../util/approval-tier.js";
 import { getModelForTier } from "../config/models.js";
 import { createResilientClient, parseModelString } from "../runner/providers.js";
+import { isDuplicateAction, type DeferredAction } from "./voice/deferred-action-queue.js";
 
 async function llmAnalyze(prompt: string): Promise<string> {
   const model = getModelForTier("standard");
@@ -180,6 +181,163 @@ export class MeetingAnalysisService {
       db.update(meetings)
         .set({ analysisStatus: "failed", updatedAt: new Date().toISOString() })
         .where(eq(meetings.id, meetingId))
+        .run();
+    }
+  }
+
+  /**
+   * Analyze a meeting AND merge in deferred action items captured during the live session.
+   * Runs the normal transcript analysis first, then creates tasks/items for deferred
+   * actions that weren't already captured by the analysis (deduplication).
+   */
+  async analyzeWithDeferred(meetingId: string, deferredActions: DeferredAction[]): Promise<void> {
+    // 1. Run standard analysis first
+    await this.analyze(meetingId);
+
+    if (deferredActions.length === 0) return;
+
+    const db = getDb();
+    const meeting = db.select().from(meetings).where(eq(meetings.id, meetingId)).get();
+    if (!meeting) return;
+
+    // 2. Get existing action items from the analysis
+    const existingItems = db
+      .select()
+      .from(meetingActionItems)
+      .where(eq(meetingActionItems.meetingId, meetingId))
+      .all();
+
+    const existingDescriptions = existingItems.map((item) => item.description);
+
+    // 3. For each deferred action, check if it's already covered by analysis
+    let addedCount = 0;
+    for (const action of deferredActions) {
+      const isDuplicate = existingDescriptions.some((desc) =>
+        isDuplicateAction(action.description, desc),
+      );
+
+      if (isDuplicate) {
+        log().info(
+          `[MEETING_ANALYSIS] Skipping duplicate deferred action: ${action.description.slice(0, 60)}`,
+        );
+        continue;
+      }
+
+      // Create action item + task for non-duplicate deferred actions
+      this.createActionItemFromDeferred(meetingId, meeting.title ?? "Untitled Meeting", action);
+      addedCount++;
+    }
+
+    log().info(
+      `[MEETING_ANALYSIS] Merged ${addedCount} deferred action(s) (${deferredActions.length - addedCount} duplicates skipped) for meeting ${meetingId}`,
+    );
+  }
+
+  /**
+   * Create tasks/inbox items directly from deferred actions when no meeting ID is available.
+   * Used when a voice session captured deferred items but no meeting recording was active.
+   */
+  async createTasksFromDeferred(deferredActions: DeferredAction[]): Promise<void> {
+    for (const action of deferredActions) {
+      this.createActionItemFromDeferred(null, "Voice Session", action);
+    }
+    log().info(
+      `[MEETING_ANALYSIS] Created ${deferredActions.length} task(s) from deferred actions (no meeting)`,
+    );
+  }
+
+  /**
+   * Create a meeting action item and optionally a PAW task from a deferred action.
+   */
+  private createActionItemFromDeferred(
+    meetingId: string | null,
+    meetingTitle: string,
+    action: DeferredAction,
+  ): void {
+    const db = getDb();
+    const itemId = randomUUID();
+    let taskId: string | null = null;
+
+    const isLobsItem = !action.assignee || action.assignee === "lobs";
+
+    if (isLobsItem) {
+      taskId = randomUUID();
+      const agent =
+        action.actionType === "write_doc" || action.actionType === "research"
+          ? action.actionType === "write_doc"
+            ? "writer"
+            : "researcher"
+          : action.actionType === "review_pr"
+            ? "reviewer"
+            : "programmer";
+
+      const notes = [
+        `## Problem`,
+        action.description,
+        "",
+        `## Acceptance Criteria`,
+        `- [ ] Change implemented and working`,
+        `- [ ] Build passes`,
+        "",
+        `## Context`,
+        `From: ${meetingTitle}${meetingId ? ` (Meeting ID: ${meetingId})` : ""}`,
+        `Priority: ${action.priority}`,
+        `Source: deferred (captured during live meeting)`,
+        action.context ? `Discussion context: ${action.context}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      const tier = classifyApprovalTier(agent, notes);
+      const status = tier === "C" ? "proposed" : "active";
+
+      db.insert(tasks)
+        .values({
+          id: taskId,
+          title: action.description,
+          status,
+          owner: action.assignee || "lobs",
+          agent,
+          notes,
+        })
+        .run();
+
+      // Tier C → inbox item for Rafe to review
+      if (tier === "C") {
+        db.insert(inboxItems)
+          .values({
+            id: randomUUID(),
+            title: `Review: ${action.description.slice(0, 80)}`,
+            content: `Deferred action from live meeting needs approval.\n\nTask: ${action.description}\nAgent: ${agent}\nFrom: ${meetingTitle}\nPriority: ${action.priority}\n\nApprove this task to start work.`,
+            type: "action",
+            requiresAction: true,
+            actionStatus: "pending",
+            sourceAgent: "meeting-analysis",
+            isRead: false,
+          })
+          .run();
+      }
+
+      log().info(
+        `[MEETING_ANALYSIS] Created ${tier}-tier task from deferred action: ${action.description.slice(0, 60)}`,
+      );
+    } else {
+      log().info(
+        `[MEETING_ANALYSIS] Skipping task creation for non-lobs deferred action (${action.assignee}): ${action.description.slice(0, 60)}`,
+      );
+    }
+
+    // Create meeting action item if we have a meeting ID
+    if (meetingId) {
+      db.insert(meetingActionItems)
+        .values({
+          id: itemId,
+          meetingId,
+          description: action.description,
+          assignee: action.assignee || null,
+          dueDate: null,
+          taskId,
+        })
         .run();
     }
   }

@@ -6,10 +6,16 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { eq } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { workflowDefinitions, workflowSubscriptions } from "../db/schema.js";
 import { log } from "../util/logger.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+/** Resolve CI script relative to project root (bin/ci.sh) */
+const CI_SCRIPT = join(__dirname, "../../bin/ci.sh");
 
 export function seedDefaultWorkflows(): number {
   const db = getDb();
@@ -165,7 +171,7 @@ const DEFAULT_WORKFLOWS = [
       {
         id: "run_tests_1",
         type: "tool_call",
-        config: { command: "/Users/lobs/lobs-server/bin/ci.sh {project.repo_path}", timeout_seconds: 600 },
+        config: { command: `${CI_SCRIPT} {project.repo_path}`, timeout_seconds: 600 },
         on_success: "tests_gate_1",
         on_failure: { retry: 0 },
       },
@@ -203,7 +209,7 @@ const DEFAULT_WORKFLOWS = [
       {
         id: "run_tests_2",
         type: "tool_call",
-        config: { command: "/Users/lobs/lobs-server/bin/ci.sh {project.repo_path}", timeout_seconds: 600 },
+        config: { command: `${CI_SCRIPT} {project.repo_path}`, timeout_seconds: 600 },
         on_success: "tests_gate_2",
         on_failure: { retry: 0 },
       },
@@ -238,7 +244,7 @@ const DEFAULT_WORKFLOWS = [
       {
         id: "run_tests_3",
         type: "tool_call",
-        config: { command: "/Users/lobs/lobs-server/bin/ci.sh {project.repo_path}", timeout_seconds: 600 },
+        config: { command: `${CI_SCRIPT} {project.repo_path}`, timeout_seconds: 600 },
         on_success: "tests_gate_3",
         on_failure: { retry: 0 },
       },
@@ -370,7 +376,7 @@ const DEFAULT_WORKFLOWS = [
       {
         id: "run_tests",
         type: "tool_call",
-        config: { command: "/Users/lobs/lobs-server/bin/ci.sh {project.repo_path}", timeout_seconds: 600 },
+        config: { command: `${CI_SCRIPT} {project.repo_path}`, timeout_seconds: 600 },
         on_success: "check_tests",
         on_failure: { retry: 1, fallback: "fix_tests", escalate_after: 3, abort_on: ["timeout"] },
       },
@@ -395,7 +401,7 @@ const DEFAULT_WORKFLOWS = [
       {
         id: "run_tests_retry",
         type: "tool_call",
-        config: { command: "/Users/lobs/lobs-server/bin/ci.sh {project.repo_path}", timeout_seconds: 600 },
+        config: { command: `${CI_SCRIPT} {project.repo_path}`, timeout_seconds: 600 },
         on_success: "check_tests_retry",
         on_failure: { retry: 0, abort_on: ["timeout"] },
       },

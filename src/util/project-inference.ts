@@ -58,6 +58,10 @@ const KEYWORD_OVERRIDES: Record<string, string[]> = {
   "paw-lite": [
     "paw lite", "paw-lite",
   ],
+  "proj-lobslab": [
+    "lobslab", "lobslab.com", "ballz", "crapuler",
+    "lobslab-apps", "lobslab-infra",
+  ],
 };
 
 function loadRules(): ProjectRule[] {

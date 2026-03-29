@@ -30,6 +30,7 @@ import {
 } from "./realtime-tools.js";
 import { buildRealtimeInstructions } from "./realtime-context.js";
 import { buildRealtimeSessionConfig } from "./realtime-config.js";
+import type { DeferredActionQueue } from "./deferred-action-queue.js";
 
 const { OpusEncoder } = opus;
 
@@ -83,6 +84,8 @@ export interface RealtimeVoiceSessionConfig {
   noiseReduction?: "near_field" | "far_field" | null;
   /** Transcription model (default: gpt-4o-mini-transcribe) */
   transcriptionModel?: string;
+  /** Optional deferred action queue for live meeting action judgment */
+  deferredActionQueue?: DeferredActionQueue;
 }
 
 // ---------------------------------------------------------------------------
@@ -252,6 +255,7 @@ export class RealtimeVoiceSession {
         },
         channelId: `voice:${this.config.guildId}`,
         cwd: process.cwd(),
+        deferredActionQueue: this.config.deferredActionQueue,
       },
     });
     this.session = session;

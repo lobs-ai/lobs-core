@@ -31,7 +31,9 @@ import { VoiceTranscript } from "./transcript.js";
 import { loadVoiceConfig } from "./config.js";
 import { VoiceSidecar } from "./sidecar.js";
 import { RealtimeVoiceSession } from "./realtime-session.js";
+import { DeferredActionQueue } from "./deferred-action-queue.js";
 import { getKeyPool } from "../key-pool.js";
+import { MeetingAnalysisService } from "../meeting-analysis.js";
 
 // ---------------------------------------------------------------------------
 // Session types
@@ -62,6 +64,8 @@ interface SidecarSession extends VoiceSessionBase {
 interface RealtimeSessionEntry extends VoiceSessionBase {
   mode: "realtime";
   realtimeSession: RealtimeVoiceSession;
+  /** Deferred action queue — captures action items during live meetings */
+  deferredActionQueue: DeferredActionQueue;
 }
 
 type VoiceSession = SidecarSession | RealtimeSessionEntry;
@@ -115,6 +119,7 @@ export class VoiceManager {
   private client: Client;
   private config: VoiceConfig;
   private sidecar: VoiceSidecar;
+  private meetingAnalysis = new MeetingAnalysisService();
   private messageHandler:
     | ((text: string, userId: string, displayName: string, channelId: string) => Promise<void>)
     | null = null;
@@ -428,6 +433,9 @@ export class VoiceManager {
     const apiKey = resolveOpenAIApiKey()!;
     const rc = this.config.realtime;
 
+    // Create deferred action queue for this session
+    const deferredActionQueue = new DeferredActionQueue();
+
     const realtimeSession = new RealtimeVoiceSession({
       guildId,
       channelId,
@@ -440,6 +448,7 @@ export class VoiceManager {
       eagerness: rc.eagerness,
       noiseReduction: rc.noiseReduction,
       transcriptionModel: rc.transcriptionModel,
+      deferredActionQueue,
     });
 
     // Connect to OpenAI Realtime API
@@ -453,6 +462,7 @@ export class VoiceManager {
       connection,
       player,
       realtimeSession,
+      deferredActionQueue,
       connectedSince: Date.now(),
     };
   }
@@ -769,6 +779,9 @@ export class VoiceManager {
       session.speaker.stop();
     } else {
       session.realtimeSession.close();
+
+      // Drain deferred action queue and process items
+      this.processDeferredActions(session.deferredActionQueue);
     }
 
     session.player.stop(true);
@@ -783,6 +796,40 @@ export class VoiceManager {
 
     if (this.sessions.size === 0) {
       this.sidecar.stopHealthMonitor();
+    }
+  }
+
+  /**
+   * Process deferred actions from a completed voice session.
+   * Drains the queue and passes items to MeetingAnalysisService for
+   * merging with transcript-based analysis, or creates tasks directly.
+   */
+  private processDeferredActions(queue: DeferredActionQueue): void {
+    const actions = queue.drain();
+    if (actions.length === 0) return;
+
+    const meetingId = queue.getMeetingId();
+    console.log(
+      `[voice:manager] Processing ${actions.length} deferred action(s) from meeting ${meetingId ?? "no-meeting"}`,
+    );
+
+    // Fire-and-forget: merge with meeting analysis or create standalone tasks
+    if (meetingId) {
+      // Meeting exists — merge deferred items with post-hoc analysis
+      void this.meetingAnalysis.analyzeWithDeferred(meetingId, actions).catch((err) => {
+        console.error(
+          `[voice:manager] Failed to process deferred actions with meeting analysis:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      });
+    } else {
+      // No meeting ID — create tasks/inbox items directly from deferred actions
+      void this.meetingAnalysis.createTasksFromDeferred(actions).catch((err) => {
+        console.error(
+          `[voice:manager] Failed to create tasks from deferred actions:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      });
     }
   }
 

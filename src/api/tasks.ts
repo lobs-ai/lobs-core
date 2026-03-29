@@ -18,7 +18,7 @@ import { assembleBrainDumpContext, formatBrainDumpContext } from "../services/co
 import { logTrainingExample } from "../services/training-data.js";
 import { findDuplicateTask } from "../util/task-dedup.js";
 import { triageIncomingItem, triageHeuristic } from "../services/intake-triage.js";
-import { syncSuggestionStatus, enrichSuggestionNotes } from "./suggestions.js";
+import { syncSuggestionStatus, enrichSuggestion } from "./suggestions.js";
 
 const learningSvc = new LearningService();
 
@@ -594,16 +594,20 @@ Return ONLY valid JSON:
 
     // ── Suggestion enrichment: auto-add service context ─────────────────
     const isSuggestion = body.external_source === "suggestion";
-    const taskNotes = isSuggestion
-      ? enrichSuggestionNotes(body.title as string, body.notes as string | undefined)
-      : body.notes as string;
+    const enrichment = isSuggestion
+      ? enrichSuggestion(body.title as string, body.notes as string | undefined)
+      : null;
+    const taskNotes = enrichment?.notes ?? (body.notes as string);
+    // Use enriched project ID if available (e.g. proj-lobslab for lobslab suggestions)
+    const taskProjectId = enrichment?.projectId
+      ?? ((body.project_id as string) || inferProjectId(body.title as string, body.notes as string | null));
 
     db.insert(tasks).values({
       id: taskId,
       title: body.title as string,
       status: (body.status as string) ?? "active",
       owner: body.owner as string,
-      projectId: (body.project_id as string) || inferProjectId(body.title as string, body.notes as string | null),
+      projectId: taskProjectId,
       notes: taskNotes,
       agent: heuristicAgent,
       modelTier: heuristicModelTier,

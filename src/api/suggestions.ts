@@ -107,10 +107,19 @@ function matchService(title: string, description?: string): typeof LOBSLAB_SERVI
   return best?.svc ?? null;
 }
 
+export interface SuggestionEnrichment {
+  notes: string;
+  /** Resolved project ID for the matched service (null if no match). */
+  projectId: string | null;
+  /** Resolved absolute repo path (null if no match). */
+  repoPath: string | null;
+}
+
 /**
  * Build enriched task notes for a suggestion, including service context.
+ * Also returns the matched project/repo info so callers can set the right project_id.
  */
-export function enrichSuggestionNotes(title: string, description?: string): string {
+export function enrichSuggestion(title: string, description?: string): SuggestionEnrichment {
   const svc = matchService(title, description);
   let notes = `Feature request from lobslab.com:\n\n**${title}**`;
   if (description) notes += `\n\n${description}`;
@@ -125,7 +134,16 @@ export function enrichSuggestionNotes(title: string, description?: string): stri
     notes += `\n\n**After making changes, deploy the service and commit/push your changes.**`;
   }
 
-  return notes;
+  // All lobslab services share the proj-lobslab project (has correct repo_path).
+  // Resolve ~ to HOME for the repo path.
+  const home = process.env.HOME ?? "/Users/lobs";
+  const repoPath = svc ? svc.repo.replace(/^~/, home) : null;
+
+  return {
+    notes,
+    projectId: svc ? "proj-lobslab" : null,
+    repoPath,
+  };
 }
 
 export async function handleSuggestionsRequest(
