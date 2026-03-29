@@ -1558,6 +1558,26 @@ export class MainAgent {
 
           // Also include any text the model said alongside the tool calls
           const assistantText = textResponse?.trim();
+
+          // Record agent intermediate reasoning to structured memory
+          if (assistantText) {
+            try {
+              const recorder = getEventRecorder();
+              recorder.recordEvent({
+                agentId: "main-agent",
+                agentType: "main",
+                sessionId,
+                eventType: "observation",
+                content: assistantText.substring(0, 1000),
+                metadata: {
+                  type: "agent_reasoning",
+                  iteration: loopIteration,
+                },
+                scope: "session",
+              });
+            } catch (e) { console.warn(`[structured-memory] Failed to record agent reasoning: ${e}`); }
+          }
+
           const fullToolSummary = assistantText
             ? `${assistantText}\n\n[Tool calls]\n${toolSummary}`
             : `[Tool calls]\n${toolSummary}`;
@@ -1757,22 +1777,26 @@ export class MainAgent {
           timestamp: Date.now(),
         } satisfies AgentStreamEvent);
 
-        // Record conversation completion to structured memory
+        // Record agent response to structured memory
         try {
           const recorder = getEventRecorder();
-          recorder.recordEvent({
-            agentId: "main-agent",
-            agentType: "main",
-            sessionId,
-            eventType: "observation",
-            content: textResponse ? textResponse.substring(0, 500) : "Conversation turn completed",
-            metadata: {
-              durationMs: Date.now() - conversationStartedAt,
-              iterations: loopIteration,
-            },
-            scope: "session",
-          });
-        } catch (e) { console.warn(`[structured-memory] Failed to record completion: ${e}`); }
+          if (textResponse && textResponse.trim()) {
+            recorder.recordEvent({
+              agentId: "main-agent",
+              agentType: "main",
+              sessionId,
+              eventType: "observation",
+              content: textResponse.substring(0, 1000),
+              metadata: {
+                type: "agent_response",
+                durationMs: Date.now() - conversationStartedAt,
+                iterations: loopIteration,
+                isFinal: true,
+              },
+              scope: "session",
+            });
+          }
+        } catch (e) { console.warn(`[structured-memory] Failed to record agent response: ${e}`); }
 
         // Fire reflection after conversation ends (main agent doesn't use agent-loop hooks)
         try {

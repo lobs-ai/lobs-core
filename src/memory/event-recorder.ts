@@ -65,8 +65,15 @@ export function classifySignalScore(
     case "decision":
       return 0.9;
 
-    case "observation":
+    case "observation": {
+      const obsType = typeof metadata?.type === "string" ? metadata.type : "";
+      // Agent's final response to user — this IS the conversation
+      if (obsType === "agent_response") return 0.8;
+      // Agent reasoning during tool use — useful context
+      if (obsType === "agent_reasoning") return 0.6;
+      // Other observations
       return 0.7;
+    }
 
     case "tool_result": {
       const toolName = typeof metadata?.tool === "string" ? metadata.tool : "";
