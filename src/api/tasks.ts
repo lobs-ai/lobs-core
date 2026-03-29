@@ -18,7 +18,7 @@ import { assembleBrainDumpContext, formatBrainDumpContext } from "../services/co
 import { logTrainingExample } from "../services/training-data.js";
 import { findDuplicateTask } from "../util/task-dedup.js";
 import { triageIncomingItem, triageHeuristic } from "../services/intake-triage.js";
-import { syncSuggestionStatus } from "./suggestions.js";
+import { syncSuggestionStatus, enrichSuggestionNotes } from "./suggestions.js";
 
 const learningSvc = new LearningService();
 
@@ -592,13 +592,19 @@ Return ONLY valid JSON:
       ? true
       : classifyAndLog(taskId, body.title as string, (body.notes as string) ?? "");
 
+    // ── Suggestion enrichment: auto-add service context ─────────────────
+    const isSuggestion = body.external_source === "suggestion";
+    const taskNotes = isSuggestion
+      ? enrichSuggestionNotes(body.title as string, body.notes as string | undefined)
+      : body.notes as string;
+
     db.insert(tasks).values({
       id: taskId,
       title: body.title as string,
       status: (body.status as string) ?? "active",
       owner: body.owner as string,
       projectId: (body.project_id as string) || inferProjectId(body.title as string, body.notes as string | null),
-      notes: body.notes as string,
+      notes: taskNotes,
       agent: heuristicAgent,
       modelTier: heuristicModelTier,
       blockedBy: Array.isArray(body.blocked_by) ? body.blocked_by as string[] : null,
@@ -606,6 +612,8 @@ Return ONLY valid JSON:
       complianceRequired: Boolean(body.compliance_required),
       isCompliant: autoIsCompliant,
       expectedArtifacts: body.expected_artifacts != null ? JSON.stringify(body.expected_artifacts) : undefined,
+      externalSource: body.external_source as string | undefined,
+      externalId: body.external_id as string | undefined,
       createdAt: now,
       updatedAt: now,
     }).run();
