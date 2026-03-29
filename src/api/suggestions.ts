@@ -118,10 +118,23 @@ export interface SuggestionEnrichment {
 /**
  * Build enriched task notes for a suggestion, including service context.
  * Also returns the matched project/repo info so callers can set the right project_id.
+ *
+ * @param explicitProject - If provided by the submitter, skip keyword matching and use this directly.
+ * @param type - "feature" or "bug" — included in the notes prefix.
  */
-export function enrichSuggestion(title: string, description?: string): SuggestionEnrichment {
-  const svc = matchService(title, description);
-  let notes = `Feature request from lobslab.com:\n\n**${title}**`;
+export function enrichSuggestion(
+  title: string,
+  description?: string,
+  explicitProject?: string | null,
+  type?: string | null,
+): SuggestionEnrichment {
+  // Use explicit project if provided, otherwise fall back to keyword matching
+  const svc = explicitProject
+    ? LOBSLAB_SERVICES[explicitProject.toLowerCase()] ?? matchService(title, description)
+    : matchService(title, description);
+
+  const typeLabel = type === "bug" ? "Bug report" : "Feature request";
+  let notes = `${typeLabel} from lobslab.com:\n\n**${title}**`;
   if (description) notes += `\n\n${description}`;
 
   if (svc) {

@@ -595,7 +595,12 @@ Return ONLY valid JSON:
     // ── Suggestion enrichment: auto-add service context ─────────────────
     const isSuggestion = body.external_source === "suggestion";
     const enrichment = isSuggestion
-      ? enrichSuggestion(body.title as string, body.notes as string | undefined)
+      ? enrichSuggestion(
+          body.title as string,
+          body.notes as string | undefined,
+          (body.suggestion_project as string) ?? null,
+          (body.suggestion_type as string) ?? null,
+        )
       : null;
     const taskNotes = enrichment?.notes ?? (body.notes as string);
     // Use enriched project ID if available (e.g. proj-lobslab for lobslab suggestions)
