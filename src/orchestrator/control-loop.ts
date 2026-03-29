@@ -38,6 +38,7 @@ import {
   decrementPendingSpawns,
   detectStaleWorkers,
   forceTerminateWorker,
+  clearStalePendingSpawns,
   type FailureType,
 } from "./worker-manager.js";
 import { chooseModel, resolveTaskTier, TIER_MODELS, buildFallbackChain, escalationModel, type ModelTier } from "./model-chooser.js";
@@ -52,6 +53,8 @@ import type { AgentResult } from "../runner/index.js";
 import { getAgentSessionsDir } from "../config/lobs.js";
 import { checkModelsBeforeSpawn } from "../diagnostics/lmstudio.js";
 import { checkBlockerPhaseGates, emitPhaseGateInboxAlert } from "./phase-gate.js";
+import { runHealthCheck } from "../services/health-monitor.js";
+import { runHealthMonitorTick } from "../main-agent/health-monitor-role.js";
 
 const learningSvc = new LearningService();
 
@@ -82,6 +85,7 @@ let timer: ReturnType<typeof setInterval> | null = null;
 let executor: WorkflowExecutor | null = null;
 let gatewayPort: number = 18789;
 let gatewayToken: string = "";
+let lastHealthCheckMs: number = 0; // Track health monitor ticks (every 30s)
 let lastWorkflowSnapshotAt = 0;
 
 export function getGatewayConfig(): { port: number; token: string } {
@@ -470,6 +474,13 @@ async function runTick(): Promise<void> {
     log().error(`orchestrator: processSchedules error: ${e}`);
   }
 
+  // ── 3.5. Clear stale pending spawn keys ─────────────────────────────────────
+  // Safety valve: if a spawn key is stuck but no worker is actually running,
+  // clear it so the project isn't permanently locked.
+  try { clearStalePendingSpawns(); } catch (e) {
+    log().error(`orchestrator: clearStalePendingSpawns error: ${e}`);
+  }
+
   // ── 4. Scan for ready tasks ────────────────────────────────────────────────
   try {
     if (hasCapacity()) {
@@ -711,6 +722,15 @@ async function runTick(): Promise<void> {
     processPendingMeetings();
   } catch (e) {
     log().error(`orchestrator: meeting analysis recovery error: ${e}`);
+  }
+
+  // ── 10. Proactive system health monitoring (main agent) ─────────────────────
+  // Detect restart cascades, orphaned task accumulation, and resource exhaustion
+  // without blocking critical control loop phases.
+  try {
+    await runHealthMonitorCheck();
+  } catch (e) {
+    log().error(`orchestrator: health monitor tick error: ${e}`);
   }
 }
 
@@ -2919,4 +2939,39 @@ function getTaskPipeline(task: { title: string; notes?: string }): string | null
   }
 
   return null;
+}
+
+// ─── Health Monitor Tick (Phase 10) ───────────────────────────────────────
+
+/**
+ * Run health monitoring checks every 30 seconds.
+ * This is a lightweight probe that doesn't block the control loop.
+ */
+async function runHealthMonitorCheck(): Promise<void> {
+  const now = Date.now();
+  const HEALTH_CHECK_INTERVAL_MS = 30_000; // 30 seconds
+
+  // Skip if we ran recently
+  if (now - lastHealthCheckMs < HEALTH_CHECK_INTERVAL_MS) {
+    return;
+  }
+
+  lastHealthCheckMs = now;
+
+  try {
+    const db = getDb();
+
+    // Run health checks (synchronous)
+    const snapshot = runHealthCheck(db);
+
+    // Feed to main agent decision engine
+    if (snapshot) {
+      await runHealthMonitorTick(db, snapshot).catch(err => {
+        log().debug?.(`[health-monitor] Main agent decision error: ${err}`);
+      });
+    }
+  } catch (e) {
+    log().debug?.(`[health-monitor] Probe error: ${e}`);
+    // Don't propagate — health monitoring is optional and shouldn't break the loop
+  }
 }

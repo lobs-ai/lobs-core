@@ -413,6 +413,36 @@ export function projectHasPendingSpawn(projectId: string, agentType?: string): b
   return false;
 }
 
+/**
+ * Safety valve: clear stale pending spawn keys that have no corresponding
+ * active worker or running workflow. Prevents permanent project lockout
+ * when a spawn completes but fails to decrement (e.g. across restarts).
+ */
+export function clearStalePendingSpawns(): void {
+  if (pendingSpawnKeys.size === 0) return;
+  const db = getDb();
+  const activeWorkers = db.select().from(workerRuns)
+    .where(isNull(workerRuns.endedAt))
+    .all()
+    .filter(r => r.startedAt != null);
+
+  const keysToRemove: string[] = [];
+  for (const key of pendingSpawnKeys) {
+    const [projId, agType] = key.split(":");
+    const hasWorker = activeWorkers.some(w =>
+      w.projectId === projId && (!agType || w.agentType === agType)
+    );
+    if (!hasWorker) {
+      keysToRemove.push(key);
+    }
+  }
+  for (const key of keysToRemove) {
+    pendingSpawnKeys.delete(key);
+    pendingSpawnCount = Math.max(0, pendingSpawnCount - 1);
+    log().warn(`[WORKER_MANAGER] Cleared stale pending spawn key: ${key}`);
+  }
+}
+
 /** Count workflow runs that are in-flight for tasks (running or pending with a task_id) */
 export function countInFlightTaskRuns(): number {
 
