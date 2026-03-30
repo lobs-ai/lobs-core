@@ -31,7 +31,6 @@ import { MainAgent } from "./services/main-agent.js";
 import { loadWorkspaceContext, buildMainAgentPrompt } from "./services/workspace-loader.js";
 import { setDiscordToolDiscord } from "./runner/tools/index.js";
 import { validateAllConfigs } from "./config/validator.js";
-import { initMemory, shutdownMemory } from "./services/memory/index.js";
 import { initMemoryDb } from "./memory/db.js";
 import { initFileIndexer, stopFileIndexer } from "./memory/indexer.js";
 import { registerEventRecorderHook } from "./hooks/event-recorder.js";
@@ -515,13 +514,6 @@ async function main() {
   // Purge archived chat sessions older than 30 days on startup
   purgeOldArchivedSessions();
 
-  // Initialize in-process memory service in the background so memory indexing
-  // cannot block the main system from reaching the main agent + Discord/API.
-  void initMemory().catch((err) => {
-    console.error("[memory] Failed to initialize memory service:", err);
-    console.warn("[memory] Continuing without memory — grep fallback will be used");
-  });
-
   // Start imagine service (background, non-blocking)
   imagineService.start();
   
@@ -556,8 +548,9 @@ async function main() {
 
     let memoryLabel = "down";
     try {
-      const { isMemoryReady } = await import("./services/memory/index.js");
-      memoryLabel = isMemoryReady() ? "in-process" : "not-ready";
+      const { getMemoryDb } = await import("./memory/db.js");
+      getMemoryDb();
+      memoryLabel = "in-process";
     } catch { /* ignore */ }
 
     console.log(
@@ -809,7 +802,6 @@ async function main() {
     // Stop file indexer (cancels rescan timer + pending embeddings)
     stopFileIndexer();
 
-    await shutdownMemory();
     await browserService.shutdown();
     await discordService.shutdown();
     cronService.stop();

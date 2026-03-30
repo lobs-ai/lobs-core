@@ -240,11 +240,12 @@ async function handleStatusCommand(interaction: ChatInputCommandInteraction): Pr
   // Count active tasks
   const activeTasks = db.prepare('SELECT COUNT(*) as count FROM tasks WHERE status = ?').get('active') as { count: number };
   
-  // Get memory service health (in-process)
+  // Get memory service health (unified DB)
   let memoryHealth = '❓ Unknown';
   try {
-    const { isMemoryReady } = await import("./memory/index.js");
-    memoryHealth = isMemoryReady() ? '✅ In-Process' : '⚠️ Not Ready';
+    const { getMemoryDb } = await import("../memory/db.js");
+    getMemoryDb();
+    memoryHealth = '✅ Unified DB';
   } catch {
     memoryHealth = '❌ Down';
   }

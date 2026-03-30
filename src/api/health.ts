@@ -2,8 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { json } from "./index.js";
-import { isMemoryReady, getMemoryHealth } from "../services/memory/index.js";
-import { memoryServer } from "../services/memory-server.js";
+import { getMemoryDb } from "../memory/db.js";
 import { discordService } from "../services/discord.js";
 import { getKeyPool } from "../services/key-pool.js";
 import { loadVoiceConfig } from "../services/voice/index.js";
@@ -17,15 +16,6 @@ const GOOGLE_CREDENTIALS_FILE = resolve(HOME, ".lobs/credentials/client_secret.j
 async function checkLmStudio(): Promise<boolean> {
   try {
     const res = await fetch("http://localhost:1234/v1/models", { signal: AbortSignal.timeout(1000) });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function checkMemoryServer(): Promise<boolean> {
-  try {
-    const res = await fetch("http://localhost:7420/healthz", { signal: AbortSignal.timeout(1000) });
     return res.ok;
   } catch {
     return false;
@@ -53,6 +43,15 @@ function getPid(): number | null {
     return isNaN(pid) ? null : pid;
   } catch {
     return null;
+  }
+}
+
+function isMemoryDbReady(): boolean {
+  try {
+    getMemoryDb();
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -105,17 +104,17 @@ async function getServiceWarnings(): Promise<ServiceHealth[]> {
   const services: ServiceHealth[] = [];
 
   const [memoryOk, lmStudioOk, imagineOk, googleResult] = await Promise.all([
-    Promise.resolve(isMemoryReady()),
+    Promise.resolve(isMemoryDbReady()),
     checkLmStudio(),
     checkImagine(),
     checkGoogleToken(),
   ]);
 
-  // Memory service (in-process)
+  // Memory service (unified DB)
   if (!memoryOk) {
     services.push({
       id: "memory-server", name: "Memory Service", status: "down",
-      message: "Memory search unavailable (in-process module not initialized)",
+      message: "Memory search unavailable (unified DB not initialized)",
       fix: "Check startup logs or run: lobs restart",
       severity: "error",
     });
@@ -246,13 +245,10 @@ export async function handleHealthRequest(_req: IncomingMessage, res: ServerResp
   }
 
   // Default: full health check
-  const [memoryReady, memoryServerReachable, lmStudio] = await Promise.all([
-    Promise.resolve(isMemoryReady()),
-    checkMemoryServer(),
+  const [memoryReady, lmStudio] = await Promise.all([
+    Promise.resolve(isMemoryDbReady()),
     checkLmStudio(),
   ]);
-  const memorySupervisor = memoryServer.getStatus();
-  const memoryServerOk = memoryReady || memoryServerReachable;
 
   const db = checkDb();
   const pid = getPid();
@@ -261,16 +257,17 @@ export async function handleHealthRequest(_req: IncomingMessage, res: ServerResp
   let memoryInfo: Record<string, unknown> = { status: "down" };
   if (memoryReady) {
     try {
-      const health = await getMemoryHealth();
+      const mdb = getMemoryDb();
+      const total = (mdb.prepare("SELECT count(*) as c FROM memories").get() as { c: number }).c;
+      const docs = (mdb.prepare("SELECT count(*) as c FROM memories WHERE memory_type='document'").get() as { c: number }).c;
       memoryInfo = {
-        status: health.status,
-        mode: "in-process",
-        uptime: health.uptime,
-        documents: health.index.documents,
-        chunks: health.index.chunks,
+        status: "ok",
+        mode: "unified-db",
+        total_memories: total,
+        document_memories: docs,
       };
     } catch {
-      memoryInfo = { status: "error", mode: "in-process" };
+      memoryInfo = { status: "error", mode: "unified-db" };
     }
   }
 
@@ -297,14 +294,7 @@ export async function handleHealthRequest(_req: IncomingMessage, res: ServerResp
     uptime: process.uptime(),
     pid: pid ?? process.pid,
     db: db ? "ok" : "error",
-    memory_server: memoryServerOk ? "ok" : "down",
-    memory_supervisor: {
-      pid: memorySupervisor.pid,
-      restarts: memorySupervisor.restartCount,
-      running: memorySupervisor.running,
-      last_healthy: memorySupervisor.lastHealthy,
-      uptime: memorySupervisor.uptime,
-    },
+    memory_server: memoryReady ? "ok" : "down",
     memory: memoryInfo,
     lm_studio: lmStudio ? "ok" : "down",
     voice: voiceInfo,

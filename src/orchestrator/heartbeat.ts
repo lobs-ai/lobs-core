@@ -50,16 +50,13 @@ interface InboxHealthResult extends CheckResult {
 }
 
 /**
- * Check if in-process memory service is ready.
+ * Check if the unified memory DB is ready.
  */
 async function checkMemoryServer(): Promise<CheckResult> {
   try {
-    const { isMemoryReady } = await import("../services/memory/index.js");
-    if (isMemoryReady()) {
-      return { status: "ok", message: "Memory service ready (in-process)" };
-    } else {
-      return { status: "warning", message: "Memory service not yet initialized" };
-    }
+    const { getMemoryDb } = await import("../memory/db.js");
+    getMemoryDb();
+    return { status: "ok", message: "Memory service ready (unified DB)" };
   } catch (err) {
     return {
       status: "error",

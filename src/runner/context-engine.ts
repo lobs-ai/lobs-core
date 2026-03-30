@@ -508,32 +508,8 @@ export async function assembleContext(params: {
       }
     }
   } catch (err) {
-    // Unified search failed (DB not ready at startup) — fall back to grep via memory-client
-    console.warn(`[context-engine] Unified memory search failed, using grep fallback: ${String(err)}`);
-
-    const { memorySearchBatch } = await import("../services/memory-client.js");
-    const batchResult = await memorySearchBatch([
-      { id: "memory", query: params.task, collections: ["workspace", "knowledge"], maxResults: 8 },
-      { id: "project", query: params.task, collections: ["projects", "knowledge"], maxResults: 8 },
-      { id: "session", query: params.task, collections: ["sessions"], maxResults: 5 },
-    ]);
-
-    for (const r of (batchResult.results.memory ?? []) as MemorySearchResult[]) {
-      if (categorizeResult(r) === "memory") {
-        memoryChunks.push({ source: r.path, content: r.snippet, score: r.score, tokens: estimateTokens(r.snippet), category: "memory" });
-      }
-    }
-    for (const r of (batchResult.results.project ?? []) as MemorySearchResult[]) {
-      const cat = categorizeResult(r);
-      if (cat === "code") {
-        codeChunks.push({ source: r.path, content: r.snippet, score: r.score, tokens: estimateTokens(r.snippet), category: "code" });
-      } else if (cat === "project") {
-        docChunks.push({ source: r.path, content: r.snippet, score: r.score, tokens: estimateTokens(r.snippet), category: "project" });
-      }
-    }
-    for (const r of (batchResult.results.session ?? []) as MemorySearchResult[]) {
-      sessionChunks.push({ source: r.path, content: r.snippet, score: r.score, tokens: estimateTokens(r.snippet), category: "session" });
-    }
+    // Unified search failed — log and continue with empty memory results
+    console.warn(`[context-engine] Unified memory search failed: ${String(err)}`);
   }
 
   layers.push(fillLayer("memory", memoryChunks, budget.allocations.memory));

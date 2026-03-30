@@ -1,8 +1,8 @@
 /**
  * Tests for src/api/health.ts
  *
- * The handler checks: DB file existence, memory server, LM Studio, and PID.
- * We mock all external I/O (fs, fetch, memory-server) so tests run fast and
+ * The handler checks: DB file existence, unified memory DB, LM Studio, and PID.
+ * We mock all external I/O (fs, fetch, memory/db) so tests run fast and
  * deterministically.
  */
 
@@ -31,6 +31,15 @@ function makeReq(): IncomingMessage {
   return { method: "GET", url: "/api/health" } as unknown as IncomingMessage;
 }
 
+/** A minimal mock DB that supports the two count queries health.ts runs. */
+function makeMemoryDb() {
+  return {
+    prepare: (sql: string) => ({
+      get: () => ({ c: sql.includes("document") ? 42 : 1337 }),
+    }),
+  };
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe("handleHealthRequest", () => {
@@ -44,11 +53,11 @@ describe("handleHealthRequest", () => {
 
   it("returns status=healthy when DB file exists", async () => {
     vi.doMock("node:fs", () => ({
-      existsSync: (_p: string) => true, // DB file exists
+      existsSync: (_p: string) => true,
       readFileSync: (_p: string) => "12345",
     }));
-    vi.doMock("../src/services/memory-server.js", () => ({
-      memoryServer: { getStatus: () => ({ pid: 1, restartCount: 0, running: true }) },
+    vi.doMock("../src/memory/db.js", () => ({
+      getMemoryDb: () => makeMemoryDb(),
     }));
     global.fetch = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch;
 
@@ -68,8 +77,8 @@ describe("handleHealthRequest", () => {
       existsSync: (_p: string) => false,
       readFileSync: () => { throw new Error("no file"); },
     }));
-    vi.doMock("../src/services/memory-server.js", () => ({
-      memoryServer: { getStatus: () => ({ pid: null, restartCount: 0, running: false }) },
+    vi.doMock("../src/memory/db.js", () => ({
+      getMemoryDb: () => { throw new Error("not initialized"); },
     }));
     global.fetch = vi.fn().mockRejectedValue(new Error("connect ECONNREFUSED")) as unknown as typeof fetch;
 
@@ -82,18 +91,16 @@ describe("handleHealthRequest", () => {
     expect(b["db"]).toBe("error");
   });
 
-  it("reports memory_server=ok when memory server responds", async () => {
+  it("reports memory_server=ok when unified memory DB is ready", async () => {
     vi.doMock("node:fs", () => ({
       existsSync: () => true,
       readFileSync: () => "99",
     }));
-    vi.doMock("../src/services/memory-server.js", () => ({
-      memoryServer: { getStatus: () => ({ pid: 2, restartCount: 1, running: true }) },
+    vi.doMock("../src/memory/db.js", () => ({
+      getMemoryDb: () => makeMemoryDb(),
     }));
-    // First fetch (memory server) succeeds, second (lmstudio) fails
-    global.fetch = vi.fn()
-      .mockResolvedValueOnce({ ok: true })
-      .mockRejectedValueOnce(new Error("no lmstudio")) as unknown as typeof fetch;
+    // LM Studio fails
+    global.fetch = vi.fn().mockRejectedValue(new Error("no lmstudio")) as unknown as typeof fetch;
 
     const { handleHealthRequest } = await import("../src/api/health.js");
     const { res, body } = makeRes();
@@ -104,18 +111,34 @@ describe("handleHealthRequest", () => {
     expect(b["lm_studio"]).toBe("down");
   });
 
+  it("reports memory_server=down when unified memory DB is not ready", async () => {
+    vi.doMock("node:fs", () => ({
+      existsSync: () => true,
+      readFileSync: () => "99",
+    }));
+    vi.doMock("../src/memory/db.js", () => ({
+      getMemoryDb: () => { throw new Error("not initialized"); },
+    }));
+    global.fetch = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch;
+
+    const { handleHealthRequest } = await import("../src/api/health.js");
+    const { res, body } = makeRes();
+    await handleHealthRequest(makeReq(), res);
+
+    const b = body();
+    expect(b["memory_server"]).toBe("down");
+    expect(b["lm_studio"]).toBe("ok");
+  });
+
   it("reports lm_studio=ok when LM Studio responds", async () => {
     vi.doMock("node:fs", () => ({
       existsSync: () => true,
       readFileSync: () => "77",
     }));
-    vi.doMock("../src/services/memory-server.js", () => ({
-      memoryServer: { getStatus: () => ({ pid: 5, restartCount: 0, running: true }) },
+    vi.doMock("../src/memory/db.js", () => ({
+      getMemoryDb: () => { throw new Error("not initialized"); },
     }));
-    // memory-server fails, lm-studio succeeds
-    global.fetch = vi.fn()
-      .mockRejectedValueOnce(new Error("no mem"))
-      .mockResolvedValueOnce({ ok: true }) as unknown as typeof fetch;
+    global.fetch = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch;
 
     const { handleHealthRequest } = await import("../src/api/health.js");
     const { res, body } = makeRes();
@@ -131,8 +154,8 @@ describe("handleHealthRequest", () => {
       existsSync: () => true,
       readFileSync: () => "42",
     }));
-    vi.doMock("../src/services/memory-server.js", () => ({
-      memoryServer: { getStatus: () => ({ pid: 0, restartCount: 0, running: false }) },
+    vi.doMock("../src/memory/db.js", () => ({
+      getMemoryDb: () => makeMemoryDb(),
     }));
     global.fetch = vi.fn().mockRejectedValue(new Error("down")) as unknown as typeof fetch;
 
@@ -156,8 +179,8 @@ describe("handleHealthRequest", () => {
       existsSync: () => true,
       readFileSync: () => "1",
     }));
-    vi.doMock("../src/services/memory-server.js", () => ({
-      memoryServer: { getStatus: () => ({ pid: 1, restartCount: 0, running: true }) },
+    vi.doMock("../src/memory/db.js", () => ({
+      getMemoryDb: () => makeMemoryDb(),
     }));
     global.fetch = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch;
 
@@ -170,15 +193,13 @@ describe("handleHealthRequest", () => {
     expect(b["lm_studio_diagnostic"]).toBeUndefined();
   });
 
-  it("includes memory_supervisor fields in response", async () => {
+  it("memory response includes unified DB stats when ready", async () => {
     vi.doMock("node:fs", () => ({
       existsSync: () => true,
       readFileSync: () => "1",
     }));
-    vi.doMock("../src/services/memory-server.js", () => ({
-      memoryServer: {
-        getStatus: () => ({ pid: 9001, restartCount: 3, running: true }),
-      },
+    vi.doMock("../src/memory/db.js", () => ({
+      getMemoryDb: () => makeMemoryDb(),
     }));
     global.fetch = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch;
 
@@ -187,19 +208,20 @@ describe("handleHealthRequest", () => {
     await handleHealthRequest(makeReq(), res);
 
     const b = body();
-    const sup = b["memory_supervisor"] as Record<string, unknown>;
-    expect(sup["pid"]).toBe(9001);
-    expect(sup["restarts"]).toBe(3);
-    expect(sup["running"]).toBe(true);
+    const mem = b["memory"] as Record<string, unknown>;
+    expect(mem["status"]).toBe("ok");
+    expect(mem["mode"]).toBe("unified-db");
+    expect(mem["total_memories"]).toBe(1337);
+    expect(mem["document_memories"]).toBe(42);
   });
 
   it("reads PID from pid file when it exists", async () => {
     vi.doMock("node:fs", () => ({
-      existsSync: (p: string) => true, // both db and pid file exist
+      existsSync: (_p: string) => true,
       readFileSync: (_p: string) => "55555",
     }));
-    vi.doMock("../src/services/memory-server.js", () => ({
-      memoryServer: { getStatus: () => ({ pid: 1, restartCount: 0, running: true }) },
+    vi.doMock("../src/memory/db.js", () => ({
+      getMemoryDb: () => makeMemoryDb(),
     }));
     global.fetch = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch;
 
@@ -213,14 +235,11 @@ describe("handleHealthRequest", () => {
 
   it("falls back to process.pid when pid file is missing", async () => {
     vi.doMock("node:fs", () => ({
-      existsSync: (p: string) => {
-        // DB file exists but PID file does not
-        return !p.endsWith(".pid");
-      },
+      existsSync: (p: string) => !p.endsWith(".pid"),
       readFileSync: () => { throw new Error("no pid file"); },
     }));
-    vi.doMock("../src/services/memory-server.js", () => ({
-      memoryServer: { getStatus: () => ({ pid: null, restartCount: 0, running: false }) },
+    vi.doMock("../src/memory/db.js", () => ({
+      getMemoryDb: () => { throw new Error("not initialized"); },
     }));
     global.fetch = vi.fn().mockRejectedValue(new Error("down")) as unknown as typeof fetch;
 

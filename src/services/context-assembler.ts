@@ -138,12 +138,12 @@ export async function assembleCalendarCheckContext(event: {
     notes: t.notes,
   }));
 
-  // Try to get relevant memory snippets via in-process memory search
+  // Try to get relevant memory snippets via unified memory search
   let relevantMemory: string[] = [];
   try {
-    const { memorySearch } = await import("./memory-client.js");
-    const { results } = await memorySearch(event.summary, { maxResults: 5 });
-    relevantMemory = results.map(r => r.snippet).slice(0, 5);
+    const { searchMemoriesFast } = await import("../memory/search.js");
+    const results = await searchMemoriesFast(event.summary, { maxResults: 5 });
+    relevantMemory = results.map(r => r.memory.content).slice(0, 5);
   } catch {
     // Memory search unavailable, continue without
   }
