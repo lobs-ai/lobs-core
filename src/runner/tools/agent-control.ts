@@ -11,7 +11,7 @@ import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { log } from "../../util/logger.js";
 import { runAgent, calculateCost } from "../agent-loop.js";
-import type { AgentSpec } from "../agent-loop.js";
+import type { AgentSpec, AgentPhase } from "../agent-loop.js";
 import { getModelForTier } from "../../config/models.js";
 import type { ToolDefinition, ToolName } from "../types.js";
 
@@ -31,6 +31,7 @@ interface ActiveAgent {
   turns: number;
   lastActivity: number;
   costUsd: number;
+  currentPhase: AgentPhase | null;
 }
 
 // In-memory tracking for active spawned agents
@@ -267,6 +268,7 @@ export async function executeSpawnAgent(
     turns: 0,
     lastActivity: Date.now(),
     costUsd: 0,
+    currentPhase: null,
   });
 
   const spec: AgentSpec = {
@@ -286,6 +288,21 @@ export async function executeSpawnAgent(
         if (progress.usage) {
           agent.costUsd = calculateCost(model, progress.usage);
         }
+      }
+    },
+    onPhaseChange: (phase) => {
+      const agent = activeAgents.get(runId);
+      if (agent) {
+        // Warn if we're moving out of a waiting_llm phase that lasted >10 minutes
+        if (agent.currentPhase?.phase === 'waiting_llm') {
+          const waitMs = Date.now() - agent.currentPhase.startedAt;
+          if (waitMs > 10 * 60 * 1000) {
+            const waitMin = Math.floor(waitMs / 60000);
+            console.warn(`[spawn_agent] ${agentType} (${runId}) waited ${waitMin}m for LLM response on turn ${agent.currentPhase.turn}`);
+          }
+        }
+        agent.currentPhase = phase;
+        agent.lastActivity = Date.now();
       }
     },
     getInjectedMessages: () => {
@@ -404,6 +421,20 @@ export async function executeCheckAgents(input: Record<string, unknown>): Promis
 
   const now = Date.now();
 
+  function formatPhase(phase: AgentPhase | null): string {
+    if (!phase) return "🔄 Starting up...";
+    const ageSeconds = Math.floor((now - phase.startedAt) / 1000);
+    const ageSec = ageSeconds % 60;
+    const ageMin = Math.floor(ageSeconds / 60);
+    const ageStr = ageMin > 0 ? `${ageMin}m ${ageSec}s` : `${ageSec}s`;
+    switch (phase.phase) {
+      case 'waiting_llm':    return `⏳ Waiting on LLM response (${ageStr})`;
+      case 'executing_tool': return `🔧 Executing tool: ${phase.toolName} (${ageStr})`;
+      case 'between_turns':  return `💭 Processing turn ${phase.turn}`;
+      case 'compacting':     return `📦 Compacting context`;
+    }
+  }
+
   function formatAgent(id: string, info: ActiveAgent, detailed: boolean): string {
     const elapsedMs = now - info.startedAt;
     const elapsedSeconds = Math.floor(elapsedMs / 1000);
@@ -418,11 +449,20 @@ export async function executeCheckAgents(input: Record<string, unknown>): Promis
         ? `${lastActivityAgo}s ago`
         : `${Math.floor(lastActivityAgo / 60)}m ago`;
 
+    const phaseStr = formatPhase(info.currentPhase);
+    const phaseAgeSeconds = info.currentPhase ? Math.floor((now - info.currentPhase.startedAt) / 1000) : 0;
+    const isStuck = phaseAgeSeconds > 5 * 60;
+
     const lines: string[] = [
       `• ${id} — ${info.type} [${info.modelTier}]`,
       `  Running: ${elapsed} | Turns: ${info.turns} | Cost: $${info.costUsd.toFixed(4)} | Last activity: ${lastActivityStr}`,
+      `  Status: ${phaseStr}`,
       `  Task: ${info.task.slice(0, 120)}${info.task.length > 120 ? "…" : ""}`,
     ];
+
+    if (isStuck) {
+      lines.push(`  ⚠️ Appears stuck — consider stop_agent or message_agent`);
+    }
 
     if (detailed) {
       lines.push(`  Model: ${info.model}`);

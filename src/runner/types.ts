@@ -53,7 +53,15 @@ export interface AgentSpec {
    * user messages before the LLM call. Used by message_agent tool.
    */
   getInjectedMessages?: () => string[];
+  /** Called when the agent's phase changes (waiting_llm, executing_tool, between_turns) */
+  onPhaseChange?: (phase: AgentPhase) => void;
 }
+
+export type AgentPhase =
+  | { phase: 'waiting_llm'; turn: number; startedAt: number }
+  | { phase: 'executing_tool'; turn: number; toolName: string; startedAt: number }
+  | { phase: 'between_turns'; turn: number; startedAt: number }
+  | { phase: 'compacting'; turn: number; startedAt: number };
 
 export type ToolName = "exec" | "read" | "write" | "edit" | "ls" | "grep" | "glob" | "find_files" | "code_search" | "web_search" | "web_fetch" | "memory_search" | "memory_read" | "memory_write" | "spawn_agent" | "run_pipeline" | "list_agents" | "check_agents" | "message_agent" | "stop_agent" | "cron" | "discord" | "process" | "humanize" | "imagine" | "html_to_pdf";
 

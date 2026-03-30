@@ -11,6 +11,7 @@ import type {
   TokenUsage,
   ToolResult,
 } from "./types.js";
+export type { AgentPhase } from "./types.js";
 import { MODEL_COSTS as COSTS } from "./types.js";
 import { getToolDefinitions, executeTool } from "./tools/index.js";
 import { buildSystemPrompt, buildSmartSystemPrompt } from "./prompt-builder.js";
@@ -182,8 +183,12 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
         `messages=${messages.length} input_tokens=${usage.inputTokens} output_tokens=${usage.outputTokens}`,
       );
 
+      // Emit between_turns phase
+      spec.onPhaseChange?.({ phase: 'between_turns', turn: turns, startedAt: Date.now() });
+
       // Check if we need to compact context
       if (shouldCompact(usage.inputTokens, spec.model)) {
+        spec.onPhaseChange?.({ phase: 'compacting', turn: turns, startedAt: Date.now() });
         const beforeCount = messages.length;
         messages.splice(0, messages.length, ...compactMessages(messages));
         const afterCount = messages.length;
@@ -238,6 +243,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
           `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} ` +
           `calling_llm model=${providerConfig.modelId} tools=${tools.length}`,
         );
+        spec.onPhaseChange?.({ phase: 'waiting_llm', turn: turns, startedAt: Date.now() });
         response = await client.createMessage({
           model: providerConfig.modelId,
           system: systemPrompt,
@@ -387,6 +393,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
               `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} ` +
               `tool_start name=${call.name} id=${call.id}`,
             );
+            spec.onPhaseChange?.({ phase: 'executing_tool', turn: turns, toolName: call.name, startedAt: Date.now() });
             // Emit before_tool_call hook
             const beforeToolEvent = await hookRegistry.emit({
               hookName: "before_tool_call",
