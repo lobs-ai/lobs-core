@@ -63,6 +63,9 @@ CREATE TABLE IF NOT EXISTS memories (
   last_accessed TEXT,
   access_count INTEGER NOT NULL DEFAULT 0,
   reflection_run_id TEXT,
+  source_path TEXT,
+  content_hash TEXT,
+  chunk_index INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -97,6 +100,8 @@ CREATE TABLE IF NOT EXISTS conflicts (
   memory_b INTEGER NOT NULL REFERENCES memories(id),
   description TEXT NOT NULL,
   resolution TEXT,
+  conflict_type TEXT,
+  suggested_action TEXT,
   resolved_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
