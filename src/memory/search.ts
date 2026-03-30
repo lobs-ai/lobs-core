@@ -18,7 +18,7 @@ import type { Memory } from "./types.js";
 
 const EMBED_URL = "http://localhost:1234/v1/embeddings";
 const EMBED_MODEL = "text-embedding-qwen3-embedding-4b";
-const EMBED_TIMEOUT_MS = 10_000;
+const EMBED_TIMEOUT_MS = 3_000;
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -110,12 +110,17 @@ function trackAccess(
       const updateStmt = db.prepare(
         `UPDATE memories SET last_accessed = ?, access_count = access_count + 1 WHERE id = ?`,
       );
+      const existsStmt = db.prepare(
+        `SELECT 1 FROM memories WHERE id = ?`,
+      );
       const logStmt = db.prepare(
         `INSERT INTO retrieval_log (memory_id, query, score, timestamp) VALUES (?, ?, ?, ?)`,
       );
 
       const tx = db.transaction((ids: number[]) => {
         for (const id of ids) {
+          // Guard against FK violations if the memory was deleted between search and tracking
+          if (!existsStmt.get(id)) continue;
           updateStmt.run(now, id);
           logStmt.run(id, query, scores.get(id) ?? null, now);
         }

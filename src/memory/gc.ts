@@ -18,7 +18,7 @@ import type { Memory } from "./types.js";
 
 const EMBED_URL = "http://localhost:1234/v1/embeddings";
 const EMBED_MODEL = "text-embedding-qwen3-embedding-4b";
-const EMBED_TIMEOUT_MS = 15_000;
+const EMBED_TIMEOUT_MS = 3_000;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
