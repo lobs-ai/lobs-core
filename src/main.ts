@@ -33,7 +33,7 @@ import { setDiscordToolDiscord } from "./runner/tools/index.js";
 import { validateAllConfigs } from "./config/validator.js";
 import { initMemory, shutdownMemory } from "./services/memory/index.js";
 import { initMemoryDb } from "./memory/db.js";
-import { initFileIndexer } from "./memory/indexer.js";
+import { initFileIndexer, stopFileIndexer } from "./memory/indexer.js";
 import { registerEventRecorderHook } from "./hooks/event-recorder.js";
 import { registerReflectionTriggerHook } from "./hooks/reflection-trigger.js";
 import { runDailyReflection } from "./memory/daily-reflection.js";
@@ -805,6 +805,9 @@ async function main() {
     // Clean up voice sessions
     const vm = (globalThis as any).__lobsVoiceManager as VoiceManager | null;
     if (vm) vm.destroyAll();
+
+    // Stop file indexer (cancels rescan timer + pending embeddings)
+    stopFileIndexer();
 
     await shutdownMemory();
     await browserService.shutdown();

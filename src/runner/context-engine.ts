@@ -13,7 +13,7 @@
  */
 
 import { readFileSync, existsSync } from "node:fs";
-import { memorySearchBatch } from "../services/memory-client.js";
+import { searchMemoriesFull, searchMemoriesFast, decayedConfidence } from "../memory/search.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -437,126 +437,109 @@ export async function assembleContext(params: {
   // 3. Multi-layer retrieval
   const layers: ContextLayer[] = [];
 
-  // Determine collection scoping
-  const project = projects.find(p => p.id === classification.project);
-  const projectCollections = project?.collections;
+  // Categorize all results upfront, split into the 4 layer buckets
+  const memoryChunks: ContextChunk[] = [];
+  const docChunks: ContextChunk[] = [];
+  const codeChunks: ContextChunk[] = [];
+  const sessionChunks: ContextChunk[] = [];
 
-  // Search queries — the main task + extracted entities
-  const queries = [params.task];
-  if (classification.topic && classification.topic !== "general") {
-    queries.push(classification.topic);
-  }
-
-  // Batch all memory searches via unified memory client (handles HTTP + grep fallback)
-  const batchSearches = [
-    { id: "memory", query: queries[0], collections: ["workspace", "knowledge"], maxResults: 8 },
-    { id: "project", query: queries[0], collections: projectCollections ?? ["projects", "knowledge"], maxResults: 8 },
-    { id: "session", query: queries[0], collections: ["sessions"], maxResults: 5 },
-  ];
-
-  const batchResult = await memorySearchBatch(batchSearches);
-  const memoryResults: MemorySearchResult[] = (batchResult.results.memory ?? []) as MemorySearchResult[];
-  const projectResults: MemorySearchResult[] = (batchResult.results.project ?? []) as MemorySearchResult[];
-  const sessionResults: MemorySearchResult[] = (batchResult.results.session ?? []) as MemorySearchResult[];
-
-  // Memory layer — decisions, learnings, preferences
-  const memoryChunks: ContextChunk[] = memoryResults
-    .filter(r => categorizeResult(r) === "memory")
-    .map(r => ({
-      source: r.path,
-      content: r.snippet,
-      score: r.score,
-      tokens: estimateTokens(r.snippet),
-      category: "memory",
-    }));
-
-  layers.push(fillLayer("memory", memoryChunks, budget.allocations.memory));
-
-  // Project layer — docs, READMEs, ADRs
-  const projectChunks: ContextChunk[] = projectResults
-    .filter(r => {
-      const cat = categorizeResult(r);
-      return cat === "project" || cat === "code";
-    })
-    .map(r => ({
-      source: r.path,
-      content: r.snippet,
-      score: r.score,
-      tokens: estimateTokens(r.snippet),
-      category: categorizeResult(r) === "code" ? "code" : "project",
-    }));
-
-  // Split into project docs vs code
-  const docChunks = projectChunks.filter(c => c.category === "project");
-  const codeChunks = projectChunks.filter(c => c.category === "code");
-
-  layers.push(fillLayer("project", docChunks, budget.allocations.project));
-  layers.push(fillLayer("code", codeChunks, budget.allocations.code));
-
-  // Session layer — recent conversation context
-  const sessionChunks: ContextChunk[] = sessionResults.map(r => ({
-    source: r.path,
-    content: r.snippet,
-    score: r.score,
-    tokens: estimateTokens(r.snippet),
-    category: "session",
-  }));
-
-  layers.push(fillLayer("session", sessionChunks, budget.allocations.session));
-
-  // Structured memory search (from memory.db — separate from document search above)
+  // Single unified search — covers both episodic memories and document chunks.
+  // MEMORY_TYPE_WEIGHTS in search.ts handles per-type scoring; no manual boost needed.
+  // Use slow path (FTS + vector) for tasks that benefit from semantic depth.
   try {
-    const { searchMemoriesFast, searchMemoriesFull, decayedConfidence } = await import(
-      "../memory/search.js"
-    );
-
-    // Use slow path (FTS + vector) for tasks that benefit from semantic depth
     const useSlowPath = (["research", "debugging", "architecture"] as string[]).includes(
       classification.taskType,
     );
     const searchFn = useSlowPath ? searchMemoriesFull : searchMemoriesFast;
 
-    const structuredResults = await searchFn(params.task, {
-      maxResults: 5,
+    const allResults = await searchFn(params.task, {
+      maxResults: 12,
       projectId: classification.project,
-      minConfidence: 0.4,
+      minConfidence: 0.3,
     });
 
-    if (structuredResults.length > 0) {
-      const structuredChunks: ContextChunk[] = structuredResults.map((result) => {
-        const m = result.memory;
+    for (const result of allResults) {
+      const m = result.memory;
+
+      if (m.source_path != null) {
+        // Document chunk — categorize by path
+        const pathLower = m.source_path.toLowerCase();
+        const shortPath = m.source_path.replace(process.env.HOME ?? "", "~");
+        const citation = m.chunk_index != null ? `${shortPath}#${m.chunk_index}` : shortPath;
+
+        if (pathLower.includes("/sessions/") || pathLower.endsWith(".jsonl") ||
+            pathLower.includes("/memory/") || pathLower.includes("lobs-shared-memory/")) {
+          sessionChunks.push({
+            source: citation,
+            content: m.content,
+            score: result.score,
+            tokens: estimateTokens(m.content),
+            category: "session",
+          });
+        } else if (pathLower.match(/\.(ts|tsx|js|jsx|py|swift|go|rs)$/)) {
+          codeChunks.push({
+            source: citation,
+            content: m.content,
+            score: result.score,
+            tokens: estimateTokens(m.content),
+            category: "code",
+          });
+        } else {
+          // ADRs, docs, READMEs, project files → project layer
+          docChunks.push({
+            source: citation,
+            content: m.content,
+            score: result.score,
+            tokens: estimateTokens(m.content),
+            category: "project",
+          });
+        }
+      } else {
+        // Episodic memory (no source_path) — always goes to memory layer
         const decayed = decayedConfidence(m);
         const formatted = formatStructuredMemory(m, result.evidenceCount, decayed);
-        return {
+        memoryChunks.push({
           source: `memory-db:${m.id}`,
           content: formatted,
-          // Structured memories get a small boost over file-based results
-          score: Math.min(result.score + 0.1, 1),
+          score: result.score,
           tokens: estimateTokens(formatted),
-          category: "memory" as const,
-        };
-      });
-
-      // Merge into the existing memory layer
-      const memoryLayer = layers.find((l) => l.category === "memory");
-      if (memoryLayer) {
-        memoryLayer.chunks.push(...structuredChunks);
-        // Re-sort by score so best items float to the top
-        memoryLayer.chunks.sort((a, b) => b.score - a.score);
-        memoryLayer.tokensUsed = memoryLayer.chunks.reduce(
-          (sum, c) => sum + c.tokens,
-          0,
-        );
-      } else {
-        layers.push(
-          fillLayer("memory", structuredChunks, budget.allocations.memory),
-        );
+          category: "memory",
+        });
       }
     }
   } catch (err) {
-    // Structured memory search is optional — log and continue
-    console.warn(`[context-engine] Structured memory search failed: ${String(err)}`);
+    // Unified search failed (DB not ready at startup) — fall back to grep via memory-client
+    console.warn(`[context-engine] Unified memory search failed, using grep fallback: ${String(err)}`);
+
+    const { memorySearchBatch } = await import("../services/memory-client.js");
+    const batchResult = await memorySearchBatch([
+      { id: "memory", query: params.task, collections: ["workspace", "knowledge"], maxResults: 8 },
+      { id: "project", query: params.task, collections: ["projects", "knowledge"], maxResults: 8 },
+      { id: "session", query: params.task, collections: ["sessions"], maxResults: 5 },
+    ]);
+
+    for (const r of (batchResult.results.memory ?? []) as MemorySearchResult[]) {
+      if (categorizeResult(r) === "memory") {
+        memoryChunks.push({ source: r.path, content: r.snippet, score: r.score, tokens: estimateTokens(r.snippet), category: "memory" });
+      }
+    }
+    for (const r of (batchResult.results.project ?? []) as MemorySearchResult[]) {
+      const cat = categorizeResult(r);
+      if (cat === "code") {
+        codeChunks.push({ source: r.path, content: r.snippet, score: r.score, tokens: estimateTokens(r.snippet), category: "code" });
+      } else if (cat === "project") {
+        docChunks.push({ source: r.path, content: r.snippet, score: r.score, tokens: estimateTokens(r.snippet), category: "project" });
+      }
+    }
+    for (const r of (batchResult.results.session ?? []) as MemorySearchResult[]) {
+      sessionChunks.push({ source: r.path, content: r.snippet, score: r.score, tokens: estimateTokens(r.snippet), category: "session" });
+    }
   }
+
+  layers.push(fillLayer("memory", memoryChunks, budget.allocations.memory));
+  layers.push(fillLayer("project", docChunks, budget.allocations.project));
+  layers.push(fillLayer("code", codeChunks, budget.allocations.code));
+  layers.push(fillLayer("session", sessionChunks, budget.allocations.session));
 
   // Surface unresolved conflicts (so the agent knows about contradictions)
   try {
@@ -566,9 +549,26 @@ export async function assembleContext(params: {
     if (conflicts.length > 0) {
       let conflictBlock = "## Memory Conflicts (need resolution)\n\n";
       for (const { conflict, memoryA, memoryB } of conflicts) {
-        conflictBlock += `**Conflict #${conflict.id}** (${conflict.description}):\n`;
-        conflictBlock += `  A: [${memoryA.memory_type}, confidence ${memoryA.confidence}] ${memoryA.content}\n`;
-        conflictBlock += `  B: [${memoryB.memory_type}, confidence ${memoryB.confidence}] ${memoryB.content}\n\n`;
+        // Special formatting for cross-type (episodic ↔ document) conflicts
+        if (conflict.conflict_type === "episodic_document") {
+          const docMemory = memoryA.memory_type === "document" ? memoryA : memoryB;
+          const episodicMemory = memoryA.memory_type === "document" ? memoryB : memoryA;
+          const sourcePath = docMemory.source_path ?? "(unknown source)";
+          const snippet = (s: string) => s.slice(0, 120);
+          conflictBlock += `**Conflict #${conflict.id}** ⚠️ Document \`${sourcePath}\` may be outdated\n`;
+          conflictBlock +=
+            `   — conflicts with ${episodicMemory.memory_type}: ` +
+            `"${snippet(episodicMemory.content)}" ` +
+            `(confidence: ${episodicMemory.confidence})\n`;
+          if (conflict.suggested_action) {
+            conflictBlock += `   — suggested action: ${conflict.suggested_action}\n`;
+          }
+          conflictBlock += "\n";
+        } else {
+          conflictBlock += `**Conflict #${conflict.id}** (${conflict.description}):\n`;
+          conflictBlock += `  A: [${memoryA.memory_type}, confidence ${memoryA.confidence}] ${memoryA.content}\n`;
+          conflictBlock += `  B: [${memoryB.memory_type}, confidence ${memoryB.confidence}] ${memoryB.content}\n\n`;
+        }
       }
 
       const conflictChunk: ContextChunk = {

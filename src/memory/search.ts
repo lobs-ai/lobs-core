@@ -79,7 +79,7 @@ async function fetchQueryEmbedding(query: string): Promise<Float32Array | null> 
 }
 
 /** Cosine similarity between two float arrays. Returns –1 to 1. */
-function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   if (a.length !== b.length || a.length === 0) return 0;
 
   let dot = 0;

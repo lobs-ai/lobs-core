@@ -14,6 +14,7 @@
 
 import { getMemoryDb } from "./db.js";
 import { log } from "../util/logger.js";
+import { cosineSimilarity } from "./search.js";
 import type { Conflict, Memory } from "./types.js";
 
 // ── Public types ─────────────────────────────────────────────────────────────
@@ -339,6 +340,168 @@ export function getUnresolvedConflicts(limit?: number): ConflictWithMemories[] {
       return { conflict, memoryA: memA, memoryB: memB };
     })
     .filter((item): item is ConflictWithMemories => item !== null);
+}
+
+// ── Cross-type conflict detection ────────────────────────────────────────────
+
+/**
+ * Derive a suggested_action for a cross-type (episodic vs. document) conflict.
+ *
+ * Rules (checked in order):
+ *  1. Memory has confidence > 0.7 AND multiple evidence events → 'update_document'
+ *  2. Document chunk was created more recently than the memory's derived_at → 'supersede_memory'
+ *  3. Memory confidence < 0.5 → 'review'
+ *  4. Default → 'review'
+ */
+function deriveSuggestedAction(
+  memory: Memory,
+  docMemory: Memory,
+  evidenceCount: number,
+): string {
+  if (memory.confidence > 0.7 && evidenceCount >= 2) {
+    return "update_document";
+  }
+
+  const docTime = new Date(docMemory.derived_at).getTime();
+  const memTime = new Date(memory.derived_at).getTime();
+  if (docTime > memTime) {
+    return "supersede_memory";
+  }
+
+  if (memory.confidence < 0.5) {
+    return "review";
+  }
+
+  return "review";
+}
+
+/**
+ * Check newly created/reconciled memories against document chunks for
+ * cross-type conflicts. Called after reconciliation in the reflection pipeline.
+ *
+ * For each new memory with confidence > 0.7:
+ * 1. Fetch its embedding from memory_embeddings
+ * 2. Find document chunks with cosine similarity > 0.85
+ * 3. For high-similarity pairs:
+ *    - cosine > 0.92 and no contradiction signal → reinforce (bump confidence +0.03)
+ *    - cosine 0.85–0.92 → create conflict record with conflict_type = 'episodic_document'
+ *
+ * Returns the number of conflict records created.
+ */
+export async function checkCrossTypeConflicts(newMemoryIds: number[]): Promise<number> {
+  if (newMemoryIds.length === 0) return 0;
+
+  const db = getMemoryDb();
+  let conflictsCreated = 0;
+
+  // Load embeddings for the new memories
+  const placeholders = newMemoryIds.map(() => "?").join(",");
+  const newEmbRows = db
+    .prepare(
+      `SELECT me.memory_id, me.embedding
+       FROM memory_embeddings me
+       WHERE me.memory_id IN (${placeholders})`,
+    )
+    .all(...newMemoryIds) as Array<{ memory_id: number; embedding: Buffer }>;
+
+  if (newEmbRows.length === 0) {
+    log().debug("[conflicts] checkCrossTypeConflicts: no embeddings found for new memories");
+    return 0;
+  }
+
+  // Load all active document chunk embeddings
+  const docEmbRows = db
+    .prepare(
+      `SELECT me.memory_id, me.embedding
+       FROM memory_embeddings me
+       JOIN memories m ON m.id = me.memory_id
+       WHERE m.memory_type = 'document' AND m.status = 'active'`,
+    )
+    .all() as Array<{ memory_id: number; embedding: Buffer }>;
+
+  if (docEmbRows.length === 0) {
+    log().debug("[conflicts] checkCrossTypeConflicts: no document chunks to compare against");
+    return 0;
+  }
+
+  // Pre-parse all document embeddings once
+  const docVectors = docEmbRows.map(({ memory_id, embedding }) => ({
+    memory_id,
+    vec: new Float32Array(embedding.buffer, embedding.byteOffset, embedding.byteLength / 4),
+  }));
+
+  // Helpers
+  const loadMemoryRow = (id: number): Memory | null =>
+    (db.prepare("SELECT * FROM memories WHERE id = ?").get(id) as Memory) ?? null;
+
+  const getEvidenceCount = (id: number): number => {
+    const row = db
+      .prepare("SELECT COUNT(*) AS cnt FROM evidence WHERE memory_id = ?")
+      .get(id) as { cnt: number };
+    return row.cnt;
+  };
+
+  const conflictExists = (a: number, b: number): boolean => {
+    const row = db
+      .prepare(
+        `SELECT id FROM conflicts
+         WHERE (memory_a = ? AND memory_b = ?) OR (memory_a = ? AND memory_b = ?)
+           AND resolved_at IS NULL`,
+      )
+      .get(a, b, b, a) as { id: number } | undefined;
+    return row !== undefined;
+  };
+
+  for (const { memory_id: memId, embedding: memBuf } of newEmbRows) {
+    const memVec = new Float32Array(memBuf.buffer, memBuf.byteOffset, memBuf.byteLength / 4);
+    const memory = loadMemoryRow(memId);
+    if (!memory) continue;
+
+    for (const { memory_id: docId, vec: docVec } of docVectors) {
+      const sim = cosineSimilarity(memVec, docVec);
+
+      if (sim <= 0.85) continue; // below threshold — skip
+
+      if (sim > 0.92) {
+        // Strong agreement — reinforce the episodic memory's confidence
+        const bumped = Math.min(1.0, memory.confidence + 0.03);
+        db.prepare(
+          "UPDATE memories SET confidence = ?, updated_at = datetime('now') WHERE id = ?",
+        ).run(bumped, memId);
+        memory.confidence = bumped; // keep local copy in sync
+        log().debug(
+          `[conflicts] Reinforced memory #${memId} (sim=${sim.toFixed(3)} with doc #${docId}), ` +
+            `confidence → ${bumped.toFixed(2)}`,
+        );
+      } else {
+        // 0.85–0.92 range — create a conflict record if one doesn't already exist
+        if (conflictExists(memId, docId)) continue;
+
+        const docMemory = loadMemoryRow(docId);
+        if (!docMemory) continue;
+
+        const evidenceCount = getEvidenceCount(memId);
+        const suggestedAction = deriveSuggestedAction(memory, docMemory, evidenceCount);
+        const snippet = (s: string) => s.slice(0, 80);
+        const description =
+          `Possible contradiction: "${snippet(memory.content)}" vs "${snippet(docMemory.content)}"`;
+
+        db.prepare(
+          `INSERT INTO conflicts
+             (memory_a, memory_b, description, conflict_type, suggested_action, created_at)
+           VALUES (?, ?, ?, 'episodic_document', ?, datetime('now'))`,
+        ).run(memId, docId, description, suggestedAction);
+
+        conflictsCreated++;
+        log().info(
+          `[conflicts] Cross-type conflict: memory #${memId} ↔ doc #${docId} ` +
+            `(sim=${sim.toFixed(3)}, suggested=${suggestedAction})`,
+        );
+      }
+    }
+  }
+
+  return conflictsCreated;
 }
 
 // ── Memory promotion ──────────────────────────────────────────────────────────

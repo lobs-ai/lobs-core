@@ -12,7 +12,7 @@ import { getMemoryDb } from "./db.js";
 import { clusterEvents } from "./clustering.js";
 import { extractMemories, getTotalTokensUsed, resetTokenCounter } from "./extractor.js";
 import { reconcile } from "./reconciler.js";
-import { autoResolveConflicts } from "./conflicts.js";
+import { autoResolveConflicts, checkCrossTypeConflicts } from "./conflicts.js";
 import { log } from "../util/logger.js";
 import type { MemoryEvent } from "./types.js";
 
@@ -290,6 +290,26 @@ export async function runReflection(opts: {
       memoriesCreated += reconciled.newMemories.length;
       memoriesReinforced += reconciled.reinforcedMemories.length;
       conflictsDetected += reconciled.conflicts.length;
+
+      // Cross-type conflict detection for high-confidence new memories
+      if (reconciled.newMemories.length > 0) {
+        const highConfIds = reconciled.newMemories
+          .filter((m) => m.confidence > 0.7)
+          .map((m) => m.id);
+        if (highConfIds.length > 0) {
+          try {
+            const crossConflicts = await checkCrossTypeConflicts(highConfIds);
+            if (crossConflicts > 0) {
+              conflictsDetected += crossConflicts;
+              log().info(
+                `[reflection] Found ${crossConflicts} cross-type conflict(s) for ${highConfIds.length} new memories`,
+              );
+            }
+          } catch (err) {
+            log().warn(`[reflection] Cross-type conflict check failed: ${String(err)}`);
+          }
+        }
+      }
 
       clustersProcessed++;
     }
