@@ -1,23 +1,23 @@
 /**
- * Memory tools — query lobs-memory search server for semantic recall.
+ * Memory tools — query structured memories and indexed docs for semantic recall.
  *
  * Three tools:
- * - memory_search: semantic search across indexed docs (markdown, notes, ADRs, etc.)
+ * - memory_search: unified semantic search across structured memories and document chunks
  * - memory_read: read specific lines from a file (for diving deeper into search results)
  * - memory_write: write to daily or permanent memory files
  *
- * memory_search uses the bridge service (HTTP fallback to grep).
+ * memory_search uses searchMemoriesFull() (FTS5 + vector), falling back to grep on error.
  * memory_write defaults to today's daily file (~/.lobs/agents/main/context/memory/YYYY-MM-DD.md).
  * Use permanent=true for lasting learnings/decisions (→ ~/lobs-shared-memory/learnings.md).
  */
 
-import { readFileSync, appendFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { readFileSync, appendFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import type { ToolDefinition } from "../types.js";
-import { memorySearch } from "../../services/memory-client.js";
 import { ensureTodaysMemoryFile } from "../../services/memory-condenser.js";
 import { getMemoryDb } from "../../memory/db.js";
 import { log } from "../../util/logger.js";
+import { searchMemoriesFull, type StructuredMemoryResult } from "../../memory/search.js";
 
 // ── memory_search ────────────────────────────────────────────────────────────
 
@@ -70,63 +70,162 @@ export async function memorySearchTool(
     20,
   );
 
-  const collections = Array.isArray(params.collections) && params.collections.length > 0
-    ? params.collections as string[]
-    : undefined;
-  
-  const context = typeof params.conversationContext === "string"
-    ? params.conversationContext
-    : undefined;
+  // collections is kept in the tool definition for future collection-filtering support
+  // but not yet passed to searchMemoriesFull
+
+  const start = Date.now();
 
   try {
-    const { results, source, timeMs } = await memorySearch(query, {
+    const results = await searchMemoriesFull(query, {
       maxResults,
-      collections,
-      conversationContext: context,
+      minConfidence: 0.3,
     });
+
+    const timeMs = Date.now() - start;
 
     if (!results || results.length === 0) {
       return `No results found for: "${query}"`;
     }
 
-    // Format results for the agent
     const lines: string[] = [];
-    lines.push(`Found ${results.length} results (${timeMs}ms, source: ${source}):`);
+    lines.push(`Found ${results.length} results (${timeMs}ms, source: server):`);
     lines.push("");
 
     for (let i = 0; i < results.length; i++) {
-      const r = results[i];
+      const r: StructuredMemoryResult = results[i];
+      const m = r.memory;
+
+      if (m.source_path) {
+        // Document chunk — use file-path style citation
+        const shortPath = m.source_path.replace(/^\/Users\/lobs\//, "~/");
+        const chunkSuffix = m.chunk_index != null ? `#chunk${m.chunk_index}` : "";
+        lines.push(
+          `[${i + 1}] ${shortPath}${chunkSuffix} (score: ${r.score.toFixed(2)}, type: document)`,
+        );
+      } else {
+        // Episodic memory — use memory-db style citation
+        lines.push(
+          `[${i + 1}] memory-db:${m.id} (score: ${r.score.toFixed(2)}, type: ${m.memory_type}, confidence: ${m.confidence.toFixed(2)})`,
+        );
+      }
+
+      lines.push(m.content.trim());
+      lines.push("");
+    }
+
+    return lines.join("\n");
+  } catch (error) {
+    // Fallback to grep when DB/search fails
+    log().warn(`[memory_search] searchMemoriesFull failed, falling back to grep: ${String(error)}`);
+
+    const start2 = Date.now();
+    const grepResults = grepFallback(query, maxResults);
+    const timeMs2 = Date.now() - start2;
+
+    if (grepResults.length === 0) {
+      return `No results found for: "${query}"`;
+    }
+
+    const lines: string[] = [];
+    lines.push(`Found ${grepResults.length} results (${timeMs2}ms, source: grep):`);
+    lines.push("");
+
+    for (let i = 0; i < grepResults.length; i++) {
+      const r = grepResults[i];
       const shortPath = r.path.replace(/^\/Users\/lobs\//, "~/");
       lines.push(`[${i + 1}] ${shortPath}#${r.startLine}-${r.endLine} (score: ${r.score.toFixed(2)})`);
       lines.push(r.snippet.trim());
       lines.push("");
     }
 
-    let output = lines.join("\n");
+    return lines.join("\n");
+  }
+}
 
-    // Augment with structured memories from memory.db
-    try {
-      const { searchMemoriesFast } = await import("../../memory/search.js");
-      const structuredResults = await searchMemoriesFast(query, {
-        maxResults: 3,
-        minConfidence: 0.4,
-      });
+// ── Grep fallback ─────────────────────────────────────────────────────────────
 
-      if (structuredResults.length > 0) {
-        output += "\n\n## Structured Memories\n\n";
-        for (const r of structuredResults) {
-          const m = r.memory;
-          output += `[Memory #${m.id}: ${m.memory_type} | confidence: ${m.confidence.toFixed(2)} | score: ${r.score.toFixed(2)}]\n`;
-          output += `${m.content}\n\n`;
+const HOME = process.env.HOME ?? "";
+const GREP_DIRS = [
+  resolve(HOME, ".lobs/agents"),
+  resolve(HOME, "lobs/lobs-shared-memory"),
+  resolve(HOME, "lobs/lobs-core"),
+  resolve(HOME, "paw/bot-shared"),
+  resolve(HOME, "paw/paw-hub"),
+  resolve(HOME, "paw/paw-designs"),
+];
+
+interface GrepResult {
+  path: string;
+  startLine: number;
+  endLine: number;
+  score: number;
+  snippet: string;
+}
+
+function grepFallback(query: string, maxResults: number): GrepResult[] {
+  const terms = query.toLowerCase().split(/\s+/).filter((t) => t.length > 2);
+  if (terms.length === 0) return [];
+
+  const results: Array<GrepResult & { matchCount: number }> = [];
+
+  for (const dir of GREP_DIRS) {
+    walkDir(dir, (filePath) => {
+      if (!filePath.endsWith(".md")) return;
+      try {
+        const content = readFileSync(filePath, "utf-8");
+        const lines = content.split("\n");
+
+        for (let i = 0; i < lines.length; i += 8) {
+          const chunk = lines.slice(i, i + 12).join("\n").toLowerCase();
+          const matchCount = terms.filter((t) => chunk.includes(t)).length;
+          if (matchCount >= Math.min(2, terms.length)) {
+            results.push({
+              path: filePath,
+              startLine: i + 1,
+              endLine: Math.min(i + 12, lines.length),
+              score: matchCount / terms.length,
+              snippet: lines.slice(i, i + 8).join("\n"),
+              matchCount,
+            });
+          }
         }
+      } catch {
+        /* skip unreadable */
       }
-    } catch {
-      // Optional — don't fail the tool if structured search fails
-    }
+    });
+  }
 
-    return output;
-  } catch (error) {
-    return `Memory search error: ${error instanceof Error ? error.message : String(error)}`;
+  results.sort((a, b) => b.matchCount - a.matchCount);
+  return results.slice(0, maxResults);
+}
+
+function walkDir(
+  dir: string,
+  callback: (path: string) => void,
+  depth = 0,
+): void {
+  if (depth > 4) return;
+  try {
+    const entries = readdirSync(dir);
+    for (const entry of entries) {
+      if (
+        entry.startsWith(".") ||
+        entry === "node_modules" ||
+        entry === "dist" ||
+        entry === "build"
+      )
+        continue;
+      const full = join(dir, entry);
+      try {
+        const stat = statSync(full);
+        if (stat.isDirectory()) walkDir(full, callback, depth + 1);
+        else if (stat.isFile()) callback(full);
+      } catch {
+        /* skip */
+      }
+    }
+  } catch {
+    /* skip */
   }
 }
 
@@ -267,7 +366,7 @@ export async function memoryWriteTool(
 
   // Resolve target file
   let targetFile = params.file as string | undefined;
-  let useDailyFormat = true;
+  let useDailyFormat: boolean;
 
   if (targetFile) {
     // Explicit file override — use permanent format
