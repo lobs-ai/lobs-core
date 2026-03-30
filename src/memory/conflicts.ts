@@ -405,7 +405,7 @@ export async function checkCrossTypeConflicts(newMemoryIds: number[]): Promise<n
     .all(...newMemoryIds) as Array<{ memory_id: number; embedding: Buffer }>;
 
   if (newEmbRows.length === 0) {
-    log().debug("[conflicts] checkCrossTypeConflicts: no embeddings found for new memories");
+    log().debug?.("[conflicts] checkCrossTypeConflicts: no embeddings found for new memories");
     return 0;
   }
 
@@ -420,7 +420,7 @@ export async function checkCrossTypeConflicts(newMemoryIds: number[]): Promise<n
     .all() as Array<{ memory_id: number; embedding: Buffer }>;
 
   if (docEmbRows.length === 0) {
-    log().debug("[conflicts] checkCrossTypeConflicts: no document chunks to compare against");
+    log().debug?.("[conflicts] checkCrossTypeConflicts: no document chunks to compare against");
     return 0;
   }
 
@@ -469,7 +469,7 @@ export async function checkCrossTypeConflicts(newMemoryIds: number[]): Promise<n
           "UPDATE memories SET confidence = ?, updated_at = datetime('now') WHERE id = ?",
         ).run(bumped, memId);
         memory.confidence = bumped; // keep local copy in sync
-        log().debug(
+        log().debug?.(
           `[conflicts] Reinforced memory #${memId} (sim=${sim.toFixed(3)} with doc #${docId}), ` +
             `confidence → ${bumped.toFixed(2)}`,
         );
