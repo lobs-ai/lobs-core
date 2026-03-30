@@ -146,6 +146,21 @@ function getEvidenceCounts(ids: number[]): Map<number, number> {
   }
 }
 
+// ── Type weights ─────────────────────────────────────────────────────────────
+
+/**
+ * Score multipliers applied after FTS + vector scoring.
+ * Episodic memories (distilled insights) score higher than raw document chunks.
+ */
+export const MEMORY_TYPE_WEIGHTS: Record<string, number> = {
+  preference: 1.3,
+  decision: 1.2,
+  learning: 1.15,
+  pattern: 1.1,
+  fact: 1.0,
+  document: 0.8,
+};
+
 // ── Shared filter builder ────────────────────────────────────────────────────
 
 interface SearchOpts {
@@ -155,6 +170,7 @@ interface SearchOpts {
   projectId?: string;
   minConfidence?: number;
   includeSuperseded?: boolean;
+  includeDocuments?: boolean;
 }
 
 function buildWhereClause(
@@ -188,6 +204,10 @@ function buildWhereClause(
   if (opts.projectId) {
     conditions.push(`${ftsAlias}.project_id = ?`);
     bindings.push(opts.projectId);
+  }
+
+  if (opts.includeDocuments === false) {
+    conditions.push(`${ftsAlias}.memory_type != 'document'`);
   }
 
   return {
@@ -240,7 +260,8 @@ export async function searchMemoriesFast(
       const importance = importanceScore(row);
       // importance (decayed confidence + access floor) replaces the raw
       // confidence + recency signals, giving 40% weight to lifecycle-aware ranking
-      const score = ftsNorm * 0.6 + importance * 0.4;
+      const typeWeight = MEMORY_TYPE_WEIGHTS[row.memory_type] ?? 1.0;
+      const score = (ftsNorm * 0.6 + importance * 0.4) * typeWeight;
       return { row, score, decayed };
     });
 
@@ -371,6 +392,10 @@ export async function searchMemoriesFull(
       // giving 40% weight to memories that are well-accessed and recently relevant
       const importance = importanceScore(m);
       score += importance * 0.4;
+
+      // Apply per-type multiplier before normalization
+      const typeWeight = MEMORY_TYPE_WEIGHTS[m.memory_type] ?? 1.0;
+      score = score * typeWeight;
 
       const matchType: StructuredMemoryResult["matchType"] =
         isFts && isVector ? "hybrid" : isFts ? "fts" : "vector";

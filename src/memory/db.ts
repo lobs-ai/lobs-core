@@ -72,6 +72,7 @@ CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope, agent_type);
 CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_id);
 CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);
 CREATE INDEX IF NOT EXISTS idx_memories_access ON memories(last_accessed);
+CREATE INDEX IF NOT EXISTS idx_memories_source_path ON memories(source_path) WHERE source_path IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS memory_embeddings (
   memory_id INTEGER PRIMARY KEY REFERENCES memories(id),
@@ -141,6 +142,20 @@ CREATE TABLE IF NOT EXISTS gc_log (
 CREATE INDEX IF NOT EXISTS idx_gc_log_memory ON gc_log(memory_id);
 CREATE INDEX IF NOT EXISTS idx_gc_log_time ON gc_log(created_at);
 
+CREATE TABLE IF NOT EXISTS indexed_files (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  path        TEXT UNIQUE NOT NULL,
+  content_hash TEXT NOT NULL,
+  last_indexed TEXT NOT NULL,
+  chunk_count  INTEGER NOT NULL DEFAULT 0,
+  collection   TEXT NOT NULL,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_indexed_files_collection ON indexed_files(collection);
+CREATE INDEX IF NOT EXISTS idx_indexed_files_path ON indexed_files(path);
+
 -- FTS5 full-text index for memories.content (porter stemmer for better recall)
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, content_rowid='id', tokenize='porter');
 
@@ -200,6 +215,11 @@ export function initMemoryDb(dbPath?: string): Database.Database {
   addColumnIfMissing("reflection_runs", "events_processed", "INTEGER DEFAULT 0");
   addColumnIfMissing("reflection_runs", "skip_reason", "TEXT");
   addColumnIfMissing("memories", "title", "TEXT");
+  addColumnIfMissing("memories", "source_path",  "TEXT");
+  addColumnIfMissing("memories", "content_hash", "TEXT");
+  addColumnIfMissing("memories", "chunk_index",  "INTEGER");
+  addColumnIfMissing("conflicts", "conflict_type", "TEXT");
+  addColumnIfMissing("conflicts", "suggested_action", "TEXT");
 
   _db = db;
   log().info(`[memory-db] Opened memory database at ${resolvedPath}`);

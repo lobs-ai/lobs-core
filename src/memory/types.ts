@@ -24,6 +24,7 @@ export interface MemoryEvent {
 
 export interface Memory {
   id: number;
+  // memory_type values: 'learning' | 'decision' | 'fact' | 'preference' | 'pattern' | 'document'
   memory_type: string;
   title: string | null;
   content: string;
@@ -42,6 +43,10 @@ export interface Memory {
   reflection_run_id: string | null;
   created_at: string;
   updated_at: string;
+  // Document-chunk fields (nullable for non-document memories)
+  source_path?: string | null;
+  content_hash?: string | null;
+  chunk_index?: number | null;
 }
 
 export interface MemoryEmbedding {
@@ -66,6 +71,19 @@ export interface Conflict {
   resolution: string | null;
   resolved_at: string | null;
   created_at: string;
+  conflict_type?: string | null;
+  suggested_action?: string | null;
+}
+
+export interface IndexedFile {
+  id: number;
+  path: string;
+  content_hash: string;
+  last_indexed: string;
+  chunk_count: number;
+  collection: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ReflectionRun {

@@ -97,7 +97,7 @@ export async function runMemoryGC(): Promise<GCResult> {
          LEFT JOIN (
            SELECT memory_id, COUNT(*) AS cnt FROM evidence GROUP BY memory_id
          ) e ON m.id = e.memory_id
-         WHERE m.status IN ('active', 'stale')`,
+         WHERE m.status IN ('active', 'stale') AND m.memory_type != 'document'`,
       )
       .all() as MemoryWithEvidence[];
 

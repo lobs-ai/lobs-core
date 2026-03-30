@@ -33,6 +33,7 @@ import { setDiscordToolDiscord } from "./runner/tools/index.js";
 import { validateAllConfigs } from "./config/validator.js";
 import { initMemory, shutdownMemory } from "./services/memory/index.js";
 import { initMemoryDb } from "./memory/db.js";
+import { initFileIndexer } from "./memory/indexer.js";
 import { registerEventRecorderHook } from "./hooks/event-recorder.js";
 import { registerReflectionTriggerHook } from "./hooks/reflection-trigger.js";
 import { runDailyReflection } from "./memory/daily-reflection.js";
@@ -300,6 +301,27 @@ async function main() {
     console.log("Structured memory database ready");
   } catch (err) {
     console.warn(`Structured memory init warning: ${err}`);
+  }
+
+  // File indexer — index markdown docs into structured-memory.db as document chunks
+  // (ADR-007 Phase 1: coexists with lobs-memory service)
+  try {
+    const HOME = process.env.HOME ?? "/Users/lobs";
+    initFileIndexer({
+      watchDirs: [
+        { path: `${HOME}/lobs-shared-memory`, collection: "workspace", recursive: true },
+        { path: `${HOME}/lobs/lobs-core/docs`, collection: "lobs-core", recursive: true },
+        { path: `${HOME}/.lobs/agents/main/context`, collection: "sessions", recursive: true },
+        { path: `${HOME}/paw/bot-shared`, collection: "paw-shared", recursive: true },
+      ],
+      chunkStrategy: "heading",
+      maxChunkTokens: 400,
+      rescanIntervalMs: 15 * 60 * 1000,
+      batchSize: 10,
+    });
+    console.log("File indexer started (ADR-007 Phase 1)");
+  } catch (err) {
+    console.warn(`File indexer init warning: ${err}`);
   }
 
   // Seed default workflows
