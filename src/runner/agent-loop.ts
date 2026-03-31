@@ -845,14 +845,11 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
           }
           
           if (loopResult.detected && loopResult.severity === "warning") {
-            // Inject warning into context
+            // Queue warning as a reminder so it arrives AFTER the tool_results message.
+            // Pushing a user message here would insert it between the assistant's tool_use
+            // blocks and the tool_results, breaking the Anthropic API pairing requirement.
             const warningMsg = loopResult.message || "Loop pattern detected";
-            
-            messages.push({
-              role: "user",
-              content: [{ type: "text", text: asClaudeSystemReminder(warningMsg) }],
-            });
-            queryState.phase = "post_tool";
+            queueQueryReminder(queryState, asClaudeSystemReminder(warningMsg));
 
             // Progress callback for the warning
             if (spec.onProgress) {

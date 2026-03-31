@@ -63,7 +63,25 @@ export function compactMessages(
   compacted.push(messages[0]);
 
   // Calculate the boundary — keep last N turns
-  const keepFromIndex = Math.max(1, messages.length - keepRecentTurns * 2);
+  let keepFromIndex = Math.max(1, messages.length - keepRecentTurns * 2);
+
+  // Adjust keepFromIndex to avoid orphaning tool_result blocks from their tool_use parents.
+  // If the boundary lands on a user message with tool_result blocks, the matching assistant
+  // message (with tool_use blocks) would be compacted away, breaking the Anthropic API pairing
+  // requirement. Move the boundary back until we land on a safe split point.
+  while (keepFromIndex > 1) {
+    const msg = messages[keepFromIndex];
+    if (
+      msg.role === "user" &&
+      Array.isArray(msg.content) &&
+      msg.content.some((block: any) => block.type === "tool_result")
+    ) {
+      keepFromIndex--;
+    } else {
+      break;
+    }
+  }
+
   const olderMessages = messages.slice(1, keepFromIndex);
 
   const summaryCandidates = olderMessages
