@@ -21,7 +21,7 @@ import { SessionTranscript, type TurnRecord } from "./session-transcript.js";
 import { shouldCompact, compactMessages } from "./context-manager.js";
 import { getHookRegistry } from "./hooks.js";
 import { LoopDetector } from "./loop-detector.js";
-import { asClaudeSystemReminder } from "../claude-runtime/llm-prompt.js";
+import { asClaudeSystemReminder, buildDynamicPromptStateSections } from "../claude-runtime/llm-prompt.js";
 
 export type { AgentSpec, AgentResult };
 
@@ -115,6 +115,161 @@ function buildCarryForwardState(params: {
   }
 
   return lines.length > 1 ? asClaudeSystemReminder(lines.join("\n")) : null;
+}
+
+function truncateStateValue(value: string, maxLength = 400): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= maxLength) return trimmed;
+  return `${trimmed.slice(0, maxLength)}...`;
+}
+
+function collectFilePaths(toolCalls: Array<{ name: string; input: Record<string, unknown> }>): string[] {
+  const files = new Set<string>();
+  for (const call of toolCalls) {
+    const candidate = (call.input.file_path as string) ?? (call.input.path as string);
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      files.add(candidate.trim());
+    }
+  }
+  return Array.from(files);
+}
+
+function updateWorkingStateFromAssistant(spec: AgentSpec, params: {
+  currentCwd: string;
+  lastAssistantText: string;
+}): void {
+  const context = (spec.context ??= {});
+  const workingState = (context.workingState ??= {});
+  workingState.currentCwd = params.currentCwd;
+  if (params.lastAssistantText.trim().length > 0) {
+    workingState.lastAssistantConclusion = truncateStateValue(params.lastAssistantText);
+  }
+  if (!workingState.objective && typeof spec.task === "string") {
+    workingState.objective = spec.task.trim().split("\n").find((line) => line.trim().length > 0) ?? spec.task.trim();
+  }
+}
+
+function updateWorkingStateFromTools(spec: AgentSpec, params: {
+  currentCwd: string;
+  toolCalls: Array<{ name: string; input: Record<string, unknown> }>;
+  results: ToolResult[];
+}): void {
+  const context = (spec.context ??= {});
+  const workingState = (context.workingState ??= {});
+  workingState.currentCwd = params.currentCwd;
+  const failures = params.results.filter((result) => result.is_error).length;
+  workingState.recentToolSummary =
+    `${params.toolCalls.map((call) => call.name).join(", ")}; ` +
+    `${params.results.length - failures} succeeded, ${failures} failed`;
+
+  const filesInPlay = new Set(workingState.filesInPlay ?? []);
+  for (const file of collectFilePaths(params.toolCalls)) filesInPlay.add(file);
+  workingState.filesInPlay = Array.from(filesInPlay).slice(-12);
+
+  if (failures > 0) {
+    const failedTools = params.toolCalls
+      .filter((_, index) => params.results[index]?.is_error)
+      .map((call) => call.name);
+    const outstanding = new Set(workingState.outstandingWork ?? []);
+    outstanding.add(`Resolve failures from: ${failedTools.join(", ")}`);
+    workingState.outstandingWork = Array.from(outstanding).slice(-8);
+  }
+}
+
+function parseStructuredSubagentEvent(text: string): {
+  runId: string;
+  agentType: string;
+  status: "completed" | "failed" | "running" | "unknown";
+  task: string;
+  turns?: number;
+  costUsd?: number;
+  durationSeconds?: number;
+  result?: string;
+} | null {
+  const normalized = text.startsWith("[System Event] ")
+    ? text.slice("[System Event] ".length)
+    : text;
+  if (!normalized.startsWith("[Subagent event]")) return null;
+
+  const lines = normalized.split("\n");
+  const map = new Map<string, string>();
+  let outcomeLabel: string | null = null;
+  const outcomeLines: string[] = [];
+
+  for (const line of lines.slice(1)) {
+    if (!outcomeLabel) {
+      const match = line.match(/^([a-z_]+):\s*(.*)$/);
+      if (match) {
+        const [, key, value] = match;
+        if (key === "result" || key === "error") {
+          outcomeLabel = key;
+          if (value) outcomeLines.push(value);
+        } else {
+          map.set(key, value);
+        }
+        continue;
+      }
+    }
+    if (outcomeLabel) outcomeLines.push(line);
+  }
+
+  const runId = map.get("run_id");
+  const agentType = map.get("agent_type");
+  const task = map.get("task");
+  if (!runId || !agentType || !task) return null;
+
+  const statusValue = map.get("status");
+  const status = statusValue === "completed" || statusValue === "failed" || statusValue === "running"
+    ? statusValue
+    : "unknown";
+
+  const turns = map.get("turns");
+  const costUsd = map.get("cost_usd");
+  const durationSeconds = map.get("duration_seconds");
+
+  return {
+    runId,
+    agentType,
+    status,
+    task,
+    ...(turns ? { turns: Number(turns) } : {}),
+    ...(costUsd ? { costUsd: Number(costUsd) } : {}),
+    ...(durationSeconds ? { durationSeconds: Number(durationSeconds) } : {}),
+    ...(outcomeLines.length > 0 ? { result: truncateStateValue(outcomeLines.join("\n"), 600) } : {}),
+  };
+}
+
+function absorbStructuredEventIntoContext(spec: AgentSpec, text: string): void {
+  const parsed = parseStructuredSubagentEvent(text);
+  if (!parsed) return;
+
+  const context = (spec.context ??= {});
+  const events = context.subagentEvents ?? [];
+  const next = events.filter((event) => event.runId !== parsed.runId);
+  next.push(parsed);
+  context.subagentEvents = next.slice(-8);
+
+  const workingState = (context.workingState ??= {});
+  const outstanding = new Set(workingState.outstandingWork ?? []);
+  if (parsed.status === "failed") {
+    outstanding.add(`Review failed subagent ${parsed.agentType} (${parsed.runId}) and recover the task`);
+  } else if (parsed.status === "completed") {
+    outstanding.add(`Integrate subagent ${parsed.agentType} (${parsed.runId}) result into the next step`);
+  }
+  workingState.outstandingWork = Array.from(outstanding).slice(-8);
+}
+
+function absorbMessageContentIntoContext(spec: AgentSpec, content: LLMMessage["content"]): void {
+  if (typeof content === "string") {
+    absorbStructuredEventIntoContext(spec, content);
+    return;
+  }
+
+  for (const block of content) {
+    if (block.type === "text" && typeof block.text === "string") {
+      absorbStructuredEventIntoContext(spec, block.text);
+    }
+  }
 }
 
 // Loop detection now handled by LoopDetector class
@@ -222,8 +377,14 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
   };
   if (spec.initialMessages && spec.initialMessages.length > 0) {
     messages.push(...spec.initialMessages);
+    for (const message of spec.initialMessages) {
+      absorbMessageContentIntoContext(spec, message.content);
+    }
   } else if (isResume && spec.resumeMessages) {
     messages.push(...spec.resumeMessages);
+    for (const message of spec.resumeMessages) {
+      absorbMessageContentIntoContext(spec, message.content);
+    }
     resumedTurnCount = Math.floor(spec.resumeMessages.length / 2); // rough estimate
     queueQueryReminder(queryState, buildResumeReminder());
     console.log(
@@ -308,6 +469,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       if (spec.getInjectedMessages) {
         const injected = spec.getInjectedMessages();
         for (const msg of injected) {
+          absorbStructuredEventIntoContext(spec, msg);
           queueQueryReminder(queryState, buildRedirectedReminder(msg));
           queryState.phase = "redirected";
           console.debug(`[agent-loop] run=${runId} injected message from parent`);
@@ -321,11 +483,16 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
 
       flushPendingReminder(messages, queryState);
 
+      const dynamicPromptState = buildDynamicPromptStateSections(spec);
+      const llmSystemPrompt = dynamicPromptState
+        ? `${systemPrompt}\n\n${dynamicPromptState}`
+        : systemPrompt;
+
       // Emit before_llm_call hook
       await spec.beforeLlmCall?.({
         turn: turns,
         messages: [...messages],
-        systemPrompt,
+        systemPrompt: llmSystemPrompt,
         currentCwd,
       });
       const beforeLlmEvent = await hookRegistry.emit({
@@ -352,7 +519,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
         spec.onPhaseChange?.({ phase: 'waiting_llm', turn: turns, startedAt: Date.now() });
         response = await client.createMessage({
           model: providerConfig.modelId,
-          system: systemPrompt,
+          system: llmSystemPrompt,
           messages,
           tools,
           maxTokens: DEFAULT_MAX_TOKENS,
@@ -444,6 +611,10 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
           lastTextOutput = block.text;
         }
       }
+      updateWorkingStateFromAssistant(spec, {
+        currentCwd,
+        lastAssistantText: lastTextOutput,
+      });
       queryState.carryForwardState = buildCarryForwardState({
         currentCwd,
         lastAssistantText: lastTextOutput,
@@ -711,6 +882,11 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
           toolCalls,
           results,
         }) ?? undefined;
+        updateWorkingStateFromTools(spec, {
+          currentCwd,
+          toolCalls,
+          results,
+        });
         await spec.onToolRound?.({
           turn: turns,
           assistantContent: responseContent,

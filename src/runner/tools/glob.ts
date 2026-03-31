@@ -14,7 +14,8 @@ import { resolveToCwd } from "./path-utils.js";
 export const globToolDefinition: ToolDefinition = {
   name: "glob",
   description:
-    "Fast file pattern matching across the codebase. Use this when you need to find files by name or path patterns such as '**/*.ts' or 'src/**/*.tsx'.",
+    "Fast file pattern matching across the codebase. Use this to find files by name or path patterns such as '**/*.ts' or 'src/**/*.tsx' before reading or editing them. " +
+    "Prefer this over shelling out to find or fd through Bash.",
   input_schema: {
     type: "object",
     properties: {

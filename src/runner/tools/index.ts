@@ -51,9 +51,9 @@ function formatToolOutput(
   const normalized = fromClaudeCodeToolName(toolName);
 
   if (normalized === "exec") {
-    const lines = ["Bash result:", output.trim()];
+    const lines = [output.trim()];
     if (sideEffects?.newCwd) {
-      lines.push(`Working directory now: ${sideEffects.newCwd}`);
+      lines.push(`working_directory_now: ${sideEffects.newCwd}`);
     }
     return lines.filter((line) => line.length > 0).join("\n\n");
   }

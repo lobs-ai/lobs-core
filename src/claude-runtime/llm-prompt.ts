@@ -33,14 +33,19 @@ function buildTaskSection(): string {
     "# Task Execution",
     "- Read existing code and context before changing things.",
     "- Use tools aggressively for verification instead of guessing.",
+    "- When multiple independent checks are needed and likely to succeed, make multiple tool calls in the same response.",
     "- Do exactly the requested work. Do not add speculative features, abstractions, or refactors.",
     "- Prefer the smallest correct change that fully solves the task.",
     "- Verify changes with the narrowest useful check before claiming success.",
     "- Ask only when a specific missing detail blocks the next step.",
     "- Preserve exact identifiers like file paths, symbols, commands, URLs, env vars, IDs, and branch names.",
     "- Use Read before Edit on an existing file. Prefer Edit for modifying existing files and Write for new files or full rewrites.",
+    "- When reading text from Read output, never include any line-number prefix in Edit old_string or new_string.",
+    "- Prefer dedicated tools over Bash when a dedicated tool fits the job.",
+    "- For long-running shell work you do not need immediately, prefer Bash with run_in_background or the process tool instead of blocking the turn.",
     "- If a command or file output is large, narrow the next tool call instead of repeatedly reading broad context.",
     "- When intermediate investigation output is not useful to keep in context, delegate bounded work to a subagent instead of dragging raw output forward.",
+    "- Do not predict subagent results while they are still running. Wait for the completion event and then integrate the outcome.",
     "- If the task is complete, stop. Do not keep exploring after the user-visible work is already done.",
   ].join("\n");
 }
@@ -91,8 +96,11 @@ function buildLiveStateSection(params: {
   additionalContext?: string;
 }): string {
   const { spec, recentHistory, contextBlock, learnings, additionalContext } = params;
+  const workingState = spec.context?.workingState;
   const objective = typeof spec.task === "string"
-    ? spec.task.trim().split("\n").find((line) => line.trim().length > 0) ?? spec.task.trim()
+    ? workingState?.objective
+      ?? spec.task.trim().split("\n").find((line) => line.trim().length > 0)
+      ?? spec.task.trim()
     : "Continue the current task.";
 
   const sources = [contextBlock, learnings, additionalContext, ...(recentHistory ?? [])]
@@ -101,13 +109,34 @@ function buildLiveStateSection(params: {
 
   const lines = ["# Live Working State", `- Objective: ${objective || "Continue the active task."}`];
 
+  if (workingState?.currentCwd) {
+    lines.push(`- Current working directory: ${workingState.currentCwd}`);
+  }
+
+  if (workingState?.recentToolSummary) {
+    lines.push(`- Recent tool state: ${workingState.recentToolSummary}`);
+  }
+
+  if (workingState?.lastAssistantConclusion) {
+    lines.push(`- Last assistant conclusion: ${workingState.lastAssistantConclusion}`);
+  }
+
+  if (workingState?.filesInPlay && workingState.filesInPlay.length > 0) {
+    lines.push(`- Files in play: ${workingState.filesInPlay.slice(0, 8).join(", ")}`);
+  }
+
   const fileMatches = Array.from(
     sources.matchAll(/(?:^|[\s(["'`])((?:\/|\.\/|\.\.\/)[^\s)"'`:,;]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+)/g),
   )
     .map((match) => match[1]?.trim())
     .filter((value): value is string => Boolean(value));
-  if (fileMatches.length > 0) {
+  if (fileMatches.length > 0 && !(workingState?.filesInPlay && workingState.filesInPlay.length > 0)) {
     lines.push(`- Files in play: ${Array.from(new Set(fileMatches)).slice(0, 8).join(", ")}`);
+  }
+
+  if (workingState?.outstandingWork && workingState.outstandingWork.length > 0) {
+    lines.push("- Outstanding work:");
+    for (const line of workingState.outstandingWork.slice(0, 6)) lines.push(`  - ${line}`);
   }
 
   const nextLines = sources
@@ -115,9 +144,14 @@ function buildLiveStateSection(params: {
     .map((line) => line.trim())
     .filter((line) => /\b(next|remaining|todo|still need|follow up|need to)\b/i.test(line))
     .slice(0, 4);
-  if (nextLines.length > 0) {
+  if (nextLines.length > 0 && !(workingState?.outstandingWork && workingState.outstandingWork.length > 0)) {
     lines.push("- Outstanding work:");
     for (const line of nextLines) lines.push(`  - ${line}`);
+  }
+
+  if (workingState?.activeDecisions && workingState.activeDecisions.length > 0) {
+    lines.push("- Active decisions:");
+    for (const line of workingState.activeDecisions.slice(0, 6)) lines.push(`  - ${line}`);
   }
 
   const decisions = sources
@@ -125,12 +159,38 @@ function buildLiveStateSection(params: {
     .map((line) => line.trim())
     .filter((line) => /\b(decided|approach|strategy|using|use )\b/i.test(line))
     .slice(0, 4);
-  if (decisions.length > 0) {
+  if (decisions.length > 0 && !(workingState?.activeDecisions && workingState.activeDecisions.length > 0)) {
     lines.push("- Active decisions:");
     for (const line of decisions) lines.push(`  - ${line}`);
   }
 
   return lines.join("\n");
+}
+
+function buildSubagentStateSection(spec: AgentSpec): string | null {
+  const events = spec.context?.subagentEvents;
+  if (!events || events.length === 0) return null;
+
+  return [
+    "# Delegation State",
+    ...events.slice(0, 6).flatMap((event) => {
+      const lines = [
+        `- ${event.agentType} (${event.runId}) — ${event.status}`,
+        `  Task: ${event.task}`,
+      ];
+      const stats: string[] = [];
+      if (typeof event.turns === "number") stats.push(`turns=${event.turns}`);
+      if (typeof event.costUsd === "number") stats.push(`cost=$${event.costUsd.toFixed(4)}`);
+      if (typeof event.durationSeconds === "number") stats.push(`duration=${event.durationSeconds.toFixed(1)}s`);
+      if (stats.length > 0) {
+        lines.push(`  Stats: ${stats.join(", ")}`);
+      }
+      if (event.result) {
+        lines.push(`  Outcome: ${event.result}`);
+      }
+      return lines;
+    }),
+  ].join("\n");
 }
 
 function buildReferenceSection(
@@ -178,6 +238,7 @@ export function buildClaudeStyleSystemPrompt(params: {
     buildTaskSection(),
     buildRuntimeSection(spec),
     buildLiveStateSection({ spec, recentHistory, contextBlock, learnings, additionalContext }),
+    buildSubagentStateSection(spec),
     buildToolSection(toolDefinitions),
     buildDelegationSection(toolDefinitions),
     recentHistory && recentHistory.length > 0
@@ -195,6 +256,16 @@ export function buildClaudeStyleSystemPrompt(params: {
     additionalContext ?? null,
   ].filter((section): section is string => Boolean(section && section.trim().length > 0));
 
+  return sections.join("\n\n");
+}
+
+export function buildDynamicPromptStateSections(spec: AgentSpec): string | null {
+  const sections = [
+    buildLiveStateSection({ spec }),
+    buildSubagentStateSection(spec),
+  ].filter((section): section is string => Boolean(section && section.trim().length > 0));
+
+  if (sections.length === 0) return null;
   return sections.join("\n\n");
 }
 

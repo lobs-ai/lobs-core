@@ -104,7 +104,23 @@ describe("readTool", () => {
   });
 
   it("handles absolute paths", async () => {
-    const result = await readTool({ path: join(TEST_DIR, "small.txt") }, TEST_DIR);
+    const result = await readTool({ path: join(TEST_DIR, "small.txt"), full: true }, TEST_DIR);
     expect(result).toContain("line1");
+  });
+
+  it("returns an unchanged stub for repeated reads of the same file region", async () => {
+    const first = await readTool({ path: "small.txt", offset: 1, limit: 2 }, TEST_DIR);
+    const second = await readTool({ path: "small.txt", offset: 1, limit: 2 }, TEST_DIR);
+
+    expect(first).toContain("line1");
+    expect(second).toContain("File unchanged since last read");
+  });
+
+  it("invalidates the repeated-read cache after the file changes", async () => {
+    await readTool({ path: "small.txt", offset: 1, limit: 2 }, TEST_DIR);
+    writeFileSync(join(TEST_DIR, "small.txt"), "line1\nline2 changed\nline3\n");
+
+    const result = await readTool({ path: "small.txt", offset: 1, limit: 2 }, TEST_DIR);
+    expect(result).toContain("line2 changed");
   });
 });

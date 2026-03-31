@@ -10,16 +10,17 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import type { ToolDefinition } from "../types.js";
 import { resolveToCwd } from "./path-utils.js";
+import { hasRecentlyReadFile } from "./read.js";
 
 // ── Tool Definition ──────────────────────────────────────────────────────────
 
 export const editToolDefinition: ToolDefinition = {
   name: "edit",
   description:
-    "Performs exact string replacements in files. You must read the file before editing it. " +
-    "Preserve exact indentation and whitespace exactly as it appears in the file. " +
+    "Performs exact string replacements in files. You must use Read on the file before editing it. " +
+    "Preserve exact indentation and whitespace exactly as it appears in the file, excluding any line-number prefix from Read output. " +
     "Use the smallest clearly unique old_string you can, usually only a few adjacent lines. " +
-    "The edit fails if old_string is ambiguous; use more context or replace_all when you intentionally want every instance updated.",
+    "The edit fails if old_string is ambiguous; provide more context or use replace_all when you intentionally want every instance updated.",
   input_schema: {
     type: "object",
     properties: {
@@ -316,6 +317,12 @@ export async function editTool(
   }
 
   validateEdits(edits);
+
+  if (!hasRecentlyReadFile(resolved)) {
+    throw new Error(
+      "You must use Read on this file before editing it. Read the file first so your old_string matches the exact current contents.",
+    );
+  }
 
   let content = readFileSync(resolved, "utf-8");
   const results: string[] = [];

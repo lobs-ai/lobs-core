@@ -199,6 +199,51 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("Do this extra thing.");
   });
 
+  it("includes structured working state when provided", () => {
+    const spec = makeSpec({
+      context: {
+        workingState: {
+          objective: "Finish the runtime upgrade",
+          currentCwd: "/tmp/project",
+          filesInPlay: ["src/runner/agent-loop.ts", "src/claude-runtime/llm-prompt.ts"],
+          outstandingWork: ["Integrate subagent result into next step"],
+          activeDecisions: ["Use one shared loop for main and worker agents"],
+          recentToolSummary: "Read, Edit; 2 succeeded, 0 failed",
+          lastAssistantConclusion: "The loop is unified; next is structured delegation state.",
+        },
+      },
+    });
+    const prompt = buildSystemPrompt(spec);
+    expect(prompt).toContain("Finish the runtime upgrade");
+    expect(prompt).toContain("Current working directory: /tmp/project");
+    expect(prompt).toContain("src/runner/agent-loop.ts");
+    expect(prompt).toContain("Integrate subagent result into next step");
+    expect(prompt).toContain("Use one shared loop for main and worker agents");
+    expect(prompt).toContain("Read, Edit; 2 succeeded, 0 failed");
+  });
+
+  it("includes structured delegation state when provided", () => {
+    const spec = makeSpec({
+      context: {
+        subagentEvents: [{
+          runId: "abc123",
+          agentType: "programmer",
+          status: "completed",
+          task: "Implement the parser changes",
+          turns: 4,
+          costUsd: 0.0123,
+          durationSeconds: 12.4,
+          result: "Updated bash parsing and added tests.",
+        }],
+      },
+    });
+    const prompt = buildSystemPrompt(spec);
+    expect(prompt).toContain("# Delegation State");
+    expect(prompt).toContain("programmer (abc123) — completed");
+    expect(prompt).toContain("Implement the parser changes");
+    expect(prompt).toContain("Updated bash parsing and added tests.");
+  });
+
   it("does not crash when context object is empty", () => {
     const spec = makeSpec({ context: {} });
     expect(() => buildSystemPrompt(spec)).not.toThrow();

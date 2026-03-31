@@ -18,21 +18,24 @@ describe("execTool", () => {
 
     it("returns exit code 0 for successful commands", async () => {
       const text = getText(await execTool({ command: "true" }, CWD));
-      expect(text).toContain("Exit code: 0");
+      expect(text).toContain("exit_code: 0");
     });
 
     it("returns non-zero exit code for failing commands", async () => {
       const text = getText(await execTool({ command: "false" }, CWD));
-      expect(text).toContain("Exit code: 1");
+      expect(text).toContain("exit_code: 1");
     });
 
     it("captures stderr", async () => {
       const text = getText(await execTool({ command: "echo err >&2" }, CWD));
+      expect(text).toContain("stderr:");
       expect(text).toContain("err");
     });
 
     it("captures both stdout and stderr", async () => {
       const text = getText(await execTool({ command: "echo out && echo err >&2" }, CWD));
+      expect(text).toContain("stdout:");
+      expect(text).toContain("stderr:");
       expect(text).toContain("out");
       expect(text).toContain("err");
     });
@@ -41,6 +44,7 @@ describe("execTool", () => {
   describe("workdir", () => {
     it("uses custom workdir", async () => {
       const text = getText(await execTool({ command: "pwd", workdir: "/tmp" }, CWD));
+      expect(text).toContain("cwd: /tmp");
       expect(text).toContain("/tmp");
     });
   });
@@ -70,9 +74,18 @@ describe("execTool", () => {
     });
   });
 
+  describe("background execution", () => {
+    it("can start a command in the background", async () => {
+      const text = getText(await execTool({ command: "sleep 1", run_in_background: true }, CWD));
+      expect(text).toContain("background_started: true");
+      expect(text).toContain("session_id:");
+    });
+  });
+
   describe("edge cases", () => {
     it("handles empty stdout", async () => {
       const text = getText(await execTool({ command: "true" }, CWD));
+      expect(text).toContain("stdout:");
       expect(typeof text).toBe("string");
     });
 

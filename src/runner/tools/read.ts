@@ -54,10 +54,20 @@ const MAX_BYTES = 50 * 1024; // 50KB
 const DEFAULT_BYTES = 50000;
 const BINARY_CHECK_BYTES = 8192;
 const MAX_FULL_FILE_BYTES = 200 * 1024; // 200KB
-const FILE_UNCHANGED_STUB =
-  "File unchanged since last read. The earlier Read result for this exact file region is still current; refer to that instead of re-reading.";
+export const FILE_UNCHANGED_STUB =
+  "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading.";
 
 const recentReadCache = new Map<string, { mtimeMs: number; size: number }>();
+const recentlyReadFiles = new Set<string>();
+
+export function hasRecentlyReadFile(filePath: string): boolean {
+  return recentlyReadFiles.has(filePath);
+}
+
+export function clearRecentReadTracking(): void {
+  recentReadCache.clear();
+  recentlyReadFiles.clear();
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -118,6 +128,7 @@ export async function readTool(
         `File too large for full read (${stat.size} bytes). Use offset/limit for large files.`,
       );
     }
+    recentlyReadFiles.add(resolved);
     recentReadCache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size });
     return content;
   }
@@ -139,6 +150,7 @@ export async function readTool(
     const shownLines = result.split("\n").length;
     const from = offset + shownLines;
     result += `\n\n[Truncated. ${lines.length - (startIdx + shownLines)} more lines. Use offset=${from} to continue.]`;
+    recentlyReadFiles.add(resolved);
     recentReadCache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size });
     return result;
   }
@@ -153,6 +165,7 @@ export async function readTool(
   }
 
   const finalResult = meta.length > 0 ? `${result}\n\n[${meta.join(". ")}]` : result;
+  recentlyReadFiles.add(resolved);
   recentReadCache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size });
   return finalResult;
 }

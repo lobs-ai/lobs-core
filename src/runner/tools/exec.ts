@@ -17,13 +17,15 @@ import { resolve } from "node:path";
 import type { ToolDefinition, ToolExecutorResult } from "../types.js";
 import { capOutput } from "./output-cap.js";
 import { extractCdTarget } from "../../claude-runtime/bash-parser.js";
+import { processTool } from "./process.js";
 
 export const execToolDefinition: ToolDefinition = {
   name: "exec",
   description:
     "Execute a shell command in the current working directory or an optional workdir. " +
-    "Returns stdout, stderr, and exit code. Prefer targeted commands over huge output. " +
-    "Use timeout to limit execution time. Use this tool for shell work instead of routing grep/glob through Bash when dedicated tools exist.",
+    "Returns structured stdout, stderr, and exit status. Prefer dedicated tools like Read, Edit, Glob, and Grep when they fit the task instead of routing everything through Bash. " +
+    "Prefer targeted commands over huge output. Use timeout to limit execution time. " +
+    "Use run_in_background when you do not need the result immediately and are okay checking later.",
   input_schema: {
     type: "object",
     properties: {
@@ -42,6 +44,10 @@ export const execToolDefinition: ToolDefinition = {
       timeout: {
         type: "number",
         description: "Timeout in seconds (default 30, max 300)",
+      },
+      run_in_background: {
+        type: "boolean",
+        description: "Run the command in the background and return a session ID instead of waiting for completion",
       },
       env: {
         type: "object",
@@ -126,6 +132,7 @@ export async function execTool(
   const workdir = (params.workdir as string) || defaultCwd;
   const timeoutRaw = typeof params.timeout === "number" ? params.timeout : DEFAULT_TIMEOUT;
   const timeout = Math.min(Math.max(timeoutRaw, 1), MAX_TIMEOUT);
+  const runInBackground = params.run_in_background === true;
   const env = {
     ...process.env,
     ...(params.env && typeof params.env === "object" ? params.env as Record<string, string> : {}),
@@ -143,6 +150,35 @@ export async function execTool(
     } else {
       return `cd: no such directory: ${cdTarget}`;
     }
+  }
+
+  if (runInBackground) {
+    if (params.env && typeof params.env === "object" && Object.keys(params.env as Record<string, string>).length > 0) {
+      throw new Error("run_in_background does not support env overrides yet");
+    }
+
+    const started = await processTool({
+      action: "start",
+      command,
+      cwd: workdir,
+      timeout,
+    }, defaultCwd);
+
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = JSON.parse(started) as Record<string, unknown>;
+    } catch {
+      return started;
+    }
+
+    return [
+      "background_started: true",
+      `command: ${command}`,
+      `cwd: ${workdir}`,
+      `session_id: ${String(parsed.sessionId ?? "")}`,
+      `pid: ${String(parsed.pid ?? "")}`,
+      "Use the process tool with action=poll or action=log to check progress later.",
+    ].join("\n\n");
   }
 
   // Wrap the command with a cwd marker so we can detect directory changes
@@ -190,23 +226,38 @@ export async function execTool(
       // Extract and strip the cwd marker from stdout
       const { cleaned: cleanedStdout, detectedCwd: cwd } = extractCwdMarker(stdout);
 
-      const parts: string[] = [];
+      const stdoutText = cleanedStdout.length > 0 ? capOutput(
+        cleanedStdout,
+        MAX_OUTPUT_CHARS,
+        MAX_OUTPUT_LINES,
+        "Re-run with a more specific command (for example head, tail, or grep) to inspect less output.",
+      ) : "(empty)";
+      const stderrText = stderr.length > 0 ? capOutput(
+        stderr,
+        MAX_OUTPUT_CHARS,
+        MAX_OUTPUT_LINES,
+        "Re-run with a more specific command to inspect less stderr output.",
+      ) : "(empty)";
+
+      const exitStatus = killed
+        ? "timeout"
+        : code !== null
+          ? String(code)
+          : `signal ${signal}`;
+
+      const sections = [
+        `command: ${command}`,
+        `cwd: ${workdir}`,
+        `stdout:\n${stdoutText}`,
+        `stderr:\n${stderrText}`,
+        `exit_code: ${exitStatus}`,
+      ];
 
       if (killed) {
-        parts.push(`Command timed out after ${timeout} seconds.`);
+        sections.push(`timeout_seconds: ${timeout}`);
       }
 
-      if (cleanedStdout.length > 0) parts.push(cleanedStdout);
-      if (stderr.length > 0) parts.push(`STDERR:\n${stderr}`);
-
-      const exitInfo = killed
-        ? `Exit: killed (timeout)`
-        : `Exit code: ${code ?? `signal ${signal}`}`;
-
-      const raw = parts.join("\n") || "(no output)";
-      const capped = capOutput(raw, MAX_OUTPUT_CHARS, MAX_OUTPUT_LINES,
-        "Re-run with more specific command (e.g. head/tail/grep) to see more.");
-      resolvePromise({ output: `${capped}\n\n${exitInfo}`, detectedCwd: cwd });
+      resolvePromise({ output: sections.join("\n\n"), detectedCwd: cwd });
     });
   });
 

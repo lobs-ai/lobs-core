@@ -132,6 +132,27 @@ export interface AgentContext {
   learnings?: string;
   /** Additional system context */
   additionalContext?: string;
+  /** Structured runtime working state carried across turns */
+  workingState?: {
+    objective?: string;
+    currentCwd?: string;
+    filesInPlay?: string[];
+    outstandingWork?: string[];
+    activeDecisions?: string[];
+    recentToolSummary?: string;
+    lastAssistantConclusion?: string;
+  };
+  /** Structured status from delegated subagents */
+  subagentEvents?: Array<{
+    runId: string;
+    agentType: string;
+    status: "completed" | "failed" | "running" | "unknown";
+    task: string;
+    turns?: number;
+    costUsd?: number;
+    durationSeconds?: number;
+    result?: string;
+  }>;
 }
 
 export interface AgentResult {

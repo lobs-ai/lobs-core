@@ -15,8 +15,9 @@ import { resolveToCwd } from "./path-utils.js";
 export const grepToolDefinition: ToolDefinition = {
   name: "grep",
   description:
-    "A ripgrep-powered search tool for file contents. Use this for search tasks instead of invoking grep or rg through Bash. " +
-    "Supports regex patterns, optional glob filters, multiline mode, and output modes for content, files_with_matches, or count.",
+    "A ripgrep-powered search tool for file contents. Use this instead of invoking grep or rg through Bash. " +
+    "Supports regex patterns, optional glob filters, multiline mode, and output modes for matching lines, files_with_matches, or count. " +
+    "Prefer this when you know the text pattern you need but not yet the exact file.",
   input_schema: {
     type: "object",
     properties: {
