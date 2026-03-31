@@ -1885,17 +1885,32 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
       return;
     }
 
+    // Classify failure type: 0-turn failures or stopReason=error are infra failures
+    // (provider errors, auth failures, key exhaustion), not agent quality issues.
+    let failureType: 'infra' | 'agent_quality' | undefined;
+    if (!result.succeeded) {
+      failureType = (result.turns === 0 || result.stopReason === "error")
+        ? 'infra'
+        : 'agent_quality';
+    }
+
+    // Build summary: prefer result.error over result.output for failed runs
+    // (agent-loop returns errors in result.error, not result.output)
+    const workerSummary = !result.succeeded && result.error
+      ? result.error.slice(0, 2000)
+      : summary;
+
     // Record worker end
     recordWorkerEnd({
       workerId,
       agentType: req.agentType,
       succeeded: result.succeeded,
-      summary,
+      summary: workerSummary,
       inputTokens: result.usage.inputTokens,
       outputTokens: result.usage.outputTokens,
       totalCostUsd: result.costUsd,
       durationSeconds: result.durationSeconds,
-      failureType: result.succeeded ? undefined : 'agent_quality',
+      failureType,
     });
 
     // Update task status
@@ -1924,7 +1939,7 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
     );
 
   } catch (error) {
-    // Record failure
+    // Record failure — the worker was started (recordWorkerStart ran) but runAgent threw.
     recordWorkerEnd({
       workerId,
       agentType: req.agentType,
@@ -1933,8 +1948,17 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
       failureType: 'infra',
     });
 
+    // Handle cleanup here instead of re-throwing to avoid double-decrement
+    // in the outer .catch() handler at the spawn dispatch site.
     decrementPendingSpawns(projectId, req.agentType);
-    throw error;
+    writeSpawnResult(req.runId, req.nodeId, {
+      status: "failed",
+      error: `Runner error: ${error instanceof Error ? error.message : String(error)}`,
+    });
+    log().error(
+      `[NATIVE_RUNNER] Runner error for ${req.agentType} run ${req.runId.slice(0, 8)}: ${error}`
+    );
+    return; // Don't re-throw — cleanup is complete
   } finally {
     // Always deregister — whether we finished cleanly, errored, or were interrupted
     activeWorkerControllers.delete(workerId);
