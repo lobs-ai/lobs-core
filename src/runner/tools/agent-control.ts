@@ -37,6 +37,30 @@ interface ActiveAgent {
 // In-memory tracking for active spawned agents
 const activeAgents = new Map<string, ActiveAgent>();
 
+function buildStructuredSubagentEvent(params: {
+  runId: string;
+  agentType: string;
+  task: string;
+  result: { succeeded: boolean; output: string; error?: string; stopReason?: string; turns: number; costUsd: number; durationSeconds: number };
+}): string {
+  const { runId, agentType, task, result } = params;
+  const status = result.succeeded ? "completed" : "failed";
+  const outcome = result.succeeded ? "result" : "error";
+
+  return [
+    "[Subagent event]",
+    `run_id: ${runId}`,
+    `agent_type: ${agentType}`,
+    `status: ${status}`,
+    `task: ${task.slice(0, 200)}`,
+    `turns: ${result.turns}`,
+    `cost_usd: ${result.costUsd.toFixed(4)}`,
+    `duration_seconds: ${result.durationSeconds.toFixed(1)}`,
+    `${outcome}:`,
+    result.succeeded ? result.output.slice(0, 3000) : (result.error || result.stopReason || result.output || "").slice(0, 3000),
+  ].join("\n");
+}
+
 // Default tools each agent type gets
 const AGENT_DEFAULT_TOOLS: Record<string, ToolName[]> = {
   programmer: ["exec", "read", "write", "edit", "memory_search", "memory_read", "memory_write"],
@@ -49,32 +73,40 @@ const AGENT_DEFAULT_TOOLS: Record<string, ToolName[]> = {
 export const AGENT_CONTROL_TOOLS: ToolDefinition[] = [
   {
     name: "spawn_agent",
-    description: `Spawn another agent to perform a subtask. The agent runs in the background and you'll receive a notification when it completes.
+    description: `Launch a new agent to handle a complex subtask autonomously.
 
-Use this when:
-- You need a code review (spawn reviewer)
-- A subtask requires different expertise (spawn researcher for investigation)
-- You want parallel work on independent pieces (spawn multiple agents)
-- You need an architectural opinion (spawn architect)
+Use this when the work is substantial, parallelizable, or needs a different specialty. Fresh subagents start without your context, so write the prompt like a briefing for a smart teammate who just walked into the room:
+- explain the task and why it matters
+- describe what you already learned or ruled out
+- include file paths, constraints, and acceptance criteria when relevant
+- say whether the agent should research, implement, verify, or review
+- do not delegate your own understanding with vague prompts like "based on your findings, fix it"
 
-Agent types: programmer, reviewer, researcher, writer, architect
-Model tiers: micro (local/free), small, medium, standard, strong (opus)
-
-The spawned agent gets its own workspace context, tools, and memory access.
-It does NOT see your conversation — only the task you give it.
-
-Returns immediately with a run ID. The agent works in the background and announces completion automatically.`,
+The spawned agent runs independently and returns later with its result.`,
     input_schema: {
       type: "object" as const,
       properties: {
+        subagent_type: {
+          type: "string",
+          enum: ["programmer", "reviewer", "researcher", "writer", "architect"],
+          description: "Claude-Code-style field for the type of agent to spawn",
+        },
         agent_type: {
           type: "string",
           enum: ["programmer", "reviewer", "researcher", "writer", "architect"],
-          description: "Type of agent to spawn",
+          description: "Backward-compatible field for the type of agent to spawn",
+        },
+        prompt: {
+          type: "string",
+          description: "Task briefing for the spawned agent",
         },
         task: {
           type: "string",
-          description: "Full task description for the agent. Be specific — include file paths, context, acceptance criteria.",
+          description: "Backward-compatible task field; prompt is preferred",
+        },
+        name: {
+          type: "string",
+          description: "Optional short label for this subagent run",
         },
         model_tier: {
           type: "string",
@@ -95,7 +127,7 @@ Returns immediately with a run ID. The agent works in the background and announc
           description: "Additional tools beyond the agent's defaults (e.g., 'web_search', 'memory_write')",
         },
       },
-      required: ["agent_type", "task"],
+      required: [],
     },
   },
   {
@@ -228,8 +260,11 @@ export async function executeSpawnAgent(
   channelId?: string,
   onComplete?: (result: { runId: string; agentType: string; succeeded: boolean; output: string; error?: string }) => void,
 ): Promise<string> {
-  const agentType = input.agent_type as string;
-  const task = input.task as string;
+  const agentType = (input.subagent_type as string) ?? (input.agent_type as string) ?? "programmer";
+  const task = (input.prompt as string) ?? (input.task as string);
+  if (!task) {
+    throw new Error("prompt or task is required");
+  }
   const modelTier = (input.model_tier as string) ?? "standard";
   // If no cwd specified, try to find the right repo for the task
   const defaultCwd = parentCwd ?? HOME;
@@ -349,15 +384,12 @@ export async function executeSpawnAgent(
     // Announce completion back to main agent on the originating channel
     const mainAgent = (globalThis as any).__lobsMainAgent;
     if (mainAgent) {
-      const status = result.succeeded ? "✅ completed" : "❌ failed";
-      const announcement = [
-        `[Subagent ${status}] ${agentType} (${runId})`,
-        `Task: ${task.slice(0, 200)}`,
-        `Turns: ${result.turns} | Cost: $${result.costUsd.toFixed(4)} | Duration: ${result.durationSeconds.toFixed(1)}s`,
-        "",
-        result.succeeded ? "Output:" : `Error: ${result.error || result.stopReason}`,
-        result.output.slice(0, 3000),
-      ].join("\n");
+      const announcement = buildStructuredSubagentEvent({
+        runId,
+        agentType,
+        task,
+        result,
+      });
 
       mainAgent.handleSystemEvent(announcement, originChannel).catch((err: any) => {
         console.error("[spawn_agent] Failed to announce completion:", err);
@@ -381,7 +413,15 @@ export async function executeSpawnAgent(
   });
 
   // Return immediately
-  return `🚀 Spawned ${agentType} agent (id: ${runId})\nTask: ${task.slice(0, 200)}\nModel: ${modelTier}\nThe agent is working in the background. You'll receive a completion notification when it finishes.`;
+  return [
+    "Subagent started.",
+    `Run ID: ${runId}`,
+    `Type: ${agentType}`,
+    `Model tier: ${modelTier}`,
+    `Working directory: ${cwd}`,
+    `Task: ${task.slice(0, 300)}`,
+    "Status: running in background; use check_agents to inspect progress and message_agent to redirect if needed.",
+  ].join("\n");
 }
 
 /**
@@ -504,7 +544,13 @@ export async function executeMessageAgent(input: Record<string, unknown>): Promi
   }
 
   agent.messageQueue.push(message);
-  return `✉️ Message queued for agent ${runId} (${agent.type})\nIt will be injected at the start of the agent's next turn.\nMessage: ${message.slice(0, 200)}${message.length > 200 ? "…" : ""}`;
+  return [
+    "Subagent message queued.",
+    `Run ID: ${runId}`,
+    `Type: ${agent.type}`,
+    `Message: ${message.slice(0, 200)}${message.length > 200 ? "…" : ""}`,
+    "Delivery: injected at the start of the next turn.",
+  ].join("\n");
 }
 
 /**
@@ -519,7 +565,12 @@ export async function executeStopAgent(input: Record<string, unknown>): Promise<
   }
 
   agent.abortController.abort();
-  return `🛑 Stop signal sent to agent ${runId} (${agent.type})\nThe agent will finish its current turn and then stop gracefully.`;
+  return [
+    "Subagent stop requested.",
+    `Run ID: ${runId}`,
+    `Type: ${agent.type}`,
+    "The agent will finish its current turn and then stop gracefully.",
+  ].join("\n");
 }
 
 /**

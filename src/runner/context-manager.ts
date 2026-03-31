@@ -17,6 +17,7 @@
 
 import type { LLMMessage } from "./providers.js";
 import { getContextLimit as getContextLimitFromConfig } from "../config/models.js";
+import { compactSession, formatCompactedSession } from "./context-engine.js";
 
 const CONTEXT_WARNING_THRESHOLD = 0.8; // 80%
 
@@ -54,6 +55,7 @@ export function compactMessages(
   keepRecentTurns: number = 5
 ): LLMMessage[] {
   if (messages.length === 0) return messages;
+  if (messages.length <= 2) return messages;
 
   const compacted: LLMMessage[] = [];
 
@@ -62,90 +64,175 @@ export function compactMessages(
 
   // Calculate the boundary — keep last N turns
   const keepFromIndex = Math.max(1, messages.length - keepRecentTurns * 2);
+  const olderMessages = messages.slice(1, keepFromIndex);
 
-  for (let i = 1; i < messages.length; i++) {
+  const summaryCandidates = olderMessages
+    .map((msg) => ({
+      role: msg.role,
+      content: stringifyMessageContent(msg.content),
+    }))
+    .filter((msg) => msg.content.length > 0);
+
+  if (summaryCandidates.length > 0) {
+    const summary = formatCompactedSession(compactSession(summaryCandidates));
+    const workingState = buildWorkingStateSummary(olderMessages);
+    if (summary.trim().length > 0) {
+      compacted.push({
+        role: "assistant",
+        content:
+          "[Earlier session summary]\n" +
+          "Use this as already-established context. Continue from it instead of redoing the same investigation.\n\n" +
+          workingState +
+          "\n\n" +
+          summary,
+      });
+    }
+  }
+
+  for (let i = keepFromIndex; i < messages.length; i++) {
     const msg = messages[i];
-
-    // Keep recent messages as-is
-    if (i >= keepFromIndex) {
-      compacted.push(msg);
-      continue;
-    }
-
-    // For older user messages with tool results, truncate output but keep structure
-    if (msg.role === "user" && Array.isArray(msg.content)) {
-      const hasToolResults = msg.content.some(
-        (block: Record<string, unknown>) => block.type === "tool_result"
-      );
-
-      if (hasToolResults) {
-        // Truncate each tool_result's content but keep the tool_use_id pairing intact
-        const compactedBlocks = msg.content.map((block: Record<string, unknown>) => {
-          if (block.type === "tool_result") {
-            const content = block.content;
-            let summary: string;
-            if (typeof content === "string") {
-              summary = content.length > 200
-                ? content.slice(0, 200) + "... [truncated]"
-                : content;
-            } else if (Array.isArray(content)) {
-              summary = "[tool output truncated to save context]";
-            } else {
-              summary = "[tool output truncated]";
-            }
-            return {
-              type: "tool_result" as const,
-              tool_use_id: block.tool_use_id,
-              content: summary,
-              ...(block.is_error ? { is_error: true } : {}),
-            };
-          }
-          return block;
-        });
-
-        compacted.push({
-          role: "user",
-          content: compactedBlocks,
-        });
-        continue;
-      }
-    }
-
-    // For older assistant messages, truncate text but keep tool_use blocks intact
-    if (msg.role === "assistant") {
-      if (Array.isArray(msg.content)) {
-        const compactedContent: Array<Record<string, unknown>> = [];
-
-        for (const block of msg.content as Array<Record<string, unknown>>) {
-          if (block.type === "text") {
-            const text = block.text as string;
-            if (text.length > 500) {
-              compactedContent.push({
-                type: "text",
-                text: text.slice(0, 500) + "... [truncated]",
-              });
-            } else {
-              compactedContent.push(block);
-            }
-          } else {
-            // Keep tool_use and other blocks exactly as-is (IDs must be preserved)
-            compactedContent.push(block);
-          }
-        }
-
-        compacted.push({
-          role: "assistant",
-          content: compactedContent,
-        });
-        continue;
-      }
-    }
-
-    // Default: keep message as-is
-    compacted.push(msg);
+    compacted.push(compactRecentMessage(msg));
   }
 
   return compacted;
+}
+
+function buildWorkingStateSummary(messages: LLMMessage[]): string {
+  const files = new Set<string>();
+  const decisions: string[] = [];
+  const completed: string[] = [];
+  const openQuestions: string[] = [];
+  const nextSteps: string[] = [];
+  let objective = "";
+
+  for (const message of messages) {
+    const text = stringifyMessageContent(message.content);
+    if (!text) continue;
+
+    if (!objective && message.role === "user") {
+      objective = text.split("\n").find((line) => line.trim().length > 0)?.trim() ?? "";
+    }
+
+    for (const match of text.matchAll(/(?:^|[\s(["'`])((?:\/|\.\/|\.\.\/)[^\s)"'`:,;]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+)/g)) {
+      const file = match[1]?.trim();
+      if (file) files.add(file);
+    }
+
+    for (const line of text.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      if (/^(done|implemented|fixed|updated|created|added|changed)\b/i.test(trimmed) || /\b(done|fixed|implemented|updated)\b/i.test(trimmed)) {
+        pushUnique(completed, trimmed);
+      }
+      if (/\b(decided|using|use |plan is|approach|strategy)\b/i.test(trimmed)) {
+        pushUnique(decisions, trimmed);
+      }
+      if (/\b(todo|remaining|still need|next|follow up|need to)\b/i.test(trimmed)) {
+        pushUnique(nextSteps, trimmed);
+      }
+      if (/\b(issue|problem|question|unclear|blocked|failing|error)\b/i.test(trimmed)) {
+        pushUnique(openQuestions, trimmed);
+      }
+    }
+  }
+
+  const lines = ["WORKING STATE:"];
+  lines.push(`OBJECTIVE: ${objective || "Continue the active task without redoing prior work."}`);
+  if (completed.length > 0) {
+    lines.push("COMPLETED:");
+    for (const item of completed.slice(0, 4)) lines.push(`- ${item}`);
+  }
+  if (decisions.length > 0) {
+    lines.push("DECISIONS:");
+    for (const item of decisions.slice(0, 4)) lines.push(`- ${item}`);
+  }
+  if (files.size > 0) {
+    lines.push(`FILES: ${Array.from(files).slice(0, 8).join(", ")}`);
+  }
+  if (openQuestions.length > 0) {
+    lines.push("OPEN ISSUES:");
+    for (const item of openQuestions.slice(0, 4)) lines.push(`- ${item}`);
+  }
+  if (nextSteps.length > 0) {
+    lines.push("NEXT STEPS:");
+    for (const item of nextSteps.slice(0, 4)) lines.push(`- ${item}`);
+  }
+
+  return lines.join("\n");
+}
+
+function pushUnique(items: string[], value: string): void {
+  if (!items.includes(value)) items.push(value);
+}
+
+function compactRecentMessage(msg: LLMMessage): LLMMessage {
+  if (msg.role === "user" && Array.isArray(msg.content)) {
+    return {
+      role: "user",
+      content: msg.content.map((block: Record<string, unknown>) => {
+        if (block.type !== "tool_result") return block;
+
+        const content = block.content;
+        let summary: string;
+        if (typeof content === "string") {
+          summary = content.length > 400
+            ? content.slice(0, 400) + "... [truncated]"
+            : content;
+        } else if (Array.isArray(content)) {
+          summary = "[tool output truncated to save context]";
+        } else {
+          summary = "[tool output truncated]";
+        }
+
+        return {
+          type: "tool_result" as const,
+          tool_use_id: block.tool_use_id,
+          content: summary,
+          ...(block.is_error ? { is_error: true } : {}),
+        };
+      }),
+    };
+  }
+
+  if (msg.role === "assistant" && Array.isArray(msg.content)) {
+    return {
+      role: "assistant",
+      content: msg.content.map((block: Record<string, unknown>) => {
+        if (block.type !== "text" || typeof block.text !== "string") return block;
+        return block.text.length > 700
+          ? { type: "text", text: block.text.slice(0, 700) + "... [truncated]" }
+          : block;
+      }),
+    };
+  }
+
+  return msg;
+}
+
+function stringifyMessageContent(content: LLMMessage["content"]): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  return content
+    .map((block: Record<string, unknown>) => {
+      if (block.type === "text" && typeof block.text === "string") {
+        return block.text;
+      }
+      if (block.type === "tool_use") {
+        const toolName = typeof block.name === "string" ? block.name : "tool";
+        const input = JSON.stringify(block.input ?? {}).slice(0, 200);
+        return `[tool ${toolName} input=${input}]`;
+      }
+      if (block.type === "tool_result") {
+        const raw = typeof block.content === "string"
+          ? block.content
+          : JSON.stringify(block.content ?? "").slice(0, 300);
+        return `[tool result ${raw}]`;
+      }
+      return JSON.stringify(block).slice(0, 200);
+    })
+    .join("\n");
 }
 
 /**

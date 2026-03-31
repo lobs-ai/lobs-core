@@ -21,11 +21,101 @@ import { SessionTranscript, type TurnRecord } from "./session-transcript.js";
 import { shouldCompact, compactMessages } from "./context-manager.js";
 import { getHookRegistry } from "./hooks.js";
 import { LoopDetector } from "./loop-detector.js";
+import { asClaudeSystemReminder } from "../claude-runtime/llm-prompt.js";
 
 export type { AgentSpec, AgentResult };
 
 const DEFAULT_MAX_TURNS = 200;
 const DEFAULT_MAX_TOKENS = 16384;
+
+function buildPostToolReminder(currentCwd: string, results: ToolResult[]): string {
+  const successful = results.filter((result) => !result.is_error).length;
+  const failed = results.length - successful;
+  const lines = [
+    "You have fresh tool results.",
+    `Working directory: ${currentCwd}`,
+    `Tool calls this round: ${results.length} total, ${successful} succeeded, ${failed} failed.`,
+    "Use these results to decide the next concrete step.",
+    "If the latest tool results already solve the user's request, respond and stop.",
+    "If you changed files, prefer a targeted verification step before concluding.",
+    "If the task is complete, stop instead of making extra tool calls.",
+    "If more work is needed, prefer the smallest next read/search/edit/exec action that reduces uncertainty.",
+  ];
+  return asClaudeSystemReminder(lines.join("\n"));
+}
+
+type QueryPhase = "initial" | "resume" | "post_tool" | "continuation" | "redirected";
+
+type QueryState = {
+  phase: QueryPhase;
+  currentCwd: string;
+  continuationCount: number;
+  turnIndex: number;
+  lastStopReason?: LLMResponse["stopReason"];
+  pendingReminder?: string;
+  carryForwardState?: string;
+};
+
+function queueQueryReminder(queryState: QueryState, reminder: string): void {
+  queryState.pendingReminder = queryState.pendingReminder
+    ? `${queryState.pendingReminder}\n\n${reminder}`
+    : reminder;
+}
+
+function flushPendingReminder(messages: LLMMessage[], queryState: QueryState): void {
+  if (!queryState.pendingReminder) return;
+  messages.push({
+    role: "user",
+    content: [{ type: "text", text: queryState.pendingReminder }],
+  });
+  queryState.pendingReminder = undefined;
+}
+
+function buildContinuationReminder(continuationCount: number): string {
+  return asClaudeSystemReminder(
+    `Continue from where you left off. This is continuation attempt ${continuationCount}/2. ` +
+    "Do not restart the task or repeat prior reasoning. Finish the interrupted response cleanly."
+  );
+}
+
+function buildRedirectedReminder(message: string): string {
+  return asClaudeSystemReminder(`Message from parent agent:\n${message}`);
+}
+
+function buildResumeReminder(): string {
+  return asClaudeSystemReminder(
+    "Your session was interrupted by a process restart. " +
+    "Your full conversation history has been restored. " +
+    "Continue where you left off. Orient quickly if needed, then keep working. " +
+    "Do not restart the task from scratch."
+  );
+}
+
+function buildCarryForwardState(params: {
+  currentCwd: string;
+  lastAssistantText: string;
+  toolCalls?: Array<{ name: string; input: Record<string, unknown> }>;
+  results?: ToolResult[];
+}): string | null {
+  const { currentCwd, lastAssistantText, toolCalls, results } = params;
+  const lines = ["Carry-forward state:", `- Working directory: ${currentCwd}`];
+
+  if (toolCalls && toolCalls.length > 0) {
+    lines.push(`- Last tool round: ${toolCalls.map((call) => call.name).join(", ")}`);
+  }
+
+  if (results && results.length > 0) {
+    const failures = results.filter((result) => result.is_error).length;
+    lines.push(`- Last tool status: ${results.length - failures} succeeded, ${failures} failed`);
+  }
+
+  const trimmed = lastAssistantText.trim();
+  if (trimmed.length > 0) {
+    lines.push(`- Last assistant conclusion: ${trimmed.length > 400 ? `${trimmed.slice(0, 400)}...` : trimmed}`);
+  }
+
+  return lines.length > 1 ? asClaudeSystemReminder(lines.join("\n")) : null;
+}
 
 // Loop detection now handled by LoopDetector class
 
@@ -46,7 +136,9 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
 
   // Generate or use existing run ID for session persistence
   const runId = spec.runId ?? spec.context?.taskId ?? randomBytes(8).toString("hex");
-  const transcript = new SessionTranscript(spec.agent, runId);
+  const transcript = spec.disableTranscript
+    ? null
+    : new SessionTranscript(spec.agent, runId);
 
   // Emit before_agent_start hook
   const hookRegistry = getHookRegistry();
@@ -78,12 +170,16 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
   // Create LLM client with session ID for sticky key assignment
   let client;
   try {
-    // Use taskId or runId as sessionId for sticky key assignment (prompt caching benefit)
-    const sessionId = spec.context?.taskId ?? runId;
-    client = createResilientClient(spec.model, {
-      sessionId,
-      maxRetries: 3,
-    });
+    if (spec.clientOverride) {
+      client = spec.clientOverride;
+    } else {
+      // Use taskId or runId as sessionId for sticky key assignment (prompt caching benefit)
+      const sessionId = spec.context?.taskId ?? runId;
+      client = createResilientClient(spec.model, {
+        sessionId,
+        maxRetries: 3,
+      });
+    }
   } catch (error) {
     return {
       succeeded: false,
@@ -118,19 +214,18 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
   // Initialize message history — resume from prior session or start fresh
   const messages: LLMMessage[] = [];
   let resumedTurnCount = 0;
-  if (isResume && spec.resumeMessages) {
+  const queryState: QueryState = {
+    phase: isResume ? "resume" : "initial",
+    currentCwd: spec.cwd,
+    continuationCount: 0,
+    turnIndex: 0,
+  };
+  if (spec.initialMessages && spec.initialMessages.length > 0) {
+    messages.push(...spec.initialMessages);
+  } else if (isResume && spec.resumeMessages) {
     messages.push(...spec.resumeMessages);
     resumedTurnCount = Math.floor(spec.resumeMessages.length / 2); // rough estimate
-    // Inject a resume notice so the agent knows it was interrupted
-    messages.push({
-      role: "user",
-      content: [{ type: "text", text:
-        "[System] Your session was interrupted by a process restart. " +
-        "Your full conversation history has been restored. " +
-        "Continue where you left off — orient fast (check state if needed) then keep working. " +
-        "Do NOT restart the task from scratch."
-      }],
-    });
+    queueQueryReminder(queryState, buildResumeReminder());
     console.log(
       `[agent-loop] run=${runId} agent=${spec.agent} RESUMING session ` +
       `with ${spec.resumeMessages.length} prior messages (~${resumedTurnCount} turns)`
@@ -150,7 +245,6 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
   let turns = 0;
   let lastTextOutput = "";
   let stopReason: AgentResult["stopReason"] = "end_turn";
-  let continuationCount = 0;
   let thinkingContent = "";
   
   // Mutable cwd — tracks the agent's "current directory" across tool calls.
@@ -178,6 +272,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       }
 
       turns++;
+      queryState.turnIndex = turns;
       console.debug(
         `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} ` +
         `messages=${messages.length} input_tokens=${usage.inputTokens} output_tokens=${usage.outputTokens}`,
@@ -213,15 +308,26 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       if (spec.getInjectedMessages) {
         const injected = spec.getInjectedMessages();
         for (const msg of injected) {
-          messages.push({
-            role: "user",
-            content: [{ type: "text", text: `[Message from parent agent]: ${msg}` }],
-          });
+          queueQueryReminder(queryState, buildRedirectedReminder(msg));
+          queryState.phase = "redirected";
           console.debug(`[agent-loop] run=${runId} injected message from parent`);
         }
       }
 
+      if (queryState.carryForwardState) {
+        queueQueryReminder(queryState, queryState.carryForwardState);
+        queryState.carryForwardState = undefined;
+      }
+
+      flushPendingReminder(messages, queryState);
+
       // Emit before_llm_call hook
+      await spec.beforeLlmCall?.({
+        turn: turns,
+        messages: [...messages],
+        systemPrompt,
+        currentCwd,
+      });
       const beforeLlmEvent = await hookRegistry.emit({
         hookName: "before_llm_call",
         agentType: spec.agent,
@@ -267,6 +373,11 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       }
 
       // Emit after_llm_call hook
+      await spec.afterLlmCall?.({
+        turn: turns,
+        response,
+        currentCwd,
+      });
       await hookRegistry.emit({
         hookName: "after_llm_call",
         agentType: spec.agent,
@@ -280,6 +391,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       });
 
       // Track usage
+      queryState.lastStopReason = response.stopReason;
       usage.inputTokens += response.usage.inputTokens;
       usage.outputTokens += response.usage.outputTokens;
       usage.cacheReadTokens += response.usage.cacheReadTokens;
@@ -293,24 +405,28 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
         thinkingContent += (thinkingContent ? "\n\n" : "") + response.thinkingContent;
       }
 
+      const responseContent = spec.sanitizeResponseContent
+        ? spec.sanitizeResponseContent(response.content)
+        : response.content;
+
       // Extract tool calls from response for transcript
-      const toolCalls = response.content
+      const toolCalls = responseContent
         .filter((block): block is { type: "tool_use"; id: string; name: string; input: Record<string, unknown> } => block.type === "tool_use")
         .map((block) => ({ name: block.name, input: block.input }));
 
       // Write turn to transcript
-      transcript.writeTurn({
+      transcript?.writeTurn({
         turn: turns,
         timestamp: new Date().toISOString(),
         messages: [...messages], // Snapshot current messages
-        response,
+        response: { ...response, content: responseContent },
         usage,
         toolCalls,
       });
 
       // Progress callback
       if (spec.onProgress) {
-        for (const block of response.content) {
+        for (const block of responseContent) {
           if (block.type === "text") {
             spec.onProgress({ turn: turns, type: "text", text: block.text, usage });
           } else if (block.type === "tool_use") {
@@ -320,14 +436,19 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       }
 
       // Add assistant response to history
-      messages.push({ role: "assistant", content: response.content as LLMMessage["content"] });
+      messages.push({ role: "assistant", content: responseContent as LLMMessage["content"] });
 
       // Extract any text output
-      for (const block of response.content) {
+      for (const block of responseContent) {
         if (block.type === "text" && block.text.trim().length > 0) {
           lastTextOutput = block.text;
         }
       }
+      queryState.carryForwardState = buildCarryForwardState({
+        currentCwd,
+        lastAssistantText: lastTextOutput,
+        toolCalls,
+      }) ?? undefined;
 
       // Check stop reason
       if (response.stopReason === "end_turn" || response.stopReason === "stop") {
@@ -341,17 +462,18 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       if (response.stopReason === "max_tokens") {
         // Model hit output token limit mid-response — ask it to continue
         // rather than silently truncating. Give it 2 continuation attempts.
-        continuationCount++;
-        if (continuationCount <= 2) {
-          console.log(`[agent-loop] max_tokens hit — requesting continuation (attempt ${continuationCount}/2)`);
+        queryState.continuationCount++;
+        queryState.phase = "continuation";
+        if (queryState.continuationCount <= 2) {
+          console.log(`[agent-loop] max_tokens hit — requesting continuation (attempt ${queryState.continuationCount}/2)`);
           console.debug(
-            `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} continue_after=max_tokens attempt=${continuationCount}`,
+            `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} continue_after=max_tokens attempt=${queryState.continuationCount}`,
           );
           // The assistant message was already pushed above. If it contains
           // incomplete tool_use blocks (common when max_tokens truncates mid-
           // tool-call), we must provide tool_result stubs before asking the
           // model to continue, otherwise the API rejects the request.
-          const pendingToolUses = response.content.filter(
+          const pendingToolUses = responseContent.filter(
             (block): block is { type: "tool_use"; id: string; name: string; input: Record<string, unknown> } =>
               block.type === "tool_use"
           );
@@ -359,24 +481,33 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
             const toolResults = pendingToolUses.map((tc) => ({
               type: "tool_result" as const,
               tool_use_id: tc.id,
-              content: "Request was truncated (max_tokens). Please retry this tool call.",
+              content: asClaudeSystemReminder(
+                "The previous response was truncated by the output token limit. Retry this tool call in full if it is still needed."
+              ),
               is_error: true,
             }));
             messages.push({ role: "user", content: toolResults as unknown as LLMMessage["content"] });
+            queueQueryReminder(
+              queryState,
+              asClaudeSystemReminder(
+                "The previous response was truncated while producing tool calls. " +
+                "Re-issue any still-needed tool call completely and only once."
+              ),
+            );
           } else {
-            messages.push({ role: "user", content: [{ type: "text", text: "Continue from where you left off." }] });
+            queueQueryReminder(queryState, buildContinuationReminder(queryState.continuationCount));
           }
           continue;
         }
         // Exhausted continuation attempts — treat as complete
-        console.warn(`[agent-loop] max_tokens hit after ${continuationCount} continuations — treating as end_turn`);
+        console.warn(`[agent-loop] max_tokens hit after ${queryState.continuationCount} continuations — treating as end_turn`);
         stopReason = "end_turn";
         break;
       }
 
       // If we got tool_use, execute them
       if (response.stopReason === "tool_use") {
-        const toolCalls = response.content.filter(
+        const toolCalls = responseContent.filter(
           (block): block is { type: "tool_use"; id: string; name: string; input: Record<string, unknown> } =>
             block.type === "tool_use"
         );
@@ -394,6 +525,13 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
               `tool_start name=${call.name} id=${call.id}`,
             );
             spec.onPhaseChange?.({ phase: 'executing_tool', turn: turns, toolName: call.name, startedAt: Date.now() });
+            await spec.onToolStart?.({
+              turn: turns,
+              toolName: call.name,
+              toolUseId: call.id,
+              input: call.input,
+              currentCwd,
+            });
             // Emit before_tool_call hook
             const beforeToolEvent = await hookRegistry.emit({
               hookName: "before_tool_call",
@@ -431,11 +569,15 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
             }
             
             // Execute the tool
-            const { result, sideEffects } = await executeTool(call.name, call.input, call.id, currentCwd);
+            const toolStartedAt = Date.now();
+            const { result, sideEffects } = spec.toolExecutor
+              ? await spec.toolExecutor(call.name, call.input, call.id, currentCwd, { toolUseId: call.id })
+              : await executeTool(call.name, call.input, call.id, currentCwd);
             
             // Apply side effects (e.g. cwd changes from cd/workdir)
             if (sideEffects?.newCwd) {
               currentCwd = sideEffects.newCwd;
+              queryState.currentCwd = sideEffects.newCwd;
               console.debug(
                 `[agent-loop] run=${runId} agent=${spec.agent} cwd_changed to=${currentCwd}`,
               );
@@ -451,6 +593,16 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
             );
             
             // Emit after_tool_call hook
+            await spec.onToolResult?.({
+              turn: turns,
+              toolName: call.name,
+              toolUseId: call.id,
+              input: call.input,
+              result,
+              sideEffects,
+              durationMs: Date.now() - toolStartedAt,
+              currentCwd,
+            });
             const afterToolEvent = await hookRegistry.emit({
               hookName: "after_tool_call",
               agentType: spec.agent,
@@ -527,8 +679,9 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
             
             messages.push({
               role: "user",
-              content: [{ type: "text", text: warningMsg }],
+              content: [{ type: "text", text: asClaudeSystemReminder(warningMsg) }],
             });
+            queryState.phase = "post_tool";
 
             // Progress callback for the warning
             if (spec.onProgress) {
@@ -548,6 +701,22 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
         messages.push({
           role: "user",
           content: results as unknown as LLMMessage["content"],
+        });
+        queueQueryReminder(queryState, buildPostToolReminder(currentCwd, results));
+        queryState.phase = "post_tool";
+        queryState.continuationCount = 0;
+        queryState.carryForwardState = buildCarryForwardState({
+          currentCwd,
+          lastAssistantText: lastTextOutput,
+          toolCalls,
+          results,
+        }) ?? undefined;
+        await spec.onToolRound?.({
+          turn: turns,
+          assistantContent: responseContent,
+          toolCalls,
+          results,
+          currentCwd,
         });
         console.debug(
           `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} ` +
@@ -582,7 +751,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
     const costUsd = calculateCost(spec.model, usage);
 
     // Write final summary — for interrupted runs this is the resume checkpoint
-    transcript.writeSummary({
+    transcript?.writeSummary({
       type: "summary",
       runId,
       agentType: spec.agent,
@@ -647,7 +816,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
     });
 
     // Write error summary
-    transcript.writeSummary({
+    transcript?.writeSummary({
       type: "summary",
       runId,
       agentType: spec.agent,

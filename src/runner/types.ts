@@ -25,6 +25,62 @@ export interface AgentSpec {
   context?: AgentContext;
   /** Callback for progress updates */
   onProgress?: (update: ProgressUpdate) => void;
+  /** Seed the loop with an explicit message history instead of task-only initialization */
+  initialMessages?: import("./providers.js").LLMMessage[];
+  /** Override the LLM client used by the shared agent loop */
+  clientOverride?: import("./providers.js").LLMClient;
+  /** Sanitize or rewrite assistant content blocks before they are stored back into the loop */
+  sanitizeResponseContent?: (
+    content: import("./providers.js").LLMResponse["content"],
+  ) => import("./providers.js").LLMResponse["content"];
+  /** Override tool execution for session-specific environments such as the main agent */
+  toolExecutor?: (
+    toolName: string,
+    params: Record<string, unknown>,
+    toolUseId: string,
+    cwd: string,
+    context?: { channelId?: string; toolUseId?: string },
+  ) => Promise<ToolExecutionResult>;
+  /** Hook before each model call */
+  beforeLlmCall?: (event: {
+    turn: number;
+    messages: import("./providers.js").LLMMessage[];
+    systemPrompt: string;
+    currentCwd: string;
+  }) => Promise<void> | void;
+  /** Hook after each model call */
+  afterLlmCall?: (event: {
+    turn: number;
+    response: import("./providers.js").LLMResponse;
+    currentCwd: string;
+  }) => Promise<void> | void;
+  /** Hook before each tool execution */
+  onToolStart?: (event: {
+    turn: number;
+    toolName: string;
+    toolUseId: string;
+    input: Record<string, unknown>;
+    currentCwd: string;
+  }) => Promise<void> | void;
+  /** Hook after each tool execution */
+  onToolResult?: (event: {
+    turn: number;
+    toolName: string;
+    toolUseId: string;
+    input: Record<string, unknown>;
+    result: ToolResult;
+    sideEffects?: ToolSideEffects;
+    durationMs: number;
+    currentCwd: string;
+  }) => Promise<void> | void;
+  /** Hook after an assistant tool-use response and its tool-result roundtrip complete */
+  onToolRound?: (event: {
+    turn: number;
+    assistantContent: import("./providers.js").LLMResponse["content"];
+    toolCalls: Array<{ id: string; name: string; input: Record<string, unknown> }>;
+    results: ToolResult[];
+    currentCwd: string;
+  }) => Promise<void> | void;
   /** Extended thinking mode (Anthropic) */
   thinking?: {
     type: "enabled";
@@ -40,6 +96,8 @@ export interface AgentSpec {
   resumeMessages?: import("./providers.js").LLMMessage[];
   /** Override the session/run ID (for transcript file naming) */
   runId?: string;
+  /** Disable JSONL/markdown transcript persistence for host-managed loops like the main agent */
+  disableTranscript?: boolean;
   /**
    * Abort signal for graceful shutdown.
    * When aborted, the agent loop finishes the current turn then writes a

@@ -21,6 +21,10 @@ import { processToolDefinition, processTool } from "./process.js";
 import { humanizeToolDefinition, humanizeTool } from "./humanize.js";
 import { imagineToolDefinition, imagineTool } from "./imagine.js";
 import { htmlToPdfToolDefinition, htmlToPdfTool } from "./html-to-pdf.js";
+import {
+  asClaudeCodeToolDefinition,
+  fromClaudeCodeToolName,
+} from "../../claude-runtime/tool-contracts.js";
 
 export { setDiscordToolDiscord };
 
@@ -37,6 +41,44 @@ export type ToolExecutor = (params: Record<string, unknown>, cwd: string, contex
 interface ToolEntry {
   definition: ToolDefinition | (() => ToolDefinition);
   execute: ToolExecutor;
+}
+
+function formatToolOutput(
+  toolName: string,
+  output: string,
+  sideEffects?: ToolSideEffects,
+): string {
+  const normalized = fromClaudeCodeToolName(toolName);
+
+  if (normalized === "exec") {
+    const lines = ["Bash result:", output.trim()];
+    if (sideEffects?.newCwd) {
+      lines.push(`Working directory now: ${sideEffects.newCwd}`);
+    }
+    return lines.filter((line) => line.length > 0).join("\n\n");
+  }
+
+  if (normalized === "edit") {
+    return output.startsWith("Edit ")
+      ? output
+      : `Edit result:\n${output}`;
+  }
+
+  if (normalized === "read") {
+    return `Read result:\n${output}`;
+  }
+
+  if (normalized === "write") {
+    return output.startsWith("Write ")
+      ? output
+      : `Write result:\n${output}`;
+  }
+
+  if (normalized === "spawn_agent" || normalized === "check_agents" || normalized === "message_agent" || normalized === "stop_agent") {
+    return `Subagent tool result:\n${output}`;
+  }
+
+  return output;
 }
 
 function getDefinition(entry: ToolEntry): ToolDefinition {
@@ -166,7 +208,10 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
 export function getToolDefinitions(tools: ToolName[]): ToolDefinition[] {
   return tools
     .filter((name) => TOOL_REGISTRY[name])
-    .map((name) => getDefinition(TOOL_REGISTRY[name]));
+    .map((name) => {
+      const definition = getDefinition(TOOL_REGISTRY[name]);
+      return asClaudeCodeToolDefinition(definition);
+    });
 }
 
 /**
@@ -179,7 +224,8 @@ export async function executeTool(
   cwd: string,
   context?: ToolContext,
 ): Promise<ToolExecutionResult> {
-  const entry = TOOL_REGISTRY[toolName as ToolName];
+  const internalName = fromClaudeCodeToolName(toolName);
+  const entry = TOOL_REGISTRY[internalName as ToolName];
 
   if (!entry) {
     return {
@@ -204,7 +250,7 @@ export async function executeTool(
       result: {
         tool_use_id: toolUseId,
         type: "tool_result",
-        content: output,
+        content: formatToolOutput(toolName, output, sideEffects),
       },
       sideEffects,
     };

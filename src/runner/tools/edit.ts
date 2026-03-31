@@ -16,14 +16,20 @@ import { resolveToCwd } from "./path-utils.js";
 export const editToolDefinition: ToolDefinition = {
   name: "edit",
   description:
-    "Edit a file by replacing exact text. The old_string must match exactly (including whitespace). " +
-    "Use this for precise, surgical edits.",
+    "Performs exact string replacements in files. You must read the file before editing it. " +
+    "Preserve exact indentation and whitespace exactly as it appears in the file. " +
+    "Use the smallest clearly unique old_string you can, usually only a few adjacent lines. " +
+    "The edit fails if old_string is ambiguous; use more context or replace_all when you intentionally want every instance updated.",
   input_schema: {
     type: "object",
     properties: {
+      file_path: {
+        type: "string",
+        description: "Absolute path to the file to edit",
+      },
       path: {
         type: "string",
-        description: "Path to the file to edit (relative or absolute)",
+        description: "Backward-compatible path field; file_path is preferred",
       },
       old_string: {
         type: "string",
@@ -53,8 +59,12 @@ export const editToolDefinition: ToolDefinition = {
           required: ["old_string", "new_string"],
         },
       },
+      replace_all: {
+        type: "boolean",
+        description: "Replace all occurrences of old_string in the file",
+      },
     },
-    required: ["path"],
+    required: [],
   },
 };
 
@@ -68,6 +78,36 @@ const DIFF_CONTEXT_LINES = 3;
 interface EditPair {
   old_string: string;
   new_string: string;
+  replace_all?: boolean;
+}
+
+function validateEdits(edits: EditPair[]): void {
+  const seen = new Set<string>();
+
+  for (let i = 0; i < edits.length; i++) {
+    const edit = edits[i];
+    const label = edits.length > 1 ? `Edit ${i + 1}` : "Edit";
+
+    if (edit.old_string.length === 0) {
+      throw new Error(`${label} old_string must not be empty`);
+    }
+
+    const key = `${edit.old_string}\u0000${edit.new_string}\u0000${edit.replace_all === true}`;
+    if (seen.has(key)) {
+      throw new Error(`${label} duplicates an earlier edit in the same batch`);
+    }
+    seen.add(key);
+
+    for (let j = 0; j < i; j++) {
+      const prior = edits[j];
+      if (edit.old_string.includes(prior.new_string) || prior.new_string.includes(edit.old_string)) {
+        throw new Error(
+          `${label} overlaps with an earlier edit in a way that is likely brittle. ` +
+          "Split the edits into separate calls or use more specific old_string values.",
+        );
+      }
+    }
+  }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -174,7 +214,7 @@ function applySingleEdit(
       return {
         updated: content,
         diff: "",
-        summary: `The new text already exists in ${filePath} (edit may have already been applied)`,
+        summary: `Idempotent edit: the requested new text already exists in ${filePath}`,
       };
     }
     // Try fuzzy matching to provide a helpful suggestion
@@ -212,13 +252,34 @@ function applySingleEdit(
   return { updated, diff, summary };
 }
 
+function applyReplaceAllEdit(
+  filePath: string,
+  content: string,
+  oldText: string,
+  newText: string,
+): { updated: string; diff: string; summary: string } {
+  if (!content.includes(oldText)) {
+    throw new Error(
+      `Could not find the specified text in ${filePath}. ` +
+      `The old_string must match exactly, including whitespace and indentation.`,
+    );
+  }
+
+  const firstIndex = content.indexOf(oldText);
+  const occurrences = content.split(oldText).length - 1;
+  const updated = content.split(oldText).join(newText);
+  const diff = generateDiff(filePath, content, oldText, newText, firstIndex);
+  const summary = `Replace-all edit: replaced ${occurrences} occurrence${occurrences === 1 ? "" : "s"} in ${filePath}`;
+  return { updated, diff, summary };
+}
+
 // ── Tool Implementation ──────────────────────────────────────────────────────
 
 export async function editTool(
   params: Record<string, unknown>,
   cwd: string,
 ): Promise<string> {
-  const filePath = params.path as string;
+  const filePath = (params.path as string) ?? (params.file_path as string);
   if (!filePath) throw new Error("path is required");
 
   const resolved = resolveToCwd(filePath, cwd);
@@ -244,14 +305,17 @@ export async function editTool(
     // Single edit mode
     const oldText = params.old_string as string;
     const newText = params.new_string as string;
+    const replaceAll = params.replace_all === true;
     if (oldText === undefined || oldText === null) {
       throw new Error("old_string is required (or use edits[] for multiple edits)");
     }
     if (newText === undefined || newText === null) {
       throw new Error("new_string is required");
     }
-    edits.push({ old_string: oldText, new_string: newText });
+    edits.push({ old_string: oldText, new_string: newText, replace_all: replaceAll });
   }
+
+  validateEdits(edits);
 
   let content = readFileSync(resolved, "utf-8");
   const results: string[] = [];
@@ -264,12 +328,9 @@ export async function editTool(
     const label = isBatch ? `Edit ${i + 1}/${edits.length}: ` : "";
 
     try {
-      const { updated, diff, summary } = applySingleEdit(
-        filePath,
-        content,
-        edit.old_string,
-        edit.new_string,
-      );
+      const { updated, diff, summary } = edit.replace_all
+        ? applyReplaceAllEdit(filePath, content, edit.old_string, edit.new_string)
+        : applySingleEdit(filePath, content, edit.old_string, edit.new_string);
       content = updated;
 
       if (diff) {
@@ -290,7 +351,7 @@ export async function editTool(
       const msg = err instanceof Error ? err.message : String(err);
       results.push(`${label}FAILED — ${msg}`);
       results.push(`\n${appliedCount}/${edits.length} edits applied before failure. File has been partially updated.`);
-      return `Edited ${filePath}\n\n${results.join("\n\n")}`;
+      return `Edit applied: ${filePath}\n\n${results.join("\n\n")}`;
     }
   }
 
@@ -300,8 +361,8 @@ export async function editTool(
   }
 
   if (edits.length === 1) {
-    return `Edited ${filePath} (${results[0]})`;
+    return `Edit applied: ${filePath}\n\n${results[0]}`;
   }
 
-  return `Edited ${filePath} (${appliedCount} edits applied)\n\n${results.join("\n\n")}`;
+  return `Edit applied: ${filePath}\nSummary: ${appliedCount}/${edits.length} edits applied\n\n${results.join("\n\n")}`;
 }

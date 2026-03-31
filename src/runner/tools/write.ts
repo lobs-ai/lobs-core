@@ -16,21 +16,25 @@ import { resolveToCwd } from "./path-utils.js";
 export const writeToolDefinition: ToolDefinition = {
   name: "write",
   description:
-    "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. " +
-    "Automatically creates parent directories.",
+    "Writes a file to the local filesystem. This overwrites the target file if it already exists. " +
+    "Prefer Edit for modifying existing files; use Write for new files, generated files, or full rewrites where replacing the whole file is intentional.",
   input_schema: {
     type: "object",
     properties: {
+      file_path: {
+        type: "string",
+        description: "Absolute path to the file to write",
+      },
       path: {
         type: "string",
-        description: "Path to the file to write (relative or absolute)",
+        description: "Backward-compatible path field; file_path is preferred",
       },
       content: {
         type: "string",
         description: "Content to write to the file",
       },
     },
-    required: ["path", "content"],
+    required: ["content"],
   },
 };
 
@@ -40,7 +44,7 @@ export async function writeTool(
   params: Record<string, unknown>,
   cwd: string,
 ): Promise<string> {
-  const filePath = params.path as string;
+  const filePath = (params.path as string) ?? (params.file_path as string);
   if (!filePath) throw new Error("path is required");
 
   const content = params.content as string;
@@ -59,5 +63,5 @@ export async function writeTool(
   await writeFile(resolved, content, "utf-8");
 
   const bytes = Buffer.byteLength(content);
-  return `Successfully wrote ${bytes} bytes to ${filePath}`;
+  return `Write applied: ${filePath}\nBytes written: ${bytes}`;
 }

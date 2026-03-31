@@ -15,8 +15,8 @@ import { resolveToCwd } from "./path-utils.js";
 export const grepToolDefinition: ToolDefinition = {
   name: "grep",
   description:
-    "Search file contents using ripgrep. Fast, respects .gitignore. " +
-    "Use for finding code patterns, function definitions, etc.",
+    "A ripgrep-powered search tool for file contents. Use this for search tasks instead of invoking grep or rg through Bash. " +
+    "Supports regex patterns, optional glob filters, multiline mode, and output modes for content, files_with_matches, or count.",
   input_schema: {
     type: "object",
     properties: {
@@ -24,13 +24,26 @@ export const grepToolDefinition: ToolDefinition = {
         type: "string",
         description: "Regex pattern to search for",
       },
+      glob: {
+        type: "string",
+        description: "Optional file glob filter such as '*.ts' or 'src/**/*.tsx'",
+      },
       path: {
         type: "string",
         description: "File or directory to search (default: current directory)",
       },
       include: {
         type: "string",
-        description: "File glob pattern to include (e.g. '*.ts')",
+        description: "Backward-compatible glob filter field",
+      },
+      output_mode: {
+        type: "string",
+        enum: ["content", "files_with_matches", "count"],
+        description: "Return matching lines, only files with matches, or counts",
+      },
+      multiline: {
+        type: "boolean",
+        description: "Enable cross-line matching",
       },
     },
     required: ["pattern"],
@@ -64,7 +77,9 @@ export async function grepTool(
 
   const searchPath = (params.path as string) || ".";
   const resolved = resolveToCwd(searchPath, cwd);
-  const include = params.include as string | undefined;
+  const include = (params.include as string | undefined) ?? (params.glob as string | undefined);
+  const outputMode = typeof params.output_mode === "string" ? params.output_mode : "content";
+  const multiline = params.multiline === true;
 
   const hasRg = await commandExists("rg");
 
@@ -74,6 +89,14 @@ export async function grepTool(
   if (hasRg) {
     cmd = "rg";
     args = ["-n", "--color=never", "--no-heading"];
+    if (multiline) {
+      args.push("--multiline");
+    }
+    if (outputMode === "files_with_matches") {
+      args.push("--files-with-matches");
+    } else if (outputMode === "count") {
+      args.push("--count");
+    }
     if (include) {
       args.push("--glob", include);
     }
@@ -137,6 +160,11 @@ export async function grepTool(
       const result = output.trim();
       if (!result) {
         resolvePromise("No matches found.");
+        return;
+      }
+
+      if (outputMode === "files_with_matches" || outputMode === "count") {
+        resolvePromise(capOutput(result));
         return;
       }
 

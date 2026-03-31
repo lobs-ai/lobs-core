@@ -106,6 +106,23 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("/my/special/dir");
   });
 
+  it("includes the Claude-style system and runtime context", () => {
+    const prompt = buildSystemPrompt(makeSpec());
+    expect(prompt).toContain("# System");
+    expect(prompt).toContain("# Task Execution");
+    expect(prompt).toMatch(/Use tools (aggressively for verification|to inspect reality) instead of guessing/);
+    expect(prompt).toContain("# Runtime Context");
+    expect(prompt).toContain("Enabled tools: exec, read, write");
+  });
+
+  it("includes an available tools section for enabled tools", () => {
+    const prompt = buildSystemPrompt(makeSpec());
+    expect(prompt).toContain("# Available Tools");
+    expect(prompt).toContain("Bash:");
+    expect(prompt).toContain("Read:");
+    expect(prompt).toContain("Write:");
+  });
+
   it("includes today's date", () => {
     const today = new Date().toISOString().split("T")[0];
     const prompt = buildSystemPrompt(makeSpec());
@@ -250,6 +267,13 @@ describe("buildSmartSystemPrompt", () => {
     const today = new Date().toISOString().split("T")[0];
     const { systemPrompt } = await buildSmartSystemPrompt(makeSpec());
     expect(systemPrompt).toContain(today);
+  });
+
+  it("includes the Claude-style sections in the smart prompt", async () => {
+    const { systemPrompt } = await buildSmartSystemPrompt(makeSpec());
+    expect(systemPrompt).toContain("# System");
+    expect(systemPrompt).toContain("# Available Tools");
+    expect(systemPrompt).toContain("Enabled tools: exec, read, write");
   });
 
   it("injects recent history when available", async () => {

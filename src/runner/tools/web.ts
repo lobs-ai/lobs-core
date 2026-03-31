@@ -11,14 +11,17 @@ import type { ToolDefinition } from "../types.js";
 export const webSearchToolDefinition: ToolDefinition = {
   name: "web_search",
   description:
-    "Search the web using Brave Search API. Returns titles, URLs, and snippets. " +
-    "Supports region-specific and localized search via country and language parameters.",
+    "Search the web and return titles, URLs, and snippets. Use this when you need current or external information instead of local repo context.",
   input_schema: {
     type: "object",
     properties: {
-      query: {
+      q: {
         type: "string",
         description: "Search query string",
+      },
+      query: {
+        type: "string",
+        description: "Backward-compatible query field; q is preferred",
       },
       count: {
         type: "number",
@@ -33,14 +36,14 @@ export const webSearchToolDefinition: ToolDefinition = {
         description: "Filter by time: 'day', 'week', 'month', or 'year'",
       },
     },
-    required: ["query"],
+    required: [],
   },
 };
 
 export async function webSearchTool(
   params: Record<string, unknown>,
 ): Promise<string> {
-  const query = params.query as string;
+  const query = (params.query as string) ?? (params.q as string);
   if (!query || typeof query !== "string") {
     throw new Error("query is required and must be a string");
   }
@@ -79,28 +82,31 @@ export async function webSearchTool(
 export const webFetchToolDefinition: ToolDefinition = {
   name: "web_fetch",
   description:
-    "Fetch and extract readable content from a URL. Returns clean text from web pages, " +
-    "including JS-rendered content. Use for reading articles, docs, and web pages.",
+    "Fetch and extract readable content from a URL, including rendered web pages. Use this to read articles, documentation, or specific pages after you already know the URL.",
   input_schema: {
     type: "object",
     properties: {
-      url: {
+      href: {
         type: "string",
         description: "HTTP or HTTPS URL to fetch",
+      },
+      url: {
+        type: "string",
+        description: "Backward-compatible URL field; href is preferred",
       },
       maxChars: {
         type: "number",
         description: "Maximum characters to return (default 6000)",
       },
     },
-    required: ["url"],
+    required: [],
   },
 };
 
 export async function webFetchTool(
   params: Record<string, unknown>,
 ): Promise<string> {
-  const url = params.url as string;
+  const url = (params.url as string) ?? (params.href as string);
   if (!url || typeof url !== "string") {
     throw new Error("url is required and must be a string");
   }

@@ -14,20 +14,24 @@ import { resolveToCwd } from "./path-utils.js";
 export const globToolDefinition: ToolDefinition = {
   name: "glob",
   description:
-    "Find files by glob pattern. Returns matching file paths, one per line.",
+    "Fast file pattern matching across the codebase. Use this when you need to find files by name or path patterns such as '**/*.ts' or 'src/**/*.tsx'.",
   input_schema: {
     type: "object",
     properties: {
+      glob: {
+        type: "string",
+        description: "Glob pattern to match",
+      },
       pattern: {
         type: "string",
-        description: "Glob pattern to match (e.g. 'src/**/*.ts')",
+        description: "Backward-compatible glob pattern field; glob is preferred",
       },
       path: {
         type: "string",
         description: "Base directory for search (default: current directory)",
       },
     },
-    required: ["pattern"],
+    required: [],
   },
 };
 
@@ -50,7 +54,7 @@ export async function globTool(
   params: Record<string, unknown>,
   cwd: string,
 ): Promise<string> {
-  const pattern = params.pattern as string;
+  const pattern = (params.pattern as string) ?? (params.glob as string);
   if (!pattern) throw new Error("pattern is required");
 
   const basePath = (params.path as string) || ".";

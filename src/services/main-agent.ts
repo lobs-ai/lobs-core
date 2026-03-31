@@ -8,7 +8,7 @@
 
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { parseModelString, createResilientClient } from "../runner/providers.js";
+import { createResilientClient } from "../runner/providers.js";
 import type { LLMMessage, LLMClient } from "../runner/providers.js";
 import { getModelConfig } from "../config/models.js";
 import { getToolDefinitions, executeTool } from "../runner/tools/index.js";
@@ -19,8 +19,8 @@ import { buildFallbackChain, resolveModelForTier, type ModelTier } from "../orch
 import Database from "better-sqlite3";
 import Anthropic from "@anthropic-ai/sdk";
 import { compactMessages, findSafeSplitPoint, calculateContextSize } from "./compaction.js";
-import { LoopDetector } from "../runner/loop-detector.js";
 import { getEventRecorder } from "../memory/event-recorder.js";
+import { runAgent } from "../runner/agent-loop.js";
 
 const MAX_HISTORY = 50;
 const MAX_CONTEXT_CHARS = 150_000; // Rough char budget for history
@@ -36,9 +36,6 @@ const CHANNEL_PROGRESS_HEARTBEAT_MS = 15_000;
 const REPLY_HANDLER_TIMEOUT_MS = 15_000;
 const PROGRESS_HANDLER_TIMEOUT_MS = 15_000;
 const TYPING_HANDLER_TIMEOUT_MS = 5_000;
-
-/** Tools that mutate state and must run sequentially (not parallelizable) */
-const SEQUENTIAL_TOOLS = new Set(["exec", "process", "write", "edit", "memory_write", "spawn_agent"]);
 
 function stripThinkBlocks(text: string): string {
   return text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
@@ -1258,308 +1255,199 @@ export class MainAgent {
         }
       }
 
-      const tools = getToolDefinitions(availableTools);
       console.log(`[main-agent] Using model: ${effectiveModel} (raw: ${this.model}, override: ${sessionRow?.model_override ?? 'none'})`);
-      const config = parseModelString(effectiveModel);
       const fallbackModels = ["micro", "small", "medium", "standard", "strong"].includes(this.model)
         ? buildFallbackChain(effectiveModel, this.model as ModelTier, "main").slice(1)
         : [];
-      const client: LLMClient = createResilientClient(effectiveModel, {
-        sessionId: `main-agent:${replyChannelId}`,
-        fallbackModels,
-        maxRetries: 3,
-      });
+      const client: LLMClient = {
+        createMessage: (params) => {
+          const baseClient: LLMClient = {
+            createMessage: (innerParams) => {
+              const realClient = createResilientClient(effectiveModel, {
+                sessionId: `main-agent:${replyChannelId}`,
+                fallbackModels,
+                maxRetries: 3,
+              });
+              return realClient.createMessage(innerParams);
+            },
+          };
+          return this.createMessageWithTimeout(baseClient, params, replyChannelId);
+        },
+      };
       let loopIteration = 0;
+      messages = this.normalizeToolProtocolMessages(messages);
+      messages = this.mergeConsecutiveRoles(messages);
+      messages = this.emergencyRepairToolPairs(messages);
 
-      // Agent loop — LLM ↔ tool execution (no turn limit, timeout handles runaway)
-      while (true) {
-        loopIteration++;
-        await this.emitTyping(replyChannelId).catch(() => {});
-        console.debug(
-          `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
-          `history=${messages.length} queued=${this.getChannelQueueDepth(replyChannelId)} tools=${tools.length}`,
-        );
-
-        // Emit SSE event: thinking (about to call LLM)
-        this.events.emit("stream", {
-          type: "thinking",
-          channelId: replyChannelId,
-          timestamp: Date.now(),
-        } satisfies AgentStreamEvent);
-
-        // Compact if approaching context limit — no pre-pruning, let the compactor
-        // see full tool results so it can produce high-quality summaries
-        messages = await this.compactIfNeeded(messages, replyChannelId);
-        const contextChars = messages.reduce((s, m) =>
-          s + (typeof m.content === "string" ? m.content.length : JSON.stringify(m.content).length), 0);
-        const systemChars = fullSystem.length;
-        console.debug(
-          `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
-          `calling_llm model=${config.modelId} msgs=${messages.length} ctx=${contextChars} sys=${systemChars} total_chars=${contextChars + systemChars}`,
-        );
-
-        // Ensure messages end with user role (models like Opus 4.6 reject assistant prefill)
-        if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-          console.warn(`[main-agent] Messages end with assistant — appending synthetic user continue message`);
-          messages.push({
-            role: "user",
-            content: "[System: continue from where you left off]",
-          });
-        }
-
-        // Final preflight after compaction/merge/synthetic messages. These later
-        // transformations can otherwise reintroduce invalid tool ordering.
-        messages = this.normalizeToolProtocolMessages(messages);
-        messages = this.mergeConsecutiveRoles(messages);
+      const validation = this.validateMessages(messages);
+      if (validation) {
+        console.error(`[main-agent] Message validation failed for ${replyChannelId.slice(0, 12)}: ${validation}`);
         messages = this.emergencyRepairToolPairs(messages);
+      }
 
-        // Validate message structure before sending to API
-        const validation = this.validateMessages(messages);
-        if (validation) {
-          console.error(`[main-agent] Message validation failed for ${replyChannelId.slice(0, 12)}: ${validation}`);
-          // Log the roles sequence for debugging
-          console.error(`[main-agent] Roles sequence: ${messages.map(m => m.role).join(', ')}`);
-          // Log content types for tool_result detection
-          for (let vi = 0; vi < messages.length; vi++) {
-            const m = messages[vi];
-            if (typeof m.content !== 'string') {
-              console.error(`[main-agent] msg[${vi}] role=${m.role} content_type=array blocks=${Array.isArray(m.content) ? m.content.map((b: any) => b.type).join(',') : typeof m.content}`);
-            }
-          }
-
-          // Emergency repair: strip any orphaned tool_result blocks to avoid 400 errors
-          messages = this.emergencyRepairToolPairs(messages);
-          const revalidation = this.validateMessages(messages);
-          if (revalidation) {
-            console.error(`[main-agent] Emergency repair failed, still invalid: ${revalidation}`);
-          } else {
-            console.warn(`[main-agent] Emergency repair succeeded for ${replyChannelId.slice(0, 12)}`);
-          }
-        }
-
-        // Sanitize: Anthropic API rejects tool_result with is_error=true and empty content
-        for (const m of messages) {
-          if (m.role === "user" && Array.isArray(m.content)) {
-            for (const block of m.content as Array<Record<string, unknown>>) {
-              if (block.type === "tool_result" && block.is_error && !block.content) {
-                block.content = "Tool error (no output)";
-              }
+      for (const m of messages) {
+        if (m.role === "user" && Array.isArray(m.content)) {
+          for (const block of m.content as Array<Record<string, unknown>>) {
+            if (block.type === "tool_result" && block.is_error && !block.content) {
+              block.content = "Tool error (no output)";
             }
           }
         }
+      }
 
-        const response = await this.createMessageWithTimeout(client, {
-          model: config.modelId,
-          system: fullSystem,
-          messages,
-          tools,
-          maxTokens: 16384,
-        }, replyChannelId);
-        if (!this.isActiveChannelRun(replyChannelId, runId)) {
-          console.warn(`[main-agent] Discarding stale LLM response for ${this.channelTag(replyChannelId)} run=${runId}`);
-          return;
-        }
-        this.noteChannelProgress(replyChannelId);
-        console.debug(
-          `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
-          `llm_response blocks=${response.content.length} stop=${response.stopReason}`,
-        );
-
-        const sanitizedContent = sanitizeAssistantBlocks(response.content as Array<
+      const isNexusChannel = replyChannelId.startsWith("nexus:");
+      const result = await runAgent({
+        task: typeof messages[messages.length - 1]?.content === "string"
+          ? String(messages[messages.length - 1]?.content)
+          : "Continue the conversation",
+        agent: "main",
+        systemPrompt: fullSystem,
+        model: effectiveModel,
+        tools: availableTools as ToolName[],
+        cwd: this.cwd,
+        timeout: Math.ceil(LLM_TURN_TIMEOUT_MS / 1000) * 4,
+        maxTurns: 50,
+        disableTranscript: true,
+        initialMessages: messages,
+        clientOverride: client,
+        sanitizeResponseContent: (content) => sanitizeAssistantBlocks(content as Array<
           | { type: "text"; text: string }
           | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
-        >);
-
-        let textResponse = "";
-        let hasToolUse = false;
-        const toolResults: Array<{
-          type: "tool_result";
-          tool_use_id: string;
-          content: string;
-          is_error?: boolean;
-        }> = [];
-
-        // Separate text blocks from tool_use blocks
-        const toolUseBlocks: Array<{ type: "tool_use"; id: string; name: string; input: Record<string, unknown> }> = [];
-        for (const block of sanitizedContent) {
-          if (block.type === "text") {
-            textResponse += block.text;
-          } else if (block.type === "tool_use") {
-            hasToolUse = true;
-            toolUseBlocks.push(block as typeof toolUseBlocks[0]);
+        >),
+        beforeLlmCall: async ({ turn, messages: runtimeMessages }) => {
+          loopIteration = turn;
+          await this.emitTyping(replyChannelId).catch(() => {});
+          this.events.emit("stream", {
+            type: "thinking",
+            channelId: replyChannelId,
+            timestamp: Date.now(),
+          } satisfies AgentStreamEvent);
+          const contextChars = runtimeMessages.reduce((s, m) =>
+            s + (typeof m.content === "string" ? m.content.length : JSON.stringify(m.content).length), 0);
+          console.debug(
+            `[main-agent.loop] channel=${replyChannelId} iter=${turn} ` +
+            `calling_shared_loop msgs=${runtimeMessages.length} ctx=${contextChars} sys=${fullSystem.length}`,
+          );
+        },
+        afterLlmCall: async ({ turn, response }) => {
+          if (!this.isActiveChannelRun(replyChannelId, runId)) {
+            throw new Error(`Channel paused: stale response for ${replyChannelId}`);
           }
-        }
-
-        // Execute tool calls — parallel when safe, sequential when side effects possible
-        // Read-only tools (read, grep, glob, ls, web_search, web_fetch, memory_search, memory_read) can run in parallel
-        const isNexusChannel = replyChannelId.startsWith("nexus:");
-
-        if (toolUseBlocks.length > 0) {
-          // Emit all tool_start events upfront
-          for (const block of toolUseBlocks) {
-            const inputPreview = JSON.stringify(block.input).substring(0, 300);
-            console.debug(
-              `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
-              `tool_start name=${block.name} id=${block.id}`,
+          this.noteChannelProgress(replyChannelId);
+          console.debug(
+            `[main-agent.loop] channel=${replyChannelId} iter=${turn} ` +
+            `llm_response blocks=${response.content.length} stop=${response.stopReason}`,
+          );
+        },
+        getInjectedMessages: () => {
+          const midLoopQueued = this.drainQueue(replyChannelId, true);
+          if (!midLoopQueued) return [];
+          this.db
+            .prepare(
+              `INSERT INTO main_agent_messages
+                 (id, role, content, channel_id, token_estimate)
+               VALUES (?, 'user', ?, ?, ?)`,
+            )
+            .run(
+              randomUUID(),
+              `[New messages received during processing]\n\n${midLoopQueued}`,
+              replyChannelId,
+              Math.ceil(midLoopQueued.length / 4),
             );
-            if (this.shouldShowSteps(replyChannelId) && !isNexusChannel) {
-              const discordMode = this.getDiscordToolsMode(replyChannelId);
-              if (discordMode === "on") {
-                await this.batchDiscordToolStep(
-                  replyChannelId,
-                  `🔧 \`${block.name}\` ${inputPreview.substring(0, 150)}${inputPreview.length >= 150 ? "..." : ""}`,
-                );
-              } else if (discordMode === "compact") {
-                await this.batchDiscordToolStep(
-                  replyChannelId,
-                  `\`${block.name}\``,
-                );
-              }
+          this.noteChannelProgress(replyChannelId);
+          return [`[New messages received during processing]\n\n${midLoopQueued}`];
+        },
+        toolExecutor: async (toolName, params, toolUseId, cwd) => {
+          const channelExecutor = this.channelToolExecutors.get(replyChannelId);
+          const overrideResult = channelExecutor
+            ? await channelExecutor(toolName, params, toolUseId)
+            : null;
+          return overrideResult ?? executeTool(toolName, params, toolUseId, cwd, { channelId: replyChannelId });
+        },
+        onToolStart: async ({ toolName, toolUseId, input }) => {
+          const inputPreview = JSON.stringify(input).substring(0, 300);
+          console.debug(
+            `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} tool_start name=${toolName} id=${toolUseId}`,
+          );
+          if (this.shouldShowSteps(replyChannelId) && !isNexusChannel) {
+            const discordMode = this.getDiscordToolsMode(replyChannelId);
+            if (discordMode === "on") {
+              await this.batchDiscordToolStep(
+                replyChannelId,
+                `🔧 \`${toolName}\` ${inputPreview.substring(0, 150)}${inputPreview.length >= 150 ? "..." : ""}`,
+              );
+            } else if (discordMode === "compact") {
+              await this.batchDiscordToolStep(replyChannelId, `\`${toolName}\``);
             }
-            this.events.emit("stream", {
-              type: "tool_start",
-              channelId: replyChannelId,
-              toolName: block.name,
-              toolInput: inputPreview,
-              toolUseId: block.id,
-              timestamp: Date.now(),
-            } satisfies AgentStreamEvent);
           }
-
-          // Determine if we can parallelize: only if ALL tools in this batch are read-only
-          const allReadOnly = toolUseBlocks.every(b => !SEQUENTIAL_TOOLS.has(b.name));
-
-          const executeOneBlock = async (block: typeof toolUseBlocks[0]) => {
-            const toolStartedAt = Date.now();
-            
-            // Check for channel-specific tool executor (e.g. vim-ws delegates file tools to client)
-            let execResult: import("../runner/types.js").ToolExecutionResult;
-            const channelExecutor = this.channelToolExecutors.get(replyChannelId);
-            const overrideResult = channelExecutor 
-              ? await channelExecutor(block.name, block.input as Record<string, unknown>, block.id)
-              : null;
-            
-            if (overrideResult) {
-              execResult = overrideResult;
-            } else {
-              execResult = await executeTool(
-                block.name,
-                block.input as Record<string, unknown>,
-                block.id,
-                this.cwd,
-                { channelId: replyChannelId },
+          this.events.emit("stream", {
+            type: "tool_start",
+            channelId: replyChannelId,
+            toolName,
+            toolInput: inputPreview,
+            toolUseId,
+            timestamp: Date.now(),
+          } satisfies AgentStreamEvent);
+        },
+        onToolResult: async ({ toolName, toolUseId, input, result, sideEffects, durationMs, currentCwd }) => {
+          if (sideEffects?.newCwd) {
+            this.cwd = sideEffects.newCwd;
+            console.debug(`[main-agent.loop] cwd_changed to=${this.cwd}`);
+          } else {
+            this.cwd = currentCwd;
+          }
+          const resultContent = this.truncateLiveToolResult(
+            typeof result.content === "string" ? result.content : JSON.stringify(result.content),
+          );
+          if (this.shouldShowSteps(replyChannelId) && !isNexusChannel) {
+            const discordMode = this.getDiscordToolsMode(replyChannelId);
+            if (discordMode === "on") {
+              const shortResult = resultContent.substring(0, 120);
+              await this.batchDiscordToolStep(
+                replyChannelId,
+                `  ${result.is_error ? "❌" : "✓"} ${shortResult}${resultContent.length > 120 ? "..." : ""}`,
               );
             }
-            const { result, sideEffects } = execResult;
-            if (sideEffects?.newCwd) {
-              this.cwd = sideEffects.newCwd;
-              console.debug(`[main-agent.loop] cwd_changed to=${this.cwd}`);
-            }
-            const resultContent = this.truncateLiveToolResult(
-              typeof result.content === "string"
-                ? result.content
-                : JSON.stringify(result.content),
-            );
-            console.debug(
-              `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
-              `tool_done name=${block.name} id=${block.id} error=${Boolean(result.is_error)} ` +
-              `result_len=${resultContent.length} duration_ms=${Date.now() - toolStartedAt}`,
-            );
-            // Discord result line (on mode only)
-            if (this.shouldShowSteps(replyChannelId) && !isNexusChannel) {
-              const discordMode = this.getDiscordToolsMode(replyChannelId);
-              if (discordMode === "on") {
-                const shortResult = resultContent.substring(0, 120);
-                await this.batchDiscordToolStep(
-                  replyChannelId,
-                  `  ${result.is_error ? "❌" : "✓"} ${shortResult}${resultContent.length > 120 ? "..." : ""}`,
-                );
-              }
-            }
-            this.events.emit("stream", {
-              type: "tool_result",
-              channelId: replyChannelId,
-              toolName: block.name,
-              toolUseId: block.id,
-              result: resultContent.substring(0, 2000),
-              isError: result.is_error,
-              timestamp: Date.now(),
-            } satisfies AgentStreamEvent);
-
-            // Record to structured memory (fire-and-forget, never throws)
-            try {
-              const recorder = getEventRecorder();
-              const isMutating = ["write", "edit", "memory_write"].includes(block.name)
-                || (block.name === "exec" && !/^\s*(ls|pwd|cat|echo|which|type|find|grep|wc|head|tail)\b/.test(String(block.input?.command ?? "")));
-              recorder.recordEvent({
-                agentId: "main-agent",
-                agentType: "main",
-                sessionId,
-                eventType: isMutating ? "action" : "tool_result",
-                content: `${block.name}: ${resultContent.substring(0, 300)}`,
-                metadata: {
-                  tool: block.name,
-                  isError: result.is_error,
-                  outputLength: resultContent.length,
-                  durationMs: Date.now() - toolStartedAt,
-                  ...(block.name === "exec" && block.input?.command ? { command: String(block.input.command).substring(0, 200) } : {}),
-                  ...((["read", "write", "edit", "ls"].includes(block.name) && block.input?.path) ? { path: String(block.input.path) } : {}),
-                },
-                scope: "session",
-              });
-            } catch (e) { console.warn(`[structured-memory] Failed to record tool event: ${e}`); }
-
-            return {
-              type: "tool_result" as const,
-              tool_use_id: result.tool_use_id,
-              content: (result.is_error && !resultContent) ? "Tool error (no output)" : resultContent,
-              is_error: result.is_error,
-            };
-          };
-
-          if (allReadOnly && toolUseBlocks.length > 1) {
-            // Parallel execution for read-only tools
-            console.debug(
-              `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
-              `parallel_tools count=${toolUseBlocks.length} tools=${toolUseBlocks.map(b => b.name).join(",")}`,
-            );
-            const results = await Promise.all(toolUseBlocks.map(executeOneBlock));
-            toolResults.push(...results);
-          } else {
-            // Sequential execution when any tool has side effects
-            for (const block of toolUseBlocks) {
-              const result = await executeOneBlock(block);
-              toolResults.push(result);
-            }
           }
-        }
-
-        // Append assistant turn
-        messages.push({ role: "assistant", content: sanitizedContent });
-
-        if (hasToolUse) {
-          console.debug(
-            `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
-            `tool_roundtrip count=${toolResults.length} continuing=true`,
-          );
-          // Store tool call summary in DB for continuity across restarts.
-          // IMPORTANT: Store the tool CALL (name + input), not the tool RESULT.
-          // Storing results here caused the model to see its own messages containing
-          // tool output as plain text, which degraded tool-calling behavior in long
-          // conversations — the model would start outputting tool calls as text instead
-          // of using structured tool_use blocks.
-          const toolSummary = toolUseBlocks.map((block) => {
-            const inputStr = JSON.stringify(block.input);
-            const inputPreview = inputStr.length > 300
-              ? inputStr.slice(0, 300) + "..."
-              : inputStr;
-            return `[${block.name}] ${inputPreview}`;
-          }).join("\n");
-
-          // Also include any text the model said alongside the tool calls
-          const assistantText = textResponse?.trim();
-
-          // Record agent intermediate reasoning to structured memory
+          this.events.emit("stream", {
+            type: "tool_result",
+            channelId: replyChannelId,
+            toolName,
+            toolUseId,
+            result: resultContent.substring(0, 2000),
+            isError: result.is_error,
+            timestamp: Date.now(),
+          } satisfies AgentStreamEvent);
+          try {
+            const recorder = getEventRecorder();
+            const isMutating = ["write", "edit", "memory_write"].includes(toolName)
+              || (toolName === "exec" && !/^\s*(ls|pwd|cat|echo|which|type|find|grep|wc|head|tail)\b/.test(String(input?.command ?? input?.cmd ?? "")));
+            recorder.recordEvent({
+              agentId: "main-agent",
+              agentType: "main",
+              sessionId,
+              eventType: isMutating ? "action" : "tool_result",
+              content: `${toolName}: ${resultContent.substring(0, 300)}`,
+              metadata: {
+                tool: toolName,
+                isError: result.is_error,
+                outputLength: resultContent.length,
+                durationMs,
+                ...(toolName === "exec" && (input?.command || input?.cmd) ? { command: String(input.command ?? input.cmd).substring(0, 200) } : {}),
+                ...((["read", "write", "edit", "ls"].includes(toolName) && (input?.path || input?.file_path)) ? { path: String(input.path ?? input.file_path) } : {}),
+              },
+              scope: "session",
+            });
+          } catch (e) {
+            console.warn(`[structured-memory] Failed to record tool event: ${e}`);
+          }
+        },
+        onToolRound: async ({ assistantContent, toolCalls, results }) => {
+          const assistantText = assistantContent
+            .filter((block): block is { type: "text"; text: string } => block.type === "text")
+            .map((block) => block.text)
+            .join("\n")
+            .trim();
           if (assistantText) {
             try {
               const recorder = getEventRecorder();
@@ -1569,29 +1457,23 @@ export class MainAgent {
                 sessionId,
                 eventType: "observation",
                 content: assistantText.substring(0, 1000),
-                metadata: {
-                  type: "agent_reasoning",
-                  iteration: loopIteration,
-                },
+                metadata: { type: "agent_reasoning", iteration: loopIteration },
                 scope: "session",
               });
-            } catch (e) { console.warn(`[structured-memory] Failed to record agent reasoning: ${e}`); }
+            } catch (e) {
+              console.warn(`[structured-memory] Failed to record agent reasoning: ${e}`);
+            }
           }
+
+          const toolSummary = toolCalls.map((block) => {
+            const inputStr = JSON.stringify(block.input);
+            const inputPreview = inputStr.length > 300 ? inputStr.slice(0, 300) + "..." : inputStr;
+            return `[${block.name}] ${inputPreview}`;
+          }).join("\n");
 
           const fullToolSummary = assistantText
             ? `${assistantText}\n\n[Tool calls]\n${toolSummary}`
             : `[Tool calls]\n${toolSummary}`;
-
-          // Store structured tool_use blocks in metadata for faithful reconstruction
-          const toolUseMetadata = JSON.stringify({
-            toolUseBlocks: toolUseBlocks.map(b => ({
-              id: b.id,
-              name: b.name,
-              input: b.input,
-            })),
-            // Preserve any text the model said alongside tool calls
-            textContent: assistantText || null,
-          });
 
           this.db
             .prepare(
@@ -1604,30 +1486,18 @@ export class MainAgent {
               fullToolSummary,
               replyChannelId,
               Math.ceil(fullToolSummary.length / 4),
-              toolUseMetadata,
+              JSON.stringify({
+                toolUseBlocks: toolCalls.map((b) => ({ id: b.id, name: b.name, input: b.input })),
+                textContent: assistantText || null,
+              }),
             );
           this.noteChannelProgress(replyChannelId);
 
-          // Feed tool results back as a user turn
-          messages.push({ role: "user", content: toolResults });
-
-          // Also persist the tool results as a user message so DB maintains alternation
-          const toolResultSummary = toolResults.map((tr) => {
-            const resultPreview =
-              tr.content.length > 500
-                ? tr.content.slice(0, 500) + "..."
-                : tr.content;
+          const toolResultSummary = results.map((tr) => {
+            const raw = typeof tr.content === "string" ? tr.content : JSON.stringify(tr.content);
+            const resultPreview = raw.length > 500 ? raw.slice(0, 500) + "..." : raw;
             return `[${tr.tool_use_id}] ${tr.is_error ? "ERROR: " : ""}${resultPreview}`;
           }).join("\n");
-
-          // Store structured tool_result blocks in metadata for faithful reconstruction
-          const toolResultMetadata = JSON.stringify({
-            toolResults: toolResults.map(tr => ({
-              tool_use_id: tr.tool_use_id,
-              content: tr.content,
-              is_error: tr.is_error || false,
-            })),
-          });
 
           this.db
             .prepare(
@@ -1640,198 +1510,129 @@ export class MainAgent {
               `[Tool results]\n${toolResultSummary}`,
               replyChannelId,
               Math.ceil(toolResultSummary.length / 4),
-              toolResultMetadata,
+              JSON.stringify({
+                toolResults: results.map((tr) => ({
+                  tool_use_id: tr.tool_use_id,
+                  content: typeof tr.content === "string" ? tr.content : JSON.stringify(tr.content),
+                  is_error: tr.is_error || false,
+                })),
+              }),
             );
           this.noteChannelProgress(replyChannelId);
-
-          // Inject any queued messages that arrived while we were working.
-          // IMPORTANT: Append to the existing tool_results user message rather than
-          // inserting a fake assistant message + new user message. The old approach
-          // broke the tool-calling flow — the model saw a synthetic "I see new messages"
-          // assistant turn after tool results, which disrupted its multi-step tool use
-          // and caused it to output tool calls as text or stop using tools entirely.
-          const midLoopQueued = this.drainQueue(replyChannelId, true); // skip DB persist — we persist below
-          if (midLoopQueued) {
-            const queuedNote = `\n\n[New messages received during processing]\n\n${midLoopQueued}`;
-            
-            // Append to the last user message (tool results) as a text block
-            const lastUserMsg = messages[messages.length - 1];
-            if (lastUserMsg && lastUserMsg.role === "user" && Array.isArray(lastUserMsg.content)) {
-              // Tool results are an array of tool_result blocks — add a text block
-              (lastUserMsg.content as Array<Record<string, unknown>>).push({
-                type: "text",
-                text: queuedNote,
-              });
-            } else if (lastUserMsg && lastUserMsg.role === "user") {
-              // String content — just append
-              lastUserMsg.content = (lastUserMsg.content as string) + queuedNote;
-            }
-
-            // Persist queued messages to DB for history continuity
-            this.db
-              .prepare(
-                `INSERT INTO main_agent_messages
-                   (id, role, content, channel_id, token_estimate)
-                 VALUES (?, 'user', ?, ?, ?)`,
-              )
-              .run(
-                randomUUID(),
-                `[New messages received during processing]\n\n${midLoopQueued}`,
-                replyChannelId,
-                Math.ceil(midLoopQueued.length / 4),
-              );
-            this.noteChannelProgress(replyChannelId);
-
-            console.log(`[main-agent] Appended ${midLoopQueued.split("---").length - 1} queued message(s) to tool results for channel ${replyChannelId.slice(0, 8)}`);
-            console.debug(
-              `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
-              `midloop_queue_appended=true`,
-            );
-          }
-
-          // Flush any accumulated Discord tool step batch before looping back
           await this.flushDiscordToolBatch(replyChannelId);
+        },
+      });
 
-          continue;
+      await this.flushDiscordToolBatch(replyChannelId);
+
+      if (!result.succeeded && result.stopReason !== "end_turn") {
+        throw new Error(result.error ?? `Agent stopped with ${result.stopReason}`);
+      }
+
+      let textResponse = result.output ?? "";
+      const isDirectChat = channelChatType !== "group";
+      const containsNoReply = /\bNO_REPLY\b/.test(textResponse.trim() || "");
+      const isNoReply = containsNoReply;
+      const isRoutineHeartbeat = this.isRoutineHeartbeat(textResponse.trim() || "");
+
+      if (containsNoReply && textResponse) {
+        textResponse = textResponse.replace(/\s*\bNO_REPLY\b\s*/g, "").trim();
+      }
+      if (isNoReply && isDirectChat) {
+        textResponse = "I'm here — what can I help with?";
+      }
+
+      console.debug(
+        `[main-agent.loop] channel=${replyChannelId} completed iter=${loopIteration} final_len=${textResponse.length} ` +
+        `direct=${isDirectChat} no_reply=${isNoReply} heartbeat=${isRoutineHeartbeat}`,
+      );
+
+      if (textResponse && !isRoutineHeartbeat && !(isNoReply && !isDirectChat)) {
+        this.db
+          .prepare(
+            `INSERT INTO main_agent_messages
+               (id, role, content, channel_id, token_estimate)
+             VALUES (?, 'assistant', ?, ?, ?)`,
+          )
+          .run(
+            randomUUID(),
+            textResponse,
+            replyChannelId,
+            Math.ceil(textResponse.length / 4),
+          );
+        this.noteChannelProgress(replyChannelId);
+
+        if (this.onReply) {
+          await this.emitReply(replyChannelId, textResponse);
         }
 
-        // In DM/Nexus, never suppress a response — override NO_REPLY
-        // Check for NO_REPLY anywhere in the response (model sometimes writes commentary + NO_REPLY)
-        const isDirectChat = channelChatType !== "group";
-        const containsNoReply = /\bNO_REPLY\b/.test(textResponse?.trim() || "");
-        const isNoReply = containsNoReply;
-        const isRoutineHeartbeat = this.isRoutineHeartbeat(textResponse?.trim() || "");
-        
-        // Strip NO_REPLY from response text if present (for cases where model writes "comment\n\nNO_REPLY")
-        if (containsNoReply && textResponse) {
-          textResponse = textResponse.replace(/\s*\bNO_REPLY\b\s*/g, "").trim();
-        }
-
-        if (isNoReply && isDirectChat) {
-          textResponse = "I'm here — what can I help with?";
-        }
-        console.debug(
-          `[main-agent.loop] channel=${replyChannelId} iter=${loopIteration} ` +
-          `final_candidate len=${textResponse.length} direct=${isDirectChat} ` +
-          `no_reply=${isNoReply} heartbeat=${isRoutineHeartbeat}`,
-        );
-
-        // Flush any remaining Discord tool batch before final reply
-        await this.flushDiscordToolBatch(replyChannelId);
-
-        // Final text response
-        if (
-          textResponse &&
-          !isRoutineHeartbeat &&
-          !(isNoReply && !isDirectChat)
-        ) {
-          // Persist
-          this.db
-            .prepare(
-              `INSERT INTO main_agent_messages
-                 (id, role, content, channel_id, token_estimate)
-               VALUES (?, 'assistant', ?, ?, ?)`,
-            )
-            .run(
-              randomUUID(),
-              textResponse,
-              replyChannelId,
-              Math.ceil(textResponse.length / 4),
-            );
-          this.noteChannelProgress(replyChannelId);
-
-          // Reply
-          if (this.onReply) {
-            await this.emitReply(replyChannelId, textResponse);
-          }
-
-          // Emit SSE event: assistant reply
-          this.events.emit("stream", {
-            type: "assistant_reply",
-            channelId: replyChannelId,
-            result: textResponse,
-            timestamp: Date.now(),
-          } satisfies AgentStreamEvent);
-        } else if (isRoutineHeartbeat) {
-          // Still persist routine heartbeats to DB for debugging, but don't send to Discord
-          this.db
-            .prepare(
-              `INSERT INTO main_agent_messages
-                 (id, role, content, channel_id, token_estimate)
-               VALUES (?, 'assistant', ?, ?, ?)`,
-            )
-            .run(
-              randomUUID(),
-              `[ROUTINE_HEARTBEAT] ${textResponse}`,
-              replyChannelId,
-              Math.ceil(textResponse.length / 4),
-            );
-          this.noteChannelProgress(replyChannelId);
-          console.log(`[main-agent] Routine heartbeat logged but not sent to Discord: ${textResponse}`);
-        }
-
-        // Emit done event
         this.events.emit("stream", {
-          type: "done",
+          type: "assistant_reply",
           channelId: replyChannelId,
+          result: textResponse,
           timestamp: Date.now(),
         } satisfies AgentStreamEvent);
-
-        // Record agent response to structured memory
-        try {
-          const recorder = getEventRecorder();
-          if (textResponse && textResponse.trim()) {
-            recorder.recordEvent({
-              agentId: "main-agent",
-              agentType: "main",
-              sessionId,
-              eventType: "observation",
-              content: textResponse.substring(0, 1000),
-              metadata: {
-                type: "agent_response",
-                durationMs: Date.now() - conversationStartedAt,
-                iterations: loopIteration,
-                isFinal: true,
-              },
-              scope: "session",
-            });
-          }
-        } catch (e) { console.warn(`[structured-memory] Failed to record agent response: ${e}`); }
-
-        // Fire reflection after conversation ends (main agent doesn't use agent-loop hooks)
-        try {
-          const { runReflection } = await import("../memory/reflection.js");
-          setImmediate(() => {
-            void runReflection({ trigger: "session_end", sessionId }).then(result => {
-              if (result.skipped) {
-                console.debug(`[reflection] Session ${sessionId} skipped: ${result.skipReason}`);
-              } else {
-                console.log(
-                  `[reflection] Session ${sessionId} — ` +
-                  `${result.eventsProcessed} events, ${result.memoriesCreated} new memories, ` +
-                  `${result.memoriesReinforced} reinforced, ${result.conflictsDetected} conflicts`
-                );
-              }
-            }).catch(err => console.warn(`[reflection] Failed: ${err}`));
-          });
-        } catch (e) { console.warn(`[structured-memory] Failed to trigger reflection: ${e}`); }
-
-        console.log(
-          `[main-agent] Processing completed for ${this.channelTag(replyChannelId)} session=${sessionId} ` +
-          `in ${Date.now() - conversationStartedAt}ms`,
-        );
-        this.conversationRetryCount.delete(replyChannelId);
-
-        // Auto-generate/update session title in the background
-        this.maybeUpdateSessionTitle(replyChannelId).catch((e) =>
-          console.error(`[main-agent] Title generation failed for ${replyChannelId}:`, e)
-        );
-        console.debug(
-          `[main-agent.loop] channel=${replyChannelId} completed iter=${loopIteration} ` +
-          `duration_ms=${Date.now() - conversationStartedAt}`,
-        );
-        break; // Done
+      } else if (isRoutineHeartbeat) {
+        this.db
+          .prepare(
+            `INSERT INTO main_agent_messages
+               (id, role, content, channel_id, token_estimate)
+             VALUES (?, 'assistant', ?, ?, ?)`,
+          )
+          .run(
+            randomUUID(),
+            `[ROUTINE_HEARTBEAT] ${textResponse}`,
+            replyChannelId,
+            Math.ceil(textResponse.length / 4),
+          );
+        this.noteChannelProgress(replyChannelId);
       }
+
+      this.events.emit("stream", {
+        type: "done",
+        channelId: replyChannelId,
+        timestamp: Date.now(),
+      } satisfies AgentStreamEvent);
+
+      try {
+        const recorder = getEventRecorder();
+        if (textResponse && textResponse.trim()) {
+          recorder.recordEvent({
+            agentId: "main-agent",
+            agentType: "main",
+            sessionId,
+            eventType: "observation",
+            content: textResponse.substring(0, 1000),
+            metadata: {
+              type: "agent_response",
+              durationMs: Date.now() - conversationStartedAt,
+              iterations: loopIteration,
+              isFinal: true,
+            },
+            scope: "session",
+          });
+        }
+      } catch (e) {
+        console.warn(`[structured-memory] Failed to record agent response: ${e}`);
+      }
+
+      try {
+        const { runReflection } = await import("../memory/reflection.js");
+        setImmediate(() => {
+          void runReflection({ trigger: "session_end", sessionId }).catch(err => console.warn(`[reflection] Failed: ${err}`));
+        });
+      } catch (e) {
+        console.warn(`[structured-memory] Failed to trigger reflection: ${e}`);
+      }
+
+      console.log(
+        `[main-agent] Processing completed for ${this.channelTag(replyChannelId)} session=${sessionId} ` +
+        `in ${Date.now() - conversationStartedAt}ms`,
+      );
+      this.conversationRetryCount.delete(replyChannelId);
+      this.maybeUpdateSessionTitle(replyChannelId).catch((e) =>
+        console.error(`[main-agent] Title generation failed for ${replyChannelId}:`, e)
+      );
     } catch (err) {
       console.error("[main-agent] Error in conversation loop:", err);
       // Flush any remaining Discord tool batch

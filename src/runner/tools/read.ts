@@ -14,30 +14,35 @@ import { resolveToCwd } from "./path-utils.js";
 export const readToolDefinition: ToolDefinition = {
   name: "read",
   description:
-    "Read the contents of a file. For text files, output is truncated to 500 lines or 50KB by default " +
-    "(whichever is hit first). Use full=true when you need the entire file in one call, " +
-    "or offset/limit for large files. Prefer reading whole files when they are reasonably sized.",
+    "Reads a file from the local filesystem. Assume any user-provided path is worth checking. " +
+    "Use an absolute path via file_path when possible. By default it reads from the start of the file and returns line-numbered text. " +
+    "When you already know the area you need, use offset and limit for a targeted read instead of re-reading the whole file. " +
+    "This tool reads files only, not directories.",
   input_schema: {
     type: "object",
     properties: {
+      file_path: {
+        type: "string",
+        description: "Absolute path to the file to read",
+      },
       path: {
         type: "string",
-        description: "Path to the file to read (relative or absolute)",
+        description: "Backward-compatible path field; file_path is preferred",
       },
       offset: {
         type: "number",
-        description: "Line number to start reading from (1-indexed)",
+        description: "Optional 1-based line offset to start reading from",
       },
       limit: {
         type: "number",
-        description: "Maximum number of lines to read",
+        description: "Optional maximum number of lines to read",
       },
       full: {
         type: "boolean",
         description: "Return the entire text file without preview truncation",
       },
     },
-    required: ["path"],
+    required: [],
   },
 };
 
@@ -49,6 +54,10 @@ const MAX_BYTES = 50 * 1024; // 50KB
 const DEFAULT_BYTES = 50000;
 const BINARY_CHECK_BYTES = 8192;
 const MAX_FULL_FILE_BYTES = 200 * 1024; // 200KB
+const FILE_UNCHANGED_STUB =
+  "File unchanged since last read. The earlier Read result for this exact file region is still current; refer to that instead of re-reading.";
+
+const recentReadCache = new Map<string, { mtimeMs: number; size: number }>();
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -67,7 +76,7 @@ export async function readTool(
   params: Record<string, unknown>,
   cwd: string,
 ): Promise<string> {
-  const filePath = params.path as string;
+  const filePath = (params.path as string) ?? (params.file_path as string);
   if (!filePath) throw new Error("path is required");
 
   const resolved = resolveToCwd(filePath, cwd);
@@ -91,6 +100,17 @@ export async function readTool(
   const content = buffer.toString("utf-8");
   const lines = content.split("\n");
   const full = params.full === true;
+  const hasExplicitRange = typeof params.offset === "number" || typeof params.limit === "number";
+  const offset = typeof params.offset === "number" ? Math.max(1, params.offset) : 1;
+  const limit = typeof params.limit === "number"
+    ? Math.max(1, params.limit)
+    : (hasExplicitRange ? MAX_LINES : DEFAULT_LINES);
+  const cacheKey = `${resolved}:${full ? "full" : `${offset}:${limit}`}`;
+
+  const cached = recentReadCache.get(cacheKey);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return FILE_UNCHANGED_STUB;
+  }
 
   if (full) {
     if (stat.size > MAX_FULL_FILE_BYTES) {
@@ -98,21 +118,18 @@ export async function readTool(
         `File too large for full read (${stat.size} bytes). Use offset/limit for large files.`,
       );
     }
+    recentReadCache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size });
     return content;
   }
 
-  const hasExplicitRange = typeof params.offset === "number" || typeof params.limit === "number";
-  const offset = typeof params.offset === "number" ? Math.max(1, params.offset) : 1;
-  const limit = typeof params.limit === "number"
-    ? Math.max(1, params.limit)
-    : (hasExplicitRange ? MAX_LINES : DEFAULT_LINES);
   const byteBudget = hasExplicitRange ? MAX_BYTES : DEFAULT_BYTES;
 
   const startIdx = offset - 1;
   const endIdx = Math.min(startIdx + limit, lines.length);
   const sliced = lines.slice(startIdx, endIdx);
-
-  let result = sliced.join("\n");
+  let result = sliced
+    .map((line, index) => `${String(startIdx + index + 1).padStart(6, " ")}\t${line}`)
+    .join("\n");
 
   // Truncate by bytes if needed
   if (Buffer.byteLength(result) > byteBudget) {
@@ -122,6 +139,7 @@ export async function readTool(
     const shownLines = result.split("\n").length;
     const from = offset + shownLines;
     result += `\n\n[Truncated. ${lines.length - (startIdx + shownLines)} more lines. Use offset=${from} to continue.]`;
+    recentReadCache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size });
     return result;
   }
 
@@ -134,5 +152,7 @@ export async function readTool(
     meta.push(`${lines.length - endIdx} more lines. Use offset=${endIdx + 1} to continue.`);
   }
 
-  return meta.length > 0 ? `${result}\n\n[${meta.join(". ")}]` : result;
+  const finalResult = meta.length > 0 ? `${result}\n\n[${meta.join(". ")}]` : result;
+  recentReadCache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size });
+  return finalResult;
 }

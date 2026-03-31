@@ -21,6 +21,10 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { ToolDefinition, TokenUsage } from "./types.js";
 import { getKeyPool } from "../services/key-pool.js";
 import { randomUUID } from "node:crypto";
+import {
+  fromClaudeCodeToolName,
+  toClaudeCodeToolName,
+} from "../claude-runtime/tool-contracts.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -120,18 +124,12 @@ export function parseModelString(model: string): ProviderConfig {
 
 const claudeCodeVersion = "2.1.75";
 
-const claudeCodeTools = [
-  "Read", "Write", "Edit", "Bash", "Grep", "Glob",
-  "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "KillShell",
-  "NotebookEdit", "Skill", "Task", "TaskOutput", "TodoWrite",
-  "WebFetch", "WebSearch",
-];
-
-const ccToolLookup = new Map(claudeCodeTools.map((t) => [t.toLowerCase(), t]));
-
 /** Map a tool name to Claude Code canonical casing (case-insensitive match). */
-const toClaudeCodeName = (name: string): string =>
-  ccToolLookup.get(name.toLowerCase()) ?? name;
+const toClaudeCodeName = (name: string): string => {
+  const lower = name.toLowerCase();
+  const mapped = toClaudeCodeToolName(lower);
+  return mapped === lower ? name : mapped;
+};
 
 /** Map a Claude Code tool name back to the original tool name from definitions. */
 const fromClaudeCodeName = (name: string, tools?: ToolDefinition[]): string => {
@@ -140,7 +138,7 @@ const fromClaudeCodeName = (name: string, tools?: ToolDefinition[]): string => {
     const matched = tools.find((t) => t.name.toLowerCase() === lowerName);
     if (matched) return matched.name;
   }
-  return name;
+  return fromClaudeCodeToolName(name);
 };
 
 /**

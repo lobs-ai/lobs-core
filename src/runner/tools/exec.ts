@@ -16,21 +16,24 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ToolDefinition, ToolExecutorResult } from "../types.js";
 import { capOutput } from "./output-cap.js";
+import { extractCdTarget } from "../../claude-runtime/bash-parser.js";
 
 export const execToolDefinition: ToolDefinition = {
   name: "exec",
   description:
-    "Execute a shell command. Returns stdout, stderr, and exit code. " +
-    "Output is capped to ~500 lines/25KB by default — use head/tail/grep for large outputs. " +
-    "Commands run in the agent's working directory by default. " +
-    "Use workdir to change directory. Use timeout to limit execution time (default 30s, max 300s). " +
-    "Combine related commands with && or ; to minimize tool calls.",
+    "Execute a shell command in the current working directory or an optional workdir. " +
+    "Returns stdout, stderr, and exit code. Prefer targeted commands over huge output. " +
+    "Use timeout to limit execution time. Use this tool for shell work instead of routing grep/glob through Bash when dedicated tools exist.",
   input_schema: {
     type: "object",
     properties: {
-      command: {
+      cmd: {
         type: "string",
         description: "Shell command to execute",
+      },
+      command: {
+        type: "string",
+        description: "Backward-compatible command field; cmd is preferred",
       },
       workdir: {
         type: "string",
@@ -46,7 +49,7 @@ export const execToolDefinition: ToolDefinition = {
         additionalProperties: { type: "string" },
       },
     },
-    required: ["command"],
+    required: [],
   },
 };
 
@@ -66,16 +69,7 @@ const CWD_MARKER = "__LOBS_CWD__";
  * commands where the cd is part of a pipeline.
  */
 function parseCdCommand(command: string): string | null {
-  const trimmed = command.trim();
-  // Match bare `cd` or `cd <path>` — no pipes, semicolons, or &&
-  const cdMatch = trimmed.match(/^cd(?:\s+(.+))?$/);
-  if (!cdMatch) return null;
-
-  // Check it's not a compound command
-  const target = cdMatch[1]?.trim();
-  if (target && /[;&|]/.test(target)) return null;
-
-  return target ?? process.env.HOME ?? "/";
+  return extractCdTarget(command);
 }
 
 /**
@@ -124,7 +118,7 @@ export async function execTool(
   params: Record<string, unknown>,
   defaultCwd: string,
 ): Promise<ToolExecutorResult> {
-  const command = params.command as string;
+  const command = (params.command as string) ?? (params.cmd as string);
   if (!command || typeof command !== "string") {
     throw new Error("command is required and must be a string");
   }

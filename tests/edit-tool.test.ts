@@ -30,7 +30,7 @@ describe("editTool", () => {
     const content = readFileSync(testFile, "utf-8");
     expect(content).toContain("replaced");
     expect(content).not.toContain("foo bar");
-    expect(result).toContain("Edited");
+    expect(result).toContain("Edit applied");
   });
 
   it("shows diff output", async () => {
@@ -104,7 +104,7 @@ describe("editTool", () => {
     );
     const content = readFileSync(testFile, "utf-8");
     expect(content).toContain("replaced");
-    expect(result).toContain("Edited");
+    expect(result).toContain("Edit applied");
   });
 
   it("suggests fuzzy match when whitespace differs", async () => {

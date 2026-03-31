@@ -12,8 +12,10 @@ import { readFileSync, existsSync } from "node:fs";
 import type { AgentSpec } from "./types.js";
 import { assembleContext, type AssembledContext } from "./context-engine.js";
 import { getAgentFiles, getRecentHistory, type AgentType } from "./workspace-manager.js";
+import { getToolDefinitions } from "./tools/index.js";
 import { loadWorkspaceContext } from "../services/workspace-loader.js";
 import { skillsService } from "../services/skills.js";
+import { buildClaudeStyleSystemPrompt } from "../claude-runtime/llm-prompt.js";
 
 // ── Agent Templates ──────────────────────────────────────────────────────────
 
@@ -85,41 +87,15 @@ Rules:
  * Build a complete system prompt for an agent run.
  */
 export function buildSystemPrompt(spec: AgentSpec): string {
-  const parts: string[] = [];
-
-  // Agent template
   const template = AGENT_TEMPLATES[spec.agent] ?? DEFAULT_TEMPLATE;
-  parts.push(template);
-
-  // Working directory context
-  parts.push(`\nWorking directory: ${spec.cwd}`);
-
-  // Current date/time
-  parts.push(`Current date: ${new Date().toISOString().split("T")[0]}`);
-
-  // Context refs — pre-loaded file content
-  if (spec.context?.contextRefs?.length) {
-    parts.push("\n---\n## Reference Context");
-    for (const ref of spec.context.contextRefs) {
-      const truncated = ref.content.length > 30000
-        ? ref.content.slice(0, 30000) + "\n\n(truncated)"
-        : ref.content;
-      parts.push(`### File: ${ref.path}\n${truncated}`);
-    }
-    parts.push("---");
-  }
-
-  // Learnings
-  if (spec.context?.learnings) {
-    parts.push(`\n## Relevant Learnings\n${spec.context.learnings}`);
-  }
-
-  // Additional context (from lobs-memory search, etc.)
-  if (spec.context?.additionalContext) {
-    parts.push(`\n${spec.context.additionalContext}`);
-  }
-
-  return parts.join("\n");
+  return buildClaudeStyleSystemPrompt({
+    spec,
+    baseInstructions: template,
+    toolDefinitions: getToolDefinitions(spec.tools),
+    contextRefs: spec.context?.contextRefs,
+    learnings: spec.context?.learnings,
+    additionalContext: spec.context?.additionalContext,
+  });
 }
 
 /**
@@ -135,33 +111,21 @@ export async function buildSmartSystemPrompt(spec: AgentSpec): Promise<{
   systemPrompt: string;
   context: AssembledContext;
 }> {
-  const parts: string[] = [];
-
   // 1. Load workspace context (AGENTS.md, SOUL.md, etc.) via the universal loader
   //    This handles all agent types consistently — same pattern across lobs agents
   const agentType = spec.agent as AgentType;
   const validAgentTypes: AgentType[] = ["programmer", "writer", "researcher", "reviewer", "architect"];
   
   const workspaceCtx = loadWorkspaceContext(spec.agent);
-  if (workspaceCtx) {
-    parts.push(workspaceCtx);
-  } else {
-    // Fallback if no workspace files exist
-    const template = AGENT_TEMPLATES[spec.agent] ?? DEFAULT_TEMPLATE;
-    parts.push(template);
-  }
-
-  // 2. Add working directory and date
-  parts.push(`\n## Working Directory\n${spec.cwd}`);
-  parts.push(`\nCurrent date: ${new Date().toISOString().split("T")[0]}`);
+  const baseInstructions = workspaceCtx ?? (AGENT_TEMPLATES[spec.agent] ?? DEFAULT_TEMPLATE);
 
   // 3. Load recent run history (last 3 summaries) for worker agents
+  let historyLines: string[] = [];
   if (validAgentTypes.includes(agentType)) {
     try {
       const history = getRecentHistory(agentType, 3);
       if (history.length > 0) {
-        const historyText = history.join("\n\n---\n\n");
-        parts.push(`\n# Recent Run History\n\nLearn from these recent runs:\n\n${historyText}`);
+        historyLines = history;
       }
     } catch {
       // Skip if history unavailable
@@ -176,12 +140,8 @@ export async function buildSmartSystemPrompt(spec: AgentSpec): Promise<{
     contextRefs: spec.context?.contextRefs?.map(r => r.path),
   });
 
-  // 5. Add the intelligently assembled context
-  if (context.contextBlock) {
-    parts.push(`\n---\n${context.contextBlock}\n---`);
-  }
-
   // 6. Match and inject relevant skills
+  const topSkills: Array<{ name: string; instructions: string }> = [];
   try {
     // Extract task title and notes
     let taskTitle = "";
@@ -197,27 +157,25 @@ export async function buildSmartSystemPrompt(spec: AgentSpec): Promise<{
     const matchedSkills = skillsService.matchSkills(taskTitle, taskNotes, spec.agent);
     
     if (matchedSkills.length > 0) {
-      // Limit to 2 most relevant skills to avoid bloating the prompt
-      const topSkills = matchedSkills.slice(0, 2);
-      parts.push("\n---\n## Relevant Skills\n");
-      
-      for (const skill of topSkills) {
-        parts.push(`### ${skill.name}\n\n${skill.instructions}\n`);
-      }
-      
-      parts.push("---");
+      topSkills.push(...matchedSkills.slice(0, 2).map((skill) => ({
+        name: skill.name,
+        instructions: skill.instructions,
+      })));
     }
   } catch (err) {
     // Skip if skills service unavailable
   }
 
-  // 7. Add any additional raw context (for backwards compatibility)
-  if (spec.context?.additionalContext) {
-    parts.push(`\n${spec.context.additionalContext}`);
-  }
-
   return {
-    systemPrompt: parts.join("\n"),
+    systemPrompt: buildClaudeStyleSystemPrompt({
+      spec,
+      baseInstructions,
+      toolDefinitions: getToolDefinitions(spec.tools),
+      recentHistory: historyLines,
+      contextBlock: context.contextBlock,
+      matchedSkills: topSkills,
+      additionalContext: spec.context?.additionalContext,
+    }),
     context,
   };
 }
