@@ -205,6 +205,18 @@ export function initMemoryDb(dbPath?: string): Database.Database {
   // Apply schema (idempotent — all statements use IF NOT EXISTS)
   db.exec(SCHEMA_SQL);
 
+  // Detect if we accidentally opened the wrong database
+  const foreignTables = db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name IN ('chunks', 'documents', 'chunk_embeddings', 'graph_edges')`
+  ).all() as { name: string }[];
+  if (foreignTables.length > 0) {
+    const names = foreignTables.map(t => t.name).join(', ');
+    const msg = `[memory-db] WARNING: Database at ${resolvedPath} contains foreign tables (${names}) that belong to lobs-memory, not structured-memory. This likely means initMemoryDb() is pointed at the wrong file.`;
+    log().error(msg);
+    db.close();
+    throw new Error(msg);
+  }
+
   // ── Additive migrations ───────────────────────────────────────────────────
   // Existing DBs won't pick up new columns from CREATE TABLE IF NOT EXISTS.
   // Each ALTER TABLE is wrapped in try/catch — it fails silently if the column

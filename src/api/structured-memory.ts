@@ -12,6 +12,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { json, error, parseQuery, parseBody } from "./index.js";
 import { getMemoryDb } from "../memory/db.js";
+import { log } from "../util/logger.js";
 import { consolidateMemories } from "../memory/consolidation.js";
 import { searchMemoriesFast, searchMemoriesFull } from "../memory/search.js";
 
@@ -22,7 +23,8 @@ import { searchMemoriesFast, searchMemoriesFull } from "../memory/search.js";
 function tryDb() {
   try {
     return getMemoryDb();
-  } catch {
+  } catch (e) {
+    log().warn(`[structured-memory-api] Memory DB unavailable: ${e}`);
     return null;
   }
 }
@@ -34,19 +36,7 @@ function tryDb() {
 function handleStats(res: ServerResponse): void {
   const db = tryDb();
   if (!db) {
-    json(res, {
-      totalMemories: 0,
-      byType: {},
-      byStatus: {},
-      totalEvents: 0,
-      recentEvents: 0,
-      totalConflicts: 0,
-      unresolvedConflicts: 0,
-      gcRuns: 0,
-      avgConfidence: 0,
-      lastReflection: null,
-      lastGcRun: null,
-    });
+    error(res, "Structured memory database not available", 503);
     return;
   }
 
@@ -130,7 +120,7 @@ function handleStats(res: ServerResponse): void {
 function handleMemories(res: ServerResponse, query: Record<string, string>): void {
   const db = tryDb();
   if (!db) {
-    json(res, { memories: [], total: 0, limit: 50, offset: 0 });
+    error(res, "Structured memory database not available", 503);
     return;
   }
 
@@ -201,7 +191,7 @@ function handleMemories(res: ServerResponse, query: Record<string, string>): voi
 function handleConflicts(res: ServerResponse, query: Record<string, string>): void {
   const db = tryDb();
   if (!db) {
-    json(res, { conflicts: [] });
+    error(res, "Structured memory database not available", 503);
     return;
   }
 
@@ -248,7 +238,7 @@ function handleConflicts(res: ServerResponse, query: Record<string, string>): vo
 function handleGcLog(res: ServerResponse, query: Record<string, string>): void {
   const db = tryDb();
   if (!db) {
-    json(res, { entries: [] });
+    error(res, "Structured memory database not available", 503);
     return;
   }
 
@@ -273,7 +263,7 @@ function handleGcLog(res: ServerResponse, query: Record<string, string>): void {
 function handleEvents(res: ServerResponse, query: Record<string, string>): void {
   const db = tryDb();
   if (!db) {
-    json(res, { events: [] });
+    error(res, "Structured memory database not available", 503);
     return;
   }
 
