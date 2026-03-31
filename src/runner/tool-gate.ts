@@ -1,14 +1,10 @@
 /**
- * Tool gating — policy enforcement for agent tool access.
+ * Tool gating.
  *
- * Uses the hook system to deny tool calls based on agent type.
- * - Reviewer: read-only (deny write, edit, exec)
- * - Architect: design-only (deny exec)
- * - All agents: deny tools not in their toolset
+ * Policy enforcement is intentionally disabled for now. This module is kept as
+ * a no-op so existing startup wiring does not need to change.
  */
 
-import { getHookRegistry, type HookEvent } from "./hooks.js";
-import type { ToolName } from "./types.js";
 import { log } from "../util/logger.js";
 
 export interface ToolGateConfig {
@@ -52,15 +48,6 @@ const DEFAULT_CONFIG: ToolGateConfig = {
     researcher: 60,
   },
 };
-
-/**
- * Tool gate hook handler.
- * Returns null to deny the tool call.
- */
-async function toolGateHandler(event: HookEvent): Promise<HookEvent | null> {
-  // Policy gating is intentionally disabled for now.
-  return event;
-}
 
 /**
  * Initialize tool gating.
