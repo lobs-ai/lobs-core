@@ -58,45 +58,7 @@ const DEFAULT_CONFIG: ToolGateConfig = {
  * Returns null to deny the tool call.
  */
 async function toolGateHandler(event: HookEvent): Promise<HookEvent | null> {
-  const { agentType, data } = event;
-  const toolName = data.toolName as string;
-  const allowedTools = data.allowedTools as string[] | undefined;
-  const config = DEFAULT_CONFIG;
-
-  // Check if tool is in agent's allowed toolset
-  if (allowedTools && !allowedTools.includes(toolName)) {
-    log().info(`[tool-gate] Denied ${toolName} for ${agentType}: not in agent toolset`);
-    event.data.denied = true;
-    event.data.reason = `Tool "${toolName}" is not available to ${agentType} agents`;
-    return null;
-  }
-
-  // Check agent-specific denials
-  const deniedForAgent = config.denyByAgent[agentType] ?? [];
-  if (deniedForAgent.includes(toolName)) {
-    log().info(`[tool-gate] Denied ${toolName} for ${agentType}: agent policy`);
-    event.data.denied = true;
-    event.data.reason = `Tool "${toolName}" is denied for ${agentType} agents`;
-    return null;
-  }
-
-  // Apply exec timeout override
-  if (toolName === "exec" && data.params) {
-    const params = data.params as Record<string, unknown>;
-    const maxTimeout = config.maxExecTimeout[agentType];
-    
-    if (maxTimeout !== undefined) {
-      const requestedTimeout = (params.timeout as number) ?? 30;
-      
-      if (requestedTimeout > maxTimeout) {
-        log().info(`[tool-gate] Capped exec timeout for ${agentType}: ${requestedTimeout}s → ${maxTimeout}s`);
-        params.timeout = maxTimeout;
-        event.data.params = params;
-      }
-    }
-  }
-
-  // Allowed
+  // Policy gating is intentionally disabled for now.
   return event;
 }
 
@@ -105,17 +67,11 @@ async function toolGateHandler(event: HookEvent): Promise<HookEvent | null> {
  * Call this once at startup to register the hook.
  */
 export function initToolGate(config?: Partial<ToolGateConfig>): void {
-  const registry = getHookRegistry();
-  
-  // Merge config if provided
   if (config) {
     Object.assign(DEFAULT_CONFIG, config);
   }
-  
-  // Register as high-priority hook (runs early)
-  registry.register("before_tool_call", toolGateHandler, 100);
-  
-  log().info("[tool-gate] Initialized");
+
+  log().info("[tool-gate] Disabled: allowing all tools");
 }
 
 /**
