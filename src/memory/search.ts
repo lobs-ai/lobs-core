@@ -158,12 +158,12 @@ function getEvidenceCounts(ids: number[]): Map<number, number> {
  * Episodic memories (distilled insights) score higher than raw document chunks.
  */
 export const MEMORY_TYPE_WEIGHTS: Record<string, number> = {
-  preference: 1.3,
-  decision: 1.2,
-  learning: 1.15,
-  pattern: 1.1,
+  preference: 1.05,
+  decision: 1.03,
+  learning: 1.02,
+  pattern: 1.01,
   fact: 1.0,
-  document: 0.8,
+  document: 1.0,
 };
 
 // ── Shared filter builder ────────────────────────────────────────────────────
@@ -256,17 +256,18 @@ export async function searchMemoriesFast(
 
     if (rows.length === 0) return [];
 
-    // Normalize FTS rank to 0-1
-    const maxRank = Math.max(...rows.map((r) => r.fts_rank));
+    // Normalize FTS rank using sigmoid-style formula: 1 / (1 + rank * k)
+    // FTS rank is already negated (positive), so higher = better match.
+    // k=0.1 means rank=10 → 0.5, rank=1 → 0.91, rank=100 → 0.09
+    // This preserves absolute relevance — a weak match won't inflate to 1.0.
+    const FTS_K = 0.1;
 
     const scored = rows.map((row) => {
-      const ftsNorm = maxRank > 0 ? row.fts_rank / maxRank : 0;
+      const ftsNorm = 1 / (1 + row.fts_rank * FTS_K);
       const decayed = decayedConfidence(row);
       const importance = importanceScore(row);
-      // importance (decayed confidence + access floor) replaces the raw
-      // confidence + recency signals, giving 40% weight to lifecycle-aware ranking
       const typeWeight = MEMORY_TYPE_WEIGHTS[row.memory_type] ?? 1.0;
-      const score = (ftsNorm * 0.6 + importance * 0.4) * typeWeight;
+      const score = (ftsNorm * 0.85 + importance * 0.15) * typeWeight;
       return { row, score, decayed };
     });
 
@@ -373,12 +374,13 @@ export async function searchMemoriesFull(
       .prepare(`SELECT * FROM memories WHERE id IN (${placeholders})`)
       .all(...idList) as Memory[];
 
-    // Build FTS rank map
-    const maxFtsRank = ftsRows.length
-      ? Math.max(...ftsRows.map((r) => r.fts_rank))
-      : 1;
+    // Build FTS score map using sigmoid-style formula: 1 / (1 + rank * k)
+    // FTS rank is already negated (positive), so higher = better match.
+    // k=0.1 means rank=10 → 0.5, rank=1 → 0.91, rank=100 → 0.09
+    // This preserves absolute relevance — a weak match won't inflate to 1.0.
+    const FTS_K = 0.1;
     const ftsScores = new Map(
-      ftsRows.map((r) => [r.id, maxFtsRank > 0 ? r.fts_rank / maxFtsRank : 0]),
+      ftsRows.map((r) => [r.id, 1 / (1 + r.fts_rank * FTS_K)]),
     );
 
     // Score each memory
