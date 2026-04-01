@@ -202,6 +202,33 @@ export function initMemoryDb(dbPath?: string): Database.Database {
   db.pragma("busy_timeout = 5000");
   db.pragma("foreign_keys = ON");
 
+  // ── Pre-schema migrations ─────────────────────────────────────────────────
+  // Some indexes in SCHEMA_SQL reference columns added in later migrations
+  // (e.g. source_path, content_hash, chunk_index on memories). On existing DBs
+  // those columns don't exist yet, so CREATE INDEX … WHERE source_path IS NOT NULL
+  // fails. We add the columns first so that db.exec(SCHEMA_SQL) is fully idempotent.
+  const addColumnIfMissingEarly = (table: string, column: string, definition: string): void => {
+    try {
+      // Only attempt if the table already exists (skip on brand-new DBs)
+      const tableExists = db.prepare(
+        `SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`
+      ).get(table);
+      if (!tableExists) return;
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    } catch {
+      // Column already exists — ignore
+    }
+  };
+
+  addColumnIfMissingEarly("memories", "title",        "TEXT");
+  addColumnIfMissingEarly("memories", "source_path",  "TEXT");
+  addColumnIfMissingEarly("memories", "content_hash", "TEXT");
+  addColumnIfMissingEarly("memories", "chunk_index",  "INTEGER");
+  addColumnIfMissingEarly("reflection_runs", "events_processed", "INTEGER DEFAULT 0");
+  addColumnIfMissingEarly("reflection_runs", "skip_reason",      "TEXT");
+  addColumnIfMissingEarly("conflicts", "conflict_type",    "TEXT");
+  addColumnIfMissingEarly("conflicts", "suggested_action", "TEXT");
+
   // Apply schema (idempotent — all statements use IF NOT EXISTS)
   db.exec(SCHEMA_SQL);
 
@@ -254,6 +281,14 @@ export function getMemoryDb(): Database.Database {
     );
   }
   return _db;
+}
+
+/**
+ * Check whether the memory database has been initialised.
+ * Useful for callers that want to skip work gracefully when the DB isn't available.
+ */
+export function isMemoryDbReady(): boolean {
+  return _db !== null;
 }
 
 /**
