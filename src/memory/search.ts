@@ -388,15 +388,15 @@ export async function searchMemoriesFull(
       const isVector = vecNorm > 0;
       const isFts = ftsNorm > 0;
 
-      // Base score: weight FTS and vector
+      // Base score: weight FTS and vector — these drive query relevance (0..1)
       let score = ftsNorm * 0.5 + vecNorm * 0.5;
-      if (isFts && !isVector) score = ftsNorm * 0.8;
-      if (!isFts && isVector) score = vecNorm * 0.8;
+      if (isFts && !isVector) score = ftsNorm * 0.85;
+      if (!isFts && isVector) score = vecNorm * 0.85;
 
-      // Lifecycle-aware importance replaces raw confidence + recency bonuses,
-      // giving 40% weight to memories that are well-accessed and recently relevant
+      // Importance is a small secondary signal — keep it from dominating relevance
+      // (was 0.4 additive which pushed everything over 1.0 → clamp to 1.00)
       const importance = importanceScore(m);
-      score += importance * 0.4;
+      score = score * 0.85 + importance * 0.15;
 
       // Apply per-type multiplier before normalization
       const typeWeight = MEMORY_TYPE_WEIGHTS[m.memory_type] ?? 1.0;

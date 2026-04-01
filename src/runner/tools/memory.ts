@@ -19,6 +19,55 @@ import { getMemoryDb } from "../../memory/db.js";
 import { log } from "../../util/logger.js";
 import { searchMemoriesFull, type StructuredMemoryResult } from "../../memory/search.js";
 
+// ── lobs-memory document search ──────────────────────────────────────────────
+
+const LOBS_MEMORY_URL = "http://localhost:7420/search";
+const LOBS_MEMORY_TIMEOUT_MS = 3_000;
+
+interface LobsMemoryResult {
+  path: string;
+  startLine: number;
+  endLine: number;
+  score: number;
+  snippet: string;
+  source: string;
+  citation: string;
+}
+
+interface LobsMemoryResponse {
+  results: LobsMemoryResult[];
+  query: string;
+  timings?: { totalMs?: number };
+}
+
+async function queryLobsMemoryServer(
+  query: string,
+  maxResults: number,
+  collections?: string[],
+  conversationContext?: string,
+): Promise<LobsMemoryResult[]> {
+  try {
+    const body: Record<string, unknown> = { query, maxResults };
+    if (collections && collections.length > 0) body.collections = collections;
+    if (conversationContext) body.conversationContext = conversationContext;
+
+    const resp = await fetch(LOBS_MEMORY_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(LOBS_MEMORY_TIMEOUT_MS),
+    });
+
+    if (!resp.ok) return [];
+
+    const data = (await resp.json()) as LobsMemoryResponse;
+    return data.results ?? [];
+  } catch {
+    // Server down or timeout — silently skip
+    return [];
+  }
+}
+
 // ── memory_search ────────────────────────────────────────────────────────────
 
 export const memorySearchToolDefinition: ToolDefinition = {
@@ -70,46 +119,93 @@ export async function memorySearchTool(
     20,
   );
 
-  // collections is kept in the tool definition for future collection-filtering support
-  // but not yet passed to searchMemoriesFull
+  const collections = Array.isArray(params.collections)
+    ? (params.collections as string[])
+    : undefined;
+  const conversationContext =
+    typeof params.conversationContext === "string"
+      ? params.conversationContext
+      : undefined;
 
   const start = Date.now();
 
   try {
-    const results = await searchMemoriesFull(query, {
-      maxResults,
-      minConfidence: 0.3,
-    });
+    // Fire structured-memory search and lobs-memory doc search in parallel
+    const [structuredResults, docResults] = await Promise.all([
+      searchMemoriesFull(query, { maxResults, minConfidence: 0.3 }),
+      queryLobsMemoryServer(query, maxResults, collections, conversationContext),
+    ]);
 
     const timeMs = Date.now() - start;
 
-    if (!results || results.length === 0) {
+    const hasStructured = structuredResults && structuredResults.length > 0;
+    const hasDocs = docResults && docResults.length > 0;
+
+    if (!hasStructured && !hasDocs) {
       return `No results found for: "${query}"`;
     }
 
+    // Build unified result list tagged by source for sorting
+    type UnifiedResult =
+      | { kind: "structured"; r: StructuredMemoryResult; score: number }
+      | { kind: "doc"; r: LobsMemoryResult; score: number };
+
+    const unified: UnifiedResult[] = [];
+
+    for (const r of structuredResults ?? []) {
+      unified.push({ kind: "structured", r, score: r.score });
+    }
+    for (const r of docResults ?? []) {
+      unified.push({ kind: "doc", r, score: r.score });
+    }
+
+    // Sort all results by score descending, cap at maxResults
+    unified.sort((a, b) => b.score - a.score);
+    const top = unified.slice(0, maxResults);
+
     const lines: string[] = [];
-    lines.push(`Found ${results.length} results (${timeMs}ms, source: server):`);
+    const sourceTag =
+      hasStructured && hasDocs
+        ? "structured-db + lobs-memory"
+        : hasStructured
+          ? "structured-db"
+          : "lobs-memory";
+    lines.push(`Found ${top.length} results (${timeMs}ms, source: ${sourceTag}):`);
     lines.push("");
 
-    for (let i = 0; i < results.length; i++) {
-      const r: StructuredMemoryResult = results[i];
-      const m = r.memory;
+    for (let i = 0; i < top.length; i++) {
+      const u = top[i];
 
-      if (m.source_path) {
-        // Document chunk — use file-path style citation
-        const shortPath = m.source_path.replace(/^\/Users\/lobs\//, "~/");
-        const chunkSuffix = m.chunk_index != null ? `#chunk${m.chunk_index}` : "";
-        lines.push(
-          `[${i + 1}] ${shortPath}${chunkSuffix} (score: ${r.score.toFixed(2)}, type: document)`,
-        );
+      if (u.kind === "structured") {
+        const r = u.r;
+        const m = r.memory;
+
+        if (m.source_path) {
+          // Document chunk — use file-path style citation
+          const shortPath = m.source_path.replace(/^\/Users\/lobs\//, "~/");
+          const chunkSuffix = m.chunk_index != null ? `#chunk${m.chunk_index}` : "";
+          lines.push(
+            `[${i + 1}] ${shortPath}${chunkSuffix} (score: ${r.score.toFixed(2)}, type: document)`,
+          );
+        } else {
+          // Episodic memory — use memory-db style citation
+          lines.push(
+            `[${i + 1}] memory-db:${m.id} (score: ${r.score.toFixed(2)}, type: ${m.memory_type}, confidence: ${m.confidence.toFixed(2)})`,
+          );
+        }
+
+        lines.push(m.content.trim());
       } else {
-        // Episodic memory — use memory-db style citation
+        // Document result from lobs-memory server
+        const r = u.r;
+        const shortPath = r.path.replace(/^\/Users\/lobs\//, "~/");
+        const lineRef = `#${r.startLine}-${r.endLine}`;
         lines.push(
-          `[${i + 1}] memory-db:${m.id} (score: ${r.score.toFixed(2)}, type: ${m.memory_type}, confidence: ${m.confidence.toFixed(2)})`,
+          `[${i + 1}] ${r.source}:${shortPath}${lineRef} (score: ${r.score.toFixed(2)})`,
         );
+        lines.push(r.snippet.trim());
       }
 
-      lines.push(m.content.trim());
       lines.push("");
     }
 
