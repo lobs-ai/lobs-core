@@ -112,7 +112,8 @@ export function compactMessages(
 
   for (let i = keepFromIndex; i < messages.length; i++) {
     const msg = messages[i];
-    compacted.push(compactRecentMessage(msg));
+    const preserveFull = i >= messages.length - 4;
+    compacted.push(compactRecentMessage(msg, preserveFull));
   }
 
   return compacted;
@@ -187,18 +188,20 @@ function pushUnique(items: string[], value: string): void {
   if (!items.includes(value)) items.push(value);
 }
 
-function compactRecentMessage(msg: LLMMessage): LLMMessage {
+function compactRecentMessage(msg: LLMMessage, preserveFull: boolean = false): LLMMessage {
   if (msg.role === "user" && Array.isArray(msg.content)) {
     return {
       role: "user",
       content: msg.content.map((block: Record<string, unknown>) => {
         if (block.type !== "tool_result") return block;
 
+        if (preserveFull) return block;
+
         const content = block.content;
         let summary: string;
         if (typeof content === "string") {
-          summary = content.length > 400
-            ? content.slice(0, 400) + "... [truncated]"
+          summary = content.length > 6000
+            ? content.slice(0, 6000) + "... [truncated]"
             : content;
         } else if (Array.isArray(content)) {
           summary = "[tool output truncated to save context]";
@@ -221,8 +224,9 @@ function compactRecentMessage(msg: LLMMessage): LLMMessage {
       role: "assistant",
       content: msg.content.map((block: Record<string, unknown>) => {
         if (block.type !== "text" || typeof block.text !== "string") return block;
-        return block.text.length > 700
-          ? { type: "text", text: block.text.slice(0, 700) + "... [truncated]" }
+        if (preserveFull) return block;
+        return block.text.length > 6000
+          ? { type: "text", text: block.text.slice(0, 6000) + "... [truncated]" }
           : block;
       }),
     };
