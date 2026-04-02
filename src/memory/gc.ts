@@ -365,25 +365,64 @@ async function fetchEmbeddingForResurrect(
 // ── Importance score ──────────────────────────────────────────────────────────
 
 /**
+ * Per-type base importance — reflects how durable and actionable a memory type
+ * is independent of its content confidence.
+ *
+ * decisions/learnings/patterns are the most valuable long-term; facts are
+ * stable but neutral; events/notes are ephemeral.
+ */
+const TYPE_BASE_IMPORTANCE: Record<string, number> = {
+  decision: 0.9,
+  learning: 0.85,
+  pattern: 0.8,
+  preference: 0.75,
+  fact: 0.7,
+  document: 0.5,
+};
+
+/**
  * Compute an importance score for ranking purposes.
  *
- * Decays exponentially from the base confidence using a 120-day half-life
- * since last access. A floor based on access_count prevents well-used
- * memories from sinking below a useful threshold.
+ * Components:
+ *  1. Decayed confidence — base confidence with exponential decay since last
+ *     access. High-authority and high-confidence memories decay more slowly.
+ *  2. Access floor — well-accessed memories can't sink below a threshold
+ *     based on log2(access_count), capped at 0.4.
+ *  3. Type bias — decisions/learnings/patterns receive a per-type base
+ *     importance multiplier that lifts them above ephemeral notes/events.
+ *  4. Authority multiplier — source_authority >= 2 (user-provided) gets
+ *     a 1.2× boost; >= 3 gets 1.4×.
  *
  * Returns a value in [0, 1].
  */
 export function importanceScore(memory: Memory): number {
-  const ACCESS_HALF_LIFE = 120; // days
+  // Half-life scales with source_authority — trusted memories decay slower
+  const authority = memory.source_authority ?? 1;
+  const halfLifeDays = 120 * Math.max(1, authority * 0.8);
+
   const lastAccessed = memory.last_accessed ?? memory.derived_at;
   const daysSince =
     (Date.now() - new Date(lastAccessed).getTime()) / (1000 * 60 * 60 * 24);
 
   const baseImportance = memory.confidence;
-  const decayed = baseImportance * Math.pow(0.5, daysSince / ACCESS_HALF_LIFE);
+  const decayed = baseImportance * Math.pow(0.5, daysSince / halfLifeDays);
 
-  // Floor based on access count — log2(count+1) * 0.1, capped at ~0.3
-  const floor = 0.1 * Math.log2((memory.access_count ?? 0) + 1);
+  // Floor based on access count — log2(count+1) * 0.1, hard-capped at 0.4
+  const floor = Math.min(0.4, 0.1 * Math.log2((memory.access_count ?? 0) + 1));
 
-  return Math.max(decayed, floor);
+  // Type-based base importance — decisions/learnings rank higher than notes
+  const typeBase = TYPE_BASE_IMPORTANCE[memory.memory_type] ?? 0.6;
+
+  // Blend: decayed confidence or access floor (whichever is higher), then
+  // interpolate upward toward the type base importance.
+  const rawScore = Math.max(decayed, floor);
+
+  // Pull toward typeBase proportionally — a decision at low confidence still
+  // sits higher than an event at equal confidence.
+  const blended = rawScore * 0.7 + typeBase * 0.3;
+
+  // Authority multiplier — user-direct memories are intrinsically more important
+  const authorityMultiplier = authority >= 3 ? 1.4 : authority >= 2 ? 1.2 : 1.0;
+
+  return Math.min(1, blended * authorityMultiplier);
 }
