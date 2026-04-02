@@ -155,15 +155,22 @@ function getEvidenceCounts(ids: number[]): Map<number, number> {
 
 /**
  * Score multipliers applied after FTS + vector scoring.
- * Episodic memories (distilled insights) score higher than raw document chunks.
+ *
+ * These differentiate durable, actionable memory types (decisions, learnings,
+ * patterns) from raw facts and document chunks. The spread is intentionally
+ * wider than before so high-value types visibly outrank noise at equal
+ * relevance scores.
+ *
+ * Multipliers are kept close to 1.0 so they tilt rather than dominate
+ * relevance — a highly-relevant document still beats a weakly-matched decision.
  */
 export const MEMORY_TYPE_WEIGHTS: Record<string, number> = {
-  preference: 1.05,
-  decision: 1.03,
-  learning: 1.02,
-  pattern: 1.01,
+  decision: 1.15,
+  learning: 1.12,
+  pattern: 1.08,
+  preference: 1.06,
   fact: 1.0,
-  document: 1.0,
+  document: 0.9,
 };
 
 // ── Shared filter builder ────────────────────────────────────────────────────
@@ -226,7 +233,8 @@ function buildWhereClause(
 /**
  * Fast structured memory search using FTS5 full-text index and recency scoring.
  *
- * Score = FTS5_rank_normalized * 0.6 + confidence * 0.2 + recency * 0.2
+ * Score = FTS5_rank_normalized * 0.72 + importance * 0.18 + decayedConfidence * 0.10
+ * The importance signal incorporates type bias, authority, and access patterns.
  * Target: < 50ms
  */
 export async function searchMemoriesFast(
@@ -264,11 +272,15 @@ export async function searchMemoriesFast(
 
     const scored = rows.map((row) => {
       const ftsNorm = 1 / (1 + row.fts_rank * FTS_K);
-      const decayed = decayedConfidence(row);
+      // decayedConfidence: type-aware decay that reflects how stale/fresh the info is
+      const confDecayed = decayedConfidence(row);
+      // importanceScore: incorporates type bias, authority boost, and access floor
       const importance = importanceScore(row);
       const typeWeight = MEMORY_TYPE_WEIGHTS[row.memory_type] ?? 1.0;
-      const score = (ftsNorm * 0.85 + importance * 0.15) * typeWeight;
-      return { row, score, decayed };
+      // FTS relevance dominates; importance and confidence tilt the ranking
+      // toward high-quality memories when relevance is similar.
+      const score = (ftsNorm * 0.72 + importance * 0.18 + confDecayed * 0.10) * typeWeight;
+      return { row, score };
     });
 
     // Sort and take top maxResults
@@ -391,23 +403,27 @@ export async function searchMemoriesFull(
       const isFts = ftsNorm > 0;
 
       // Base score: weight FTS and vector — these drive query relevance (0..1)
-      let score = ftsNorm * 0.5 + vecNorm * 0.5;
-      if (isFts && !isVector) score = ftsNorm * 0.85;
-      if (!isFts && isVector) score = vecNorm * 0.85;
+      let relevance = ftsNorm * 0.5 + vecNorm * 0.5;
+      if (isFts && !isVector) relevance = ftsNorm * 0.85;
+      if (!isFts && isVector) relevance = vecNorm * 0.85;
 
-      // Importance is a small secondary signal — keep it from dominating relevance
-      // (was 0.4 additive which pushed everything over 1.0 → clamp to 1.00)
+      // importanceScore: type bias + authority + access floor + decay
       const importance = importanceScore(m);
-      score = score * 0.85 + importance * 0.15;
+      // decayedConfidence: type-specific confidence decay since last validation
+      const confDecayed = decayedConfidence(m);
 
-      // Apply per-type multiplier before normalization
+      // Relevance dominates; importance and confidence tilt toward high-quality
+      // memories when relevance scores are similar.
+      const score = (relevance * 0.72 + importance * 0.18 + confDecayed * 0.10);
+
+      // Apply per-type multiplier
       const typeWeight = MEMORY_TYPE_WEIGHTS[m.memory_type] ?? 1.0;
-      score = score * typeWeight;
+      const finalScore = score * typeWeight;
 
       const matchType: StructuredMemoryResult["matchType"] =
         isFts && isVector ? "hybrid" : isFts ? "fts" : "vector";
 
-      return { memory: m, score: Math.min(score, 1), matchType };
+      return { memory: m, score: Math.min(finalScore, 1), matchType };
     });
 
     // Sort descending
