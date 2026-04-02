@@ -30,13 +30,16 @@ export function getContextLimit(model: string): number {
 
 /**
  * Check if we're approaching the context limit.
+ * Uses current message array size (not cumulative tokens) to avoid
+ * triggering compaction every turn after the first compaction.
  */
 export function shouldCompact(
-  cumulativeInputTokens: number,
+  messages: LLMMessage[],
   model: string
 ): boolean {
   const limit = getContextLimit(model);
-  return cumulativeInputTokens > limit * CONTEXT_WARNING_THRESHOLD;
+  const currentTokens = estimateTokens(messages);
+  return currentTokens > limit * CONTEXT_WARNING_THRESHOLD;
 }
 
 /**

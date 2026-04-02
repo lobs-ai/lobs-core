@@ -18,7 +18,8 @@ import { buildSystemPrompt, buildSmartSystemPrompt } from "./prompt-builder.js";
 import { parseModelString, createResilientClient, type LLMMessage, type LLMResponse } from "./providers.js";
 import { createHash, randomBytes } from "node:crypto";
 import { SessionTranscript, type TurnRecord } from "./session-transcript.js";
-import { shouldCompact, compactMessages } from "./context-manager.js";
+import { shouldCompact, estimateTokens } from "./context-manager.js";
+import { compactMessages as smartCompactMessages, pruneToolResults } from "../services/compaction.js";
 import { getHookRegistry } from "./hooks.js";
 import { LoopDetector } from "./loop-detector.js";
 import { asClaudeSystemReminder, buildDynamicPromptStateSections } from "../claude-runtime/llm-prompt.js";
@@ -443,17 +444,22 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       spec.onPhaseChange?.({ phase: 'between_turns', turn: turns, startedAt: Date.now() });
 
       // Check if we need to compact context
-      if (shouldCompact(usage.inputTokens, spec.model)) {
+      if (shouldCompact(messages, spec.model)) {
         spec.onPhaseChange?.({ phase: 'compacting', turn: turns, startedAt: Date.now() });
         const beforeCount = messages.length;
-        messages.splice(0, messages.length, ...compactMessages(messages));
+
+        // Use smart LLM-based compaction
+        const compactionResult = await smartCompactMessages(messages);
+        if (compactionResult.compacted) {
+          messages.splice(0, messages.length, ...compactionResult.messages);
+        }
         const afterCount = messages.length;
 
         if (beforeCount !== afterCount) {
           console.log(
-            `[Context compaction] Reduced messages from ${beforeCount} to ${afterCount} (${usage.inputTokens.toLocaleString()} input tokens)`
+            `[Context compaction] Reduced messages from ${beforeCount} to ${afterCount} (estimated ${estimateTokens(messages).toLocaleString()} tokens)`
           );
-          
+
           // Emit session_compacted hook
           await hookRegistry.emit({
             hookName: "session_compacted",
@@ -520,7 +526,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
         response = await client.createMessage({
           model: providerConfig.modelId,
           system: llmSystemPrompt,
-          messages,
+          messages: pruneToolResults(messages),
           tools,
           maxTokens: DEFAULT_MAX_TOKENS,
           thinking: spec.thinking,
