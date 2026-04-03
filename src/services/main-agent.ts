@@ -18,7 +18,7 @@ import { loadWorkspaceContext, buildSystemPrompt, buildVoiceSystemPrompt } from 
 import { buildFallbackChain, resolveModelForTier, type ModelTier } from "../orchestrator/model-chooser.js";
 import Database from "better-sqlite3";
 import Anthropic from "@anthropic-ai/sdk";
-import { compactMessages, findSafeSplitPoint, calculateContextSize } from "./compaction.js";
+import { compactMessages, microcompact, findSafeSplitPoint, calculateContextSize } from "./compaction.js";
 import { getEventRecorder } from "../memory/event-recorder.js";
 import { runAgent } from "../runner/agent-loop.js";
 
@@ -2684,72 +2684,18 @@ export class MainAgent {
   private pruneHistory(
     messages: Array<{ role: string; content: string | Array<Record<string, unknown>>; created_at: string; metadata?: string | null }>,
   ): Array<{ role: string; content: string | Array<Record<string, unknown>>; created_at: string; metadata?: string | null }> {
-    const KEEP_RECENT = 8; // Keep last 8 assistant turns fully intact
-    const MAX_TOOL_OUTPUT = 500; // Truncate old tool outputs to this many chars
-    const PLACEHOLDER =
-      "[Earlier tool output removed to save context. Re-run the tool if needed.]";
-
-    // Count assistant turns from the end
-    let assistantCount = 0;
-    let keepFullFrom = 0; // index from which we keep full
-
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === "assistant") {
-        assistantCount++;
-        if (assistantCount >= KEEP_RECENT) {
-          // Everything before this index gets pruned
-          keepFullFrom = i;
-          break;
-        }
-      }
-    }
-
-    return messages.map((m, i) => {
-      if (i >= keepFullFrom || assistantCount < KEEP_RECENT)
-        return { role: m.role, content: m.content, created_at: m.created_at, metadata: m.metadata };
-
-      // For old messages, strip image metadata (don't resend multi-MB base64 for old turns)
-      // and truncate large content (likely tool outputs)
-      const contentSize = typeof m.content === 'string' ? m.content.length : JSON.stringify(m.content).length;
-      if (contentSize > MAX_TOOL_OUTPUT * 3 && m.role === "user") {
-        // If content has structured tool_result blocks, truncate the output
-        // WITHIN each block rather than destroying the block structure
-        if (Array.isArray(m.content)) {
-          const hasToolResults = (m.content as any[]).some((b: any) => b.type === "tool_result");
-          if (hasToolResults) {
-            const truncatedBlocks = (m.content as any[]).map((block: any) => {
-              if (block.type === "tool_result") {
-                const outputText = typeof block.content === "string"
-                  ? block.content
-                  : JSON.stringify(block.content);
-                return {
-                  ...block,
-                  content: outputText.length > MAX_TOOL_OUTPUT
-                    ? outputText.substring(0, MAX_TOOL_OUTPUT) + "\n" + PLACEHOLDER
-                    : block.content,
-                };
-              }
-              return block;
-            });
-            return {
-              role: m.role,
-              content: truncatedBlocks,
-              created_at: m.created_at,
-            };
-          }
-        }
-
-        // Plain text content — safe to truncate directly
-        const textContent = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
-        return {
-          role: m.role,
-          content:
-            textContent.substring(0, MAX_TOOL_OUTPUT) + "\n\n" + PLACEHOLDER,
-          created_at: m.created_at,
-        };
-      }
-      return { role: m.role, content: m.content, created_at: m.created_at };
-    });
+    // Delegate to microcompact — it clears old tool results entirely
+    // (replacing with "[Old tool result content cleared]") while keeping
+    // the N most recent intact. This is better than the old approach of
+    // truncating to 500 chars which was both destructive and still costly.
+    const asLLM = messages.map(m => ({ role: m.role as "user" | "assistant", content: m.content }));
+    const compacted = microcompact(asLLM, 8);
+    return messages.map((m, i) => ({
+      role: m.role,
+      content: compacted[i].content,
+      created_at: m.created_at,
+      metadata: m.metadata,
+    }));
   }
 
   /**
@@ -2775,7 +2721,6 @@ export class MainAgent {
       // better content extraction, and preserves key findings from tool results
       const result = await compactMessages(messages, {
         summarizeRatio,
-        maxSummaryTokens: 3000,
         preserveIdentifiers: true,
       });
 
@@ -2783,16 +2728,16 @@ export class MainAgent {
 
       // Persist compaction summary to DB
       if (channelId && result.compacted) {
-        const summary = typeof compacted[0]?.content === "string"
-          ? compacted[0].content.replace("[Conversation summary — earlier messages compacted]\n\n", "")
-          : "";
+        let summary = typeof compacted[0]?.content === "string" ? compacted[0].content : "";
+        // Strip the compaction header (old and new formats)
+        summary = summary.replace(/^\[Conversation (?:summary — earlier messages )?compacted[^\]]*\]\n\n/, "");
         if (summary) {
           // Count how many synthetic messages (compaction summary + ack) were at the start
           // of the input — these aren't real DB rows and shouldn't be counted
           let syntheticPrefix = 0;
           for (const m of messages) {
             const txt = typeof m.content === "string" ? m.content : "";
-            if (txt.startsWith("[Conversation summary") || txt === "Understood, I have the context from the summary. Continuing.") {
+            if (txt.startsWith("[Conversation summary") || txt.startsWith("[Conversation compacted") || txt === "Understood, I have the context from the summary. Continuing." || txt === "Understood, I have the context from the summary. Continuing from where we left off.") {
               syntheticPrefix++;
             } else {
               break;
