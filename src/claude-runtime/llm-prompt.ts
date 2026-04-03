@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import type { AgentSpec, ToolDefinition } from "../runner/types.js";
 
 function summarizeInputSchema(schema: Record<string, unknown>): string {
@@ -218,6 +219,56 @@ function buildReferenceSection(
   ].join("\n");
 }
 
+function buildGitContextBlock(cwd: string): string | null {
+  try {
+    const opts = { timeout: 3000, cwd, encoding: "utf-8" as const };
+
+    // Bail if not inside a git repo
+    execSync("git rev-parse --is-inside-work-tree", { ...opts, stdio: "pipe" });
+
+    const branch = execSync("git branch --show-current", { ...opts, stdio: "pipe" }).trim();
+    const statusRaw = execSync("git status --porcelain", { ...opts, stdio: "pipe" }).trim();
+    const logRaw = execSync("git log --oneline -5", { ...opts, stdio: "pipe" }).trim();
+
+    const lines = ["# Git Context (snapshot at session start)"];
+    lines.push(`- Branch: ${branch || "(detached HEAD)"}`);
+
+    if (!statusRaw) {
+      lines.push("- Status: clean");
+    } else {
+      const statusLines = statusRaw.split("\n").slice(0, 20);
+      const modified: string[] = [];
+      const untracked: string[] = [];
+      for (const line of statusLines) {
+        const xy = line.slice(0, 2);
+        const file = line.slice(3).trim();
+        if (xy === "??") {
+          untracked.push(file);
+        } else {
+          modified.push(file);
+        }
+      }
+      const parts: string[] = [];
+      if (modified.length > 0) parts.push(`${modified.length} modified`);
+      if (untracked.length > 0) parts.push(`${untracked.length} untracked`);
+      lines.push(`- Status: ${parts.join(", ")}`);
+      if (modified.length > 0) lines.push(`- Modified: ${modified.join(", ")}`);
+      if (untracked.length > 0) lines.push(`- Untracked: ${untracked.join(", ")}`);
+    }
+
+    if (logRaw) {
+      lines.push("- Recent commits:");
+      for (const commit of logRaw.split("\n")) {
+        lines.push(`  ${commit}`);
+      }
+    }
+
+    return lines.join("\n");
+  } catch {
+    return null;
+  }
+}
+
 export function buildClaudeStyleSystemPrompt(params: {
   spec: AgentSpec;
   baseInstructions: string;
@@ -246,6 +297,7 @@ export function buildClaudeStyleSystemPrompt(params: {
     buildSystemSection(),
     buildTaskSection(),
     buildRuntimeSection(spec),
+    buildGitContextBlock(spec.cwd),
     buildLiveStateSection({ spec, recentHistory, contextBlock, learnings, additionalContext }),
     buildSubagentStateSection(spec),
     buildToolSection(toolDefinitions),

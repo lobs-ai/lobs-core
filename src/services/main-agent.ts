@@ -1306,7 +1306,7 @@ export class MainAgent {
         tools: availableTools as ToolName[],
         cwd: this.cwd,
         timeout: Math.ceil(LLM_TURN_TIMEOUT_MS / 1000) * 4,
-        maxTurns: 50,
+        maxTurns: 200,
         disableTranscript: true,
         initialMessages: messages,
         clientOverride: client,
