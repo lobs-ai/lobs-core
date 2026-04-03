@@ -323,8 +323,151 @@ export function microcompact(
 }
 
 /**
+ * Superseded Read Pruning — file-aware deduplication of read results.
+ *
+ * When the same file is read multiple times, all but the most recent read
+ * are replaced with a stub. When a file is edited after a read, the pre-edit
+ * read is also marked stale. This runs BEFORE microcompact so the recency
+ * window operates on already-deduplicated content.
+ *
+ * Returns a new array — does NOT mutate the input.
+ */
+export function pruneSupersededReads(messages: LLMMessage[]): LLMMessage[] {
+  // Step 1: Build a map of tool_use_id → { toolName, filePath, msgIndex }
+  // by scanning assistant messages for Read/Edit tool_use blocks.
+  const toolUseMap = new Map<string, { toolName: string; filePath: string; msgIndex: number }>();
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+
+    for (const block of msg.content as Array<Record<string, unknown>>) {
+      if (block.type !== "tool_use") continue;
+      const name = String(block.name || "");
+      if (!["Read", "read", "Edit", "edit"].includes(name)) continue;
+
+      const input = block.input as Record<string, unknown> | undefined;
+      if (!input) continue;
+
+      const filePath = String(input.file_path || input.path || "");
+      if (!filePath) continue;
+
+      toolUseMap.set(String(block.id), { toolName: name, filePath, msgIndex: i });
+    }
+  }
+
+  // Step 2: Build a map of filePath → list of file operations
+  // by scanning user messages for tool_result blocks that match tracked tool_uses.
+  type FileOperation = {
+    toolUseId: string;
+    toolName: string;
+    msgIndex: number;       // assistant message index (tool_use)
+    resultMsgIndex: number; // user message index (tool_result)
+  };
+  const fileOps = new Map<string, FileOperation[]>();
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg.role !== "user" || !Array.isArray(msg.content)) continue;
+
+    for (const block of msg.content as Array<Record<string, unknown>>) {
+      if (block.type !== "tool_result") continue;
+      const toolUseId = String(block.tool_use_id || "");
+      const info = toolUseMap.get(toolUseId);
+      if (!info) continue;
+
+      const ops = fileOps.get(info.filePath) || [];
+      ops.push({
+        toolUseId,
+        toolName: info.toolName,
+        msgIndex: info.msgIndex,
+        resultMsgIndex: i,
+      });
+      fileOps.set(info.filePath, ops);
+    }
+  }
+
+  // Step 3: For each file, determine which tool results to supersede.
+  const toSupersede = new Map<string, string>(); // tool_use_id → reason message
+
+  for (const [, ops] of fileOps) {
+    if (ops.length <= 1) continue; // Only one operation — nothing to supersede
+
+    // Sort chronologically by result message index
+    ops.sort((a, b) => a.resultMsgIndex - b.resultMsgIndex);
+
+    const reads = ops.filter(op => ["Read", "read"].includes(op.toolName));
+    const edits = ops.filter(op => ["Edit", "edit"].includes(op.toolName));
+
+    if (reads.length > 1) {
+      // Multiple reads of same file — supersede all but the last
+      for (let i = 0; i < reads.length - 1; i++) {
+        toSupersede.set(
+          reads[i].toolUseId,
+          "[Superseded by a more recent read of this file — refer to the later result]",
+        );
+      }
+    }
+
+    // If there are edits after a read, the pre-edit read content is stale
+    if (edits.length > 0 && reads.length > 0) {
+      const lastEdit = edits[edits.length - 1];
+      for (const read of reads) {
+        if (read.resultMsgIndex < lastEdit.resultMsgIndex && !toSupersede.has(read.toolUseId)) {
+          toSupersede.set(
+            read.toolUseId,
+            "[File was edited after this read — content is outdated]",
+          );
+        }
+      }
+    }
+  }
+
+  if (toSupersede.size === 0) return messages;
+
+  // Step 4: Replace superseded tool results with stubs.
+  let tokensSaved = 0;
+  const result = messages.map(msg => {
+    if (msg.role !== "user" || !Array.isArray(msg.content)) return msg;
+
+    let touched = false;
+    const newContent = (msg.content as Array<Record<string, unknown>>).map(block => {
+      if (block.type !== "tool_result") return block;
+      const reason = toSupersede.get(String(block.tool_use_id));
+      if (!reason) return block;
+
+      // Don't supersede already-cleared results
+      const existing = typeof block.content === "string" ? block.content : "";
+      if (
+        existing === CLEARED_MESSAGE ||
+        existing.startsWith("[Superseded") ||
+        existing.startsWith("[File was edited")
+      ) {
+        return block;
+      }
+
+      tokensSaved += Math.ceil(existing.length / 4);
+      touched = true;
+      return { ...block, content: reason };
+    });
+
+    if (!touched) return msg;
+    return { ...msg, content: newContent };
+  });
+
+  if (tokensSaved > 0) {
+    console.log(
+      `[pruneSupersededReads] Replaced ${toSupersede.size} superseded read results (~${tokensSaved} tokens saved)`,
+    );
+  }
+
+  return result;
+}
+
+/**
  * Prune old tool results before LLM calls.
- * Delegates to microcompact — clears old results entirely instead of truncating.
+ * First supersedes duplicate/stale file reads (file-aware), then clears
+ * remaining old tool results by recency via microcompact.
  * Does NOT persist — only affects the current request's context.
  */
 export function pruneToolResults(
@@ -332,7 +475,10 @@ export function pruneToolResults(
   keepRecentTurns: number = 8,
   _maxOldToolOutputChars: number = 300, // kept for signature compatibility
 ): LLMMessage[] {
-  return microcompact(messages, keepRecentTurns);
+  // First: supersede duplicate/stale reads (file-aware)
+  const deduped = pruneSupersededReads(messages);
+  // Then: clear remaining old tool results by recency
+  return microcompact(deduped, keepRecentTurns);
 }
 
 // ---------------------------------------------------------------------------
