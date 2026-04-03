@@ -18,6 +18,7 @@ import { ensureTodaysMemoryFile } from "../../services/memory-condenser.js";
 import { getMemoryDb } from "../../memory/db.js";
 import { log } from "../../util/logger.js";
 import { searchMemoriesFull, type StructuredMemoryResult } from "../../memory/search.js";
+import { invalidateKeyMemoriesCache } from "../../services/workspace-loader.js";
 
 // ── lobs-memory document search ──────────────────────────────────────────────
 
@@ -561,6 +562,10 @@ export async function memoryWriteTool(
         // Non-fatal — the flat file write already succeeded
         log().warn(`[memory_write] Failed to write structured memory: ${String(dbErr)}`);
       }
+
+      // Bust the key-memories cache so the next system-prompt rebuild reflects
+      // the newly written memory without waiting for the 5-minute TTL.
+      invalidateKeyMemoriesCache();
     }
 
     const shortPath = targetFile.replace(homeDir, "~");

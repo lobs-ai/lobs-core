@@ -13,8 +13,137 @@ import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { getAgentContextDir, getAgentDir } from "../config/lobs.js";
+import { isMemoryDbReady, getMemoryDb } from "../memory/db.js";
 
 const HOME = homedir();
+
+// ── Key Memory Injection ─────────────────────────────────────────────────────
+
+const KEY_MEMORIES_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const KEY_MEMORIES_MAX_CHARS = 2000;
+const KEY_MEMORIES_FETCH_LIMIT = 40; // fetch more than needed, trim to budget
+
+interface KeyMemoriesCache {
+  content: string;
+  builtAt: number;
+}
+
+let _keyMemoriesCache: KeyMemoriesCache | null = null;
+
+/**
+ * Type-based importance weights — mirrors gc.ts TYPE_BASE_IMPORTANCE.
+ * Used as a secondary sort signal in the SQL query.
+ */
+const TYPE_ORDER: Record<string, number> = {
+  decision:   6,
+  learning:   5,
+  pattern:    4,
+  preference: 3,
+  fact:       2,
+  document:   1,
+};
+
+/**
+ * Load the top important memories from the DB for injection into the main
+ * agent system prompt.
+ *
+ * Selection strategy (pure SQL, no LLM):
+ *   1. All active preferences (always surfaced — these define Lobs' behaviour)
+ *   2. High-confidence decisions and learnings
+ *   3. Remaining active memories, ranked by: source_authority DESC,
+ *      confidence DESC, access_count DESC, type weight DESC
+ *
+ * Results are cached for 5 minutes so repeated prompt rebuilds don't hammer
+ * the DB on every message.
+ *
+ * @returns A "## Key Memories" markdown section, or "" if DB unavailable.
+ */
+function loadKeyMemories(): string {
+  // Return cached result if fresh
+  if (_keyMemoriesCache && Date.now() - _keyMemoriesCache.builtAt < KEY_MEMORIES_CACHE_TTL_MS) {
+    return _keyMemoriesCache.content;
+  }
+
+  if (!isMemoryDbReady()) {
+    return "";
+  }
+
+  try {
+    const db = getMemoryDb();
+
+    // Fetch candidates: active, non-document memories, ordered by importance signals.
+    // We fetch more than we'll show so we can trim to the char budget gracefully.
+    const rows = db.prepare(`
+      SELECT memory_type, content, confidence, source_authority, access_count, last_accessed
+      FROM memories
+      WHERE status = 'active'
+        AND memory_type != 'document'
+      ORDER BY
+        -- Preferences always bubble to the top
+        CASE memory_type WHEN 'preference' THEN 1 ELSE 0 END DESC,
+        -- Then high source_authority (user-provided = authoritative)
+        source_authority DESC,
+        -- Then type weight proxy: decision > learning > pattern > fact > ...
+        CASE memory_type
+          WHEN 'decision'   THEN 6
+          WHEN 'learning'   THEN 5
+          WHEN 'pattern'    THEN 4
+          WHEN 'preference' THEN 3
+          WHEN 'fact'       THEN 2
+          ELSE 0
+        END DESC,
+        -- Then confidence
+        confidence DESC,
+        -- Then recency of access
+        last_accessed DESC
+      LIMIT ?
+    `).all(KEY_MEMORIES_FETCH_LIMIT) as Array<{
+      memory_type: string;
+      content: string;
+      confidence: number;
+      source_authority: number;
+      access_count: number;
+      last_accessed: string | null;
+    }>;
+
+    if (rows.length === 0) {
+      _keyMemoriesCache = { content: "", builtAt: Date.now() };
+      return "";
+    }
+
+    // Format rows compactly: "[type] content"
+    // Trim to char budget, keeping whole entries
+    const lines: string[] = [];
+    let totalChars = 0;
+    for (const row of rows) {
+      const line = `[${row.memory_type}] ${row.content.trim()}`;
+      if (totalChars + line.length + 1 > KEY_MEMORIES_MAX_CHARS) break;
+      lines.push(line);
+      totalChars += line.length + 1;
+    }
+
+    if (lines.length === 0) {
+      _keyMemoriesCache = { content: "", builtAt: Date.now() };
+      return "";
+    }
+
+    const content = `## Key Memories\n${lines.join("\n")}`;
+    _keyMemoriesCache = { content, builtAt: Date.now() };
+    return content;
+  } catch (err) {
+    // Non-fatal — if DB is unavailable, skip injection
+    console.warn(`[workspace-loader] Failed to load key memories: ${err}`);
+    return "";
+  }
+}
+
+/**
+ * Invalidate the key memories cache (e.g. after memory_write calls).
+ * Exported so tool handlers can bust the cache when new memories are saved.
+ */
+export function invalidateKeyMemoriesCache(): void {
+  _keyMemoriesCache = null;
+}
 
 // ── Per-Agent Config ─────────────────────────────────────────────────────────
 
@@ -225,6 +354,15 @@ export function loadWorkspaceContext(agentType: string = "main"): string {
       `Use the \`read\` tool when you need them.\n` +
       available.map(a => `- ${a}`).join("\n")
     );
+  }
+
+  // Inject top important memories for the main agent only.
+  // Subagents get task-specific memory via context-engine.ts instead.
+  if (agentType === "main") {
+    const keyMemories = loadKeyMemories();
+    if (keyMemories) {
+      sections.push(keyMemories);
+    }
   }
 
   return sections.join("\n\n");
