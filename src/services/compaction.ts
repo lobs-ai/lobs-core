@@ -1,12 +1,12 @@
 /**
  * Smarter context compaction for agent conversations.
- * 
- * Features:
- * - Proper context size calculation (handles tool_result content blocks)
- * - Uses a dedicated cheaper model for summarization (Haiku)
- * - Preserves important identifiers (file paths, IDs, URLs, variable names)
- * - Structured summary (decisions, open questions, current task state)
- * - Tracks compaction count for observability
+ *
+ * Architecture (Claude Code-inspired):
+ * 1. Microcompact  — runs every turn before the API call; clears old tool
+ *    results entirely (replaces with stub), keeps N most recent intact.
+ * 2. Full compact  — triggers at threshold; uses LLM to generate a structured
+ *    9-section summary with an <analysis> scratchpad that gets stripped before
+ *    the summary reaches context.
  */
 
 import { parseModelString, createClient } from "../runner/providers.js";
@@ -26,28 +26,89 @@ export interface CompactionConfig {
   preserveIdentifiers: boolean;
 }
 
+export interface CompactionResult {
+  messages: LLMMessage[];
+  compacted: boolean;
+  originalCount: number;
+  newCount: number;
+}
+
 const DEFAULT_CONFIG: CompactionConfig = {
   threshold: 120_000,
   summarizeRatio: 0.6,
   model: getModelForTier("small"),
-  maxSummaryTokens: 3000,
+  maxSummaryTokens: 16384,
   preserveIdentifiers: true,
 };
 
+// ---------------------------------------------------------------------------
+// Full compaction — LLM-generated structured summary
+// ---------------------------------------------------------------------------
+
+const COMPACT_SYSTEM_PROMPT = `CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
+
+Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
+This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
+
+Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
+
+1. Chronologically analyze each message and section of the conversation. For each section thoroughly identify:
+   - The user's explicit requests and intents
+   - Your approach to addressing the user's requests
+   - Key decisions, technical concepts and code patterns
+   - Specific details like:
+     - file names
+     - full code snippets
+     - function signatures
+     - file edits
+   - Errors that you ran into and how you fixed them
+   - Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
+2. Double-check for technical accuracy and completeness, addressing each required element thoroughly.
+
+Your summary should include the following sections:
+
+1. Primary Request and Intent: Capture all of the user's explicit requests and intents in detail
+2. Key Technical Concepts: List all important technical concepts, technologies, and frameworks discussed.
+3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. Pay special attention to the most recent messages and include full code snippets where applicable and include a summary of why this file read or edit is important.
+4. Errors and fixes: List all errors that you ran into, and how you fixed them. Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
+5. Problem Solving: Document problems solved and any ongoing troubleshooting efforts.
+6. All user messages: List ALL user messages that are not tool results. These are critical for understanding the users' feedback and changing intent.
+7. Pending Tasks: Outline any pending tasks that you have explicitly been asked to work on.
+8. Current Work: Describe in detail precisely what was being worked on immediately before this summary request, paying special attention to the most recent messages from both user and assistant. Include file names and code snippets where applicable.
+9. Optional Next Step: List the next step that you will take that is related to the most recent work you were doing. IMPORTANT: ensure that this step is DIRECTLY in line with the user's most recent explicit requests. If your last task was concluded, then only list next steps if they are explicitly in line with the users request.
+   If there is a next step, include direct quotes from the most recent conversation showing exactly what task you were working on and where you left off. This should be verbatim to ensure there's no drift in task interpretation.
+
+REMINDER: Do NOT call any tools. Respond with plain text only — an <analysis> block followed by a <summary> block. Tool calls will be rejected and you will fail the task.`;
+
 /**
- * Smarter compaction that:
- * 1. Calculates total context size properly (handling tool_result content blocks)
- * 2. Uses a dedicated cheaper model for summarization
- * 3. Preserves important identifiers (file paths, IDs, URLs, variable names)
- * 4. Keeps a structured summary (decisions, open questions, current task state)
- * 5. Tracks compaction count for observability
+ * Strip the <analysis> scratchpad and extract/reformat the <summary> block.
+ */
+export function formatCompactSummary(summary: string): string {
+  let formatted = summary;
+  // Strip analysis section (drafting scratchpad — not useful in context)
+  formatted = formatted.replace(/<analysis>[\s\S]*?<\/analysis>/, "");
+  // Extract summary section content and reformat with a plain header
+  const summaryMatch = formatted.match(/<summary>([\s\S]*?)<\/summary>/);
+  if (summaryMatch) {
+    formatted = formatted.replace(
+      /<summary>[\s\S]*?<\/summary>/,
+      `Summary:\n${(summaryMatch[1] || "").trim()}`,
+    );
+  }
+  formatted = formatted.replace(/\n\n+/g, "\n\n");
+  return formatted.trim();
+}
+
+/**
+ * Full LLM-based compaction. Triggers when context exceeds threshold.
+ * Sends the full conversation to the summarizer (capped at 100K chars)
+ * so the model can extract what matters rather than us pre-truncating.
  */
 export async function compactMessages(
   messages: LLMMessage[],
   config: Partial<CompactionConfig> = {},
-): Promise<{ messages: LLMMessage[]; compacted: boolean; originalCount: number; newCount: number }> {
+): Promise<CompactionResult> {
   const cfg = { ...DEFAULT_CONFIG, ...config };
-  
   const totalChars = calculateContextSize(messages);
 
   if (totalChars < cfg.threshold) {
@@ -56,74 +117,47 @@ export async function compactMessages(
 
   console.log(`[compaction] Context at ${totalChars} chars (threshold: ${cfg.threshold}), compacting...`);
 
-  const rawSplit = Math.floor(messages.length * cfg.summarizeRatio);
-  const splitPoint = findSafeSplitPoint(messages, rawSplit);
+  const splitPoint = findSafeSplitPoint(messages, Math.floor(messages.length * cfg.summarizeRatio));
   const toSummarize = messages.slice(0, splitPoint);
   const toKeep = messages.slice(splitPoint);
 
-  // Build summary input — include more detail than basic compaction
-  const summaryText = toSummarize.map((m, i) => {
-    const role = m.role.toUpperCase();
-    let content = "";
-    if (typeof m.content === "string") {
-      content = m.content.substring(0, 800);
-    } else if (Array.isArray(m.content)) {
-      content = (m.content as Array<Record<string, unknown>>).map(block => {
-        if (typeof block === "string") return (block as string).substring(0, 400);
-        const b = block as Record<string, unknown>;
-        if (b.type === "text") return String(b.text || "").substring(0, 400);
-        if (b.type === "tool_use") return `[Tool: ${b.name}(${JSON.stringify(b.input).substring(0, 200)})]`;
-        if (b.type === "tool_result") {
-          const rc = typeof b.content === "string" ? b.content : JSON.stringify(b.content);
-          return `[Result: ${String(rc).substring(0, 300)}]`;
-        }
-        return "[content block]";
-      }).join(" ");
-    } else {
-      content = JSON.stringify(m.content).substring(0, 600);
-    }
-    return `[${i}] ${role}: ${content}`;
-  }).join("\n");
+  // Build the full conversation text for the summarizer.
+  // Include more detail than before — the model handles extraction.
+  const conversationText = toSummarize
+    .map((m, i) => {
+      const role = m.role.toUpperCase();
+      const content =
+        typeof m.content === "string"
+          ? m.content
+          : Array.isArray(m.content)
+            ? (m.content as Array<Record<string, unknown>>)
+                .map(block => {
+                  if (typeof block === "string") return block;
+                  const b = block as Record<string, unknown>;
+                  if (b.type === "text") return String(b.text || "");
+                  if (b.type === "tool_use") {
+                    return `[Tool call: ${b.name}(${JSON.stringify(b.input).substring(0, 500)})]`;
+                  }
+                  if (b.type === "tool_result") {
+                    const rc =
+                      typeof b.content === "string" ? b.content : JSON.stringify(b.content);
+                    // Keep more of tool results — they contain important findings
+                    return `[Tool result: ${String(rc).substring(0, 2000)}]`;
+                  }
+                  return "[content block]";
+                })
+                .join("\n")
+            : JSON.stringify(m.content).substring(0, 1000);
+      return `[${i}] ${role}: ${content}`;
+    })
+    .join("\n\n");
 
-  const systemPrompt = cfg.preserveIdentifiers
-    ? `You are a conversation compactor. Summarize this conversation history into a structured summary that prevents the agent from needing to re-read files or re-investigate things it already discovered.
-
-RULES:
-1. PRESERVE all identifiers exactly: file paths, URLs, git branches, issue numbers, variable names, channel IDs, user IDs, model names
-2. PRESERVE all decisions made and their reasoning
-3. PRESERVE all open questions and blockers
-4. PRESERVE current task state (what was being worked on, what's done, what's next)
-5. PRESERVE any constraints, requirements, or acceptance criteria mentioned
-6. PRESERVE key findings from tool results — file contents discovered, grep results, command outputs that informed decisions
-7. Include enough detail that the agent does NOT need to re-run tools to recover context
-8. Use bullet points for clarity
-9. Group by: Goals, Key Findings, Decisions, Current State, Open Questions, Key Identifiers
-
-Output format:
-## Goals
-- ...
-
-## Key Findings
-- File X contains Y (key lines/structures discovered)
-- Command output showed Z
-- ...
-
-## Decisions
-- ...
-
-## Current State
-- What's being worked on: ...
-- Completed: ...
-- Next steps: ...
-
-## Open Questions
-- ...
-
-## Key Identifiers
-- Files: ...
-- IDs: ...
-- Other: ...`
-    : `Summarize this conversation history concisely. Preserve: goals, decisions, constraints, key identifiers, and open questions. Output as bullet points.`;
+  // Cap at 100K chars for the summarizer input
+  const cappedInput =
+    conversationText.length > 100_000
+      ? conversationText.substring(0, 100_000) +
+        "\n\n[...conversation truncated for summarization]"
+      : conversationText;
 
   try {
     const modelConfig = parseModelString(cfg.model);
@@ -131,43 +165,48 @@ Output format:
 
     const response = await client.createMessage({
       model: modelConfig.modelId,
-      system: systemPrompt,
-      messages: [
-        { role: "user", content: summaryText.substring(0, 80000) },
-      ],
+      system: COMPACT_SYSTEM_PROMPT,
+      messages: [{ role: "user", content: cappedInput }],
       tools: [],
       maxTokens: cfg.maxSummaryTokens,
     });
 
-    const summary = (response.content as Array<{ type: string; text?: string }>)
+    const rawSummary = (response.content as Array<{ type: string; text?: string }>)
       .filter(b => b.type === "text")
       .map(b => b.text || "")
       .join("");
 
-    // Build compacted message list, ensuring proper role alternation.
-    // If toKeep starts with an assistant message, omit the synthetic ack
-    // to avoid consecutive assistant messages (ack + kept assistant).
+    const summary = formatCompactSummary(rawSummary);
+
+    // Build the post-compact user message — matches Claude Code's format
+    const summaryMessage = `This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+${summary}
+
+Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with "I'll continue" or similar. Pick up the last task as if the break never happened.`;
+
     const compactedMessages: LLMMessage[] = [
       {
         role: "user",
-        content: `[Conversation compacted — ${splitPoint} messages summarized]\n\n${summary}`,
+        content: `[Conversation compacted — ${splitPoint} messages summarized]\n\n${summaryMessage}`,
       },
     ];
 
-    const firstKeptRole = toKeep.length > 0 ? toKeep[0].role : null;
-    if (firstKeptRole !== "assistant") {
-      // Safe to add the ack — next message is user (or empty)
+    // Only add ack if the next kept message isn't already assistant
+    // (avoids consecutive assistant messages)
+    if (toKeep.length === 0 || toKeep[0].role !== "assistant") {
       compactedMessages.push({
         role: "assistant",
-        content: "Understood. I have the full context from the summary and will continue from where we left off.",
+        content: "Understood, I have the context from the summary. Continuing from where we left off.",
       });
     }
-    // else: skip the ack to avoid consecutive assistant messages
 
     compactedMessages.push(...toKeep);
 
     const newSize = calculateContextSize(compactedMessages);
-    console.log(`[compaction] Compacted ${splitPoint} messages into summary (${totalChars} → ${newSize} chars)`);
+    console.log(
+      `[compaction] Compacted ${splitPoint} messages into summary (${totalChars} → ${newSize} chars, ${messages.length} → ${compactedMessages.length} messages)`,
+    );
 
     return {
       messages: compactedMessages,
@@ -176,8 +215,8 @@ Output format:
       newCount: compactedMessages.length,
     };
   } catch (err) {
-    console.error("[compaction] Failed:", err);
-    // Fallback: just keep recent messages
+    console.error("[compaction] LLM summary failed:", err);
+    // Fallback: keep recent messages only
     return {
       messages: toKeep,
       compacted: true,
@@ -187,120 +226,151 @@ Output format:
   }
 }
 
+// ---------------------------------------------------------------------------
+// Microcompact — clears old tool results before every API call
+// ---------------------------------------------------------------------------
+
 /**
- * Find a safe split point that doesn't orphan tool_result blocks.
- * 
- * Claude's API requires every tool_result to have a matching tool_use in the
- * immediately preceding assistant message. If we split between an assistant
- * message with tool_use blocks and the following user message with tool_result
- * blocks, the kept portion starts with orphaned tool_results → 400 error.
- *
- * Strategy: start from the target split point and walk backward until we find
- * a point where the message at splitPoint is NOT a user message containing
- * tool_result blocks (i.e., we don't split a tool_use/tool_result pair).
+ * Tool names whose results should be cleared when old enough.
+ * These produce large outputs that are only relevant in the short term.
  */
-export function findSafeSplitPoint(messages: LLMMessage[], targetSplit: number): number {
-  let split = targetSplit;
-  
-  // Walk backward from target to find a safe boundary
-  while (split > 0 && split < messages.length) {
-    const msg = messages[split];
-    
-    // Check if this message is a user message containing tool_result blocks
-    if (msg.role === "user" && Array.isArray(msg.content)) {
-      const hasToolResult = (msg.content as Array<Record<string, unknown>>).some(
-        (block) => block.type === "tool_result"
-      );
-      if (hasToolResult) {
-        // This would orphan tool_results — move split back to before the assistant tool_use
-        split--;
-        continue;
+const COMPACTABLE_TOOLS = new Set([
+  "Bash",
+  "Read",
+  "Grep",
+  "Glob",
+  "Edit",
+  "Write",
+  "WebFetch",
+  "WebSearch",
+  "find_files",
+  "code_search",
+  // lowercase aliases
+  "exec",
+  "read",
+  "grep",
+  "glob",
+]);
+
+const CLEARED_MESSAGE = "[Old tool result content cleared]";
+
+/**
+ * Microcompact: clear old tool results before each API call.
+ *
+ * Key insight: if the model hasn't used a tool result in the last N turns,
+ * it won't. Clearing it entirely is better than truncating — it removes the
+ * token cost completely while keeping the structural turn intact.
+ *
+ * Keeps the N most recent compactable tool results intact.
+ * Returns a new array — does NOT mutate the input.
+ */
+export function microcompact(
+  messages: LLMMessage[],
+  keepRecent: number = 8,
+): LLMMessage[] {
+  // Collect all compactable tool_use IDs in order (assistant messages)
+  const compactableToolIds: string[] = [];
+  for (const msg of messages) {
+    if (msg.role === "assistant" && Array.isArray(msg.content)) {
+      for (const block of msg.content as Array<Record<string, unknown>>) {
+        if (block.type === "tool_use" && COMPACTABLE_TOOLS.has(String(block.name))) {
+          compactableToolIds.push(String(block.id));
+        }
       }
     }
-    
-    break;
   }
 
-  // Don't let split go below 2 (need at least something to summarize)
-  return Math.max(split, 2);
+  // Keep the last N tool results; clear everything older
+  const keepSet = new Set(compactableToolIds.slice(-keepRecent));
+  const clearSet = new Set(compactableToolIds.filter(id => !keepSet.has(id)));
+
+  if (clearSet.size === 0) return messages;
+
+  let tokensSaved = 0;
+
+  const result = messages.map(msg => {
+    if (msg.role !== "user" || !Array.isArray(msg.content)) return msg;
+
+    let touched = false;
+    const newContent = (msg.content as Array<Record<string, unknown>>).map(block => {
+      if (
+        block.type === "tool_result" &&
+        clearSet.has(String(block.tool_use_id)) &&
+        block.content !== CLEARED_MESSAGE
+      ) {
+        const oldContent =
+          typeof block.content === "string"
+            ? block.content
+            : JSON.stringify(block.content);
+        tokensSaved += Math.ceil(oldContent.length / 4); // rough token estimate
+        touched = true;
+        return { ...block, content: CLEARED_MESSAGE };
+      }
+      return block;
+    });
+
+    if (!touched) return msg;
+    return { ...msg, content: newContent };
+  });
+
+  if (tokensSaved > 0) {
+    console.log(
+      `[microcompact] Cleared ${clearSet.size} old tool results (~${tokensSaved} tokens saved)`,
+    );
+  }
+
+  return result;
 }
 
 /**
- * Prune old tool results in-memory before LLM calls.
- * Keeps recent tool outputs intact, truncates old ones.
+ * Prune old tool results before LLM calls.
+ * Delegates to microcompact — clears old results entirely instead of truncating.
  * Does NOT persist — only affects the current request's context.
  */
 export function pruneToolResults(
   messages: LLMMessage[],
   keepRecentTurns: number = 8,
-  maxOldToolOutputChars: number = 300,
+  _maxOldToolOutputChars: number = 300, // kept for signature compatibility
 ): LLMMessage[] {
-  // Count assistant turns from the end to find the cutoff
-  let assistantCount = 0;
-  let cutoffIndex = 0;
-  
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "assistant") {
-      assistantCount++;
-      if (assistantCount >= keepRecentTurns) {
-        // Set cutoff to the user message before this assistant (if exists)
-        // This keeps the full turn (user + assistant) intact
-        cutoffIndex = i > 0 && messages[i - 1].role === "user" ? i - 1 : i;
-        break;
-      }
-    }
-  }
-
-  return messages.map((m, i) => {
-    // Keep recent messages intact
-    if (i >= cutoffIndex) return m;
-
-    // For old messages, truncate large tool outputs but preserve key structure
-    if (typeof m.content === "string" && m.content.length > maxOldToolOutputChars * 3 && m.role === "user") {
-      return {
-        ...m,
-        content: smartTruncateToolOutput(m.content, maxOldToolOutputChars),
-      };
-    }
-
-    // Handle array content (tool_result blocks)
-    if (Array.isArray(m.content) && m.role === "user") {
-      return {
-        ...m,
-        content: m.content.map(block => {
-          const b = block as Record<string, unknown>;
-          if (b.type === "tool_result" && typeof b.content === "string" && b.content.length > maxOldToolOutputChars * 3) {
-            return {
-              ...b,
-              content: smartTruncateToolOutput(b.content, maxOldToolOutputChars),
-            };
-          }
-          return block;
-        }),
-      };
-    }
-
-    return m;
-  });
+  return microcompact(messages, keepRecentTurns);
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 /**
- * Smart truncation for old tool outputs.
- * Keeps the beginning (usually most informative) plus the end (exit codes, summaries).
- * Also preserves lines containing file paths and key identifiers.
+ * Find a safe split point that doesn't orphan tool_result blocks.
+ *
+ * Claude's API requires every tool_result to have a matching tool_use in the
+ * immediately preceding assistant message. If we split between an assistant
+ * message with tool_use blocks and the following user message with tool_result
+ * blocks, the kept portion starts with orphaned tool_results → 400 error.
+ *
+ * Strategy: walk backward from the target until the message at splitPoint is
+ * NOT a user message containing tool_result blocks.
  */
-function smartTruncateToolOutput(content: string, maxChars: number): string {
-  if (content.length <= maxChars) return content;
-  
-  const headSize = Math.floor(maxChars * 0.7);
-  const tailSize = Math.floor(maxChars * 0.2);
-  
-  const head = content.substring(0, headSize);
-  const tail = content.substring(content.length - tailSize);
-  
-  const totalLines = content.split("\n").length;
-  
-  return head + `\n\n[...truncated ${totalLines} lines. Re-run if full output needed.]\n\n` + tail;
+export function findSafeSplitPoint(messages: LLMMessage[], targetSplit: number): number {
+  let split = targetSplit;
+
+  while (split > 0 && split < messages.length) {
+    const msg = messages[split];
+
+    if (msg.role === "user" && Array.isArray(msg.content)) {
+      const hasToolResult = (msg.content as Array<Record<string, unknown>>).some(
+        block => block.type === "tool_result",
+      );
+      if (hasToolResult) {
+        split--;
+        continue;
+      }
+    }
+
+    break;
+  }
+
+  // Don't let split go below 2 (need at least something to summarize)
+  return Math.max(split, 2);
 }
 
 /**
@@ -311,14 +381,25 @@ export function calculateContextSize(messages: LLMMessage[]): number {
   return messages.reduce((sum, m) => {
     if (typeof m.content === "string") return sum + m.content.length;
     if (Array.isArray(m.content)) {
-      return sum + (m.content as Array<Record<string, unknown>>).reduce((s: number, block: Record<string, unknown>) => {
-        if (typeof block === "string") return s + (block as string).length;
-        if (block.type === "text") return s + String(block.text || "").length;
-        if (block.type === "tool_result") {
-          return s + (typeof block.content === "string" ? block.content.length : JSON.stringify(block.content).length);
-        }
-        return s + JSON.stringify(block).length;
-      }, 0);
+      return (
+        sum +
+        (m.content as Array<Record<string, unknown>>).reduce(
+          (s: number, block: Record<string, unknown>) => {
+            if (typeof block === "string") return s + (block as string).length;
+            if (block.type === "text") return s + String(block.text || "").length;
+            if (block.type === "tool_result") {
+              return (
+                s +
+                (typeof block.content === "string"
+                  ? block.content.length
+                  : JSON.stringify(block.content).length)
+              );
+            }
+            return s + JSON.stringify(block).length;
+          },
+          0,
+        )
+      );
     }
     return sum + JSON.stringify(m.content).length;
   }, 0);
