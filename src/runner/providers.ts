@@ -28,7 +28,7 @@ import {
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-export type Provider = "anthropic" | "openai" | "lmstudio" | "openrouter" | "openai-compatible";
+export type Provider = "anthropic" | "openai" | "openai-codex" | "lmstudio" | "openrouter" | "openai-compatible";
 
 export interface ProviderConfig {
   provider: Provider;
@@ -90,8 +90,11 @@ export function parseModelString(model: string): ProviderConfig {
     if (providerHint === "anthropic") {
       return { provider: "anthropic", modelId: parts.slice(1).join("/") };
     }
-    if (providerHint === "openai" || providerHint === "openai-codex") {
+    if (providerHint === "openai") {
       return { provider: "openai", modelId: parts.slice(1).join("/") };
+    }
+    if (providerHint === "openai-codex") {
+      return { provider: "openai-codex", modelId: parts.slice(1).join("/") };
     }
     if (providerHint === "lmstudio" || providerHint === "local") {
       return { provider: "lmstudio", modelId: parts.slice(1).join("/") };
@@ -885,7 +888,7 @@ function buildOpenAIToolFallbackInstruction(tools: ToolDefinition[]): string {
 }
 
 function providerHasNativeToolCalling(provider: Provider): boolean {
-  return provider === "anthropic" || provider === "openai" || provider === "openrouter" || provider === "lmstudio";
+  return provider === "anthropic" || provider === "openai" || provider === "openai-codex" || provider === "openrouter" || provider === "lmstudio";
 }
 
 class OpenAICompatibleClient implements LLMClient {
@@ -1039,7 +1042,10 @@ class OpenAICompatibleClient implements LLMClient {
 
     let response: Response;
     try {
-      response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
+      const endpoint = this.provider === "openai-codex"
+        ? `${this.baseUrl}/codex/responses`
+        : `${this.baseUrl}/v1/chat/completions`;
+      response = await fetch(endpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1166,6 +1172,7 @@ class OpenAICompatibleClient implements LLMClient {
 const PROVIDER_DEFAULTS: Record<Provider, { baseUrl: string; envKey: string }> = {
   anthropic: { baseUrl: "https://api.anthropic.com", envKey: "ANTHROPIC_API_KEY" },
   openai: { baseUrl: "https://api.openai.com", envKey: "OPENAI_API_KEY" },
+  "openai-codex": { baseUrl: "https://chatgpt.com/backend-api", envKey: "OPENAI_CODEX_TOKEN" },
   lmstudio: { baseUrl: "http://localhost:1234", envKey: "" },
   openrouter: { baseUrl: "https://openrouter.ai/api", envKey: "OPENROUTER_API_KEY" },
   "openai-compatible": { baseUrl: "http://localhost:8080", envKey: "" },
@@ -1427,6 +1434,32 @@ export function createClient(config: ProviderConfig, sessionId?: string): LLMCli
       throw new Error("No Anthropic credentials found");
     }
     return new AnthropicClient(auth, config.modelId, sessionId);
+  }
+
+  // openai-codex: Bearer token (OAuth) through chatgpt.com
+  if (config.provider === "openai-codex") {
+    const defaults = PROVIDER_DEFAULTS["openai-codex"];
+    const baseUrl = config.baseUrl ?? defaults.baseUrl;
+
+    let apiKey = config.apiKey ?? "";
+    if (!apiKey && defaults.envKey) {
+      apiKey = process.env[defaults.envKey] ?? "";
+    }
+
+    if (!apiKey) {
+      throw new Error(
+        "No OpenAI Codex token found. Set OPENAI_CODEX_TOKEN env var or provide apiKey in config. " +
+        "This should be an OAuth Bearer token from ChatGPT subscription, not an API key.",
+      );
+    }
+
+    const extraHeaders: Record<string, string> = {};
+    const accountId = process.env.OPENAI_CODEX_ACCOUNT_ID;
+    if (accountId) {
+      extraHeaders["ChatGPT-Account-Id"] = accountId;
+    }
+
+    return new OpenAICompatibleClient(baseUrl, apiKey, "openai-codex", sessionId, extraHeaders);
   }
 
   // All other providers use OpenAI-compatible API
