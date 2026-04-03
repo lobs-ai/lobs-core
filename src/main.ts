@@ -486,6 +486,38 @@ async function main() {
     },
   });
 
+  cronService.registerSystemJob({
+    id: "memory-consolidation",
+    name: "Memory Consolidation",
+    schedule: "0 3 * * *", // daily at 3am ET — merge near-duplicate memories
+    enabled: true,
+    handler: async () => {
+      const { consolidateMemories } = await import("./memory/consolidation.js");
+      const stats = await consolidateMemories();
+      if (stats.groupsFound > 0) {
+        console.log(
+          `[memory-consolidation] Found ${stats.groupsFound} group(s), merged ${stats.memoriesMerged} memories into ${stats.memoriesCreated} new`,
+        );
+      }
+    },
+  });
+
+  cronService.registerSystemJob({
+    id: "memory-gc",
+    name: "Memory GC",
+    schedule: "0 */6 * * *", // every 6 hours — transition memories through active → stale → archived
+    enabled: true,
+    handler: async () => {
+      const { runMemoryGC } = await import("./memory/gc.js");
+      const result = await runMemoryGC();
+      if (result.transitionsToStale > 0 || result.transitionsToArchived > 0) {
+        console.log(
+          `[memory-gc] Evaluated ${result.totalEvaluated} memories: ${result.transitionsToStale} → stale, ${result.transitionsToArchived} → archived, ${result.confidenceReductions} confidence reductions`,
+        );
+      }
+    },
+  });
+
   // Daily reflection — run at 03:00 local time, after daily db-maintenance
   let lastDailyReflectionDate = "";
   const DAILY_REFLECTION_HOUR = 3;
