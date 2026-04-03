@@ -7,10 +7,10 @@
  * Shows a unified diff of each change after a successful edit.
  */
 
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
 import type { ToolDefinition } from "../types.js";
 import { resolveToCwd } from "./path-utils.js";
-import { hasRecentlyReadFile } from "./read.js";
+import { hasRecentlyReadFile, getReadCacheMtime } from "./read.js";
 
 // ── Tool Definition ──────────────────────────────────────────────────────────
 
@@ -200,6 +200,17 @@ function fuzzyFindSimilar(content: string, oldStr: string): string | null {
 }
 
 /**
+ * Normalize curly/typographic quotes to straight ASCII quotes.
+ * Used as a fallback when exact match fails — models sometimes produce
+ * curly quotes even when the source file uses straight quotes.
+ */
+function normalizeQuotes(s: string): string {
+  return s
+    .replace(/[\u2018\u2019\u2032]/g, "'")
+    .replace(/[\u201C\u201D\u2033]/g, '"');
+}
+
+/**
  * Apply a single edit to content. Returns { updated, diff, summary } or throws.
  */
 function applySingleEdit(
@@ -218,6 +229,16 @@ function applySingleEdit(
         summary: `Idempotent edit: the requested new text already exists in ${filePath}`,
       };
     }
+    // Try quote normalization — model may have sent curly quotes, file has straight
+    const normalizedOld = normalizeQuotes(oldText);
+    if (normalizedOld !== oldText) {
+      const normalizedIdx = content.indexOf(normalizedOld);
+      if (normalizedIdx !== -1) {
+        // Found with normalized quotes — recurse with the corrected old_string
+        return applySingleEdit(filePath, content, normalizedOld, newText);
+      }
+    }
+
     // Try fuzzy matching to provide a helpful suggestion
     const similar = fuzzyFindSimilar(content, oldText);
     if (similar) {
@@ -322,6 +343,16 @@ export async function editTool(
     throw new Error(
       "You must use Read on this file before editing it. Read the file first so your old_string matches the exact current contents.",
     );
+  }
+
+  const cachedMtime = getReadCacheMtime(resolved);
+  if (cachedMtime !== null) {
+    const currentMtime = statSync(resolved).mtimeMs;
+    if (currentMtime > cachedMtime) {
+      throw new Error(
+        `File '${filePath}' has been modified since last read (possibly by a linter, formatter, or another process). Read it again before editing.`,
+      );
+    }
   }
 
   let content = readFileSync(resolved, "utf-8");

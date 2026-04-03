@@ -46,6 +46,20 @@ export const grepToolDefinition: ToolDefinition = {
         type: "boolean",
         description: "Enable cross-line matching",
       },
+      context_lines: {
+        type: "number",
+        description:
+          "Number of context lines around each match (default: 0). Only applies in content output mode.",
+      },
+      case_sensitive: {
+        type: "boolean",
+        description:
+          "Case sensitive search (default: smart case — case sensitive if pattern has uppercase)",
+      },
+      max_results: {
+        type: "number",
+        description: "Maximum number of matches to return (default: 200)",
+      },
     },
     required: ["pattern"],
   },
@@ -55,8 +69,9 @@ export const grepToolDefinition: ToolDefinition = {
 
 const MAX_CAPTURE = 200_000; // Max bytes to capture from the process
 const TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_RESULTS = 200;
 
-// ── Tool Implementation ──────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
  * Check if a command exists on the system.
@@ -69,6 +84,29 @@ function commandExists(cmd: string): Promise<boolean> {
   });
 }
 
+/**
+ * Strip the cwd prefix from file paths in grep/rg output to save tokens.
+ */
+function relativizePaths(output: string, cwd: string): string {
+  if (!cwd.endsWith("/")) cwd += "/";
+  return output.replaceAll(cwd, "");
+}
+
+/**
+ * Truncate output to max_results lines, appending a notice if truncated.
+ */
+function applyMaxResults(output: string, maxResults: number): string {
+  const lines = output.split("\n");
+  if (lines.length <= maxResults) return output;
+  const truncated = lines.slice(0, maxResults).join("\n");
+  return (
+    truncated +
+    `\n(... results truncated to ${maxResults} matches. Use a more specific pattern or path to narrow results.)`
+  );
+}
+
+// ── Tool Implementation ──────────────────────────────────────────────────────
+
 export async function grepTool(
   params: Record<string, unknown>,
   cwd: string,
@@ -78,9 +116,18 @@ export async function grepTool(
 
   const searchPath = (params.path as string) || ".";
   const resolved = resolveToCwd(searchPath, cwd);
-  const include = (params.include as string | undefined) ?? (params.glob as string | undefined);
-  const outputMode = typeof params.output_mode === "string" ? params.output_mode : "content";
+  const include =
+    (params.include as string | undefined) ?? (params.glob as string | undefined);
+  const outputMode =
+    typeof params.output_mode === "string" ? params.output_mode : "content";
   const multiline = params.multiline === true;
+  const contextLines =
+    typeof params.context_lines === "number" ? params.context_lines : 0;
+  const caseSensitive = params.case_sensitive as boolean | undefined;
+  const maxResults =
+    typeof params.max_results === "number"
+      ? params.max_results
+      : DEFAULT_MAX_RESULTS;
 
   const hasRg = await commandExists("rg");
 
@@ -89,25 +136,59 @@ export async function grepTool(
 
   if (hasRg) {
     cmd = "rg";
-    args = ["-n", "--color=never", "--no-heading"];
+    args = ["-n", "--color=never", "--no-heading", "--max-columns=500", "--max-columns-preview"];
+
+    // Smart case by default; explicitly true → -s; explicitly false → -i
+    if (caseSensitive === true) {
+      args.push("-s");
+    } else if (caseSensitive === false) {
+      args.push("-i");
+    } else {
+      args.push("--smart-case");
+    }
+
     if (multiline) {
       args.push("--multiline");
     }
+
     if (outputMode === "files_with_matches") {
       args.push("--files-with-matches");
     } else if (outputMode === "count") {
       args.push("--count");
+    } else if (contextLines > 0) {
+      // Context lines only apply in content mode
+      args.push(`-C`, String(contextLines));
     }
+
     if (include) {
       args.push("--glob", include);
     }
+
+    // Always exclude .git directory
+    args.push("--glob=!.git");
+
     args.push(pattern, resolved);
   } else {
     cmd = "grep";
     args = ["-rn", "--color=never"];
+
+    // Case sensitivity for grep fallback
+    if (caseSensitive === false) {
+      args.push("-i");
+    }
+
+    // Context lines for grep fallback (content mode only)
+    if (outputMode === "content" && contextLines > 0) {
+      args.push(`-C`, String(contextLines));
+    }
+
     if (include) {
       args.push("--include", include);
     }
+
+    // Exclude .git for grep fallback
+    args.push("--exclude-dir=.git");
+
     args.push(pattern, resolved);
   }
 
@@ -164,12 +245,13 @@ export async function grepTool(
         return;
       }
 
-      if (outputMode === "files_with_matches" || outputMode === "count") {
-        resolvePromise(capOutput(result));
-        return;
-      }
+      // Relativize paths to save tokens
+      const relativized = relativizePaths(result, cwd);
 
-      resolvePromise(capOutput(result));
+      // Apply max_results truncation
+      const truncated = applyMaxResults(relativized, maxResults);
+
+      resolvePromise(capOutput(truncated));
     });
   });
 }
