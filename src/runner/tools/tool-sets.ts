@@ -24,6 +24,7 @@ const NEXUS_TOOLS: ToolName[] = [
   "memory_read",
   "memory_write",
   "spawn_agent",
+  "dispatch_agent",
   "check_agents",
   "message_agent",
   "stop_agent",

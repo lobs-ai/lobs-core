@@ -39,7 +39,7 @@ export async function dispatchAgentTool(
   const agentCwd = (params.cwd as string) || cwd;
 
   if (!task || task.trim().length === 0) {
-    return { output: "Error: task is required", sideEffects: undefined };
+    return "Error: task is required";
   }
 
   // Restricted read-only tool set — no write, edit, exec, or agent spawning
@@ -67,19 +67,16 @@ export async function dispatchAgentTool(
     if (result.succeeded && result.output.trim().length > 0) {
       const output = result.output.trim();
       const meta = `[dispatch_agent completed in ${result.turns} turns, ${result.durationSeconds.toFixed(1)}s]`;
-      return { output: `${meta}\n\n${output}`, sideEffects: undefined };
+      return `${meta}\n\n${output}`;
     }
 
     if (!result.succeeded) {
-      return {
-        output: `dispatch_agent failed: ${result.error || "unknown error"} (${result.turns} turns, ${result.durationSeconds.toFixed(1)}s)`,
-        sideEffects: undefined,
-      };
+      return `dispatch_agent failed: ${result.error || "unknown error"} (${result.turns} turns, ${result.durationSeconds.toFixed(1)}s)`;
     }
 
-    return { output: "dispatch_agent returned empty result", sideEffects: undefined };
+    return "dispatch_agent returned empty result";
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { output: `dispatch_agent error: ${message}`, sideEffects: undefined };
+    return `dispatch_agent error: ${message}`;
   }
 }

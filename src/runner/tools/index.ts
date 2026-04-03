@@ -21,6 +21,7 @@ import { processToolDefinition, processTool } from "./process.js";
 import { humanizeToolDefinition, humanizeTool } from "./humanize.js";
 import { imagineToolDefinition, imagineTool } from "./imagine.js";
 import { htmlToPdfToolDefinition, htmlToPdfTool } from "./html-to-pdf.js";
+import { dispatchAgentToolDefinition, dispatchAgentTool } from "./dispatch.js";
 import {
   asClaudeCodeToolDefinition,
   fromClaudeCodeToolName,
@@ -199,6 +200,10 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   html_to_pdf: {
     definition: htmlToPdfToolDefinition,
     execute: (params, cwd) => htmlToPdfTool(params, cwd),
+  },
+  dispatch_agent: {
+    definition: dispatchAgentToolDefinition,
+    execute: (params, cwd) => dispatchAgentTool(params, cwd),
   },
 };
 

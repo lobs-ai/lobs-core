@@ -10,6 +10,7 @@ export const CLAUDE_CODE_TOOL_ALIASES: Record<string, string> = {
   web_search: "WebSearch",
   web_fetch: "WebFetch",
   spawn_agent: "Task",
+  dispatch_agent: "dispatch_agent",
 };
 
 const INTERNAL_TOOL_ALIASES: Record<string, string> = Object.fromEntries(
