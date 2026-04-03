@@ -36,6 +36,16 @@ export const globToolDefinition: ToolDefinition = {
   },
 };
 
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+function relativizePaths(output: string, cwd: string): string {
+  const prefix = cwd.endsWith("/") ? cwd : cwd + "/";
+  return output
+    .split("\n")
+    .map((line) => (line.startsWith(prefix) ? line.slice(prefix.length) : line))
+    .join("\n");
+}
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_CAPTURE = 200_000;
@@ -145,11 +155,22 @@ export async function globTool(
         return;
       }
 
+      // Relativize paths — strip cwd prefix so output doesn't waste tokens on absolute paths
+      const relativized = relativizePaths(result, cwd);
+
       // Count matches
-      const matchCount = result.split("\n").length;
+      const matchCount = relativized.split("\n").length;
       const header = `Found ${matchCount} file${matchCount === 1 ? "" : "s"}:\n`;
 
-      resolvePromise(header + capOutput(result));
+      resolvePromise(
+        header +
+          capOutput(
+            relativized,
+            undefined,
+            undefined,
+            "Use a more specific pattern or path to narrow results.",
+          ),
+      );
     });
   });
 }

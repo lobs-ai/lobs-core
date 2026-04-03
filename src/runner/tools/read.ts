@@ -64,6 +64,19 @@ export function hasRecentlyReadFile(filePath: string): boolean {
   return recentlyReadFiles.has(filePath);
 }
 
+export function getReadCacheMtime(resolvedPath: string): number | null {
+  // The cache key for a full read is `${resolved}:full`, and for default reads
+  // it's `${resolved}:1:500` (or other offset:limit combos). We want the mtime
+  // regardless of which variant was cached, so scan for any entry whose key
+  // starts with the resolved path.
+  for (const [key, value] of recentReadCache) {
+    if (key.startsWith(`${resolvedPath}:`)) {
+      return value.mtimeMs;
+    }
+  }
+  return null;
+}
+
 export function clearRecentReadTracking(): void {
   recentReadCache.clear();
   recentlyReadFiles.clear();
@@ -90,6 +103,22 @@ export async function readTool(
   if (!filePath) throw new Error("path is required");
 
   const resolved = resolveToCwd(filePath, cwd);
+
+  // Block device files that would hang or produce infinite output
+  const BLOCKED_DEVICE_PATHS = new Set([
+    "/dev/zero",
+    "/dev/random",
+    "/dev/urandom",
+    "/dev/full",
+    "/dev/stdin",
+    "/dev/tty",
+    "/dev/console",
+  ]);
+  if (BLOCKED_DEVICE_PATHS.has(resolved)) {
+    throw new Error(
+      "Cannot read device file — would block or produce infinite output.",
+    );
+  }
 
   if (!existsSync(resolved)) {
     throw new Error(`File not found: ${filePath}`);
