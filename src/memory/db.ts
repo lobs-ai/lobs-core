@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS events (
   scope TEXT NOT NULL DEFAULT 'session',
   project_id TEXT,
   signal_score REAL NOT NULL DEFAULT 0.5,
+  reflected_at TEXT,
+  reflection_run_id TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -224,6 +226,8 @@ export function initMemoryDb(dbPath?: string): Database.Database {
   addColumnIfMissingEarly("memories", "source_path",  "TEXT");
   addColumnIfMissingEarly("memories", "content_hash", "TEXT");
   addColumnIfMissingEarly("memories", "chunk_index",  "INTEGER");
+  addColumnIfMissingEarly("events", "reflected_at", "TEXT");
+  addColumnIfMissingEarly("events", "reflection_run_id", "TEXT");
   addColumnIfMissingEarly("reflection_runs", "events_processed", "INTEGER DEFAULT 0");
   addColumnIfMissingEarly("reflection_runs", "skip_reason",      "TEXT");
   addColumnIfMissingEarly("conflicts", "conflict_type",    "TEXT");
@@ -256,6 +260,8 @@ export function initMemoryDb(dbPath?: string): Database.Database {
     }
   };
 
+  addColumnIfMissing("events", "reflected_at", "TEXT");
+  addColumnIfMissing("events", "reflection_run_id", "TEXT");
   addColumnIfMissing("reflection_runs", "events_processed", "INTEGER DEFAULT 0");
   addColumnIfMissing("reflection_runs", "skip_reason", "TEXT");
   addColumnIfMissing("memories", "title", "TEXT");

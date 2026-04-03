@@ -31,6 +31,17 @@ const STALE_RUN_THRESHOLD_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 2000; // 2s, 4s, 8s
 
+/** Prevent concurrent duplicate runs over the same session / event range. */
+const activeReflectionKeys = new Set<string>();
+
+/** Hard limits so reflection can't burn through API budget during spikes. */
+const SESSION_END_COOLDOWN_MS = 5 * 60 * 1000;
+const HOURLY_TOKEN_BUDGET = 120_000;
+const MAX_CLUSTERS_PER_SESSION_RUN = 3;
+const MAX_CLUSTERS_PER_DAILY_RUN = 20;
+const MAX_TOKENS_PER_SESSION_RUN = 12_000;
+const MAX_TOKENS_PER_DAILY_RUN = 80_000;
+
 // ── Public types ─────────────────────────────────────────────────────────────
 
 export interface ReflectionResult {
@@ -61,7 +72,7 @@ function gatherUnreflectedEvents(opts: {
   const db = getMemoryDb();
 
   const conditions: string[] = [
-    `e.id NOT IN (SELECT DISTINCT event_id FROM evidence WHERE event_id IS NOT NULL)`,
+    `e.reflected_at IS NULL`,
   ];
   const params: (string | number)[] = [];
 
@@ -86,6 +97,65 @@ function gatherUnreflectedEvents(opts: {
   `;
 
   return db.prepare(sql).all(...params) as MemoryEvent[];
+}
+
+function buildReflectionKey(opts: {
+  trigger: "session_end" | "daily" | "manual";
+  sessionId?: string;
+  eventRange?: { since: string; until: string };
+}): string | null {
+  if (opts.sessionId) return `${opts.trigger}:session:${opts.sessionId}`;
+  if (opts.eventRange) return `${opts.trigger}:range:${opts.eventRange.since}:${opts.eventRange.until}`;
+  if (opts.trigger === "session_end") return null;
+  return `${opts.trigger}:global`;
+}
+
+function markEventsReflected(eventIds: number[], runId: string): void {
+  if (eventIds.length === 0) return;
+  const db = getMemoryDb();
+  const now = new Date().toISOString();
+  const placeholders = eventIds.map(() => "?").join(", ");
+  db.prepare(
+    `UPDATE events
+     SET reflected_at = ?, reflection_run_id = ?
+     WHERE id IN (${placeholders})`,
+  ).run(now, runId, ...eventIds);
+}
+
+function getRecentReflectionStartedAt(trigger: "session_end" | "daily" | "manual"): string | null {
+  const db = getMemoryDb();
+  const row = db.prepare(
+    `SELECT started_at
+     FROM reflection_runs
+     WHERE trigger = ?
+     ORDER BY started_at DESC
+     LIMIT 1`,
+  ).get(trigger) as { started_at: string } | undefined;
+  return row?.started_at ?? null;
+}
+
+function getRecentReflectionTokenUsage(windowMs: number): number {
+  const db = getMemoryDb();
+  const since = new Date(Date.now() - windowMs).toISOString();
+  const row = db.prepare(
+    `SELECT COALESCE(SUM(tokens_used), 0) AS total
+     FROM reflection_runs
+     WHERE started_at >= ?
+       AND status = 'completed'`,
+  ).get(since) as { total: number | null } | undefined;
+  return Number(row?.total ?? 0);
+}
+
+function getClusterLimit(trigger: "session_end" | "daily" | "manual"): number {
+  if (trigger === "daily") return MAX_CLUSTERS_PER_DAILY_RUN;
+  if (trigger === "session_end") return MAX_CLUSTERS_PER_SESSION_RUN;
+  return MAX_CLUSTERS_PER_DAILY_RUN;
+}
+
+function getRunTokenLimit(trigger: "session_end" | "daily" | "manual"): number {
+  if (trigger === "daily") return MAX_TOKENS_PER_DAILY_RUN;
+  if (trigger === "session_end") return MAX_TOKENS_PER_SESSION_RUN;
+  return MAX_TOKENS_PER_DAILY_RUN;
 }
 
 // ── Skipped run recording ────────────────────────────────────────────────────
@@ -175,6 +245,7 @@ export async function runReflection(opts: {
   eventRange?: { since: string; until: string };
 }): Promise<ReflectionResult> {
   const runId = randomUUID();
+  const reflectionKey = buildReflectionKey(opts);
 
   const skipped = (reason: string): ReflectionResult => {
     recordSkippedRun(runId, opts.trigger, reason);
@@ -194,33 +265,35 @@ export async function runReflection(opts: {
     };
   };
 
-  // ── Gather events ──────────────────────────────────────────────────────────
-
-  const events = gatherUnreflectedEvents({
-    sessionId: opts.sessionId,
-    since: opts.eventRange?.since,
-    until: opts.eventRange?.until,
-  });
-
-  if (events.length < MIN_EVENTS_TO_REFLECT) {
-    return skipped(`only ${events.length} events in scope (min ${MIN_EVENTS_TO_REFLECT})`);
+  if (opts.trigger === "session_end" && !opts.sessionId) {
+    return skipped("session_end reflection requires a sessionId");
   }
 
-  // ── Start reflection run ────────────────────────────────────────────────────
+  if (opts.trigger === "session_end") {
+    const lastStartedAt = getRecentReflectionStartedAt("session_end");
+    if (lastStartedAt) {
+      const msSinceLastRun = Date.now() - new Date(lastStartedAt).getTime();
+      if (msSinceLastRun < SESSION_END_COOLDOWN_MS) {
+        return skipped(
+          `session_end reflection cooldown active (${Math.ceil((SESSION_END_COOLDOWN_MS - msSinceLastRun) / 1000)}s remaining)`,
+        );
+      }
+    }
+  }
 
-  const db = getMemoryDb();
-  const startedAt = new Date().toISOString();
+  const recentTokenUsage = getRecentReflectionTokenUsage(60 * 60 * 1000);
+  if (recentTokenUsage >= HOURLY_TOKEN_BUDGET) {
+    return skipped(`hourly reflection token budget exhausted (${recentTokenUsage}/${HOURLY_TOKEN_BUDGET})`);
+  }
 
-  db.prepare(
-    `INSERT INTO reflection_runs
-       (id, trigger, started_at, tier, status,
-        events_processed, clusters_processed, memories_created, memories_reinforced,
-        conflicts_detected, tokens_used)
-     VALUES (?, ?, ?, 'local', 'running', ?, 0, 0, 0, 0, 0)`,
-  ).run(runId, opts.trigger, startedAt, events.length);
+  if (reflectionKey && activeReflectionKeys.has(reflectionKey)) {
+    return skipped(`reflection already running for ${reflectionKey}`);
+  }
 
-  resetTokenCounter();
+  if (reflectionKey) activeReflectionKeys.add(reflectionKey);
 
+  let events: MemoryEvent[] = [];
+  let db = getMemoryDb();
   let clustersProcessed = 0;
   let clustersSkipped = 0;
   let clustersErrored = 0;
@@ -229,9 +302,38 @@ export async function runReflection(opts: {
   let conflictsDetected = 0;
 
   try {
+    // ── Gather events ────────────────────────────────────────────────────────
+
+    events = gatherUnreflectedEvents({
+      sessionId: opts.sessionId,
+      since: opts.eventRange?.since,
+      until: opts.eventRange?.until,
+    });
+
+    if (events.length < MIN_EVENTS_TO_REFLECT) {
+      return skipped(`only ${events.length} events in scope (min ${MIN_EVENTS_TO_REFLECT})`);
+    }
+
+    // ── Start reflection run ────────────────────────────────────────────────
+
+    db = getMemoryDb();
+    const startedAt = new Date().toISOString();
+
+    db.prepare(
+      `INSERT INTO reflection_runs
+         (id, trigger, started_at, tier, status,
+          events_processed, clusters_processed, memories_created, memories_reinforced,
+          conflicts_detected, tokens_used)
+       VALUES (?, ?, ?, 'local', 'running', ?, 0, 0, 0, 0, 0)`,
+    ).run(runId, opts.trigger, startedAt, events.length);
+
+    resetTokenCounter();
+
     // ── Cluster events ──────────────────────────────────────────────────────
 
     const clusters = clusterEvents(events);
+    const clusterLimit = getClusterLimit(opts.trigger);
+    const runTokenLimit = getRunTokenLimit(opts.trigger);
 
     // Sort: high priority first, then medium, skip last
     const priorityOrder = { high: 0, medium: 1, skip: 2 };
@@ -247,8 +349,23 @@ export async function runReflection(opts: {
     // ── Process every non-skip cluster ──────────────────────────────────────
 
     for (const cluster of clusters) {
+      if (clustersProcessed + clustersSkipped >= clusterLimit) {
+        log().info(
+          `[reflection] Run ${runId} reached cluster cap (${clusterLimit}) for ${opts.trigger}; deferring remaining clusters`,
+        );
+        break;
+      }
+
+      if (getTotalTokensUsed() >= runTokenLimit) {
+        log().info(
+          `[reflection] Run ${runId} reached token cap (${getTotalTokensUsed()}/${runTokenLimit}) for ${opts.trigger}; deferring remaining clusters`,
+        );
+        break;
+      }
+
       // Skip low-priority clusters (all events below 0.5 signal)
       if (cluster.priority === "skip") {
+        markEventsReflected(cluster.events.map((e) => e.id), runId);
         clustersSkipped++;
         continue;
       }
@@ -266,6 +383,7 @@ export async function runReflection(opts: {
 
       let candidates = extractResult.result;
       if (candidates.length === 0) {
+        markEventsReflected(cluster.events.map((e) => e.id), runId);
         clustersProcessed++;
         continue;
       }
@@ -290,6 +408,7 @@ export async function runReflection(opts: {
       memoriesCreated += reconciled.newMemories.length;
       memoriesReinforced += reconciled.reinforcedMemories.length;
       conflictsDetected += reconciled.conflicts.length;
+      markEventsReflected(cluster.events.map((e) => e.id), runId);
 
       // Cross-type conflict detection for high-confidence new memories
       if (reconciled.newMemories.length > 0) {
@@ -414,5 +533,7 @@ export async function runReflection(opts: {
       tokensUsed: getTotalTokensUsed(),
       skipped: false,
     };
+  } finally {
+    if (reflectionKey) activeReflectionKeys.delete(reflectionKey);
   }
 }

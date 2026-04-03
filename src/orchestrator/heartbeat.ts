@@ -106,8 +106,8 @@ async function checkTaskHealth(): Promise<TaskHealthResult> {
   const activeResult = db.prepare("SELECT COUNT(*) as count FROM tasks WHERE status = 'active'").get() as { count: number };
   const activeTasks = activeResult.count;
   
-  // Count failed tasks (completed but with failure)
-  const failedResult = db.prepare("SELECT COUNT(*) as count FROM tasks WHERE status = 'completed' AND failure_reason IS NOT NULL").get() as { count: number };
+  // Count failed tasks (completed but with failure) — only within last 7 days to avoid stale alerts
+  const failedResult = db.prepare("SELECT COUNT(*) as count FROM tasks WHERE status = 'completed' AND failure_reason IS NOT NULL AND updated_at > datetime('now', '-7 days')").get() as { count: number };
   const failedTasks = failedResult.count;
   
   // Count blocked tasks

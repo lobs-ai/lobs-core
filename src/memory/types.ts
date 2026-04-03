@@ -19,6 +19,8 @@ export interface MemoryEvent {
   scope: "system" | "agent" | "session";
   project_id: string | null;
   signal_score: number;
+  reflected_at?: string | null;
+  reflection_run_id?: string | null;
   created_at: string;
 }
 
