@@ -1,6 +1,19 @@
 import { execSync } from "node:child_process";
 import type { AgentSpec, ToolDefinition } from "../runner/types.js";
 
+const TOOL_GUIDANCE: Record<string, string> = {
+  Bash: "Prefer non-interactive commands. Use && chains for multi-step operations. For long-running work, use run_in_background. Prefer targeted commands (head, tail, grep) over dumping large outputs.",
+  Read: "Read the whole file by default. Use offset+limit for targeted reads of known sections. If you need a specific pattern, use Grep first to find the line, then Read with offset.",
+  Edit: "You MUST Read a file before editing it. Use the smallest unique old_string — usually 2-5 lines. Preserve exact indentation. Never include line-number prefixes from Read output. Batch multiple changes in the edits array.",
+  Write: "Use for new files or full rewrites only. Prefer Edit for modifying existing files. Always include the complete intended file content.",
+  Grep: "Use before Read when searching for a pattern. Use glob filter to narrow by file type. Use files_with_matches to find which files contain a pattern, count for scale checks.",
+  Glob: "Use to find files by name before reading. More efficient than find_files for simple name patterns.",
+  find_files:
+    "More flexible than Glob for complex searches — supports regex, extension filters, depth limits, type filters.",
+  code_search: "Ripgrep with context lines — good for finding function definitions and understanding surrounding code.",
+  ls: "Quick directory listing. Use before deeper investigation to understand structure.",
+};
+
 function summarizeInputSchema(schema: Record<string, unknown>): string {
   const properties = schema.properties;
   if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
@@ -76,7 +89,9 @@ function buildToolSection(toolDefinitions: ToolDefinition[]): string | null {
     "# Available Tools",
     ...toolDefinitions.map((tool) => {
       const description = tool.description.replace(/\s+/g, " ").trim();
-      return `- ${tool.name}: ${description} Args: ${summarizeInputSchema(tool.input_schema)}.`;
+      const guidance = TOOL_GUIDANCE[tool.name];
+      const line = `- ${tool.name}: ${description} Args: ${summarizeInputSchema(tool.input_schema)}.`;
+      return guidance ? `${line}\n  Usage: ${guidance}` : line;
     }),
   ].join("\n");
 }
@@ -107,11 +122,12 @@ function buildLiveStateSection(params: {
 }): string {
   const { spec, recentHistory, contextBlock, learnings, additionalContext } = params;
   const workingState = spec.context?.workingState;
-  const objective = typeof spec.task === "string"
-    ? workingState?.objective
-      ?? spec.task.trim().split("\n").find((line) => line.trim().length > 0)
-      ?? spec.task.trim()
-    : "Continue the current task.";
+  const objective =
+    typeof spec.task === "string"
+      ? (workingState?.objective ??
+        spec.task.trim().split("\n").find((line) => line.trim().length > 0) ??
+        spec.task.trim())
+      : "Continue the current task.";
 
   const sources = [contextBlock, learnings, additionalContext, ...(recentHistory ?? [])]
     .filter((value): value is string => Boolean(value && value.trim().length > 0))
@@ -136,11 +152,16 @@ function buildLiveStateSection(params: {
   }
 
   const fileMatches = Array.from(
-    sources.matchAll(/(?:^|[\s(["'`])((?:\/|\.\/|\.\.\/)[^\s)"'`:,;]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+)/g),
+    sources.matchAll(
+      /(?:^|[\s(["'`])((?:\/|\.\/|\.\.\/)[^\s)"'`:,;]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+)/g,
+    ),
   )
     .map((match) => match[1]?.trim())
     .filter((value): value is string => Boolean(value));
-  if (fileMatches.length > 0 && !(workingState?.filesInPlay && workingState.filesInPlay.length > 0)) {
+  if (
+    fileMatches.length > 0 &&
+    !(workingState?.filesInPlay && workingState.filesInPlay.length > 0)
+  ) {
     lines.push(`- Files in play: ${Array.from(new Set(fileMatches)).slice(0, 8).join(", ")}`);
   }
 
@@ -154,7 +175,10 @@ function buildLiveStateSection(params: {
     .map((line) => line.trim())
     .filter((line) => /\b(next|remaining|todo|still need|follow up|need to)\b/i.test(line))
     .slice(0, 4);
-  if (nextLines.length > 0 && !(workingState?.outstandingWork && workingState.outstandingWork.length > 0)) {
+  if (
+    nextLines.length > 0 &&
+    !(workingState?.outstandingWork && workingState.outstandingWork.length > 0)
+  ) {
     lines.push("- Outstanding work:");
     for (const line of nextLines) lines.push(`  - ${line}`);
   }
@@ -169,7 +193,10 @@ function buildLiveStateSection(params: {
     .map((line) => line.trim())
     .filter((line) => /\b(decided|approach|strategy|using|use )\b/i.test(line))
     .slice(0, 4);
-  if (decisions.length > 0 && !(workingState?.activeDecisions && workingState.activeDecisions.length > 0)) {
+  if (
+    decisions.length > 0 &&
+    !(workingState?.activeDecisions && workingState.activeDecisions.length > 0)
+  ) {
     lines.push("- Active decisions:");
     for (const line of decisions) lines.push(`  - ${line}`);
   }
@@ -191,7 +218,8 @@ function buildSubagentStateSection(spec: AgentSpec): string | null {
       const stats: string[] = [];
       if (typeof event.turns === "number") stats.push(`turns=${event.turns}`);
       if (typeof event.costUsd === "number") stats.push(`cost=$${event.costUsd.toFixed(4)}`);
-      if (typeof event.durationSeconds === "number") stats.push(`duration=${event.durationSeconds.toFixed(1)}s`);
+      if (typeof event.durationSeconds === "number")
+        stats.push(`duration=${event.durationSeconds.toFixed(1)}s`);
       if (stats.length > 0) {
         lines.push(`  Stats: ${stats.join(", ")}`);
       }
