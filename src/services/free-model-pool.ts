@@ -198,6 +198,48 @@ class FreeModelPool {
   }
 
   /**
+   * Expose the models array (read-only snapshot) for benchmark/status display.
+   */
+  getModels(): FreeModel[] {
+    return this.models.slice();
+  }
+
+  /**
+   * Bulk-update model priorities (used by benchmark auto-ranking).
+   */
+  updatePriorities(priorities: Array<{ id: string; priority: number }>): void {
+    for (const { id, priority } of priorities) {
+      const model = this.models.find(m => m.id === id);
+      if (model) model.priority = priority;
+    }
+    this.models.sort((a, b) => a.priority - b.priority);
+  }
+
+  /**
+   * Remove a model from the pool entirely (used by exclude).
+   */
+  excludeModel(modelId: string): void {
+    this.models = this.models.filter(m => m.id !== modelId);
+  }
+
+  /**
+   * Add a model back into the pool (used by include after exclusion).
+   */
+  includeModel(modelId: string, config: { provider: string; baseUrl: string; priority: number }): void {
+    if (!this.models.find(m => m.id === modelId)) {
+      this.models.push({
+        id: modelId,
+        provider: config.provider,
+        baseUrl: config.baseUrl,
+        priority: config.priority,
+        healthy: true,
+        failureCount: 0,
+      });
+      this.models.sort((a, b) => a.priority - b.priority);
+    }
+  }
+
+  /**
    * Return a snapshot of pool health for diagnostics.
    */
   getHealthSummary(): FreeModelHealthSummary {

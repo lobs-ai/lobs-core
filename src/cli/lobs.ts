@@ -49,6 +49,7 @@ import { validateAllConfigs, printValidationResults } from "../config/validator.
 import { getModelConfig } from "../config/models.js";
 import { runLmStudioDiagnostic, formatDiagnosticReport } from "../diagnostics/lmstudio.js";
 import { cmdCodexAuth } from "./codex-auth.js";
+import { cmdModelsBenchmark } from "./model-benchmark.js";
 
 const HOME = process.env.HOME ?? "";
 const LOBS_PORT = parseInt(process.env.LOBS_PORT ?? "9420", 10);
@@ -1691,6 +1692,18 @@ const subcommand = args[1];
     case "models":
       if (subcommand === "available" || subcommand === "list") {
         await cmdModelsAvailable();
+      } else if (subcommand === "benchmark") {
+        await cmdModelsBenchmark();
+      } else if (subcommand === "status") {
+        await cmdModelsBenchmark("status");
+      } else if (subcommand === "pin") {
+        await cmdModelsBenchmark("pin", args.slice(2));
+      } else if (subcommand === "unpin") {
+        await cmdModelsBenchmark("unpin", args.slice(2));
+      } else if (subcommand === "exclude") {
+        await cmdModelsBenchmark("exclude", args.slice(2));
+      } else if (subcommand === "include") {
+        await cmdModelsBenchmark("include", args.slice(2));
       } else {
         await cmdModelsDiagnostic();
       }
@@ -1747,6 +1760,10 @@ const subcommand = args[1];
       console.log(colorize("Models:", "cyan"));
       console.log("  lobs models              Diagnose LM Studio model availability");
       console.log("  lobs models available    List selectable models + loaded LM Studio models");
+      console.log("  lobs models benchmark    Benchmark free models and update rankings");
+      console.log("  lobs models status       Show free model pool health and scores");
+      console.log("  lobs models pin <id>     Pin a model to top priority");
+      console.log("  lobs models exclude <id> Exclude a model from rotation");
       console.log("");
       console.log(colorize("Config:", "cyan"));
       console.log("  lobs config check        Validate all config files");
