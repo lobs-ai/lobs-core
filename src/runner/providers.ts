@@ -30,7 +30,7 @@ import {
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-export type Provider = "anthropic" | "openai" | "openai-codex" | "lmstudio" | "openrouter" | "openai-compatible";
+export type Provider = "anthropic" | "openai" | "openai-codex" | "lmstudio" | "openrouter" | "openai-compatible" | "opencode-zen" | "opencode-go" | "z-ai" | "minimax" | "kimi";
 
 export interface ProviderConfig {
   provider: Provider;
@@ -103,6 +103,21 @@ export function parseModelString(model: string): ProviderConfig {
     }
     if (providerHint === "openrouter") {
       return { provider: "openrouter", modelId: parts.slice(1).join("/") };
+    }
+    if (providerHint === "opencode-zen") {
+      return { provider: "opencode-zen", modelId: parts.slice(1).join("/") };
+    }
+    if (providerHint === "opencode-go") {
+      return { provider: "opencode-go", modelId: parts.slice(1).join("/") };
+    }
+    if (providerHint === "z-ai") {
+      return { provider: "z-ai", modelId: parts.slice(1).join("/") };
+    }
+    if (providerHint === "minimax") {
+      return { provider: "minimax", modelId: parts.slice(1).join("/") };
+    }
+    if (providerHint === "kimi") {
+      return { provider: "kimi", modelId: parts.slice(1).join("/") };
     }
     // Unknown provider prefix — treat as openai-compatible
     return { provider: "openai-compatible", modelId: model, baseUrl: undefined };
@@ -1178,6 +1193,11 @@ const PROVIDER_DEFAULTS: Record<Provider, { baseUrl: string; envKey: string }> =
   lmstudio: { baseUrl: "http://localhost:1234", envKey: "" },
   openrouter: { baseUrl: "https://openrouter.ai/api", envKey: "OPENROUTER_API_KEY" },
   "openai-compatible": { baseUrl: "http://localhost:8080", envKey: "" },
+  "opencode-zen": { baseUrl: "https://opencode.ai/zen/v1", envKey: "OPENCODE_API_KEY" },
+  "opencode-go": { baseUrl: "https://opencode.ai/zen/go/v1", envKey: "OPENCODE_API_KEY" },
+  "z-ai": { baseUrl: "https://open.z.ai/api/paas/v4", envKey: "ZAI_API_KEY" },
+  minimax: { baseUrl: "https://api.minimax.chat/v1", envKey: "MINIMAX_API_KEY" },
+  kimi: { baseUrl: "https://api.moonshot.cn/v1", envKey: "KIMI_API_KEY" },
 };
 
 // ── Resilient Client Wrapper ─────────────────────────────────────────────────

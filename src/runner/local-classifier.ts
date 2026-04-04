@@ -47,6 +47,7 @@ async function callLocal(
     maxTokens?: number;
     temperature?: number;
     timeoutMs?: number;
+    taskCategory?: import("../services/model-router.js").TaskCategory;
   }
 ): Promise<string> {
   const maxTokens = options?.maxTokens ?? 256;
@@ -58,6 +59,59 @@ async function callLocal(
     : prompt;
 
   const messages = [{ role: "user", content: truncatedPrompt }];
+
+  // Try model router if task category is specified
+  if (options?.taskCategory) {
+    try {
+      const { getModelRouter } = await import("../services/model-router.js");
+      const router = getModelRouter();
+      const selection = router.selectModel(options.taskCategory, { sensitiveData: false });
+
+      if (selection && selection.providerId !== "lmstudio") {
+        const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+        try {
+          const headers: Record<string, string> = { "Content-Type": "application/json" };
+          if (selection.apiKey) headers["Authorization"] = `Bearer ${selection.apiKey}`;
+
+          const response = await fetch(`${selection.baseUrl}/chat/completions`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              model: selection.modelId,
+              messages,
+              max_tokens: maxTokens,
+              temperature,
+              stream: false,
+            }),
+            signal: controller.signal,
+          });
+
+          if (!response.ok) {
+            throw new Error(`${selection.providerId}/${selection.modelId} returned ${response.status}`);
+          }
+
+          const data = await response.json() as {
+            choices?: Array<{ message?: { content?: string } }>;
+            usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
+          };
+
+          const text = data.choices?.[0]?.message?.content?.trim() ?? "";
+          clearTimeout(timeout);
+          router.reportSuccess(selection.providerId, selection.modelId, 0);
+          return text;
+        } catch (err) {
+          clearTimeout(timeout);
+          router.reportFailure(selection.providerId, selection.modelId, String(err));
+          throw err; // re-throw to fall through to local
+        }
+      }
+    } catch (routerErr) {
+      log().warn?.(`[router] Cloud model failed for ${options.taskCategory}, falling back to local: ${routerErr}`);
+    }
+  }
 
   // Local LM Studio
   const model = options?.model ?? DEFAULT_MODEL;
@@ -135,7 +189,7 @@ Respond with ONLY a JSON object: {"category": "<one of the categories>", "confid
 Do not include any other text.`;
 
   try {
-    const raw = await callLocal(prompt, { maxTokens: 64, temperature: 0 });
+    const raw = await callLocal(prompt, { maxTokens: 64, temperature: 0, taskCategory: "classification" });
     const parsed = JSON.parse(raw.replace(/```json?\n?/g, "").replace(/```/g, "").trim());
     const category = parsed.category as T;
 
@@ -215,7 +269,7 @@ Text: ${text}
 Respond with ONLY a JSON object: {"summary": "<summary>", "keyPoints": ["<point1>", "<point2>"]}`;
 
   try {
-    const raw = await callLocal(prompt, { maxTokens: 512, temperature: 0.2 });
+    const raw = await callLocal(prompt, { maxTokens: 512, temperature: 0.2, taskCategory: "classification" });
     const parsed = JSON.parse(raw.replace(/```json?\n?/g, "").replace(/```/g, "").trim());
     return {
       summary: parsed.summary ?? text.slice(0, maxLength),
@@ -264,7 +318,7 @@ Document: ${document}
 Respond with ONLY a number between 0.0 and 1.0.`;
 
   try {
-    const raw = await callLocal(prompt, { maxTokens: 8, temperature: 0 });
+    const raw = await callLocal(prompt, { maxTokens: 8, temperature: 0, taskCategory: "classification" });
     const score = parseFloat(raw.trim());
     if (isNaN(score)) return 0.5;
     return Math.min(1, Math.max(0, score));
@@ -285,7 +339,7 @@ ${diff}
 Respond with ONLY the commit message (one line, no quotes).`;
 
   try {
-    return await callLocal(prompt, { maxTokens: 64, temperature: 0.3 });
+    return await callLocal(prompt, { maxTokens: 64, temperature: 0.3, taskCategory: "classification" });
   } catch {
     return "chore: update files";
   }
@@ -307,7 +361,7 @@ Text: ${text}
 Respond with ONLY a valid JSON object matching the schema.`;
 
   try {
-    const raw = await callLocal(prompt, { maxTokens: 512, temperature: 0 });
+    const raw = await callLocal(prompt, { maxTokens: 512, temperature: 0, taskCategory: "classification" });
     return JSON.parse(raw.replace(/```json?\n?/g, "").replace(/```/g, "").trim()) as T;
   } catch {
     return null;

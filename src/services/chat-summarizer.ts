@@ -66,8 +66,8 @@ Rules:
 
 /**
  * Call LM Studio for summarization/title tasks.
- * Always local-only — chat summaries contain full conversation transcripts
- * and must NOT be sent to free cloud models (which use data for training).
+ * Routes through the model router with sensitiveData=true — chat summaries contain
+ * full conversation transcripts and must NOT be sent to providers that train on data.
  */
 async function callLocalModel(
   systemPrompt: string,
@@ -90,6 +90,75 @@ async function callLocalModel(
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+  // Try model router with sensitiveData=true — only routes to non-training providers
+  try {
+    const { getModelRouter } = await import("../services/model-router.js");
+    const router = getModelRouter();
+    const selection = router.selectModel("summarization", { sensitiveData: true });
+
+    if (selection && selection.providerId !== "lmstudio") {
+      try {
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (selection.apiKey) headers["Authorization"] = `Bearer ${selection.apiKey}`;
+
+        const response = await fetch(`${selection.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            model: selection.modelId,
+            messages: baseMessages,
+            max_tokens: maxTokens,
+            temperature,
+            stream: false,
+          }),
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(`${selection.providerId}/${selection.modelId} returned ${response.status}`);
+        }
+
+        const data = await response.json() as {
+          choices?: Array<{ message?: { content?: string } }>;
+          usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
+        };
+
+        let content = data.choices?.[0]?.message?.content?.trim() ?? "";
+        content = content.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+
+        clearTimeout(timeout);
+        router.reportSuccess(selection.providerId, selection.modelId, 0);
+
+        // Record usage — best-effort
+        try {
+          const { getUsageTracker } = await import("./provider-usage-tracker.js");
+          const tracker = getUsageTracker();
+          tracker.record({
+            providerId: selection.providerId,
+            modelId: selection.modelId,
+            inputTokens: data.usage?.prompt_tokens ?? 0,
+            outputTokens: data.usage?.completion_tokens ?? 0,
+            cachedTokens: 0,
+            estimatedCost: tracker.estimateCost(
+              selection.providerId,
+              selection.modelId,
+              data.usage?.prompt_tokens ?? 0,
+              data.usage?.completion_tokens ?? 0,
+            ),
+            taskCategory: "summarization",
+            latencyMs: 0,
+            success: true,
+          });
+        } catch { /* best-effort */ }
+
+        return content;
+      } catch (err) {
+        router.reportFailure(selection.providerId, selection.modelId, String(err));
+        log().warn?.(`[router] Cloud model failed for summarization, falling back to local: ${err}`);
+      }
+    }
+  } catch { /* router unavailable — fall through to local */ }
 
   try {
     const response = await fetch(`${baseUrl}/chat/completions`, {

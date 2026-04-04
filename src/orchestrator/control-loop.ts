@@ -55,6 +55,7 @@ import { checkModelsBeforeSpawn } from "../diagnostics/lmstudio.js";
 import { checkBlockerPhaseGates, emitPhaseGateInboxAlert } from "./phase-gate.js";
 import { runHealthCheck } from "../services/health-monitor.js";
 import { runHealthMonitorTick } from "../main-agent/health-monitor-role.js";
+import { initializeModelRouting } from "../services/router-integration.js";
 
 const learningSvc = new LearningService();
 
@@ -322,6 +323,9 @@ async function checkSessionAlive(sessionKey: string): Promise<boolean> {
 
 export function startControlLoop(ctx: LobsPluginServiceContext, intervalMs: number): void {
   log().info(`orchestrator: starting control loop (interval=${intervalMs}ms)`);
+
+  // Wire usage tracker into model router
+  initializeModelRouting();
 
   executor = new WorkflowExecutor();
 

@@ -84,6 +84,10 @@ export interface LocalCallOptions {
   temperature?: number;
   timeoutMs?: number;
   systemPrompt?: string;
+  /** Task category for model routing — if set, the router may select a cloud model instead of local */
+  taskCategory?: import("../services/model-router.js").TaskCategory;
+  /** If true, contains sensitive data — never route to training providers */
+  sensitiveData?: boolean;
 }
 
 /**
@@ -116,6 +120,80 @@ export async function callLocalModel(
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  // Try model router if task category is specified
+  if (options?.taskCategory) {
+    try {
+      const { getModelRouter } = await import("../services/model-router.js");
+      const router = getModelRouter();
+      const selection = router.selectModel(options.taskCategory, {
+        sensitiveData: options.sensitiveData,
+      });
+
+      if (selection && selection.providerId !== "lmstudio") {
+        const startMs = Date.now();
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (selection.apiKey) headers["Authorization"] = `Bearer ${selection.apiKey}`;
+
+        const response = await fetch(`${selection.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            model: selection.modelId,
+            messages,
+            max_tokens: maxTokens,
+            temperature,
+            stream: false,
+          }),
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(`${selection.providerId}/${selection.modelId} returned ${response.status}`);
+        }
+
+        const data = await response.json() as {
+          choices?: Array<{ message?: { content?: string } }>;
+          usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
+        };
+
+        const text = data.choices?.[0]?.message?.content?.trim() ?? "";
+        const tokensUsed = data.usage?.total_tokens ?? 0;
+        const latencyMs = Date.now() - startMs;
+
+        router.reportSuccess(selection.providerId, selection.modelId, latencyMs);
+
+        // Record usage — best-effort, never fail the request
+        try {
+          const { getUsageTracker } = await import("../services/provider-usage-tracker.js");
+          const tracker = getUsageTracker();
+          tracker.record({
+            providerId: selection.providerId,
+            modelId: selection.modelId,
+            inputTokens: data.usage?.prompt_tokens ?? 0,
+            outputTokens: data.usage?.completion_tokens ?? 0,
+            cachedTokens: 0,
+            estimatedCost: tracker.estimateCost(
+              selection.providerId,
+              selection.modelId,
+              data.usage?.prompt_tokens ?? 0,
+              data.usage?.completion_tokens ?? 0,
+            ),
+            taskCategory: options.taskCategory,
+            latencyMs,
+            success: true,
+          });
+        } catch { /* usage tracking is best-effort */ }
+
+        log().info?.(`[router] Used ${selection.providerId}/${selection.modelId} for ${options.taskCategory} (${latencyMs}ms)`);
+        clearTimeout(timeout);
+        return { text, tokensUsed };
+      }
+    } catch (routerErr) {
+      // Router failed — fall back to local
+      log().warn?.(`[router] Cloud model failed for ${options.taskCategory}, falling back to local: ${routerErr}`);
+    }
+  }
 
   try {
     const response = await fetch(`${baseUrl}/chat/completions`, {

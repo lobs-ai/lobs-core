@@ -1691,6 +1691,9 @@ const subcommand = args[1];
     case "models":
       if (subcommand === "available" || subcommand === "list") {
         await cmdModelsAvailable();
+      } else if (["status", "providers", "usage", "route", "enable", "disable", "set-limit", "policy"].includes(subcommand || "")) {
+        const { cmdModelRouter } = await import("./model-router-cli.js");
+        await cmdModelRouter(subcommand!, args.slice(2));
       } else {
         await cmdModelsDiagnostic();
       }
@@ -1747,6 +1750,14 @@ const subcommand = args[1];
       console.log(colorize("Models:", "cyan"));
       console.log("  lobs models              Diagnose LM Studio model availability");
       console.log("  lobs models available    List selectable models + loaded LM Studio models");
+      console.log("  lobs models status       Show router status and routing policy");
+      console.log("  lobs models providers    List all providers and their models");
+      console.log("  lobs models usage        Show usage breakdown per provider");
+      console.log("  lobs models route <cat>  Show what model would be selected for a task");
+      console.log("  lobs models enable <id>  Enable a provider");
+      console.log("  lobs models disable <id> Disable a provider");
+      console.log("  lobs models set-limit <p> <period> <$>  Set usage limit");
+      console.log("  lobs models policy       Show routing policy details");
       console.log("");
       console.log(colorize("Config:", "cyan"));
       console.log("  lobs config check        Validate all config files");
