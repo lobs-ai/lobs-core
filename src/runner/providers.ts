@@ -1707,17 +1707,15 @@ export function createClient(config: ProviderConfig, sessionId?: string): LLMCli
   let keyIndex: number | undefined;
   let keyLabel: string | undefined;
   
-  // Try KeyPool for OpenAI and OpenRouter
-  if (!apiKey && config.provider === "openai") {
-    const auth = resolveOpenAIAuth(sessionId);
-    apiKey = auth?.apiKey ?? "";
-    keyIndex = auth?.keyIndex;
-    keyLabel = auth?.keyLabel;
-  } else if (!apiKey && config.provider === "openrouter") {
-    const auth = resolveOpenRouterAuth(sessionId);
-    apiKey = auth?.apiKey ?? "";
-    keyIndex = auth?.keyIndex;
-    keyLabel = auth?.keyLabel;
+  // Try KeyPool for any provider (generic — works for all providers in keys.json)
+  if (!apiKey && sessionId) {
+    const pool = getKeyPool();
+    const selection = pool.getKeySelection(config.provider, sessionId);
+    if (selection) {
+      apiKey = selection.key;
+      keyIndex = selection.keyIndex;
+      keyLabel = selection.label;
+    }
   }
 
   // Fallback to environment variables

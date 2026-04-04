@@ -18,7 +18,8 @@ const KEY_HEALTH_STATE_PATH = join(homedir(), ".lobs", "key-health-state.json");
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-type Provider = "anthropic" | "openai" | "openai-codex" | "openrouter";
+/** Any provider string — no longer hardcoded. */
+type Provider = string;
 
 interface KeySelection {
   key: string;
@@ -71,17 +72,11 @@ export class KeyPoolService {
   }
 
   private initializePools(): void {
-    if (this.config.anthropic?.keys) {
-      this.pools.set("anthropic", this.config.anthropic.keys);
-    }
-    if (this.config.openai?.keys) {
-      this.pools.set("openai", this.config.openai.keys);
-    }
-    if (this.config["openai-codex"]?.keys) {
-      this.pools.set("openai-codex", this.config["openai-codex"].keys);
-    }
-    if (this.config.openrouter?.keys) {
-      this.pools.set("openrouter", this.config.openrouter.keys);
+    // Generic: load all providers from config, not a hardcoded list
+    for (const [provider, pool] of Object.entries(this.config)) {
+      if (pool?.keys?.length) {
+        this.pools.set(provider as Provider, pool.keys);
+      }
     }
   }
 

@@ -20,6 +20,7 @@ import { getUsageTracker } from "../services/provider-usage-tracker.js";
 import type { TaskCategory } from "../services/model-router.js";
 import type { UsageLimits } from "../services/provider-usage-tracker.js";
 import { getModelConfig, getModelForTier, setTier } from "../config/models.js";
+import { loadKeyConfig } from "../config/keys.js";
 import { getDb } from "../db/connection.js";
 import { projects } from "../db/schema.js";
 import { eq, or } from "drizzle-orm";
@@ -187,6 +188,8 @@ function countFreeModels(providerId: string): number {
 }
 
 async function cmdProviders(): Promise<void> {
+  // Ensure keys from keys.json are loaded into process.env
+  loadKeyConfig();
   const router = getModelRouter();
   const status = router.getStatus();
   const tracker = getUsageTracker();
