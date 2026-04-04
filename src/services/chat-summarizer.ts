@@ -17,8 +17,6 @@ import { chatSessions, chatMessages } from "../db/schema.js";
 import { log } from "../util/logger.js";
 import { getModelConfig } from "../config/models.js";
 import { logTrainingExample } from "./training-data.js";
-// NOTE: Free model pool intentionally NOT used here — chat summaries contain
-// full conversation transcripts and must not be sent to providers that train on usage.
 
 // ── Config ──────────────────────────────────────────────────────────────
 

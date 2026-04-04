@@ -41,21 +41,6 @@ export interface ModelConfig {
     embeddingModel: string;  // For vector embeddings
   };
 
-  /** Free cloud model pool (OpenCode Zen, etc.) */
-  free?: {
-    enabled: boolean;
-    apiKey?: string;       // Can also come from OPENCODE_API_KEY env var
-    models: Array<{
-      id: string;
-      provider: string;    // "opencode"
-      baseUrl: string;
-      priority: number;
-    }>;
-    /** Prefer free models over local for background tasks */
-    preferOverLocal: boolean;
-    /** Max timeout per request in ms */
-    timeoutMs: number;
-  };
 
   /** Scheduler intelligence settings */
   scheduler?: {
@@ -108,20 +93,6 @@ const DEFAULT_CONFIG: ModelConfig = {
     baseUrl: "http://localhost:1234/v1",
     chatModel: "qwen3-4b",
     embeddingModel: "text-embedding-qwen3-embedding-4b",
-  },
-
-  free: {
-    enabled: true,
-    models: [
-      { id: "qwen3.6-plus-free",     provider: "opencode", baseUrl: "https://opencode.ai/zen/v1", priority: 1 },
-      { id: "minimax-m2.5-free",     provider: "opencode", baseUrl: "https://opencode.ai/zen/v1", priority: 2 },
-      { id: "nemotron-3-super-free", provider: "opencode", baseUrl: "https://opencode.ai/zen/v1", priority: 3 },
-      { id: "mimo-v2-pro-free",      provider: "opencode", baseUrl: "https://opencode.ai/zen/v1", priority: 4 },
-      { id: "big-pickle",            provider: "opencode", baseUrl: "https://opencode.ai/zen/v1", priority: 5 },
-      { id: "gpt-5-nano",            provider: "opencode", baseUrl: "https://opencode.ai/zen/v1", priority: 6 },
-    ],
-    preferOverLocal: true,
-    timeoutMs: 30_000,
   },
 
   scheduler: {
@@ -185,7 +156,6 @@ export function getModelConfig(): ModelConfig {
       if (fileData.scheduler) _config.scheduler = { ..._config.scheduler, ...fileData.scheduler };
       if (fileData.costs) _config.costs = { ..._config.costs, ...fileData.costs };
       if (fileData.contextLimits) _config.contextLimits = { ..._config.contextLimits, ...fileData.contextLimits };
-      if (fileData.free) _config.free = { ..._config.free, ...fileData.free };
     } catch { /* use defaults */ }
   }
 

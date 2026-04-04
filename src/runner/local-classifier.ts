@@ -18,7 +18,6 @@
 
 import { log } from "../util/logger.js";
 import { getLocalConfig, getModelConfig } from "../config/models.js";
-import { getFreeModelPool, getOpenCodeApiKey } from "../services/free-model-pool.js";
 
 const LM_STUDIO_BASE = process.env.LM_STUDIO_URL ?? getLocalConfig().baseUrl;
 const DEFAULT_MODEL = process.env.LOCAL_MODEL ?? getLocalConfig().chatModel;
@@ -60,56 +59,7 @@ async function callLocal(
 
   const messages = [{ role: "user", content: truncatedPrompt }];
 
-  // Try free model pool first
-  const cfg = getModelConfig();
-  if (cfg.free?.enabled !== false) {
-    const pool = getFreeModelPool();
-    const freeModel = pool.getNextModel();
-    if (freeModel) {
-      const apiKey = getOpenCodeApiKey();
-      const freeTimeoutMs = cfg.free?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), freeTimeoutMs);
-      try {
-        log().debug?.(`[local-classifier] Using free model ${freeModel.id}`);
-        const response = await fetch(`${freeModel.baseUrl}/chat/completions`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...(apiKey ? { "Authorization": `Bearer ${apiKey}` } : {}),
-          },
-          body: JSON.stringify({
-            model: freeModel.id,
-            messages,
-            max_tokens: maxTokens,
-            temperature,
-            stream: false,
-          }),
-          signal: controller.signal,
-        });
-
-        if (!response.ok) {
-          throw new Error(`Free model ${freeModel.id} returned ${response.status}: ${await response.text()}`);
-        }
-
-        const data = await response.json() as {
-          choices?: Array<{ message?: { content?: string } }>;
-        };
-        const text = data.choices?.[0]?.message?.content?.trim() ?? "";
-        if (!text) throw new Error(`Free model ${freeModel.id} returned empty response`);
-
-        pool.reportSuccess(freeModel.id);
-        return text;
-      } catch (err) {
-        pool.reportFailure(freeModel.id);
-        log().warn(`[local-classifier] Free model ${freeModel.id} failed, falling back to local: ${err}`);
-      } finally {
-        clearTimeout(timeout);
-      }
-    }
-  }
-
-  // Fallback: local LM Studio
+  // Local LM Studio
   const model = options?.model ?? DEFAULT_MODEL;
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const controller = new AbortController();
