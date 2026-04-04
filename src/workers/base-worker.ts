@@ -13,9 +13,10 @@
  */
 
 import { log } from "../util/logger.js";
-import { getLocalConfig, getModelForTier } from "../config/models.js";
+import { getLocalConfig, getModelConfig, getModelForTier } from "../config/models.js";
 import { isLocalModelAvailable } from "../runner/local-classifier.js";
 import { parseModelString, createClient } from "../runner/providers.js";
+import { getFreeModelPool, getOpenCodeApiKey } from "../services/free-model-pool.js";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -83,6 +84,8 @@ export interface LocalCallOptions {
   temperature?: number;
   timeoutMs?: number;
   systemPrompt?: string;
+  /** Skip free model pool and always use local LM Studio (e.g. for embeddings) */
+  forceLocal?: boolean;
 }
 
 /**
@@ -95,13 +98,10 @@ export async function callLocalModel(
   options?: LocalCallOptions,
 ): Promise<{ text: string; tokensUsed: number }> {
   const localCfg = getLocalConfig();
-  // Strip lmstudio/ prefix — LM Studio API expects the bare model ID
-  const rawModel = options?.model ?? localCfg.chatModel;
-  const model = rawModel.replace(/^lmstudio\//, "");
-  const baseUrl = options?.baseUrl ?? localCfg.baseUrl;
+  const cfg = getModelConfig();
   const maxTokens = options?.maxTokens ?? 1024;
   const temperature = options?.temperature ?? 0.2;
-  const timeoutMs = options?.timeoutMs ?? 30_000;
+  const freeTimeoutMs = cfg.free?.timeoutMs ?? 30_000;
 
   const truncatedPrompt = prompt.length > MAX_INPUT_CHARS
     ? prompt.slice(0, MAX_INPUT_CHARS) + "\n... [truncated]"
@@ -112,6 +112,60 @@ export async function callLocalModel(
     messages.push({ role: "system", content: options.systemPrompt });
   }
   messages.push({ role: "user", content: truncatedPrompt });
+
+  // Try free model pool first (unless caller forces local)
+  if (!options?.forceLocal && cfg.free?.enabled !== false) {
+    const pool = getFreeModelPool();
+    const freeModel = pool.getNextModel();
+    if (freeModel) {
+      const apiKey = getOpenCodeApiKey();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), freeTimeoutMs);
+      try {
+        log().debug?.(`[base-worker] Using free model ${freeModel.id} (${freeModel.provider})`);
+        const response = await fetch(`${freeModel.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(apiKey ? { "Authorization": `Bearer ${apiKey}` } : {}),
+          },
+          body: JSON.stringify({
+            model: freeModel.id,
+            messages,
+            max_tokens: maxTokens,
+            temperature,
+            stream: false,
+          }),
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(`Free model ${freeModel.id} returned ${response.status}: ${await response.text()}`);
+        }
+
+        const data = await response.json() as {
+          choices?: Array<{ message?: { content?: string } }>;
+          usage?: { total_tokens?: number };
+        };
+        const text = data.choices?.[0]?.message?.content?.trim() ?? "";
+        if (!text) throw new Error(`Free model ${freeModel.id} returned empty response`);
+
+        pool.reportSuccess(freeModel.id);
+        return { text, tokensUsed: data.usage?.total_tokens ?? 0 };
+      } catch (err) {
+        pool.reportFailure(freeModel.id);
+        log().warn(`[base-worker] Free model ${freeModel.id} failed, falling back to local: ${err}`);
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+  }
+
+  // Fallback: local LM Studio
+  const rawModel = options?.model ?? localCfg.chatModel;
+  const model = rawModel.replace(/^lmstudio\//, "");
+  const baseUrl = options?.baseUrl ?? localCfg.baseUrl;
+  const timeoutMs = options?.timeoutMs ?? 30_000;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);

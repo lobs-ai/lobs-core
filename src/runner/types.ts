@@ -12,7 +12,7 @@ export interface AgentSpec {
   /** Model to use (e.g. "claude-sonnet-4-6") */
   model: string;
   /** Provider (anthropic, openai) — defaults to anthropic */
-  provider?: "anthropic" | "openai" | "openai-codex";
+  provider?: "anthropic" | "openai" | "openai-codex" | "opencode";
   /** Working directory for exec/file operations */
   cwd: string;
   /** Tools to enable */

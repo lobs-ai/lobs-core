@@ -30,7 +30,7 @@ import {
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-export type Provider = "anthropic" | "openai" | "openai-codex" | "lmstudio" | "openrouter" | "openai-compatible";
+export type Provider = "anthropic" | "openai" | "openai-codex" | "opencode" | "lmstudio" | "openrouter" | "openai-compatible";
 
 export interface ProviderConfig {
   provider: Provider;
@@ -97,6 +97,9 @@ export function parseModelString(model: string): ProviderConfig {
     }
     if (providerHint === "openai-codex") {
       return { provider: "openai-codex", modelId: parts.slice(1).join("/") };
+    }
+    if (providerHint === "opencode") {
+      return { provider: "opencode", modelId: parts.slice(1).join("/"), baseUrl: "https://opencode.ai/zen/v1" };
     }
     if (providerHint === "lmstudio" || providerHint === "local") {
       return { provider: "lmstudio", modelId: parts.slice(1).join("/") };
@@ -1175,6 +1178,7 @@ const PROVIDER_DEFAULTS: Record<Provider, { baseUrl: string; envKey: string }> =
   anthropic: { baseUrl: "https://api.anthropic.com", envKey: "ANTHROPIC_API_KEY" },
   openai: { baseUrl: "https://api.openai.com", envKey: "OPENAI_API_KEY" },
   "openai-codex": { baseUrl: "https://chatgpt.com/backend-api/codex", envKey: "OPENAI_CODEX_TOKEN" },
+  opencode: { baseUrl: "https://opencode.ai/zen/v1", envKey: "OPENCODE_API_KEY" },
   lmstudio: { baseUrl: "http://localhost:1234", envKey: "" },
   openrouter: { baseUrl: "https://openrouter.ai/api", envKey: "OPENROUTER_API_KEY" },
   "openai-compatible": { baseUrl: "http://localhost:8080", envKey: "" },
@@ -1676,6 +1680,14 @@ export function createClient(config: ProviderConfig, sessionId?: string): LLMCli
     }
 
     return new OpenAICodexClient(baseUrl, apiKey, sessionId, extraHeaders);
+  }
+
+  // opencode: OpenAI-compatible endpoint with OPENCODE_API_KEY
+  if (config.provider === "opencode") {
+    const defaults = PROVIDER_DEFAULTS["opencode"];
+    const baseUrl = config.baseUrl ?? defaults.baseUrl;
+    const apiKey = config.apiKey ?? process.env.OPENCODE_API_KEY ?? "";
+    return new OpenAICompatibleClient(baseUrl, apiKey, "opencode", sessionId);
   }
 
   // All other providers use OpenAI-compatible API
