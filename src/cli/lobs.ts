@@ -48,6 +48,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { validateAllConfigs, printValidationResults } from "../config/validator.js";
 import { getModelConfig } from "../config/models.js";
 import { runLmStudioDiagnostic, formatDiagnosticReport } from "../diagnostics/lmstudio.js";
+import { cmdCodexAuth } from "./codex-auth.js";
 
 const HOME = process.env.HOME ?? "";
 const LOBS_PORT = parseInt(process.env.LOBS_PORT ?? "9420", 10);
@@ -1702,7 +1703,11 @@ const subcommand = args[1];
     case "memory":
       await handleMemoryCommand(subcommand, args.slice(2));
       break;
-    
+
+    case "codex-auth":
+      await cmdCodexAuth(subcommand);
+      break;
+
     case "init":
       cmdInit();
       break;
@@ -1747,6 +1752,11 @@ const subcommand = args[1];
       console.log("  lobs config check        Validate all config files");
       console.log("  lobs config show         Show config file status");
       console.log("  lobs init                Initialize config directory");
+      console.log("");
+      console.log(colorize("Codex Auth:", "cyan"));
+      console.log("  lobs codex-auth login    OAuth login for openai-codex provider");
+      console.log("  lobs codex-auth status   Show token status and expiry");
+      console.log("  lobs codex-auth refresh  Refresh the access token");
       console.log("");
       console.log(colorize("Logs:", "cyan"));
       console.log("  lobs logs [--tail N]     Show recent log output");

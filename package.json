@@ -23,6 +23,7 @@
     "@anthropic-ai/sdk": "^0.79.0",
     "@discordjs/opus": "^0.10.0",
     "@discordjs/voice": "^0.19.2",
+    "@mariozechner/pi-ai": "^0.65.0",
     "@openai/agents": "^0.8.0",
     "@openai/agents-realtime": "^0.8.0",
     "better-sqlite3": "^11.0.0",

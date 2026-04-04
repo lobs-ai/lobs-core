@@ -21,6 +21,7 @@ export interface KeyPool {
 export interface KeyConfig {
   anthropic?: KeyPool;
   openai?: KeyPool;
+  "openai-codex"?: KeyPool;
   openrouter?: KeyPool;
 }
 
@@ -100,6 +101,9 @@ export function normalizeKeyConfig(data: unknown): KeyConfig {
   const openai = normalizePool(raw.openai);
   if (openai) config.openai = openai;
 
+  const openaiCodex = normalizePool(raw["openai-codex"]);
+  if (openaiCodex) config["openai-codex"] = openaiCodex;
+
   const openrouter = normalizePool(raw.openrouter);
   if (openrouter) config.openrouter = openrouter;
 
@@ -172,6 +176,11 @@ export function loadKeyConfig(): KeyConfig {
   const openrouterKeys = parseEnvKeys("OPENROUTER_API_KEYS");
   if (openrouterKeys) {
     config.openrouter = { keys: dedupeKeyEntries(openrouterKeys, "openrouter"), strategy: "sticky-failover" };
+  }
+
+  const codexKeys = parseEnvKeys("OPENAI_CODEX_TOKENS");
+  if (codexKeys) {
+    config["openai-codex"] = { keys: dedupeKeyEntries(codexKeys, "openai-codex"), strategy: "sticky-failover" };
   }
 
   return config;

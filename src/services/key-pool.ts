@@ -18,7 +18,7 @@ const KEY_HEALTH_STATE_PATH = join(homedir(), ".lobs", "key-health-state.json");
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-type Provider = "anthropic" | "openai" | "openrouter";
+type Provider = "anthropic" | "openai" | "openai-codex" | "openrouter";
 
 interface KeySelection {
   key: string;
@@ -76,6 +76,9 @@ export class KeyPoolService {
     }
     if (this.config.openai?.keys) {
       this.pools.set("openai", this.config.openai.keys);
+    }
+    if (this.config["openai-codex"]?.keys) {
+      this.pools.set("openai-codex", this.config["openai-codex"].keys);
     }
     if (this.config.openrouter?.keys) {
       this.pools.set("openrouter", this.config.openrouter.keys);

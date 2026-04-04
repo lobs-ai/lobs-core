@@ -18,8 +18,10 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import type { ToolDefinition, TokenUsage } from "./types.js";
 import { getKeyPool } from "../services/key-pool.js";
+import { getCodexAuth } from "../services/codex-auth.js";
 import { randomUUID } from "node:crypto";
 import {
   fromClaudeCodeToolName,
@@ -1172,7 +1174,7 @@ class OpenAICompatibleClient implements LLMClient {
 const PROVIDER_DEFAULTS: Record<Provider, { baseUrl: string; envKey: string }> = {
   anthropic: { baseUrl: "https://api.anthropic.com", envKey: "ANTHROPIC_API_KEY" },
   openai: { baseUrl: "https://api.openai.com", envKey: "OPENAI_API_KEY" },
-  "openai-codex": { baseUrl: "https://chatgpt.com/backend-api", envKey: "OPENAI_CODEX_TOKEN" },
+  "openai-codex": { baseUrl: "https://chatgpt.com/backend-api/codex", envKey: "OPENAI_CODEX_TOKEN" },
   lmstudio: { baseUrl: "http://localhost:1234", envKey: "" },
   openrouter: { baseUrl: "https://openrouter.ai/api", envKey: "OPENROUTER_API_KEY" },
   "openai-compatible": { baseUrl: "http://localhost:8080", envKey: "" },
@@ -1415,6 +1417,194 @@ export function createResilientClient(
   return new ResilientLLMClient(primaryClient, model, { ...options, sessionId });
 }
 
+// ── OpenAICodexClient ──────────────────────────────────────────────────────────
+
+/**
+ * LLM client for the OpenAI Codex endpoint using the Responses API.
+ * The Codex endpoint at chatgpt.com/backend-api/codex/responses uses the
+ * Responses API format, which is fundamentally different from Chat Completions.
+ */
+class OpenAICodexClient implements LLMClient {
+  private client: OpenAI;
+
+  constructor(
+    baseUrl: string,
+    apiKey: string,
+    _sessionId?: string,
+    extraHeaders?: Record<string, string>,
+  ) {
+    // The openai SDK's responses.create() appends /responses to baseURL,
+    // so we set baseURL to .../codex (not .../codex/responses)
+    this.client = new OpenAI({
+      baseURL: baseUrl,
+      apiKey: apiKey,
+      defaultHeaders: extraHeaders,
+    });
+  }
+
+  async createMessage(params: {
+    model: string;
+    system: string;
+    messages: LLMMessage[];
+    tools: ToolDefinition[];
+    maxTokens: number;
+    thinking?: { type: "enabled"; budgetTokens: number } | { type: "adaptive" };
+  }): Promise<LLMResponse> {
+    // Convert messages to Responses API input items
+    const input = this.convertMessagesToInput(params.messages);
+
+    // Convert tools from Anthropic format (input_schema) to Responses API format (parameters)
+    const tools = params.tools.map((t) => ({
+      type: "function" as const,
+      name: t.name,
+      description: t.description,
+      parameters: t.input_schema,
+    }));
+
+    // Build request params
+    const requestParams: Record<string, unknown> = {
+      model: params.model,
+      instructions: params.system,
+      input,
+      max_output_tokens: params.maxTokens,
+    };
+
+    if (tools.length > 0) {
+      requestParams.tools = tools;
+    }
+
+    // Make the API call via the Responses API
+    const response = await this.client.responses.create(
+      requestParams as Parameters<typeof this.client.responses.create>[0],
+    );
+
+    // Convert response to our LLMResponse format
+    return this.convertResponse(response as Parameters<typeof this.convertResponse>[0]);
+  }
+
+  private convertMessagesToInput(messages: LLMMessage[]): unknown[] {
+    const input: unknown[] = [];
+
+    for (const msg of messages) {
+      if (msg.role === "user") {
+        if (typeof msg.content === "string") {
+          input.push({ type: "message", role: "user", content: msg.content });
+        } else if (Array.isArray(msg.content)) {
+          for (const block of msg.content) {
+            const b = block as Record<string, unknown>;
+            if (b.type === "tool_result") {
+              // tool_result → function_call_output
+              input.push({
+                type: "function_call_output",
+                call_id: b.tool_use_id,
+                output:
+                  typeof b.content === "string"
+                    ? b.content
+                    : JSON.stringify(b.content),
+              });
+            } else if (b.type === "text") {
+              input.push({
+                type: "message",
+                role: "user",
+                content: b.text,
+              });
+            }
+          }
+        }
+      } else if (msg.role === "assistant") {
+        if (typeof msg.content === "string") {
+          input.push({
+            type: "message",
+            role: "assistant",
+            content: msg.content,
+          });
+        } else if (Array.isArray(msg.content)) {
+          for (const block of msg.content) {
+            const b = block as Record<string, unknown>;
+            if (b.type === "text" && b.text) {
+              input.push({
+                type: "message",
+                role: "assistant",
+                content: b.text,
+              });
+            } else if (b.type === "tool_use") {
+              // tool_use → function_call
+              input.push({
+                type: "function_call",
+                id: b.id,
+                call_id: b.id,
+                name: b.name,
+                arguments: JSON.stringify(b.input),
+              });
+            }
+          }
+        }
+      }
+    }
+
+    return input;
+  }
+
+  private convertResponse(response: {
+    output?: Array<{
+      type: string;
+      role?: string;
+      content?: Array<{ type: string; text?: string }>;
+      id?: string;
+      call_id?: string;
+      name?: string;
+      arguments?: string;
+    }>;
+    status?: string;
+    usage?: { input_tokens?: number; output_tokens?: number };
+  }): LLMResponse {
+    const content: LLMResponse["content"] = [];
+
+    for (const item of response.output ?? []) {
+      if (item.type === "message") {
+        for (const block of item.content ?? []) {
+          if (block.type === "output_text" && block.text) {
+            content.push({ type: "text", text: block.text });
+          }
+        }
+      } else if (item.type === "function_call") {
+        let input: Record<string, unknown> = {};
+        try {
+          input = JSON.parse(item.arguments ?? "{}") as Record<string, unknown>;
+        } catch {
+          // keep empty object
+        }
+        content.push({
+          type: "tool_use",
+          id: item.call_id ?? item.id ?? "",
+          name: item.name ?? "",
+          input,
+        });
+      }
+    }
+
+    // Determine stop reason
+    const stopReason: LLMResponse["stopReason"] = content.some(
+      (c) => c.type === "tool_use",
+    )
+      ? "tool_use"
+      : response.status === "incomplete"
+        ? "max_tokens"
+        : "end_turn";
+
+    return {
+      content: content.length > 0 ? content : [{ type: "text", text: "" }],
+      stopReason,
+      usage: {
+        inputTokens: response.usage?.input_tokens ?? 0,
+        outputTokens: response.usage?.output_tokens ?? 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      },
+    };
+  }
+}
+
 /**
  * Create an LLM client for the given provider config.
  * @param sessionId - Optional session ID for sticky key assignment
@@ -1441,25 +1631,51 @@ export function createClient(config: ProviderConfig, sessionId?: string): LLMCli
     const defaults = PROVIDER_DEFAULTS["openai-codex"];
     const baseUrl = config.baseUrl ?? defaults.baseUrl;
 
+    // Priority: explicit config override > OAuth credentials > key pool > env var
     let apiKey = config.apiKey ?? "";
+
+    // Try OAuth credentials (sync cached token — refreshed async on last getAccessToken() call)
+    if (!apiKey) {
+      const codexAuth = getCodexAuth();
+      const cached = codexAuth.getCachedAccessToken();
+      if (cached) {
+        apiKey = cached;
+      }
+    }
+
+    // Try key pool
+    if (!apiKey) {
+      const keyPool = getKeyPool();
+      if (keyPool.hasKeys("openai-codex")) {
+        const auth = keyPool.getAuth("openai-codex", sessionId ?? DEFAULT_KEYPOOL_SESSION_ID);
+        if (auth?.apiKey) {
+          apiKey = auth.apiKey;
+        }
+      }
+    }
+
+    // Fall back to env var
     if (!apiKey && defaults.envKey) {
       apiKey = process.env[defaults.envKey] ?? "";
     }
 
     if (!apiKey) {
       throw new Error(
-        "No OpenAI Codex token found. Set OPENAI_CODEX_TOKEN env var or provide apiKey in config. " +
-        "This should be an OAuth Bearer token from ChatGPT subscription, not an API key.",
+        "No OpenAI Codex token found. Run `lobs codex-auth login` for OAuth, " +
+        "add to ~/.lobs/config/secrets/keys.json, or set OPENAI_CODEX_TOKEN env var.",
       );
     }
 
     const extraHeaders: Record<string, string> = {};
-    const accountId = process.env.OPENAI_CODEX_ACCOUNT_ID;
+    // Prefer accountId from OAuth credentials, fall back to env var
+    const codexAuth = getCodexAuth();
+    const oauthAccountId = codexAuth.credentials?.accountId;
+    const accountId = oauthAccountId ?? process.env.OPENAI_CODEX_ACCOUNT_ID;
     if (accountId) {
       extraHeaders["ChatGPT-Account-Id"] = accountId;
     }
 
-    return new OpenAICompatibleClient(baseUrl, apiKey, "openai-codex", sessionId, extraHeaders);
+    return new OpenAICodexClient(baseUrl, apiKey, sessionId, extraHeaders);
   }
 
   // All other providers use OpenAI-compatible API
