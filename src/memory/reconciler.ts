@@ -10,12 +10,13 @@
 import { getMemoryDb } from "./db.js";
 import { log } from "../util/logger.js";
 import { parseModelString, createClient } from "../runner/providers.js";
+import { getModelForTier } from "../config/models.js";
 import type { MemoryCandidate } from "./extractor.js";
 import type { Memory, Conflict } from "./types.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const CLASSIFICATION_MODEL = "anthropic/claude-haiku-4-5";
+const CLASSIFICATION_MODEL = getModelForTier("small");
 const CLASSIFICATION_MAX_TOKENS = 16;
 
 const EMBED_URL = "http://localhost:1234/v1/embeddings";

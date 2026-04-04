@@ -19,6 +19,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { log } from "../util/logger.js";
+import { getModelCost } from "../config/models.js";
 
 // ---------------------------------------------------------------------------
 // Model pricing (cost per 1M tokens in USD)
@@ -49,7 +50,12 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
 
 function estimateCost(model: string, inputTokens: number, outputTokens: number): number {
   if (!model || (!inputTokens && !outputTokens)) return 0;
-  // Exact match first
+  // Try centralized config first
+  const configRates = getModelCost(model);
+  if (configRates) {
+    return (inputTokens * configRates.input + outputTokens * configRates.output) / 1_000_000;
+  }
+  // Exact match in local fallback table
   const pricing = MODEL_PRICING[model];
   if (pricing) {
     return (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000;

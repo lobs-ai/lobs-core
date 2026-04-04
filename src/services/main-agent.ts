@@ -547,7 +547,7 @@ export class MainAgent {
     try {
       const modelConfig = getModelConfig();
       const baseUrl = modelConfig.local?.baseUrl ?? "http://localhost:1234/v1";
-      const rawModel = modelConfig.local?.chatModel ?? "qwen/qwen3.5-9b";
+      const rawModel = modelConfig.local?.chatModel ?? getModelConfig().local.chatModel;
       const model = rawModel.replace(/^lmstudio\//, "");
 
       const systemPrompt = "Generate a very short title (3-6 words) for this conversation. Return ONLY the title, no quotes, no punctuation at the end. Be specific about the topic, not generic.";

@@ -8,6 +8,7 @@
 
 import type { ToolDefinition, ToolExecutorResult } from "../types.js";
 import { runAgent } from "../agent-loop.js";
+import { getAgentModel } from "../../config/models.js";
 
 export const dispatchAgentToolDefinition: ToolDefinition = {
   name: "dispatch_agent",
@@ -56,7 +57,7 @@ export async function dispatchAgentTool(
     const result = await runAgent({
       agent: "researcher",
       task: `You are a search agent. Find the answer to this question and respond with a concise, specific answer. Include file paths and line numbers when referencing code.\n\nQuestion: ${task}`,
-      model: "anthropic/claude-sonnet-4-20250514",
+      model: getAgentModel("researcher"),
       cwd: agentCwd,
       tools: [...readOnlyTools],
       maxTurns: 15,

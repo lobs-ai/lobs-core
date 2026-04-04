@@ -17,11 +17,12 @@
 import { getMemoryDb } from "./db.js";
 import { parseModelString, createClient } from "../runner/providers.js";
 import { log } from "../util/logger.js";
+import { getModelForTier } from "../config/models.js";
 import type { Memory } from "./types.js";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const CONSOLIDATION_MODEL = "anthropic/claude-haiku-4-5";
+const CONSOLIDATION_MODEL = getModelForTier("small");
 const SIMILARITY_THRESHOLD = 0.75;
 
 // ── Types ─────────────────────────────────────────────────────────────────────

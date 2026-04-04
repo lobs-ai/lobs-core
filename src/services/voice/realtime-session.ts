@@ -194,11 +194,15 @@ export class RealtimeVoiceSession {
     if (this.connected || this.closing) return;
     this.connectStartedAt = Date.now();
 
+    // OpenAI-specific voice API model — does not map to the tier system.
+    // Override via this.config.model if needed.
     const model = this.config.model ?? "gpt-4o-realtime-preview";
     const voice = this.config.voice ?? "ash";
     const eagerness = this.config.eagerness ?? "medium";
     const turnDetection = this.config.turnDetection ?? "semantic_vad";
     const noiseReduction = this.config.noiseReduction ?? "near_field";
+    // OpenAI-specific transcription model — does not map to the tier system.
+    // Override via this.config.transcriptionModel if needed.
     const transcriptionModel =
       this.config.transcriptionModel ?? "gpt-4o-mini-transcribe";
 

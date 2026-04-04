@@ -85,7 +85,7 @@ async function callLocalModel(
 
   const baseUrl = config.local?.baseUrl ?? "http://localhost:1234/v1";
   // Strip lmstudio/ prefix — LM Studio API expects the bare model ID
-  const rawModel = config.local?.chatModel ?? "qwen/qwen3.5-9b";
+  const rawModel = config.local?.chatModel ?? getModelConfig().local.chatModel;
   const model = rawModel.replace(/^lmstudio\//, "");
 
   const controller = new AbortController();
@@ -271,7 +271,7 @@ export async function generateChatTitle(sessionKey: string): Promise<string | nu
     }
 
     const config = getModelConfig();
-    const model = config.local?.chatModel ?? "qwen/qwen3.5-9b";
+    const model = config.local?.chatModel ?? getModelConfig().local.chatModel;
 
     // Call local model
     const rawTitle = await callLocalModel(TITLE_SYSTEM_PROMPT, userPrompt, {
@@ -352,7 +352,7 @@ export async function maybeSummarizeChat(sessionKey: string): Promise<string | n
       .filter(m => m.role === "user" || m.role === "assistant");
 
     const config = getModelConfig();
-    const model = config.local?.chatModel ?? "qwen/qwen3.5-9b";
+    const model = config.local?.chatModel ?? getModelConfig().local.chatModel;
 
     let systemPrompt: string;
     let userPrompt: string;

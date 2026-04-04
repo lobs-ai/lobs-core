@@ -12,12 +12,13 @@
 
 import { log } from "../util/logger.js";
 import { parseModelString, createClient } from "../runner/providers.js";
+import { getModelForTier } from "../config/models.js";
 import type { EventCluster } from "./clustering.js";
 import type { MemoryEvent } from "./types.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const EXTRACTION_MODEL = "anthropic/claude-haiku-4-5";
+const EXTRACTION_MODEL = getModelForTier("small");
 const MAX_RESPONSE_TOKENS = 2048;
 
 /**
