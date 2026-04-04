@@ -60,6 +60,12 @@ export interface ModelConfig {
     cacheWrite: number;
   }>;
 
+  /** Voice/realtime models (OpenAI-specific) */
+  voice?: {
+    realtimeModel: string;       // default: "gpt-4o-realtime-preview"
+    transcriptionModel: string;  // default: "gpt-4o-mini-transcribe"
+  };
+
   /** Context window sizes */
   contextLimits: Record<string, number>;
 }
@@ -71,7 +77,7 @@ export interface ModelChain {
 
 // ── Defaults ─────────────────────────────────────────────────────────────────
 
-const DEFAULT_CONFIG: ModelConfig = {
+export const DEFAULT_CONFIG: ModelConfig = {
   tiers: {
     micro: "lmstudio/qwen3-4b",
     small: "anthropic/claude-haiku-4-5",
@@ -115,6 +121,11 @@ const DEFAULT_CONFIG: ModelConfig = {
     "gpt-4o":            { input: 2.5, output: 10, cacheRead: 1.25, cacheWrite: 2.5 },
   },
 
+  voice: {
+    realtimeModel: "gpt-4o-realtime-preview",
+    transcriptionModel: "gpt-4o-mini-transcribe",
+  },
+
   contextLimits: {
     "claude-sonnet-4-6": 200_000,
     "claude-sonnet-4-5": 200_000,
@@ -153,6 +164,7 @@ export function getModelConfig(): ModelConfig {
         }
       }
       if (fileData.local) _config.local = { ..._config.local, ...fileData.local };
+      if (fileData.voice) _config.voice = { ..._config.voice, ...fileData.voice };
       if (fileData.scheduler) _config.scheduler = { ..._config.scheduler, ...fileData.scheduler };
       if (fileData.costs) _config.costs = { ..._config.costs, ...fileData.costs };
       if (fileData.contextLimits) _config.contextLimits = { ..._config.contextLimits, ...fileData.contextLimits };
@@ -237,6 +249,12 @@ export function setTier(tier: string, model: string): void {
   }
   (cfg.tiers as Record<string, string>)[tier] = model;
   saveModelConfig(cfg);
+}
+
+/** Get voice/realtime model config */
+export function getVoiceConfig(): NonNullable<ModelConfig["voice"]> {
+  const cfg = getModelConfig();
+  return cfg.voice ?? { realtimeModel: "gpt-4o-realtime-preview", transcriptionModel: "gpt-4o-mini-transcribe" };
 }
 
 /** Get local model settings (strips lmstudio/ prefix from model IDs) */

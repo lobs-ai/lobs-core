@@ -15,7 +15,8 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { homedir } from "node:os";
-import { getModelConfig, saveModelConfig, resetModelConfig } from "../config/models.js";
+import { spawnSync } from "node:child_process";
+import { getModelConfig, saveModelConfig, resetModelConfig, setTier, DEFAULT_CONFIG } from "../config/models.js";
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
 
@@ -64,7 +65,7 @@ const KNOWN_PROVIDERS = [
 const PROVIDER_ENV: Record<string, string> = {
   anthropic: "ANTHROPIC_API_KEY",
   openai: "OPENAI_API_KEY",
-  "openai-codex": "OPENAI_CODEX_API_KEY",
+  "openai-codex": "OPENAI_CODEX_TOKEN",
   "opencode-go": "OPENCODE_API_KEY",
   "opencode-zen": "OPENCODE_API_KEY",
   "z-ai": "Z_AI_API_KEY",
@@ -124,6 +125,8 @@ interface ModelsFileExtended {
   agents?: Record<string, { primary: string; fallbacks: string[] }>;
   taskRoutes?: Record<string, string>;
   local?: Record<string, unknown>;
+  voice?: { realtimeModel?: string; transcriptionModel?: string };
+  scheduler?: Record<string, unknown>;
   costs?: Record<string, unknown>;
   contextLimits?: Record<string, unknown>;
   [key: string]: unknown;
@@ -405,6 +408,188 @@ function cmdSetRoute(args: string[]): void {
   );
 }
 
+// ── Subcommand: set-tier ─────────────────────────────────────────────────────
+
+function cmdSetTier(args: string[]): void {
+  if (args.length < 2) {
+    console.error(c("Error: tier and model are required", "red"));
+    console.log("Usage: lobs config set-tier <tier> <model>");
+    console.log("Tiers: micro, small, medium, standard, strong");
+    process.exit(1);
+  }
+
+  const [tier, model] = args;
+  try {
+    setTier(tier, model);
+    console.log(c("✅", "green") + ` Set tier ${c(tier, "cyan")} → ${c(model, "green")}`);
+  } catch (err) {
+    console.error(c(`Error: ${(err as Error).message}`, "red"));
+    process.exit(1);
+  }
+}
+
+// ── Subcommand: set-agent ─────────────────────────────────────────────────────
+
+function cmdSetAgent(args: string[]): void {
+  if (args.length < 2) {
+    console.error(c("Error: agent and model are required", "red"));
+    console.log("Usage: lobs config set-agent <agent> <model>");
+    console.log("Agents: programmer, researcher, writer, reviewer, architect, suggester");
+    process.exit(1);
+  }
+
+  const [agent, model] = args;
+  const data = loadModelsFile();
+  if (!data.agents) data.agents = {};
+  if (!data.agents[agent]) {
+    data.agents[agent] = { primary: model, fallbacks: [] };
+  } else {
+    data.agents[agent].primary = model;
+  }
+  saveModelsFile(data);
+  console.log(c("✅", "green") + ` Set agent ${c(agent, "cyan")} primary model → ${c(model, "green")}`);
+}
+
+// ── Subcommand: set-voice ─────────────────────────────────────────────────────
+
+function cmdSetVoice(args: string[]): void {
+  if (args.length < 2) {
+    console.error(c("Error: key and model are required", "red"));
+    console.log("Usage: lobs config set-voice <key> <model>");
+    console.log("Keys: realtime, transcription");
+    process.exit(1);
+  }
+
+  const [key, model] = args;
+  const data = loadModelsFile();
+  if (!data.voice) data.voice = {};
+
+  if (key === "realtime") {
+    data.voice.realtimeModel = model;
+    saveModelsFile(data);
+    console.log(c("✅", "green") + ` Set voice realtime model → ${c(model, "green")}`);
+  } else if (key === "transcription") {
+    data.voice.transcriptionModel = model;
+    saveModelsFile(data);
+    console.log(c("✅", "green") + ` Set voice transcription model → ${c(model, "green")}`);
+  } else {
+    console.error(c(`Error: unknown voice key "${key}"`, "red"));
+    console.log("Valid keys: realtime, transcription");
+    process.exit(1);
+  }
+}
+
+// ── Subcommand: set-local ─────────────────────────────────────────────────────
+
+const LOCAL_KEYS = ["chatModel", "summaryModel", "embeddingModel", "baseUrl"] as const;
+type LocalKey = typeof LOCAL_KEYS[number];
+
+function cmdSetLocal(args: string[]): void {
+  if (args.length < 2) {
+    console.error(c("Error: key and value are required", "red"));
+    console.log("Usage: lobs config set-local <key> <value>");
+    console.log(`Keys: ${LOCAL_KEYS.join(", ")}`);
+    process.exit(1);
+  }
+
+  const [key, value] = args;
+  if (!LOCAL_KEYS.includes(key as LocalKey)) {
+    console.error(c(`Error: unknown local key "${key}"`, "red"));
+    console.log(`Valid keys: ${LOCAL_KEYS.join(", ")}`);
+    process.exit(1);
+  }
+
+  const data = loadModelsFile();
+  if (!data.local) data.local = {};
+  data.local[key] = value;
+  saveModelsFile(data);
+  console.log(c("✅", "green") + ` Set local.${c(key, "cyan")} → ${c(value, "green")}`);
+}
+
+// ── Subcommand: set-scheduler ─────────────────────────────────────────────────
+
+const SCHEDULER_BOOL_KEYS = ["enabled", "localOnly"] as const;
+const SCHEDULER_NUM_KEYS = ["temperature", "maxTokens"] as const;
+const SCHEDULER_STR_KEYS = ["tier", "overrideModel"] as const;
+const SCHEDULER_ALL_KEYS = [...SCHEDULER_BOOL_KEYS, ...SCHEDULER_NUM_KEYS, ...SCHEDULER_STR_KEYS] as const;
+type SchedulerKey = typeof SCHEDULER_ALL_KEYS[number];
+
+function cmdSetScheduler(args: string[]): void {
+  if (args.length < 2) {
+    console.error(c("Error: key and value are required", "red"));
+    console.log("Usage: lobs config set-scheduler <key> <value>");
+    console.log(`Keys: ${SCHEDULER_ALL_KEYS.join(", ")}`);
+    process.exit(1);
+  }
+
+  const [key, rawValue] = args;
+  if (!SCHEDULER_ALL_KEYS.includes(key as SchedulerKey)) {
+    console.error(c(`Error: unknown scheduler key "${key}"`, "red"));
+    console.log(`Valid keys: ${SCHEDULER_ALL_KEYS.join(", ")}`);
+    process.exit(1);
+  }
+
+  let value: unknown = rawValue;
+  if (SCHEDULER_BOOL_KEYS.includes(key as typeof SCHEDULER_BOOL_KEYS[number])) {
+    value = rawValue === "true" || rawValue === "1";
+  } else if (SCHEDULER_NUM_KEYS.includes(key as typeof SCHEDULER_NUM_KEYS[number])) {
+    value = parseFloat(rawValue);
+    if (isNaN(value as number)) {
+      console.error(c(`Error: "${key}" must be a number`, "red"));
+      process.exit(1);
+    }
+  } else if (key === "overrideModel" && (rawValue === "null" || rawValue === "")) {
+    value = null;
+  }
+
+  const data = loadModelsFile();
+  if (!data.scheduler) data.scheduler = {};
+  data.scheduler[key] = value;
+  saveModelsFile(data);
+  console.log(c("✅", "green") + ` Set scheduler.${c(key, "cyan")} → ${c(String(value), "green")}`);
+}
+
+// ── Subcommand: edit ──────────────────────────────────────────────────────────
+
+function cmdEdit(): void {
+  // Ensure the file exists before opening
+  if (!existsSync(MODELS_PATH)) {
+    mkdirSync(dirname(MODELS_PATH), { recursive: true });
+    writeFileSync(MODELS_PATH, "{}\n", "utf-8");
+    console.log(c(`Created ${MODELS_PATH}`, "dim"));
+  }
+
+  const editor = process.env.EDITOR ?? process.env.VISUAL ?? "vim";
+  console.log(c(`Opening ${MODELS_PATH} in ${editor}...`, "dim"));
+
+  const result = spawnSync(editor, [MODELS_PATH], { stdio: "inherit" });
+  if (result.error) {
+    console.error(c(`Error launching editor: ${result.error.message}`, "red"));
+    process.exit(1);
+  }
+
+  // Reload config after editing
+  resetModelConfig();
+  console.log(c("✅ Config reloaded.", "green"));
+}
+
+// ── Subcommand: init ──────────────────────────────────────────────────────────
+
+function cmdInit(args: string[]): void {
+  const force = args.includes("--force");
+
+  if (existsSync(MODELS_PATH) && !force) {
+    console.warn(c(`⚠️  ${MODELS_PATH} already exists. Use --force to overwrite.`, "yellow"));
+    process.exit(1);
+  }
+
+  mkdirSync(dirname(MODELS_PATH), { recursive: true });
+  writeFileSync(MODELS_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2) + "\n", "utf-8");
+  resetModelConfig();
+  console.log(c("✅", "green") + ` Created ${MODELS_PATH} with full default config.`);
+  console.log(c(`  Edit it directly or use \`lobs config set-*\` commands.`, "dim"));
+}
+
 // ── Subcommand: show ──────────────────────────────────────────────────────────
 
 function cmdShow(): void {
@@ -466,6 +651,43 @@ function cmdShow(): void {
     console.log("");
   }
 
+  // ── Voice ──
+  const voice = cfg.voice ?? { realtimeModel: "gpt-4o-realtime-preview", transcriptionModel: "gpt-4o-mini-transcribe" };
+  console.log(bold("Voice Models:"));
+  console.log(`  ${c("realtime".padEnd(16), "cyan")}  ${c(voice.realtimeModel, "green")}`);
+  console.log(`  ${c("transcription".padEnd(16), "cyan")}  ${c(voice.transcriptionModel, "green")}`);
+  console.log("");
+
+  // ── Local ──
+  const local = cfg.local;
+  console.log(bold("Local Models (LM Studio):"));
+  console.log(`  ${c("baseUrl".padEnd(16), "cyan")}  ${c(local.baseUrl, "green")}`);
+  console.log(`  ${c("chatModel".padEnd(16), "cyan")}  ${c(local.chatModel, "green")}`);
+  if (local.summaryModel) {
+    console.log(`  ${c("summaryModel".padEnd(16), "cyan")}  ${c(local.summaryModel, "green")}`);
+  }
+  console.log(`  ${c("embeddingModel".padEnd(16), "cyan")}  ${c(local.embeddingModel, "green")}`);
+  console.log("");
+
+  // ── Scheduler ──
+  const sched = cfg.scheduler;
+  if (sched) {
+    console.log(bold("Scheduler:"));
+    const schedEntries: [string, unknown][] = [
+      ["enabled",       sched.enabled],
+      ["localOnly",     sched.localOnly],
+      ["tier",          sched.tier],
+      ["overrideModel", sched.overrideModel ?? "(none)"],
+      ["temperature",   sched.temperature],
+      ["maxTokens",     sched.maxTokens],
+    ];
+    for (const [k, v] of schedEntries) {
+      if (v === undefined) continue;
+      console.log(`  ${c(k.padEnd(16), "cyan")}  ${c(String(v), "green")}`);
+    }
+    console.log("");
+  }
+
   // ── Config files ──
   console.log(bold("Config files:"));
   const files = [
@@ -500,6 +722,13 @@ function cmdHelp(): void {
   console.log("  lobs config set-agent-fallback <a> <m..>  Set agent fallback chain");
   console.log("  lobs config routes                     Show task→tier routing");
   console.log("  lobs config set-route <cat> <tier>     Set task category route");
+  console.log("  lobs config set-tier <tier> <model>    Set a tier's model");
+  console.log("  lobs config set-agent <agent> <model>  Set an agent's primary model");
+  console.log("  lobs config set-voice <key> <model>    Set voice model (realtime|transcription)");
+  console.log("  lobs config set-local <key> <value>    Set local model setting");
+  console.log("  lobs config set-scheduler <key> <val>  Set scheduler setting");
+  console.log("  lobs config edit                       Open models.json in $EDITOR");
+  console.log("  lobs config init [--force]             Create models.json with full defaults");
   console.log("");
 }
 
@@ -530,6 +759,27 @@ export async function cmdConfig(subcommand: string, args: string[]): Promise<voi
       break;
     case "set-route":
       cmdSetRoute(args);
+      break;
+    case "set-tier":
+      cmdSetTier(args);
+      break;
+    case "set-agent":
+      cmdSetAgent(args);
+      break;
+    case "set-voice":
+      cmdSetVoice(args);
+      break;
+    case "set-local":
+      cmdSetLocal(args);
+      break;
+    case "set-scheduler":
+      cmdSetScheduler(args);
+      break;
+    case "edit":
+      cmdEdit();
+      break;
+    case "init":
+      cmdInit(args);
       break;
     case "help":
     case "--help":
