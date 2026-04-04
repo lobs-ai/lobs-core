@@ -46,7 +46,8 @@ import { execSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { validateAllConfigs, printValidationResults } from "../config/validator.js";
-import { getModelConfig } from "../config/models.js";
+import { getModelConfig, getModelForTier } from "../config/models.js";
+import { loadKeyConfig, getEnvKeyForProvider } from "../config/keys.js";
 import { runLmStudioDiagnostic, formatDiagnosticReport } from "../diagnostics/lmstudio.js";
 import { cmdCodexAuth } from "./codex-auth.js";
 
@@ -777,10 +778,98 @@ async function cmdHealth() {
 }
 
 async function cmdModelsDiagnostic() {
+  // Load keys into process.env
+  loadKeyConfig();
+
+  const config = getModelConfig();
+  const tiers = (config.tiers ?? {}) as Record<string, string>;
+  const tierFallbacks = ((config as unknown as Record<string, unknown>)["tierFallbacks"] ?? {}) as Record<string, string[]>;
+  const agents = (config.agents ?? {}) as Record<string, { primary: string; fallbacks?: string[] }>;
+
+  // ── Tier Overview ──────────────────────────────────────────────────────────
+  console.log("\n\x1b[1m=== Model Tiers ===\x1b[0m\n");
+
+  const tierOrder = ["strong", "standard", "medium", "small", "micro"];
+  for (const tier of tierOrder) {
+    const model = tiers[tier];
+    if (!model) continue;
+    const [provider] = model.split("/");
+    const envKey = getEnvKeyForProvider(provider);
+    const hasKey = provider === "lmstudio" || !!process.env[envKey];
+    const status = hasKey ? "\x1b[32m✓\x1b[0m" : "\x1b[31m✗ no key\x1b[0m";
+    const fallbacks = tierFallbacks[tier];
+    const fbStr = fallbacks?.length ? `  → fallback: ${fallbacks.join(" → ")}` : "";
+    console.log(`  ${status}  \x1b[1m${tier.padEnd(10)}\x1b[0m ${model}${fbStr}`);
+  }
+
+  // ── Cloud Providers ────────────────────────────────────────────────────────
+  console.log("\n\x1b[1m=== Cloud Providers ===\x1b[0m\n");
+
+  // Collect all providers referenced in tiers + fallbacks + agents
+  const usedProviders = new Set<string>();
+  for (const model of Object.values(tiers)) {
+    usedProviders.add(model.split("/")[0]);
+  }
+  for (const fbs of Object.values(tierFallbacks)) {
+    for (const fb of fbs) usedProviders.add(fb.split("/")[0]);
+  }
+  for (const a of Object.values(agents)) {
+    usedProviders.add(a.primary.split("/")[0]);
+    for (const fb of a.fallbacks ?? []) usedProviders.add(fb.split("/")[0]);
+  }
+
+  // Remove local
+  usedProviders.delete("lmstudio");
+
+  for (const provider of [...usedProviders].sort()) {
+    const envKey = getEnvKeyForProvider(provider);
+    const hasKey = !!process.env[envKey];
+    const keyStatus = hasKey
+      ? `\x1b[32m✓\x1b[0m ${envKey}`
+      : `\x1b[31m✗\x1b[0m ${envKey} not set`;
+    
+    // Find which tiers use this provider
+    const tierUsage: string[] = [];
+    for (const [tier, model] of Object.entries(tiers)) {
+      if (model.startsWith(provider + "/")) tierUsage.push(tier);
+    }
+    const usage = tierUsage.length ? ` (${tierUsage.join(", ")})` : " (fallback only)";
+    console.log(`  ${keyStatus}  \x1b[36m${provider}\x1b[0m${usage}`);
+  }
+
+  // ── Agent Defaults ─────────────────────────────────────────────────────────
+  console.log("\n\x1b[1m=== Agent Defaults ===\x1b[0m\n");
+
+  for (const [agent, cfg] of Object.entries(agents)) {
+    const fbs = cfg.fallbacks?.length ? ` → ${cfg.fallbacks.join(" → ")}` : "";
+    console.log(`  ${agent.padEnd(12)} ${cfg.primary}${fbs}`);
+  }
+
+  // ── Local Models (LM Studio) ──────────────────────────────────────────────
+  console.log("\n\x1b[1m=== Local Models (LM Studio) ===\x1b[0m\n");
+
   const report = await runLmStudioDiagnostic();
-  const lines = formatDiagnosticReport(report, { color: process.stdout.isTTY });
-  for (const line of lines) console.log(line);
-  process.exit(report.ok ? 0 : 1);
+  if (!report.reachable) {
+    console.log("  \x1b[31m✗ LM Studio not reachable\x1b[0m");
+  } else {
+    console.log(`  \x1b[32m✓\x1b[0m LM Studio reachable  ${report.loadedModels?.length ?? 0} models loaded`);
+    if (report.loadedModels?.length) {
+      for (const m of report.loadedModels) {
+        console.log(`    ● ${m}`);
+      }
+    }
+    // Show configured local model status
+    if (report.configuredLocalModels?.length) {
+      console.log("");
+      for (const cm of report.configuredLocalModels) {
+        const isLoaded = report.loadedModels?.some(m => m === cm.id || m.includes(cm.id) || cm.id.includes(m));
+        const icon = isLoaded ? "\x1b[32m✓\x1b[0m" : "\x1b[31m✗\x1b[0m";
+        console.log(`  ${icon}  ${cm.id.padEnd(45)} ${cm.location}`);
+      }
+    }
+  }
+
+  console.log("");
 }
 
 async function cmdModelsAvailable(): Promise<void> {
