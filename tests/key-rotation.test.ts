@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { EventEmitter } from "node:events";
 
 function writeKeysConfig(homeDir: string, data: unknown): void {
   const secretsDir = join(homeDir, ".lobs", "config", "secrets");
@@ -253,6 +254,67 @@ describe("key rotation", () => {
       expect(first?.apiKey).toBeTruthy();
       expect(second?.apiKey).toBeTruthy();
     } finally {
+      shutdownKeyPool();
+    }
+  });
+
+  test("anthropic uses max_tokens even when adaptive thinking is enabled", async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), "lobs-anthropic-thinking-"));
+    process.env.HOME = homeDir;
+    writeKeysConfig(homeDir, {
+      anthropic: {
+        keys: ["sk-ant-a"],
+        strategy: "sticky-failover",
+      },
+    });
+
+    const stream = new EventEmitter();
+    stream.finalMessage = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "end_turn",
+      usage: {
+        input_tokens: 10,
+        output_tokens: 5,
+      },
+    });
+    stream.abort = vi.fn();
+
+    let capturedParams;
+
+    vi.resetModules();
+    vi.doMock("@anthropic-ai/sdk", () => ({
+      default: class MockAnthropic {
+        constructor() {}
+        messages = {
+          stream: (params) => {
+            capturedParams = params;
+            queueMicrotask(() => stream.emit("connect"));
+            return stream;
+          },
+        };
+      },
+    }));
+
+    const { shutdownKeyPool } = await import("../src/services/key-pool.js");
+    const { createClient } = await import("../src/runner/providers.js");
+
+    try {
+      const client = createClient({ provider: "anthropic", modelId: "claude-opus-4-6" }, "session-opus");
+      const response = await client.createMessage({
+        model: "claude-opus-4-6",
+        system: "system",
+        messages: [{ role: "user", content: "hello" }],
+        tools: [],
+        maxTokens: 512,
+        thinking: { type: "adaptive" },
+      });
+
+      expect(response.content).toEqual([{ type: "text", text: "ok" }]);
+      expect(capturedParams.max_tokens).toBe(512);
+      expect(capturedParams.max_output_tokens).toBeUndefined();
+      expect(capturedParams.thinking).toEqual({ type: "adaptive" });
+    } finally {
+      vi.doUnmock("@anthropic-ai/sdk");
       shutdownKeyPool();
     }
   });

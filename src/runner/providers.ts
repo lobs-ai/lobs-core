@@ -18,7 +18,6 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
-import OpenAI from "openai";
 import type { ToolDefinition, TokenUsage } from "./types.js";
 import { getKeyPool } from "../services/key-pool.js";
 import { getCodexAuth } from "../services/codex-auth.js";
@@ -554,10 +553,8 @@ class AnthropicClient implements LLMClient {
           budget_tokens: params.thinking.budgetTokens,
         };
       }
-      apiParams.max_output_tokens = params.maxTokens;
-    } else {
-      apiParams.max_tokens = params.maxTokens;
     }
+    apiParams.max_tokens = params.maxTokens;
 
     // Track this request as in-flight so the pool can deprioritize this key
     // for new sessions if it appears stuck.
@@ -1445,21 +1442,21 @@ export function createResilientClient(
  * Responses API format, which is fundamentally different from Chat Completions.
  */
 class OpenAICodexClient implements LLMClient {
-  private client: OpenAI;
+  private readonly baseUrl: string;
+  private readonly apiKey: string;
+  private readonly sessionId?: string;
+  private readonly headers: Record<string, string>;
 
   constructor(
     baseUrl: string,
     apiKey: string,
-    _sessionId?: string,
+    sessionId?: string,
     extraHeaders?: Record<string, string>,
   ) {
-    // The openai SDK's responses.create() appends /responses to baseURL,
-    // so we set baseURL to .../codex (not .../codex/responses)
-    this.client = new OpenAI({
-      baseURL: baseUrl,
-      apiKey: apiKey,
-      defaultHeaders: extraHeaders,
-    });
+    this.baseUrl = baseUrl;
+    this.apiKey = apiKey;
+    this.sessionId = sessionId;
+    this.headers = extraHeaders ?? {};
   }
 
   async createMessage(params: {
@@ -1470,36 +1467,47 @@ class OpenAICodexClient implements LLMClient {
     maxTokens: number;
     thinking?: { type: "enabled"; budgetTokens: number } | { type: "adaptive" };
   }): Promise<LLMResponse> {
-    // Convert messages to Responses API input items
     const input = this.convertMessagesToInput(params.messages);
-
-    // Convert tools from Anthropic format (input_schema) to Responses API format (parameters)
     const tools = params.tools.map((t) => ({
       type: "function" as const,
       name: t.name,
       description: t.description,
       parameters: t.input_schema,
+      strict: false,
     }));
 
-    // Build request params
-    const requestParams: Record<string, unknown> = {
+    const requestBody: Record<string, unknown> = {
       model: params.model,
+      store: false,
+      stream: true,
       instructions: params.system,
       input,
-      max_output_tokens: params.maxTokens,
+      text: { verbosity: "medium" },
+      include: ["reasoning.encrypted_content"],
+      tool_choice: "auto",
+      parallel_tool_calls: true,
+      ...(this.sessionId ? { prompt_cache_key: this.sessionId } : {}),
     };
 
     if (tools.length > 0) {
-      requestParams.tools = tools;
+      requestBody.tools = tools;
     }
 
-    // Make the API call via the Responses API
-    const response = await this.client.responses.create(
-      requestParams as Parameters<typeof this.client.responses.create>[0],
-    );
+    const response = await fetch(this.resolveEndpoint(), {
+      method: "POST",
+      headers: this.buildHeaders(),
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(600_000),
+    });
 
-    // Convert response to our LLMResponse format
-    return this.convertResponse(response as Parameters<typeof this.convertResponse>[0]);
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`${response.status} ${text.slice(0, 200)}`.trim());
+    }
+
+    const sseText = await response.text();
+    const finalResponse = this.extractFinalResponseFromSSE(sseText);
+    return this.convertResponse(finalResponse);
   }
 
   private convertMessagesToInput(messages: LLMMessage[]): unknown[] {
@@ -1508,12 +1516,15 @@ class OpenAICodexClient implements LLMClient {
     for (const msg of messages) {
       if (msg.role === "user") {
         if (typeof msg.content === "string") {
-          input.push({ type: "message", role: "user", content: msg.content });
+          input.push({
+            role: "user",
+            content: [{ type: "input_text", text: msg.content }],
+          });
         } else if (Array.isArray(msg.content)) {
+          const content: Array<Record<string, unknown>> = [];
           for (const block of msg.content) {
             const b = block as Record<string, unknown>;
             if (b.type === "tool_result") {
-              // tool_result → function_call_output
               input.push({
                 type: "function_call_output",
                 call_id: b.tool_use_id,
@@ -1523,12 +1534,20 @@ class OpenAICodexClient implements LLMClient {
                     : JSON.stringify(b.content),
               });
             } else if (b.type === "text") {
-              input.push({
-                type: "message",
-                role: "user",
-                content: b.text,
+              content.push({
+                type: "input_text",
+                text: b.text,
+              });
+            } else if (b.type === "image" && typeof b.data === "string" && typeof b.mediaType === "string") {
+              content.push({
+                type: "input_image",
+                detail: "auto",
+                image_url: `data:${b.mediaType};base64,${b.data}`,
               });
             }
+          }
+          if (content.length > 0) {
+            input.push({ role: "user", content });
           }
         }
       } else if (msg.role === "assistant") {
@@ -1536,7 +1555,8 @@ class OpenAICodexClient implements LLMClient {
           input.push({
             type: "message",
             role: "assistant",
-            content: msg.content,
+            content: [{ type: "output_text", text: msg.content, annotations: [] }],
+            status: "completed",
           });
         } else if (Array.isArray(msg.content)) {
           for (const block of msg.content) {
@@ -1545,14 +1565,14 @@ class OpenAICodexClient implements LLMClient {
               input.push({
                 type: "message",
                 role: "assistant",
-                content: b.text,
+                content: [{ type: "output_text", text: b.text, annotations: [] }],
+                status: "completed",
               });
             } else if (b.type === "tool_use") {
-              // tool_use → function_call
               input.push({
                 type: "function_call",
-                id: b.id,
                 call_id: b.id,
+                id: String(b.id).startsWith("fc_") ? b.id : `fc_${String(b.id)}`,
                 name: b.name,
                 arguments: JSON.stringify(b.input),
               });
@@ -1621,6 +1641,100 @@ class OpenAICodexClient implements LLMClient {
         cacheReadTokens: 0,
         cacheWriteTokens: 0,
       },
+    };
+  }
+
+  private resolveEndpoint(): string {
+    const normalized = this.baseUrl.replace(/\/+$/, "");
+    if (normalized.endsWith("/codex/responses")) return normalized;
+    if (normalized.endsWith("/codex")) return `${normalized}/responses`;
+    return `${normalized}/codex/responses`;
+  }
+
+  private buildHeaders(): Record<string, string> {
+    const accountId = this.headers["ChatGPT-Account-Id"] ?? this.headers["chatgpt-account-id"];
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.apiKey}`,
+      accept: "text/event-stream",
+      "content-type": "application/json",
+      "OpenAI-Beta": "responses=experimental",
+      originator: "pi",
+      "User-Agent": `lobs-core (${process.platform} ${process.arch})`,
+      ...this.headers,
+    };
+    if (accountId) {
+      headers["chatgpt-account-id"] = accountId;
+      delete headers["ChatGPT-Account-Id"];
+    }
+    if (this.sessionId) {
+      headers["session_id"] = this.sessionId;
+    }
+    return headers;
+  }
+
+  private extractFinalResponseFromSSE(sseText: string): {
+    output?: Array<{
+      type: string;
+      role?: string;
+      content?: Array<{ type: string; text?: string }>;
+      id?: string;
+      call_id?: string;
+      name?: string;
+      arguments?: string;
+    }>;
+    status?: string;
+    usage?: { input_tokens?: number; output_tokens?: number };
+  } {
+    let finalResponse: Record<string, unknown> | null = null;
+    let responseError: string | null = null;
+
+    for (const chunk of sseText.split("\n\n")) {
+      const dataLines = chunk
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim());
+      if (dataLines.length === 0) continue;
+
+      const data = dataLines.join("\n").trim();
+      if (!data || data === "[DONE]") continue;
+
+      try {
+        const parsed = JSON.parse(data) as Record<string, unknown>;
+        const type = parsed.type;
+        if (type === "error") {
+          responseError = String(parsed.message ?? parsed.code ?? "Codex error");
+        } else if (
+          type === "response.completed" ||
+          type === "response.done" ||
+          type === "response.incomplete"
+        ) {
+          finalResponse = parsed.response as Record<string, unknown>;
+        } else if (type === "response.failed") {
+          const response = parsed.response as Record<string, unknown> | undefined;
+          const errorObj = response?.error as Record<string, unknown> | undefined;
+          responseError = String(errorObj?.message ?? "Codex response failed");
+        }
+      } catch {
+        // Ignore malformed SSE fragments.
+      }
+    }
+
+    if (!finalResponse) {
+      throw new Error(responseError ?? "Codex response stream ended without a final response");
+    }
+
+    return finalResponse as {
+      output?: Array<{
+        type: string;
+        role?: string;
+        content?: Array<{ type: string; text?: string }>;
+        id?: string;
+        call_id?: string;
+        name?: string;
+        arguments?: string;
+      }>;
+      status?: string;
+      usage?: { input_tokens?: number; output_tokens?: number };
     };
   }
 }
