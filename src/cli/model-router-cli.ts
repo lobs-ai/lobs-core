@@ -19,6 +19,10 @@ import { getModelRouter } from "../services/model-router.js";
 import { getUsageTracker } from "../services/provider-usage-tracker.js";
 import type { TaskCategory } from "../services/model-router.js";
 import type { UsageLimits } from "../services/provider-usage-tracker.js";
+import { getModelConfig, getModelForTier, setTier } from "../config/models.js";
+import { getDb } from "../db/connection.js";
+import { projects } from "../db/schema.js";
+import { eq, or } from "drizzle-orm";
 
 // ── ANSI Colors ───────────────────────────────────────────────────────────────
 
@@ -567,6 +571,94 @@ function getProviderDataPolicy(providerId: string): string | null {
   return PROVIDER_META[providerId]?.dataPolicy ?? null;
 }
 
+async function cmdTiers(): Promise<void> {
+  const cfg = getModelConfig();
+  const tiers = cfg.tiers as Record<string, string>;
+
+  console.log("\n" + bold("Model Tiers"));
+  console.log(c("\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550", "cyan"));
+
+  const maxLen = Math.max(...Object.keys(tiers).map((k) => k.length));
+  for (const [tier, model] of Object.entries(tiers)) {
+    console.log(`  ${c(tier.padEnd(maxLen), "cyan")}  \u2192 ${model}`);
+  }
+
+  // Project overrides
+  const db = getDb();
+  const rows = db
+    .select({ id: projects.id, title: projects.title, defaultModelTier: projects.defaultModelTier })
+    .from(projects)
+    .all();
+
+  const withTier = rows.filter((r: { id: string; title: string; defaultModelTier: string | null }) => r.defaultModelTier);
+  const withoutTier = rows.filter((r: { id: string; title: string; defaultModelTier: string | null }) => !r.defaultModelTier);
+
+  console.log("\n" + bold("Project Overrides:"));
+  for (const row of withTier) {
+    const model = row.defaultModelTier ? getModelForTier(row.defaultModelTier) : null;
+    console.log(`  ${c(row.title, "cyan")}  \u2192 ${row.defaultModelTier} (${model ?? "unknown"})`);
+  }
+  for (const row of withoutTier.slice(0, 5)) {
+    console.log(`  ${dim(row.title)}  \u2192 ${dim("(system default)")}`);
+  }
+  if (withoutTier.length > 5) {
+    console.log(dim(`  ... and ${withoutTier.length - 5} more with system default`));
+  }
+
+  console.log("");
+}
+async function cmdSetTier(args: string[]): Promise<void> {
+  const [tier, model] = args;
+  if (!tier || !model) {
+    console.error(c("Error: tier and model are required", "red"));
+    console.log("Usage: lobs models set-tier <tier> <model>");
+    process.exit(1);
+  }
+
+  try {
+    setTier(tier, model);
+    console.log(c("✅", "green") + ` Set tier ${bold(tier)} → ${c(model, "cyan")}`);
+  } catch (err) {
+    console.error(c(`Error: ${(err as Error).message}`, "red"));
+    process.exit(1);
+  }
+}
+
+async function cmdSetProjectTier(args: string[]): Promise<void> {
+  const [projectRef, tier] = args;
+  if (!projectRef || !tier) {
+    console.error(c("Error: project and tier are required", "red"));
+    console.log("Usage: lobs models set-project-tier <project-id-or-title> <tier>");
+    process.exit(1);
+  }
+
+  // Validate tier exists
+  const cfg = getModelConfig();
+  const tiers = cfg.tiers as Record<string, string>;
+  if (!(tier in tiers)) {
+    console.error(c(`Error: unknown tier "${tier}". Valid: ${Object.keys(tiers).join(", ")}`, "red"));
+    process.exit(1);
+  }
+
+  const db = getDb();
+  // Look up project by ID or title (case-insensitive)
+  const row = db
+    .select({ id: projects.id, title: projects.title })
+    .from(projects)
+    .where(or(eq(projects.id, projectRef), eq(projects.title, projectRef)))
+    .get();
+
+  if (!row) {
+    console.error(c(`Error: project not found: "${projectRef}"`, "red"));
+    process.exit(1);
+  }
+
+  db.update(projects).set({ defaultModelTier: tier }).where(eq(projects.id, row.id)).run();
+
+  console.log(c("✅", "green") + ` Set project ${bold(row.title)} default tier → ${c(tier, "cyan")}`);
+}
+
+
 // ── Help ──────────────────────────────────────────────────────────────────────
 
 function printHelp(): void {
@@ -581,7 +673,10 @@ function printHelp(): void {
   console.log(
     "  set-limit <p> <period> <$>  Set usage limit (periods: per5Hours, perWeek, perMonth, perDay)"
   );
-  console.log("  policy              Show routing policy details\n");
+  console.log("  policy              Show routing policy details");
+  console.log("  tiers               Show current tier → model mappings");
+  console.log("  set-tier <t> <m>    Update a tier mapping");
+  console.log("  set-project-tier <project> <tier>  Set project default tier\n");
   console.log(`Task categories: ${TASK_CATEGORIES.join(", ")}\n`);
 }
 
@@ -615,6 +710,15 @@ export async function cmdModelRouter(
       break;
     case "policy":
       await cmdPolicy();
+      break;
+    case "tiers":
+      await cmdTiers();
+      break;
+    case "set-tier":
+      await cmdSetTier(args);
+      break;
+    case "set-project-tier":
+      await cmdSetProjectTier(args);
       break;
     default:
       printHelp();

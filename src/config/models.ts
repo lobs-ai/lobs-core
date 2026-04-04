@@ -221,6 +221,16 @@ export function getContextLimit(model: string): number {
   return 128_000; // safe default
 }
 
+/** Update a single tier mapping and save to disk */
+export function setTier(tier: string, model: string): void {
+  const cfg = getModelConfig();
+  if (!(tier in (cfg.tiers as Record<string, string>))) {
+    throw new Error(`Unknown tier: ${tier}. Valid: ${Object.keys(cfg.tiers).join(", ")}`);
+  }
+  (cfg.tiers as Record<string, string>)[tier] = model;
+  saveModelConfig(cfg);
+}
+
 /** Get local model settings (strips lmstudio/ prefix from model IDs) */
 export function getLocalConfig(): ModelConfig["local"] {
   const local = getModelConfig().local;

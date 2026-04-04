@@ -34,6 +34,7 @@ export const projects = sqliteTable("projects", {
   // Compliance flag: when true, all tasks in this project must use local models only.
   // Cascades down to every task dispatch in processSpawnRequest.
   complianceRequired: integer("compliance_required", { mode: "boolean" }).notNull().default(false),
+  defaultModelTier: text("default_model_tier"),
   ...timestamps,
 });
 

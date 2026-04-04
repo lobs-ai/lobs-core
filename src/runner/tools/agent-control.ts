@@ -14,6 +14,9 @@ import { runAgent, calculateCost } from "../agent-loop.js";
 import type { AgentSpec, AgentPhase } from "../agent-loop.js";
 import { getModelForTier } from "../../config/models.js";
 import type { ToolDefinition, ToolName } from "../types.js";
+import { getDb } from "../../db/connection.js";
+import { projects } from "../../db/schema.js";
+import { eq } from "drizzle-orm";
 
 const HOME = process.env.HOME ?? "";
 
@@ -251,6 +254,14 @@ const BUILTIN_PIPELINES: Record<string, Array<{ agentType: string; modelTier: st
   ],
 };
 
+/** Look up a project's default model tier from the DB. Returns null if not found or not set. */
+async function getProjectDefaultTier(projectId: string | null | undefined): Promise<string | null> {
+  if (!projectId) return null;
+  const db = getDb();
+  const row = db.select({ tier: projects.defaultModelTier }).from(projects).where(eq(projects.id, projectId)).get();
+  return row?.tier ?? null;
+}
+
 /**
  * Execute the spawn_agent tool.
  */
@@ -265,7 +276,13 @@ export async function executeSpawnAgent(
   if (!task) {
     throw new Error("prompt or task is required");
   }
-  const modelTier = (input.model_tier as string) ?? "standard";
+  // Resolve model tier: explicit override > project default > system default
+  let modelTier = (input.model_tier as string) ?? null;
+  if (!modelTier) {
+    const projectId = (input.project_id as string) ?? null;
+    const projectTier = await getProjectDefaultTier(projectId);
+    modelTier = projectTier ?? "standard";
+  }
   // If no cwd specified, try to find the right repo for the task
   const defaultCwd = parentCwd ?? HOME;
   const cwd = (input.cwd as string) ?? defaultCwd;

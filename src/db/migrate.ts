@@ -28,6 +28,9 @@ export function runMigrations(db: PawDB): void {
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
 
+  // Idempotent column additions (ignore if already present)
+  try { db.run(sql`ALTER TABLE projects ADD COLUMN default_model_tier TEXT`); } catch (_) { /* already exists */ }
+
   db.run(sql`CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
