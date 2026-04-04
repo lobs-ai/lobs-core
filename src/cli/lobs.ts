@@ -1665,10 +1665,9 @@ const subcommand = args[1];
     case "config":
       if (subcommand === "check") {
         cmdConfigCheck();
-      } else if (subcommand === "show") {
-        await cmdConfigShow();
       } else {
-        console.log("Usage: lobs config [check|show]");
+        const { cmdConfig } = await import("./config-cli.js");
+        await cmdConfig(subcommand || "show", args.slice(2));
       }
       break;
     
@@ -1760,8 +1759,15 @@ const subcommand = args[1];
       console.log("  lobs models policy       Show routing policy details");
       console.log("");
       console.log(colorize("Config:", "cyan"));
-      console.log("  lobs config check        Validate all config files");
-      console.log("  lobs config show         Show config file status");
+      console.log("  config show              Full config overview");
+      console.log("  config check             Validate config files");
+      console.log("  config keys              List API keys (masked)");
+      console.log("  config set-key ...       Add/update API key (provider key [--label name])");
+      console.log("  config remove-key ...    Remove API key (provider [--label name])");
+      console.log("  config set-fallback ...  Set tier fallback chain (tier model1 model2...)");
+      console.log("  config set-agent-fallback ... Set agent fallback chain (agent model1 model2...)");
+      console.log("  config routes            Show task→tier routing");
+      console.log("  config set-route ...     Set task category route (category tier)");
       console.log("  lobs init                Initialize config directory");
       console.log("");
       console.log(colorize("Codex Auth:", "cyan"));
