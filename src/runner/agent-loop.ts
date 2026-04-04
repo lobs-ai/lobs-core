@@ -332,7 +332,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
     } else {
       // Use taskId or runId as sessionId for sticky key assignment (prompt caching benefit)
       const sessionId = spec.context?.taskId ?? runId;
-      const fallbacks = getAgentFallbacks(spec.agent);
+      const fallbacks = getAgentFallbacks(spec.agent, spec.modelTier);
       client = createResilientClient(spec.model, {
         sessionId,
         maxRetries: 3,

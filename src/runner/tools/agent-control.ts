@@ -327,6 +327,7 @@ export async function executeSpawnAgent(
     agent: agentType,
     task,
     model,
+    modelTier,
     tools,
     cwd,
     timeout,

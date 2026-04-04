@@ -196,9 +196,17 @@ export function getAgentModel(agentType: string): string {
   return chain?.primary ?? cfg.tiers.standard;
 }
 
-/** Get fallback chain for an agent type */
-export function getAgentFallbacks(agentType: string): string[] {
+/** Get fallback chain, tier-aware.
+ *  If modelTier is provided and tierFallbacks exist in config, those take
+ *  priority (since the primary model comes from the tier, not the agent). */
+export function getAgentFallbacks(agentType: string, modelTier?: string): string[] {
   const cfg = getModelConfig();
+  if (modelTier) {
+    const tierFb = (cfg as unknown as Record<string, unknown>)["tierFallbacks"] as Record<string, string[]> | undefined;
+    if (tierFb?.[modelTier]?.length) {
+      return tierFb[modelTier];
+    }
+  }
   const chain = (cfg.agents as Record<string, ModelChain>)[agentType];
   return chain?.fallbacks ?? [];
 }

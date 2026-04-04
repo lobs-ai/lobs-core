@@ -25,6 +25,8 @@ export interface AgentSpec {
   context?: AgentContext;
   /** Callback for progress updates */
   onProgress?: (update: ProgressUpdate) => void;
+  /** Model tier used for this agent (for tier-aware fallbacks) */
+  modelTier?: string;
   /** Seed the loop with an explicit message history instead of task-only initialization */
   initialMessages?: import("./providers.js").LLMMessage[];
   /** Override the LLM client used by the shared agent loop */
