@@ -154,12 +154,14 @@ Date: ${date}
 Memory file contents:
 ${stripFrontmatter(content)}`;
 
+    // forceLocal: memory files may contain conversation snippets — never send to free cloud models
     const { data, tokensUsed } = await callLocalModelJSON<DailyAnalysis>(prompt, {
       model: ctx.model,
       baseUrl: ctx.baseUrl,
       maxTokens: 700,
       temperature: 0.1,
       systemPrompt: "You maintain agent memory files. Produce compact factual summaries and topical tags for retrieval.",
+      forceLocal: true,
     });
 
     return {
@@ -213,12 +215,14 @@ Structure:
 Source material:
 ${dailyContents.join("\n\n---\n\n")}`;
 
+    // forceLocal: weekly summaries derive from memory files with potential conversation data
     const { text, tokensUsed } = await callLocalModel(prompt, {
       model: ctx.model,
       baseUrl: ctx.baseUrl,
       maxTokens: 1200,
       temperature: 0.2,
       systemPrompt: "You write concise weekly operational summaries for an AI agent system. Prefer stable facts over narrative.",
+      forceLocal: true,
     });
 
     return { summary: text.trim(), tokensUsed };
@@ -274,6 +278,7 @@ ${stripFrontmatter(content)}`,
             maxTokens: 500,
             temperature: 0.1,
             systemPrompt: "Compress operational memory without losing durable facts.",
+            forceLocal: true,  // memory content may contain conversation data
           },
         );
         totalTokens += tokensUsed;

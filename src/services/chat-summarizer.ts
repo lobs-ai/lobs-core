@@ -17,7 +17,8 @@ import { chatSessions, chatMessages } from "../db/schema.js";
 import { log } from "../util/logger.js";
 import { getModelConfig } from "../config/models.js";
 import { logTrainingExample } from "./training-data.js";
-import { getFreeModelPool, getOpenCodeApiKey } from "./free-model-pool.js";
+// NOTE: Free model pool intentionally NOT used here — chat summaries contain
+// full conversation transcripts and must not be sent to providers that train on usage.
 
 // ── Config ──────────────────────────────────────────────────────────────
 
@@ -66,8 +67,9 @@ Rules:
 // ── Core Functions ──────────────────────────────────────────────────────
 
 /**
- * Call LM Studio (or a free cloud model) for summarization/title tasks.
- * Tries free model pool first; falls back to local LM Studio.
+ * Call LM Studio for summarization/title tasks.
+ * Always local-only — chat summaries contain full conversation transcripts
+ * and must NOT be sent to free cloud models (which use data for training).
  */
 async function callLocalModel(
   systemPrompt: string,
@@ -78,61 +80,11 @@ async function callLocalModel(
   const maxTokens = opts?.maxTokens ?? 256;
   const temperature = opts?.temperature ?? 0.3;
 
-  // Build messages — local Qwen uses a think-block prefill, free models don't need it
   const baseMessages = [
     { role: "system", content: systemPrompt },
     { role: "user", content: userPrompt },
   ];
 
-  // Try free model pool first
-  if (config.free?.enabled !== false) {
-    const pool = getFreeModelPool();
-    const freeModel = pool.getNextModel();
-    if (freeModel) {
-      const apiKey = getOpenCodeApiKey();
-      const freeTimeoutMs = config.free?.timeoutMs ?? TIMEOUT_MS;
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), freeTimeoutMs);
-      try {
-        log().debug?.(`[chat-summarizer] Using free model ${freeModel.id}`);
-        const response = await fetch(`${freeModel.baseUrl}/chat/completions`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...(apiKey ? { "Authorization": `Bearer ${apiKey}` } : {}),
-          },
-          body: JSON.stringify({
-            model: freeModel.id,
-            messages: baseMessages,
-            max_tokens: maxTokens,
-            temperature,
-            stream: false,
-          }),
-          signal: controller.signal,
-        });
-
-        if (!response.ok) {
-          throw new Error(`Free model ${freeModel.id} returned ${response.status}: ${await response.text()}`);
-        }
-
-        const data = await response.json() as {
-          choices?: Array<{ message?: { content?: string } }>;
-        };
-        const content = data.choices?.[0]?.message?.content?.trim() ?? "";
-        if (!content) throw new Error(`Free model ${freeModel.id} returned empty response`);
-
-        pool.reportSuccess(freeModel.id);
-        return content;
-      } catch (err) {
-        pool.reportFailure(freeModel.id);
-        log().warn(`[chat-summarizer] Free model ${freeModel.id} failed, falling back to local: ${err}`);
-      } finally {
-        clearTimeout(timeout);
-      }
-    }
-  }
-
-  // Fallback: local LM Studio
   const baseUrl = config.local?.baseUrl ?? "http://localhost:1234/v1";
   // Strip lmstudio/ prefix — LM Studio API expects the bare model ID
   const rawModel = config.local?.chatModel ?? "qwen/qwen3.5-9b";
