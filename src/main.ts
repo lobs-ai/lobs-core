@@ -16,6 +16,7 @@ import { setLogger, log } from "./util/logger.js";
 import { resolve } from "node:path";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, renameSync, statSync, appendFileSync } from "node:fs";
 import { initToolGate } from "./runner/tool-gate.js";
+import { initToolManager } from "./runner/tools/tool-manager.js";
 import { runHeartbeat } from "./orchestrator/heartbeat.js";
 import { initCronService } from "./services/cron.js";
 import { runSentinelCheck } from "./services/system-sentinel.js";
@@ -35,7 +36,6 @@ import { initMemoryDb } from "./memory/db.js";
 import { initFileIndexer, stopFileIndexer } from "./memory/indexer.js";
 import { registerEventRecorderHook } from "./hooks/event-recorder.js";
 import { registerReflectionTriggerHook } from "./hooks/reflection-trigger.js";
-import { registerSessionWatcher } from "./memory/session-watcher.js";
 import { initDynamicToolLoader } from "./runner/tools/dynamic-tools.js";
 import { runDailyReflection } from "./memory/daily-reflection.js";
 import { imagineService } from "./services/imagine.js";
@@ -335,15 +335,15 @@ async function main() {
   // Initialize hook system and tool gating
   console.log("Initializing hook system...");
   initToolGate();
+  initToolManager();
 
   // Register structured memory hooks (event recording + reflection trigger)
   // These wire into the runner lifecycle via HookRegistry — must come after
   // initMemoryDb() and initToolGate().
   registerEventRecorderHook(null as never);  // _api param is unused
   registerReflectionTriggerHook();
-  registerSessionWatcher();
   initDynamicToolLoader();
-  console.log("Structured memory hooks registered (event recorder + reflection trigger + session watcher)");
+  console.log("Structured memory hooks registered (event recorder + reflection trigger)");
 
   // Load skills
   console.log("Loading skills...");

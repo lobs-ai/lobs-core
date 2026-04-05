@@ -39,10 +39,10 @@ describe("Tool Sets", () => {
   });
 
   describe("getToolsForSession", () => {
-    it("should exclude Discord tools from nexus sessions", () => {
+    it("should include discord tool in nexus sessions", () => {
       const tools = getToolsForSession("nexus");
       
-      expect(tools).not.toContain("discord");
+      expect(tools).toContain("discord");
     });
 
     it("should include discord tool in Discord sessions", () => {
@@ -101,26 +101,23 @@ describe("Tool Sets", () => {
       const discordTools = getToolsForSession("discord");
       const systemTools = getToolsForSession("system");
       
-      // Discord should have more tools than nexus (adds discord tool)
-      expect(discordTools.length).toBeGreaterThan(nexusTools.length);
-      
-      // System should have more tools than discord (adds cron)
-      expect(systemTools.length).toBeGreaterThan(discordTools.length);
+      // Nexus and DM now include discord, guild spreads nexus + discord again
+      // System adds cron on top of guild tools
+      expect(systemTools.length).toBeGreaterThan(nexusTools.length);
     });
 
-    it("should exclude discord tool from DM sessions", () => {
+    it("should include discord tool in DM sessions", () => {
       const dmTools = getToolsForSession("dm");
-      expect(dmTools).not.toContain("discord");
+      expect(dmTools).toContain("discord");
     });
 
-    it("should have more tools in guild sessions than DM sessions", () => {
+    it("should include discord tool in guild sessions", () => {
       const discordTools = getToolsForSession("discord");
       const dmTools = getToolsForSession("dm");
       
-      // Guild sessions add the discord tool
-      expect(discordTools.length).toBeGreaterThan(dmTools.length);
+      // Both DM and guild include discord
       expect(discordTools).toContain("discord");
-      expect(dmTools).not.toContain("discord");
+      expect(dmTools).toContain("discord");
     });
   });
 });

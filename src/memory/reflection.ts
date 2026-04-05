@@ -36,6 +36,7 @@ const activeReflectionKeys = new Set<string>();
 
 /** Hard limits so reflection can't burn through API budget during spikes. */
 const SESSION_END_COOLDOWN_MS = 5 * 60 * 1000;
+const COMPACTION_COOLDOWN_MS = 2 * 60 * 1000;
 const HOURLY_TOKEN_BUDGET = 120_000;
 const MAX_CLUSTERS_PER_SESSION_RUN = 3;
 const MAX_CLUSTERS_PER_DAILY_RUN = 20;
@@ -100,7 +101,7 @@ function gatherUnreflectedEvents(opts: {
 }
 
 function buildReflectionKey(opts: {
-  trigger: "session_end" | "daily" | "manual";
+  trigger: "session_end" | "daily" | "manual" | "compaction";
   sessionId?: string;
   eventRange?: { since: string; until: string };
 }): string | null {
@@ -122,7 +123,7 @@ function markEventsReflected(eventIds: number[], runId: string): void {
   ).run(now, runId, ...eventIds);
 }
 
-function getRecentReflectionStartedAt(trigger: "session_end" | "daily" | "manual"): string | null {
+function getRecentReflectionStartedAt(trigger: "session_end" | "daily" | "manual" | "compaction"): string | null {
   const db = getMemoryDb();
   const row = db.prepare(
     `SELECT started_at
@@ -146,15 +147,15 @@ function getRecentReflectionTokenUsage(windowMs: number): number {
   return Number(row?.total ?? 0);
 }
 
-function getClusterLimit(trigger: "session_end" | "daily" | "manual"): number {
+function getClusterLimit(trigger: "session_end" | "daily" | "manual" | "compaction"): number {
   if (trigger === "daily") return MAX_CLUSTERS_PER_DAILY_RUN;
-  if (trigger === "session_end") return MAX_CLUSTERS_PER_SESSION_RUN;
+  if (trigger === "session_end" || trigger === "compaction") return MAX_CLUSTERS_PER_SESSION_RUN;
   return MAX_CLUSTERS_PER_DAILY_RUN;
 }
 
-function getRunTokenLimit(trigger: "session_end" | "daily" | "manual"): number {
+function getRunTokenLimit(trigger: "session_end" | "daily" | "manual" | "compaction"): number {
   if (trigger === "daily") return MAX_TOKENS_PER_DAILY_RUN;
-  if (trigger === "session_end") return MAX_TOKENS_PER_SESSION_RUN;
+  if (trigger === "session_end" || trigger === "compaction") return MAX_TOKENS_PER_SESSION_RUN;
   return MAX_TOKENS_PER_DAILY_RUN;
 }
 
@@ -162,7 +163,7 @@ function getRunTokenLimit(trigger: "session_end" | "daily" | "manual"): number {
 
 function recordSkippedRun(
   runId: string,
-  trigger: "session_end" | "daily" | "manual",
+  trigger: "session_end" | "daily" | "manual" | "compaction",
   skipReason: string,
 ): void {
   const db = getMemoryDb();
@@ -240,7 +241,7 @@ async function withRetry<T>(
 // ── Main entry point ─────────────────────────────────────────────────────────
 
 export async function runReflection(opts: {
-  trigger: "session_end" | "daily" | "manual";
+  trigger: "session_end" | "daily" | "manual" | "compaction";
   sessionId?: string;
   eventRange?: { since: string; until: string };
 }): Promise<ReflectionResult> {
@@ -276,6 +277,18 @@ export async function runReflection(opts: {
       if (msSinceLastRun < SESSION_END_COOLDOWN_MS) {
         return skipped(
           `session_end reflection cooldown active (${Math.ceil((SESSION_END_COOLDOWN_MS - msSinceLastRun) / 1000)}s remaining)`,
+        );
+      }
+    }
+  }
+
+  if (opts.trigger === "compaction") {
+    const lastStartedAt = getRecentReflectionStartedAt("compaction");
+    if (lastStartedAt) {
+      const msSinceLastRun = Date.now() - new Date(lastStartedAt).getTime();
+      if (msSinceLastRun < COMPACTION_COOLDOWN_MS) {
+        return skipped(
+          `compaction reflection cooldown active (${Math.ceil((COMPACTION_COOLDOWN_MS - msSinceLastRun) / 1000)}s remaining)`,
         );
       }
     }

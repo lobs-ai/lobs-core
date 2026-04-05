@@ -1,8 +1,9 @@
 /**
- * Reflection trigger hook — fires runReflection() at the end of each agent session.
+ * Reflection trigger hook — fires runReflection() at the end of each agent session
+ * and whenever the context window is compacted.
  *
- * Registered on `after_agent_end` with low priority (runs after the event recorder).
- * Fire-and-forget via setImmediate — never blocks the agent.
+ * Registered on `after_agent_end` and `session_compacted` with low priority
+ * (runs after the event recorder). Fire-and-forget via setImmediate — never blocks the agent.
  */
 
 import { getHookRegistry, type HookEvent, type HookHandler } from "../runner/hooks.js";
@@ -72,4 +73,59 @@ export function registerReflectionTriggerHook(): void {
 
   // Priority -20 ensures we run after the event recorder (priority -10)
   registry.register("after_agent_end", afterAgentEnd, -20);
+
+  const sessionCompacted: HookHandler = async (event: HookEvent) => {
+    const sessionId = event.taskId ?? undefined;
+
+    // Fast-path skip: compaction with very few events isn't worth reflecting on.
+    // event.data contains { beforeCount, afterCount, inputTokens } from the agent loop.
+    const beforeCount =
+      typeof event.data.beforeCount === "number" ? event.data.beforeCount : null;
+    if (beforeCount !== null && beforeCount < MIN_EVENTS_FAST_PATH) {
+      log().debug?.(
+        `[reflection-trigger] Skipping compaction for session ${sessionId ?? "?"} — ` +
+          `only ${beforeCount} messages before compaction (fast-path)`,
+      );
+      return event;
+    }
+
+    log().debug?.(
+      `[reflection-trigger] Scheduling compaction reflection for session ${sessionId ?? "?"}`,
+    );
+
+    // Fire-and-forget — setImmediate so we never block the agent runner
+    setImmediate(() => {
+      void (async () => {
+        try {
+          const result = await runReflection({
+            trigger: "compaction",
+            sessionId,
+          });
+
+          if (result.skipped) {
+            log().debug?.(
+              `[reflection-trigger] Compaction ${sessionId ?? "?"} skipped: ${result.skipReason}`,
+            );
+          } else {
+            log().info(
+              `[reflection-trigger] Compaction ${sessionId ?? "?"} — ` +
+                `${result.eventsProcessed} events, ` +
+                `${result.memoriesCreated} new memories, ` +
+                `${result.memoriesReinforced} reinforced, ` +
+                `${result.conflictsDetected} conflicts, ` +
+                `${result.tokensUsed} tokens`,
+            );
+          }
+        } catch (err) {
+          // Never let reflection errors escape — they must not crash the runner
+          log().error(`[reflection-trigger] Compaction reflection failed: ${String(err)}`);
+        }
+      })();
+    });
+
+    return event;
+  };
+
+  // Priority -20 ensures we run after the event recorder (priority -10)
+  registry.register("session_compacted", sessionCompacted, -20);
 }
