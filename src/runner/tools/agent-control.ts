@@ -40,6 +40,11 @@ interface ActiveAgent {
 // In-memory tracking for active spawned agents
 const activeAgents = new Map<string, ActiveAgent>();
 
+/** Get all active spawned agents for API exposure */
+export function getActiveAgents(): ActiveAgent[] {
+  return Array.from(activeAgents.values());
+}
+
 function buildStructuredSubagentEvent(params: {
   runId: string;
   agentType: string;

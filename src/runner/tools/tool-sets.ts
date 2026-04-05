@@ -7,7 +7,7 @@ import type { ToolName } from "../types.js";
 
 export type SessionType = "nexus" | "discord" | "system" | "dm" | "voice";
 
-// Nexus/API chat — no Discord tools needed
+// Nexus/API chat — no Discord tools (discord is enabled on-demand via tool_manage)
 const NEXUS_TOOLS: ToolName[] = [
   "exec",
   "read",
@@ -33,6 +33,7 @@ const NEXUS_TOOLS: ToolName[] = [
   "imagine",
   "html_to_pdf",
   "tool_manage",
+  "discord",
 ];
 
 // Discord DM sessions — same as nexus (no discord tool needed, replies are inline)

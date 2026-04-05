@@ -401,8 +401,17 @@ async function handleHelpCommand(interaction: ChatInputCommandInteraction): Prom
       { name: '/clear', value: 'Clear conversation history', inline: false },
       { name: '/help', value: 'Show this help message', inline: false },
     )
+    .addFields({ name: '\u200b', value: '**Lobs can also manage your Discord server** — just ask naturally:', inline: false })
+    .addFields(
+      { name: 'Messages', value: 'edit, delete, bulk delete, pin, unpin', inline: true },
+      { name: 'Channels', value: 'create, edit, delete, permissions, categories', inline: true },
+      { name: 'Threads', value: 'archive, lock, unlock, edit, delete, manage members', inline: true },
+      { name: 'Webhooks', value: 'create, list, post with embeds or files', inline: true },
+      { name: 'Info', value: 'guild, member, role, channel details', inline: true },
+    )
+    .setFooter({ text: 'Just ask — "create a #feedback channel", "archive this thread", etc.' })
     .setTimestamp();
-  
+
   await interaction.reply({ embeds: [embed], ephemeral: true });
 }
 

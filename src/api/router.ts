@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { LobsPluginApi } from "../types/lobs-plugin.js";
 import { handleTaskRequest } from "./tasks.js";
 import { handleProjectRequest } from "./projects.js";
-import { handleAgentRequest } from "./agents.js";
+import { handleAgentRequest, handleActiveAgentsRequest } from "./agents.js";
 import { handleStatusRequest } from "./status.js";
 import { handleInboxRequest } from "./inbox.js";
 import { handleWorkerRequest } from "./worker.js";
@@ -74,6 +74,7 @@ export function registerPawRouter(api: LobsPluginApi): void {
         case "tasks":           await handleTaskRequest(req, res, parts[1], parts); return true;
         case "projects":        await handleProjectRequest(req, res, parts[1], parts); return true;
         case "agents":          await handleAgentRequest(req, res, parts[1]); return true;
+        case "active-agents":   await handleActiveAgentsRequest(req, res); return true;
         case "status":          await handleStatusRequest(req, res, parts[1], parts); return true;
         case "inbox":           await handleInboxRequest(req, res, parts[1], parts); return true;
         case "worker":          await handleWorkerRequest(req, res, parts[1], parts); return true;
@@ -163,6 +164,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       case "tasks":           await handleTaskRequest(req, res, parts[1], parts); return;
       case "projects":        await handleProjectRequest(req, res, parts[1], parts); return;
       case "agents":          await handleAgentRequest(req, res, parts[1]); return;
+      case "active-agents":   await handleActiveAgentsRequest(req, res); return;
       case "status":          await handleStatusRequest(req, res, parts[1], parts); return;
       case "inbox":           await handleInboxRequest(req, res, parts[1], parts); return;
       case "worker":          await handleWorkerRequest(req, res, parts[1], parts); return;

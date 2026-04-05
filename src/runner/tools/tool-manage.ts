@@ -10,6 +10,8 @@ import type { ToolDefinition } from "../types.js";
 import type { ToolExecutor } from "./index.js";
 import { securityScan } from "./tool-security.js";
 import { getDynamicToolLoader, type ToolJson } from "./dynamic-tools.js";
+import { getToolManager } from "./tool-manager.js";
+import type { ToolName } from "../types.js";
 
 // Built-in tool names that cannot be overridden
 const BUILTIN_TOOL_NAMES = new Set([
@@ -25,17 +27,28 @@ const NAME_PATTERN = /^[a-z][a-z0-9-]*$/;
 export const toolManageDefinition: ToolDefinition = {
   name: "tool_manage",
   description:
-    "Create, edit, delete, or list dynamic tools. Dynamic tools are callable tools that persist across sessions. " +
+    "Create, edit, delete, or list dynamic tools, and enable/disable built-in tools at runtime. " +
+    "Dynamic tools are stored in ~/.lobs/tools/ and persist across sessions. " +
     "Use 'create' to make a new tool with a shell script, TypeScript module, or procedural steps. " +
     "Use 'list' to see all dynamic tools. " +
     "Use 'edit' to modify an existing tool. " +
-    "Use 'delete' to remove a tool.",
+    "Use 'delete' to remove a tool. " +
+    "Use 'enable' or 'disable' to toggle built-in tools at runtime (e.g., enable discord for Nexus sessions). " +
+    "Use 'list_disabled' to see which tools are currently disabled.\n\n" +
+    "**Built-in tools that can be enabled on demand:**\n" +
+    "- **discord** — Manage your Discord server: channels (create, edit, delete, permissions), " +
+    "threads (archive, lock, unlock, edit, delete), messages (edit, pin, bulk delete), " +
+    "webhooks (create, post with embeds/files), and guild info (members, roles). " +
+    "Says things like 'enable discord so I can create a #feedback channel' or " +
+    "'enable discord, then create a webhook on #announcements called Events'.\n" +
+    "Enable it whenever you need to manage Discord — enable it before the task, " +
+    "disable it after if you want to keep the prompt clean again.",
   input_schema: {
     type: "object",
     properties: {
       action: {
         type: "string",
-        enum: ["create", "edit", "delete", "list"],
+        enum: ["create", "edit", "delete", "list", "enable", "disable", "list_disabled"],
         description: "Action to perform",
       },
       name: {
@@ -87,8 +100,14 @@ export const toolManageTool: ToolExecutor = async (params) => {
       return handleDelete(params);
     case "list":
       return handleList();
+    case "enable":
+      return handleEnable(params);
+    case "disable":
+      return handleDisable(params);
+    case "list_disabled":
+      return handleListDisabled();
     default:
-      return `Unknown action: ${action}. Valid actions: create, edit, delete, list`;
+      return `Unknown action: ${action}. Valid actions: create, edit, delete, list, enable, disable, list_disabled`;
   }
 };
 
@@ -278,6 +297,40 @@ function handleList(): string {
   }
 
   return lines.join("\n");
+}
+
+function handleEnable(params: Record<string, unknown>): string {
+  const name = params.name as string | undefined;
+  if (!name) return "Error: 'name' is required for enable action.";
+  const toolName = name as ToolName;
+
+  // Validate it exists as a built-in tool
+  const loader = getDynamicToolLoader();
+  if (!loader) return "Error: dynamic tool loader not initialized";
+  if (loader.has(toolName)) {
+    return `Error: '${name}' is not a built-in tool. Use 'list' to see available dynamic tools.`;
+  }
+
+  const manager = getToolManager();
+  manager.enable(toolName);
+  return `Enabled '${name}'. It will now appear in tool definitions and can be called.`;
+}
+
+function handleDisable(params: Record<string, unknown>): string {
+  const name = params.name as string | undefined;
+  if (!name) return "Error: 'name' is required for disable action.";
+  const toolName = name as ToolName;
+
+  const manager = getToolManager();
+  manager.disable(toolName);
+  return `Disabled '${name}'. Excluded from tool definitions and blocked if called.`;
+}
+
+function handleListDisabled(): string {
+  const manager = getToolManager();
+  const disabled = manager.listDisabled();
+  if (disabled.length === 0) return "No tools are currently disabled.";
+  return `Disabled tools: ${disabled.join(", ")}`;
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────

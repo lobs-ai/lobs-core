@@ -24,6 +24,7 @@ import { htmlToPdfToolDefinition, htmlToPdfTool } from "./html-to-pdf.js";
 import { dispatchAgentToolDefinition, dispatchAgentTool } from "./dispatch.js";
 import { toolManageDefinition, toolManageTool } from "./tool-manage.js";
 import { getDynamicToolLoader } from "./dynamic-tools.js";
+import { getToolManager } from "./tool-manager.js";
 import {
   asClaudeCodeToolDefinition,
   fromClaudeCodeToolName,
@@ -217,8 +218,9 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
  * Get tool definitions for the Anthropic API.
  */
 export function getToolDefinitions(tools: ToolName[]): ToolDefinition[] {
+  const manager = getToolManager();
   const staticDefs = tools
-    .filter((name) => TOOL_REGISTRY[name])
+    .filter((name) => TOOL_REGISTRY[name] && manager.isEnabled(name))
     .map((name) => {
       const definition = getDefinition(TOOL_REGISTRY[name]);
       return asClaudeCodeToolDefinition(definition);
@@ -242,6 +244,20 @@ export async function executeTool(
   context?: ToolContext,
 ): Promise<ToolExecutionResult> {
   const internalName = fromClaudeCodeToolName(toolName);
+  const manager = getToolManager();
+
+  // Block execution of disabled tools
+  if (!manager.isEnabled(internalName as ToolName)) {
+    return {
+      result: {
+        tool_use_id: toolUseId,
+        type: "tool_result",
+        content: `Tool '${toolName}' is currently disabled. Use tool_manage (action: enable) to enable it.`,
+        is_error: true,
+      },
+    };
+  }
+
   const entry = TOOL_REGISTRY[internalName as ToolName];
 
   if (!entry) {
