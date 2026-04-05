@@ -118,7 +118,7 @@ The spawned agent runs independently and returns later with its result.`,
         model_tier: {
           type: "string",
           enum: ["micro", "small", "medium", "standard", "strong"],
-          description: "Model tier. Default: standard for most work, small for simple/mechanical tasks, micro for trivial tasks. Only use strong for genuinely exceptional reasoning needs.",
+          description: "Model tier. Default: medium for most work. Use standard for important/complex tasks needing high reasoning quality. Use small for simple/mechanical tasks, micro for trivial tasks. Only use strong for genuinely exceptional reasoning needs where standard has failed.",
         },
         cwd: {
           type: "string",
@@ -245,15 +245,15 @@ Pipeline stops if any stage fails.`,
 // Built-in pipeline definitions
 const BUILTIN_PIPELINES: Record<string, Array<{ agentType: string; modelTier: string; taskPrefix: string }>> = {
   "implement-and-review": [
-    { agentType: "programmer", modelTier: "standard", taskPrefix: "Implement the following:\n\n" },
+    { agentType: "programmer", modelTier: "medium", taskPrefix: "Implement the following:\n\n" },
     { agentType: "reviewer", modelTier: "small", taskPrefix: "Review the code changes from the previous implementation. Check for bugs, edge cases, and code quality. Provide specific feedback.\n\nImplementation task:\n" },
   ],
   "design-and-implement": [
-    { agentType: "architect", modelTier: "strong", taskPrefix: "Create a design document for:\n\n" },
-    { agentType: "programmer", modelTier: "standard", taskPrefix: "Implement the following design. Follow the architecture exactly as specified.\n\nDesign:\n" },
+    { agentType: "architect", modelTier: "standard", taskPrefix: "Create a design document for:\n\n" },
+    { agentType: "programmer", modelTier: "medium", taskPrefix: "Implement the following design. Follow the architecture exactly as specified.\n\nDesign:\n" },
   ],
   "research-and-write": [
-    { agentType: "researcher", modelTier: "standard", taskPrefix: "Research the following topic thoroughly:\n\n" },
+    { agentType: "researcher", modelTier: "medium", taskPrefix: "Research the following topic thoroughly:\n\n" },
     { agentType: "writer", modelTier: "small", taskPrefix: "Write clear documentation based on the research findings below:\n\nResearch:\n" },
   ],
 };
@@ -285,7 +285,7 @@ export async function executeSpawnAgent(
   if (!modelTier) {
     const projectId = (input.project_id as string) ?? null;
     const projectTier = await getProjectDefaultTier(projectId);
-    modelTier = projectTier ?? "standard";
+    modelTier = projectTier ?? "medium";
   }
   // If no cwd specified, try to find the right repo for the task
   const defaultCwd = parentCwd ?? HOME;
