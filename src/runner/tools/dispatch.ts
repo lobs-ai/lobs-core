@@ -13,7 +13,7 @@ import { getAgentModel } from "../../config/models.js";
 export const dispatchAgentToolDefinition: ToolDefinition = {
   name: "dispatch_agent",
   description:
-    "Launch a lightweight read-only sub-agent for search and investigation tasks. The sub-agent runs in its own context with restricted tools (Read, Grep, Glob, find_files, code_search, ls only — no write/execute). Returns only the sub-agent's final text response, keeping your context clean. Use this instead of reading many files yourself when searching for something.",
+    "Launch a lightweight read-only sub-agent for search and investigation tasks. The sub-agent runs in its own context with restricted tools (Read, Grep, Glob, find_files, code_search, ls only — no write/execute). Returns only the sub-agent's final text response, keeping your context clean.\n\nThis is your PRIMARY investigation tool. Default to using dispatch_agent whenever you need to search, investigate, or understand something across multiple files. It costs almost nothing (~$0.01-0.02), runs fast, and keeps your context window clean for thinking instead of filled with raw file contents. If you're about to make 3+ Read/Grep calls, use this instead.",
   input_schema: {
     type: "object",
     properties: {

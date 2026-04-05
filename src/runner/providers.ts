@@ -872,6 +872,10 @@ class OpenCodeGoClient implements LLMClient {
       thinkingTokens: (response.usage as any).thinking_tokens,
     };
 
+    console.log(
+      `[OpenCodeGoClient] usage: in=${usage.inputTokens} out=${usage.outputTokens} cacheRead=${usage.cacheReadTokens} cacheWrite=${usage.cacheWriteTokens}`,
+    );
+
     // Extract thinking content if present
     let thinkingContent: string | undefined;
     const thinkingBlocks = (response.content as any[]).filter(
@@ -1947,7 +1951,7 @@ export function createClient(config: ProviderConfig, sessionId?: string): LLMCli
     // Create Anthropic SDK client pointed at OpenCode Go endpoint
     const anthropicClient = new Anthropic({
       apiKey,
-      baseURL: baseUrl + "/v1",
+      baseURL: baseUrl,
       dangerouslyAllowBrowser: true,
       defaultHeaders: {
         "accept": "application/json",

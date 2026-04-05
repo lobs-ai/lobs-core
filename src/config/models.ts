@@ -97,7 +97,7 @@ export const DEFAULT_CONFIG: ModelConfig = {
 
   local: {
     baseUrl: "http://localhost:1234/v1",
-    chatModel: "qwen3-4b",
+    chatModel: "qwen/qwen3.5-9b",
     embeddingModel: "text-embedding-qwen3-embedding-4b",
   },
 
@@ -119,6 +119,7 @@ export const DEFAULT_CONFIG: ModelConfig = {
     "claude-opus-4":     { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
     "claude-haiku-4-5":  { input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1 },
     "gpt-4o":            { input: 2.5, output: 10, cacheRead: 1.25, cacheWrite: 2.5 },
+    "minimax-m2.7":      { input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0 },
   },
 
   voice: {

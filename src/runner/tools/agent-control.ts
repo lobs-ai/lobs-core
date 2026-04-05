@@ -76,14 +76,18 @@ const AGENT_DEFAULT_TOOLS: Record<string, ToolName[]> = {
 export const AGENT_CONTROL_TOOLS: ToolDefinition[] = [
   {
     name: "spawn_agent",
-    description: `Launch a new agent to handle a complex subtask autonomously.
+    description: `Launch a new agent to handle a complex subtask autonomously. This is your PRIMARY tool for getting real work done.
 
-Use this when the work is substantial, parallelizable, or needs a different specialty. Fresh subagents start without your context, so write the prompt like a briefing for a smart teammate who just walked into the room:
+DEFAULT TO USING THIS for any non-trivial work — code changes, writing, reviews, refactors, research with web access. If a task would take more than ~30 seconds of tool calls, spawn an agent instead of doing it yourself. You are the manager; subagents are your workforce.
+
+Fresh subagents start without your context, so write the prompt like a briefing for a smart teammate who just walked into the room:
 - explain the task and why it matters
 - describe what you already learned or ruled out
 - include file paths, constraints, and acceptance criteria when relevant
 - say whether the agent should research, implement, verify, or review
 - do not delegate your own understanding with vague prompts like "based on your findings, fix it"
+
+Parallelize when possible — if you have 3 independent tasks, spawn 3 agents simultaneously instead of doing them sequentially.
 
 The spawned agent runs independently and returns later with its result.`,
     input_schema: {
@@ -331,6 +335,7 @@ export async function executeSpawnAgent(
     tools,
     cwd,
     timeout,
+    sensitiveCategories: ["agent-loop"],
     ...(maxTurns != null && { maxTurns }),
     abortSignal: abortController.signal,
     onProgress: (progress) => {
@@ -644,6 +649,7 @@ export async function executeRunPipeline(input: Record<string, unknown>, parentC
       tools,
       cwd,
       timeout: 600,
+      sensitiveCategories: ["agent-loop"],
     };
 
     try {

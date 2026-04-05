@@ -54,32 +54,66 @@ const MAX_BYTES = 50 * 1024; // 50KB
 const DEFAULT_BYTES = 50000;
 const BINARY_CHECK_BYTES = 8192;
 const MAX_FULL_FILE_BYTES = 200 * 1024; // 200KB
-export const FILE_UNCHANGED_STUB =
-  "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading.";
+type ReadSnapshot = {
+  mtimeMs: number;
+  size: number;
+  contentHash: string;
+};
 
-const recentReadCache = new Map<string, { mtimeMs: number; size: number }>();
+const recentReadCache = new Map<string, ReadSnapshot>();
 const recentlyReadFiles = new Set<string>();
+
+function hashContent(content: string): string {
+  let hash = 0;
+  for (let i = 0; i < content.length; i++) {
+    hash = ((hash << 5) - hash + content.charCodeAt(i)) | 0;
+  }
+  return hash.toString(16);
+}
 
 export function hasRecentlyReadFile(filePath: string): boolean {
   return recentlyReadFiles.has(filePath);
 }
 
-export function getReadCacheMtime(resolvedPath: string): number | null {
+export function getReadSnapshot(resolvedPath: string): ReadSnapshot | null {
   // The cache key for a full read is `${resolved}:full`, and for default reads
-  // it's `${resolved}:1:500` (or other offset:limit combos). We want the mtime
+  // it's `${resolved}:1:500` (or other offset:limit combos). We want the snapshot
   // regardless of which variant was cached, so scan for any entry whose key
   // starts with the resolved path.
   for (const [key, value] of recentReadCache) {
     if (key.startsWith(`${resolvedPath}:`)) {
-      return value.mtimeMs;
+      return value;
     }
   }
   return null;
 }
 
+export function createReadSnapshot(content: string, mtimeMs: number, size: number): ReadSnapshot {
+  return {
+    mtimeMs,
+    size,
+    contentHash: hashContent(content),
+  };
+}
+
 export function clearRecentReadTracking(): void {
   recentReadCache.clear();
   recentlyReadFiles.clear();
+}
+
+/**
+ * Update the read snapshot for a file after it has been modified by the Edit tool.
+ * This prevents the staleness check from rejecting subsequent edits to the same file
+ * without requiring a re-read.
+ */
+export function updateReadSnapshot(resolvedPath: string, content: string, mtimeMs: number, size: number): void {
+  const snapshot = createReadSnapshot(content, mtimeMs, size);
+  // Update all cached variants for this path (full, offset:limit, etc.)
+  for (const key of recentReadCache.keys()) {
+    if (key.startsWith(`${resolvedPath}:`)) {
+      recentReadCache.set(key, snapshot);
+    }
+  }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -146,10 +180,7 @@ export async function readTool(
     : (hasExplicitRange ? MAX_LINES : DEFAULT_LINES);
   const cacheKey = `${resolved}:${full ? "full" : `${offset}:${limit}`}`;
 
-  const cached = recentReadCache.get(cacheKey);
-  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
-    return FILE_UNCHANGED_STUB;
-  }
+  const currentSnapshot = createReadSnapshot(content, stat.mtimeMs, stat.size);
 
   if (full) {
     if (stat.size > MAX_FULL_FILE_BYTES) {
@@ -158,7 +189,7 @@ export async function readTool(
       );
     }
     recentlyReadFiles.add(resolved);
-    recentReadCache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size });
+    recentReadCache.set(cacheKey, currentSnapshot);
     return content;
   }
 
@@ -180,7 +211,7 @@ export async function readTool(
     const from = offset + shownLines;
     result += `\n\n[Truncated. ${lines.length - (startIdx + shownLines)} more lines. Use offset=${from} to continue.]`;
     recentlyReadFiles.add(resolved);
-    recentReadCache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size });
+    recentReadCache.set(cacheKey, currentSnapshot);
     return result;
   }
 
@@ -195,6 +226,6 @@ export async function readTool(
 
   const finalResult = meta.length > 0 ? `${result}\n\n[${meta.join(". ")}]` : result;
   recentlyReadFiles.add(resolved);
-  recentReadCache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size });
+  recentReadCache.set(cacheKey, currentSnapshot);
   return finalResult;
 }

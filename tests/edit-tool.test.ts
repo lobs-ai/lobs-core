@@ -165,4 +165,27 @@ describe("editTool", () => {
       editTool({ path: testFile, old_string: "foo bar", new_string: "replaced" }, testDir),
     ).rejects.toThrow("You must use Read");
   });
+
+  it("allows edit immediately after read even if mtime changes without content changes", async () => {
+    await readTool({ path: testFile }, testDir);
+    const originalContent = readFileSync(testFile, "utf-8");
+    writeFileSync(testFile, originalContent);
+
+    const result = await editTool(
+      { path: testFile, old_string: "foo bar", new_string: "replaced" },
+      testDir,
+    );
+
+    expect(result).toContain("Edit applied");
+    expect(readFileSync(testFile, "utf-8")).toContain("replaced");
+  });
+
+  it("rejects edit if file content changed after read", async () => {
+    await readTool({ path: testFile }, testDir);
+    writeFileSync(testFile, readFileSync(testFile, "utf-8").replace("foo bar", "changed elsewhere"));
+
+    await expect(
+      editTool({ path: testFile, old_string: "foo bar", new_string: "replaced" }, testDir),
+    ).rejects.toThrow("has been modified since last read");
+  });
 });

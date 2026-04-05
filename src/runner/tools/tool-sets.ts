@@ -55,6 +55,7 @@ const VOICE_TOOLS: ToolName[] = [
   "grep",
   "glob",
   "spawn_agent",
+  "dispatch_agent",
 ];
 
 // System/proactive sessions — full access (needs to message users)

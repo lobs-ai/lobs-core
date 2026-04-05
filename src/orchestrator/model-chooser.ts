@@ -115,14 +115,6 @@ export interface ModelChoice {
   source: "agent-config" | "tier-default";
 }
 
-function isCodexModel(model: string): boolean {
-  return model.startsWith("openai-codex/");
-}
-
-function stripCodex(models: string[]): string[] {
-  return models.filter(m => !isCodexModel(m));
-}
-
 /**
  * Choose the best model for a given tier and agent type.
  *
@@ -141,12 +133,8 @@ export function chooseModel(
   if (agentType && effectiveTier !== "micro") {
     const agentCfg = (cfg.agents as Record<string, { primary: string; fallbacks: string[] }>)[agentType];
     if (agentCfg?.primary) {
-      if (isCodexModel(agentCfg.primary)) {
-        log().warn(`[MODEL_CHOOSER] ${agentType} agent-config primary is Codex (${agentCfg.primary}); ignoring and using tier-default.`);
-      } else {
-        log().debug?.(`[MODEL_CHOOSER] ${agentType} → agent-config: ${agentCfg.primary}`);
-        return { model: agentCfg.primary, tier: effectiveTier, source: "agent-config" };
-      }
+      log().debug?.(`[MODEL_CHOOSER] ${agentType} → agent-config: ${agentCfg.primary}`);
+      return { model: agentCfg.primary, tier: effectiveTier, source: "agent-config" };
     }
   }
 
@@ -164,27 +152,23 @@ export function buildFallbackChain(
   tier: ModelTier,
   agentType?: string,
 ): string[] {
-  if (isCodexModel(preferredModel)) {
-    preferredModel = getModelForTier(tier);
-  }
-
   // 1. Use lobs config agent fallbacks if available
   if (agentType) {
     const cfg = getModelConfig();
     const agentCfg = (cfg.agents as Record<string, { primary: string; fallbacks: string[] }>)[agentType];
     if (agentCfg?.fallbacks?.length) {
-      const rest = stripCodex(agentCfg.fallbacks).filter(m => m !== preferredModel);
-      const chain = stripCodex([preferredModel, ...rest]);
+      const rest = agentCfg.fallbacks.filter(m => m !== preferredModel);
+      const chain = [preferredModel, ...rest];
       log().debug?.(`[MODEL_CHOOSER] ${agentType} fallback chain: ${chain.join(" → ")}`);
-      return chain;
+      return [...new Set(chain)];
     }
   }
 
   // 2. Use tier fallbacks
   const tierModels = buildTierModels();
-  const candidates = stripCodex(tierModels[tier] ?? [getModelForTier("standard")]);
+  const candidates = tierModels[tier] ?? [getModelForTier("standard")];
   const tierFallbacks = candidates.filter(m => m !== preferredModel);
-  return stripCodex([preferredModel, ...tierFallbacks]);
+  return [...new Set([preferredModel, ...tierFallbacks])];
 }
 
 function resolveTier(tier?: string, agentType?: string): ModelTier {

@@ -1,9 +1,10 @@
 import { getModelConfig, getModelForTier } from "../config/models.js";
+import { getEnvKeyForProvider, loadKeyConfig } from "../config/keys.js";
 import { fetchLoadedModels } from "../diagnostics/lmstudio.js";
 import { parseModelString } from "../runner/providers.js";
 import { getRawDb } from "../db/connection.js";
 
-export type ModelOptionSource = "tier" | "configured" | "lmstudio";
+export type ModelOptionSource = "tier" | "configured" | "lmstudio" | "available";
 
 export interface ModelOption {
   id: string;
@@ -34,6 +35,14 @@ const FRIENDLY_ALIASES: Record<string, string> = {
   medium: "medium",
   standard: "standard",
   strong: "strong",
+};
+
+const AVAILABLE_PROVIDER_MODELS: Record<string, string[]> = {
+  anthropic: [
+    "anthropic/claude-haiku-4-5",
+    "anthropic/claude-sonnet-4-6",
+    "anthropic/claude-opus-4-6",
+  ],
 };
 
 function ensureProviderPrefix(model: string): string {
@@ -87,6 +96,7 @@ export async function getModelCatalog(timeoutMs = 2500): Promise<ModelCatalog> {
   const defaultModel = getDefaultChatModel();
   const loaded = await fetchLoadedModels(cfg.local.baseUrl, timeoutMs);
   const loadedIds = (loaded ?? []).map((m) => m.id);
+  const keyConfig = loadKeyConfig();
   const seen = new Map<string, ModelOption>();
 
   const add = (model: string, source: ModelOptionSource, extra: Partial<ModelOption> = {}) => {
@@ -123,6 +133,15 @@ export async function getModelCatalog(timeoutMs = 2500): Promise<ModelCatalog> {
     for (const fallback of chain.fallbacks) add(fallback, "configured");
   }
 
+  for (const [provider, models] of Object.entries(AVAILABLE_PROVIDER_MODELS)) {
+    if (!hasProviderCredentials(provider, keyConfig)) continue;
+    for (const model of models) {
+      add(model, "available", {
+        label: `${provider} -> ${model}`,
+      });
+    }
+  }
+
   for (const modelId of loadedIds) {
     add(`lmstudio/${modelId}`, "lmstudio", {
       label: `LM Studio -> ${modelId}`,
@@ -153,6 +172,16 @@ export async function getModelCatalog(timeoutMs = 2500): Promise<ModelCatalog> {
       loadedModels: loadedIds,
     },
   };
+}
+
+function hasProviderCredentials(
+  provider: string,
+  keyConfig: ReturnType<typeof loadKeyConfig>,
+): boolean {
+  const pool = keyConfig[provider];
+  if (pool?.keys?.length) return true;
+  const envKey = getEnvKeyForProvider(provider);
+  return Boolean(process.env[envKey]?.trim());
 }
 
 export async function normalizeModelSelection(input: string): Promise<string> {

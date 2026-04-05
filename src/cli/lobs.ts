@@ -335,6 +335,24 @@ function getRunningPid(): number | null {
   }
 }
 
+function getListeningPid(): number | null {
+  try {
+    const output = execSync(`lsof -tiTCP:${LOBS_PORT} -sTCP:LISTEN`, {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (!output) return null;
+    const pid = parseInt(output.split(/\s+/)[0] ?? "", 10);
+    return Number.isNaN(pid) ? null : pid;
+  } catch {
+    return null;
+  }
+}
+
+function getKnownPid(): number | null {
+  return getRunningPid() ?? getListeningPid();
+}
+
 function isServerReachable(): Promise<boolean> {
   return fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(2000) })
     .then(r => r.ok)
@@ -363,6 +381,18 @@ async function cmdStart(opts: { useLaunchd?: boolean } = {}) {
     // PID file exists but server not reachable — stale PID
     console.log(colorize(`Stale PID file found (PID ${pid} not responding). Cleaning up...`, "yellow"));
     try { unlinkSync(PID_FILE); } catch {}
+  }
+
+  const listeningPid = getListeningPid();
+  if (listeningPid) {
+    const reachable = await isServerReachable();
+    if (reachable) {
+      console.log(colorize(`lobs-core is already running (PID ${listeningPid})`, "yellow"));
+      return;
+    }
+    console.error(colorize(`Port ${LOBS_PORT} is already in use by PID ${listeningPid}`, "red"));
+    console.log(colorize("  Stop it with: lobs stop", "dim"));
+    return;
   }
 
   // Check that dist/main.js exists
@@ -439,7 +469,7 @@ async function cmdStart(opts: { useLaunchd?: boolean } = {}) {
 async function cmdStop() {
   unloadLaunchdService();
 
-  const pid = getRunningPid();
+  const pid = getKnownPid();
   if (!pid) {
     console.log(colorize("lobs-core is not running", "yellow"));
     if (existsSync(PID_FILE)) {
@@ -561,7 +591,7 @@ async function cmdRestart(skipBuild = false, skipPull = false, opts: { useLaunch
     }
   }
 
-  const pid = getRunningPid();
+  const pid = getKnownPid();
   if (pid) {
     await cmdStop();
     
@@ -570,8 +600,8 @@ async function cmdRestart(skipBuild = false, skipPull = false, opts: { useLaunch
     let dead = false;
     for (let i = 0; i < 20; i++) {
       await new Promise(r => setTimeout(r, 250));
-      const stillAlive = getRunningPid();
-      const portFree = !(await isServerReachable());
+      const stillAlive = getKnownPid();
+      const portFree = !stillAlive;
       if (!stillAlive && portFree) {
         dead = true;
         break;
@@ -621,7 +651,7 @@ async function cmdLogs(tail: number = 50, follow: boolean = false) {
 
 async function cmdStatus() {
   // Check if running first
-  const pid = getRunningPid();
+  const pid = getKnownPid();
   if (!pid) {
     console.log(colorize("\n=== Lobs Core Status ===\n", "bright"));
     console.log(colorize("  ✗ Not running", "red"));
@@ -778,98 +808,55 @@ async function cmdHealth() {
 }
 
 async function cmdModelsDiagnostic() {
-  // Load keys into process.env
+  const { getModelConfig } = await import("../config/models.js");
+  const { loadKeyConfig, getEnvKeyForProvider } = await import("../config/keys.js");
+
   loadKeyConfig();
+  const modelConfig = getModelConfig();
+  const tiers = modelConfig.tiers as Record<string, string>;
+  const tierFallbacks = (modelConfig as unknown as Record<string, unknown>).tierFallbacks as Record<string, string[]> | undefined;
 
-  const config = getModelConfig();
-  const tiers = (config.tiers ?? {}) as Record<string, string>;
-  const tierFallbacks = ((config as unknown as Record<string, unknown>)["tierFallbacks"] ?? {}) as Record<string, string[]>;
-  const agents = (config.agents ?? {}) as Record<string, { primary: string; fallbacks?: string[] }>;
+  console.log(colorize("\n=== Model Overview ===\n", "bright"));
 
-  // ── Tier Overview ──────────────────────────────────────────────────────────
-  console.log("\n\x1b[1m=== Model Tiers ===\x1b[0m\n");
-
-  const tierOrder = ["strong", "standard", "medium", "small", "micro"];
-  for (const tier of tierOrder) {
-    const model = tiers[tier];
-    if (!model) continue;
-    const [provider] = model.split("/");
-    const envKey = getEnvKeyForProvider(provider);
-    const hasKey = provider === "lmstudio" || !!process.env[envKey];
-    const status = hasKey ? "\x1b[32m✓\x1b[0m" : "\x1b[31m✗ no key\x1b[0m";
-    const fallbacks = tierFallbacks[tier];
-    const fbStr = fallbacks?.length ? `  → fallback: ${fallbacks.join(" → ")}` : "";
-    console.log(`  ${status}  \x1b[1m${tier.padEnd(10)}\x1b[0m ${model}${fbStr}`);
+  console.log(colorize("Configured Tiers", "cyan"));
+  for (const [tier, model] of Object.entries(tiers)) {
+    const fallbacks = tierFallbacks?.[tier] ?? [];
+    const suffix = fallbacks.length > 0 ? colorize(`  → ${fallbacks.join(" → ")}`, "dim") : "";
+    console.log(`  ${colorize(tier.padEnd(8), "bright")} ${model}${suffix}`);
   }
+  console.log("");
 
-  // ── Cloud Providers ────────────────────────────────────────────────────────
-  console.log("\n\x1b[1m=== Cloud Providers ===\x1b[0m\n");
-
-  // Collect all providers referenced in tiers + fallbacks + agents
   const usedProviders = new Set<string>();
   for (const model of Object.values(tiers)) {
-    usedProviders.add(model.split("/")[0]);
+    const provider = model.includes("/") ? model.split("/")[0] : undefined;
+    if (provider) usedProviders.add(provider);
   }
-  for (const fbs of Object.values(tierFallbacks)) {
-    for (const fb of fbs) usedProviders.add(fb.split("/")[0]);
-  }
-  for (const a of Object.values(agents)) {
-    usedProviders.add(a.primary.split("/")[0]);
-    for (const fb of a.fallbacks ?? []) usedProviders.add(fb.split("/")[0]);
-  }
-
-  // Remove local
-  usedProviders.delete("lmstudio");
-
-  for (const provider of [...usedProviders].sort()) {
-    const envKey = getEnvKeyForProvider(provider);
-    const hasKey = !!process.env[envKey];
-    const keyStatus = hasKey
-      ? `\x1b[32m✓\x1b[0m ${envKey}`
-      : `\x1b[31m✗\x1b[0m ${envKey} not set`;
-    
-    // Find which tiers use this provider
-    const tierUsage: string[] = [];
-    for (const [tier, model] of Object.entries(tiers)) {
-      if (model.startsWith(provider + "/")) tierUsage.push(tier);
+  if (tierFallbacks) {
+    for (const models of Object.values(tierFallbacks)) {
+      for (const model of models) {
+        const provider = model.includes("/") ? model.split("/")[0] : undefined;
+        if (provider) usedProviders.add(provider);
+      }
     }
-    const usage = tierUsage.length ? ` (${tierUsage.join(", ")})` : " (fallback only)";
-    console.log(`  ${keyStatus}  \x1b[36m${provider}\x1b[0m${usage}`);
   }
 
-  // ── Agent Defaults ─────────────────────────────────────────────────────────
-  console.log("\n\x1b[1m=== Agent Defaults ===\x1b[0m\n");
-
-  for (const [agent, cfg] of Object.entries(agents)) {
-    const fbs = cfg.fallbacks?.length ? ` → ${cfg.fallbacks.join(" → ")}` : "";
-    console.log(`  ${agent.padEnd(12)} ${cfg.primary}${fbs}`);
+  console.log(colorize("Cloud Providers In Use", "cyan"));
+  const cloudProviders = [...usedProviders].filter((p) => p !== "lmstudio");
+  if (cloudProviders.length === 0) {
+    console.log(`  ${colorize("(none)", "dim")}`);
+  } else {
+    for (const provider of cloudProviders) {
+      const envKey = getEnvKeyForProvider(provider);
+      const hasKey = Boolean(process.env[envKey]);
+      console.log(`  ${colorize(provider, "bright")}  ${hasKey ? colorize("✓ key set", "green") : colorize(`✗ ${envKey} not set`, "red")}`);
+    }
   }
-
-  // ── Local Models (LM Studio) ──────────────────────────────────────────────
-  console.log("\n\x1b[1m=== Local Models (LM Studio) ===\x1b[0m\n");
+  console.log("");
 
   const report = await runLmStudioDiagnostic();
-  if (!report.reachable) {
-    console.log("  \x1b[31m✗ LM Studio not reachable\x1b[0m");
-  } else {
-    console.log(`  \x1b[32m✓\x1b[0m LM Studio reachable  ${report.loadedModels?.length ?? 0} models loaded`);
-    if (report.loadedModels?.length) {
-      for (const m of report.loadedModels) {
-        console.log(`    ● ${m}`);
-      }
-    }
-    // Show configured local model status
-    if (report.configuredLocalModels?.length) {
-      console.log("");
-      for (const cm of report.configuredLocalModels) {
-        const isLoaded = report.loadedModels?.some(m => m === cm.id || m.includes(cm.id) || cm.id.includes(m));
-        const icon = isLoaded ? "\x1b[32m✓\x1b[0m" : "\x1b[31m✗\x1b[0m";
-        console.log(`  ${icon}  ${cm.id.padEnd(45)} ${cm.location}`);
-      }
-    }
-  }
-
-  console.log("");
+  const lines = formatDiagnosticReport(report, { color: process.stdout.isTTY });
+  for (const line of lines) console.log(line);
+  process.exit(report.ok ? 0 : 1);
 }
 
 async function cmdModelsAvailable(): Promise<void> {

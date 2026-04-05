@@ -10,7 +10,7 @@
 import { readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
 import type { ToolDefinition } from "../types.js";
 import { resolveToCwd } from "./path-utils.js";
-import { hasRecentlyReadFile, getReadCacheMtime } from "./read.js";
+import { hasRecentlyReadFile, getReadSnapshot, createReadSnapshot, updateReadSnapshot } from "./read.js";
 
 // ── Tool Definition ──────────────────────────────────────────────────────────
 
@@ -345,12 +345,17 @@ export async function editTool(
     );
   }
 
-  const cachedMtime = getReadCacheMtime(resolved);
-  if (cachedMtime !== null) {
-    const currentMtime = statSync(resolved).mtimeMs;
-    if (currentMtime > cachedMtime) {
+  const readSnapshot = getReadSnapshot(resolved);
+  if (readSnapshot !== null) {
+    const stat = statSync(resolved);
+    const currentContent = readFileSync(resolved, "utf-8");
+    const currentSnapshot = createReadSnapshot(currentContent, stat.mtimeMs, stat.size);
+    if (
+      currentSnapshot.size !== readSnapshot.size ||
+      currentSnapshot.contentHash !== readSnapshot.contentHash
+    ) {
       throw new Error(
-        `File '${filePath}' has been modified since last read (possibly by a linter, formatter, or another process). Read it again before editing.`,
+        `File '${filePath}' has been modified since last read (content changed). Read it again before editing.`,
       );
     }
   }
@@ -385,6 +390,8 @@ export async function editTool(
       // Multi-edit: write what we have so far and report
       if (appliedCount > 0) {
         writeFileSync(resolved, content, "utf-8");
+        const newStat1 = statSync(resolved);
+        updateReadSnapshot(resolved, content, newStat1.mtimeMs, newStat1.size);
       }
       const msg = err instanceof Error ? err.message : String(err);
       results.push(`${label}FAILED — ${msg}`);
@@ -396,6 +403,8 @@ export async function editTool(
   // Write final content
   if (appliedCount > 0) {
     writeFileSync(resolved, content, "utf-8");
+    const newStat2 = statSync(resolved);
+    updateReadSnapshot(resolved, content, newStat2.mtimeMs, newStat2.size);
   }
 
   if (edits.length === 1) {

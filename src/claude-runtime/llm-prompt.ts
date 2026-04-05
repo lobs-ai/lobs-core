@@ -12,6 +12,8 @@ const TOOL_GUIDANCE: Record<string, string> = {
     "More flexible than Glob for complex searches — supports regex, extension filters, depth limits, type filters.",
   code_search: "Ripgrep with context lines — good for finding function definitions and understanding surrounding code.",
   ls: "Quick directory listing. Use before deeper investigation to understand structure.",
+  dispatch_agent: "YOUR PRIMARY INVESTIGATION TOOL. Use dispatch_agent for ANY search, investigation, or multi-file reading task. It runs a lightweight read-only sub-agent that returns findings without polluting your context. Use it instead of reading many files yourself. Examples: 'find all usages of X', 'how does the auth flow work', 'what files would need to change for Y'. Costs almost nothing and keeps your context clean.",
+  spawn_agent: "YOUR PRIMARY EXECUTION TOOL. Use Task/spawn_agent for ANY non-trivial implementation work — code changes, writing, reviews, refactors, research with web access. If a task would take more than ~30 seconds of tool calls, spawn an agent. You are the manager; subagents are your workforce. Stay responsive for conversation, don't block doing long work yourself. Brief the agent thoroughly: file paths, constraints, what 'done' looks like.",
 };
 
 function summarizeInputSchema(schema: Record<string, unknown>): string {
@@ -61,7 +63,9 @@ function buildTaskSection(): string {
     "- Prefer dedicated tools over Bash when a dedicated tool fits the job.",
     "- For long-running shell work you do not need immediately, prefer Bash with run_in_background or the process tool instead of blocking the turn.",
     "- If a command or file output is large, narrow the next tool call instead of repeatedly reading broad context.",
-    "- When intermediate investigation output is not useful to keep in context, delegate bounded work to a subagent instead of dragging raw output forward.",
+    "- If a task involves multi-file investigation, use dispatch_agent to gather info without polluting your context.",
+    "- If a task involves implementation (code changes, writing, reviews), spawn a Task subagent — don't do it yourself.",
+    "- Your job is to THINK, PLAN, and COORDINATE. Subagents do the heavy lifting.",
     "- Do not predict subagent results while they are still running. Wait for the completion event and then integrate the outcome.",
     "- When an approach fails, diagnose why before switching tactics — read the error, check your assumptions, try a targeted fix. Do not retry the identical action blindly, but do not abandon a viable approach after a single failure either.",
     "- Report outcomes faithfully. Never claim tests pass when output shows failures. Never suppress or simplify failing checks to manufacture a green result.",
@@ -100,17 +104,44 @@ function buildDelegationSection(toolDefinitions: ToolDefinition[]): string | nul
   const hasTaskTool = toolDefinitions.some(
     (tool) => tool.name === "Task" || tool.name === "spawn_agent",
   );
-  if (!hasTaskTool) return null;
+  const hasDispatchTool = toolDefinitions.some(
+    (tool) => tool.name === "dispatch_agent",
+  );
+  if (!hasTaskTool && !hasDispatchTool) return null;
 
-  return [
-    "# Delegation",
-    "- Use Task when work is substantial, parallelizable, or needs a fresh specialist.",
-    "- Brief the subagent like a smart colleague with zero context: explain the goal, why it matters, what you already know, file paths, constraints, and expected output.",
-    "- Never delegate your own understanding. Phrases like 'based on your findings, fix it' or 'look into this and handle it' push synthesis onto the subagent instead of doing it yourself. You must understand the problem before delegating the solution.",
-    "- Keep delegation bounded. Say whether the subagent should research only, implement changes, verify work, or review risk.",
+  const lines = [
+    "# Delegation — USE SUBAGENTS AGGRESSIVELY",
+    "",
+    "You are a MANAGER, not a line worker. Your primary value is staying responsive, thinking strategically, and coordinating work — not grinding through file reads and code changes yourself.",
+    "",
+    "## dispatch_agent (investigation/search)",
+    "- Use for ANY task that involves reading multiple files, searching codebases, or gathering information.",
+    "- Runs synchronously with read-only tools. Returns findings directly. Keeps your context clean.",
+    "- Cost: ~$0.01-0.02. Faster than reading files yourself and doesn\'t pollute your context.",
+    "- Examples: \'find all usages of function X\', \'what files implement Y\', \'how does the Z flow work\', \'search for pattern A across the codebase\'.",
+    "- DEFAULT TO THIS over reading files yourself. If you\'re about to make 3+ Read/Grep calls to investigate something, use dispatch_agent instead.",
+    "",
+    "## Task/spawn_agent (implementation/execution)",
+    "- Use for ANY work that takes more than ~30 seconds of tool calls: code changes, writing, reviews, refactors, research with web access.",
+    "- Runs asynchronously in background. Returns via [Subagent event] when done.",
+    "- Brief the subagent thoroughly: explain the goal, what you already know, file paths, constraints, and what \'done\' looks like.",
+    "- Parallelize when possible — spawn multiple agents for independent tasks simultaneously.",
+    "- If you have 3 files to change independently, that\'s 3 parallel agents, not 1 sequential slog.",
+    "",
+    "## Rules for both",
+    "- Never delegate your own understanding. You must understand the problem before delegating the solution.",
+    "- Set scope explicitly: research-only agents should not modify files; implementation agents should not explore beyond the task.",
     "- When a subagent returns, integrate its findings into your own next step instead of blindly echoing it.",
-    "- Set the subagent's scope explicitly: research-only agents should not modify files; implementation agents should not explore beyond the task.",
-  ].join("\n");
+    "- Do not predict subagent results while they are still running. Wait for the completion event.",
+    "",
+    "## Anti-pattern: doing the work yourself",
+    "- If you catch yourself making 5+ sequential Read/Grep/Edit calls, STOP. You should have spawned an agent.",
+    "- If you\'re about to write or modify code across multiple files, STOP. Spawn a programmer agent.",
+    "- If you\'re investigating how something works by reading file after file, STOP. Use dispatch_agent.",
+    "- Your context window is precious. Every file you read yourself is context you can\'t use for thinking.",
+  ];
+
+  return lines.join("\n");
 }
 
 function buildLiveStateSection(params: {

@@ -56,6 +56,7 @@ export class KeyPoolService {
   private health: Map<string, KeyHealth> = new Map();   // "provider:keyIdentity" -> health
   private preferredHealthyKey: Map<Provider, string> = new Map(); // provider -> last successful key identity
   private inFlight: Map<string, InFlightInfo> = new Map(); // "provider:keyIdentity" -> in-flight tracking
+  private roundRobinCounters: Map<Provider, number> = new Map(); // provider -> next key index for round-robin
 
   private config: KeyConfig;
   private configSignature = "";
@@ -112,15 +113,14 @@ export class KeyPoolService {
     const assignedIdentity = this.assignments.get(assignmentKey);
     let keyIndex = assignedIdentity ? keys.findIndex((entry) => this.getKeyIdentity(provider, entry.key) === assignedIdentity) : -1;
 
-    // First time for this session — prefer the last key that actually succeeded.
-    // If we don't have one, spread new sessions across healthy keys instead of
-    // purely hashing into one slot and blackholing concurrent chats on the same key.
-    // Also skip "suspect" keys — those with in-flight requests that aren't completing.
+    // First time for this session — round-robin across healthy keys so that
+    // usage is spread evenly across all accounts (e.g. draining regular Anthropic
+    // usage on all keys before any hits extra credits). Session stays on its
+    // assigned key for the rest of its lifetime (prompt cache).
     if (keyIndex < 0) {
       keyIndex =
-        this.getPreferredHealthyKeyIndex(provider, keys)
-        ?? this.selectHealthyKeyForNewSession(provider, sessionId, keys)
-        ?? this.hashSessionToKey(sessionId, keys.length);
+        this.selectHealthyKeyRoundRobin(provider, keys)
+        ?? this.nextRoundRobin(provider, keys.length);
 
       // If the selected key is suspect (stuck in-flight requests), try to find a non-suspect one
       if (this.isKeySuspect(provider, keyIndex)) {
@@ -687,56 +687,46 @@ export class KeyPoolService {
     return bestIndex;
   }
 
-  private getPreferredHealthyKeyIndex(provider: Provider, keys: KeyEntry[]): number | undefined {
-    // NOTE: We no longer blindly funnel all new sessions to a single "preferred" key.
-    // That caused thundering-herd effects where one key took all load, got rate-limited,
-    // then the next key took all load, etc. Instead, preferred key is only used as a
-    // tiebreaker in selectHealthyKeyForNewSession (via load-balancing).
-    // Return undefined here so new sessions go through proper load-balanced selection.
+  /**
+   * Round-robin key selection for new sessions. Returns the next healthy,
+   * non-suspect key index, cycling through all keys evenly. Returns undefined
+   * only if no healthy non-suspect keys exist.
+   */
+  private selectHealthyKeyRoundRobin(
+    provider: Provider,
+    keys: KeyEntry[],
+  ): number | undefined {
+    const poolSize = keys.length;
+    const start = this.nextRoundRobin(provider, poolSize);
+
+    // Try each key starting from the round-robin position
+    for (let offset = 0; offset < poolSize; offset++) {
+      const tryIndex = (start + offset) % poolSize;
+      if (this.isHealthy(provider, tryIndex) && !this.isKeySuspect(provider, tryIndex)) {
+        return tryIndex;
+      }
+    }
+
+    // Fall back to any healthy key (even suspect ones)
+    for (let offset = 0; offset < poolSize; offset++) {
+      const tryIndex = (start + offset) % poolSize;
+      if (this.isHealthy(provider, tryIndex)) {
+        return tryIndex;
+      }
+    }
+
     return undefined;
   }
 
-  private selectHealthyKeyForNewSession(
-    provider: Provider,
-    sessionId: string,
-    keys: KeyEntry[],
-  ): number | undefined {
-    const counts = new Map<number, number>();
-    const healthyIndices: number[] = [];
-
-    for (let i = 0; i < keys.length; i++) {
-      if (!this.isHealthy(provider, i)) continue;
-      if (this.isKeySuspect(provider, i)) continue; // Skip keys with stuck in-flight requests
-      healthyIndices.push(i);
-      counts.set(i, 0);
-    }
-
-    if (healthyIndices.length === 0) return undefined;
-
-    for (const [assignmentKey, identity] of this.assignments.entries()) {
-      if (!assignmentKey.startsWith(`${provider}:`)) continue;
-      const assignedIndex = keys.findIndex((entry) => this.getKeyIdentity(provider, entry.key) === identity);
-      if (assignedIndex >= 0 && counts.has(assignedIndex)) {
-        counts.set(assignedIndex, (counts.get(assignedIndex) ?? 0) + 1);
-      }
-    }
-
-    let minCount = Number.POSITIVE_INFINITY;
-    const leastLoaded: number[] = [];
-    for (const index of healthyIndices) {
-      const count = counts.get(index) ?? 0;
-      if (count < minCount) {
-        minCount = count;
-        leastLoaded.length = 0;
-        leastLoaded.push(index);
-      } else if (count === minCount) {
-        leastLoaded.push(index);
-      }
-    }
-
-    if (leastLoaded.length === 1) return leastLoaded[0];
-    const tieBreak = this.hashSessionToKey(sessionId, leastLoaded.length);
-    return leastLoaded[tieBreak];
+  /**
+   * Advance and return the round-robin counter for a provider.
+   * Ensures new sessions cycle through keys 0 → 1 → 2 → 0 → ... evenly.
+   */
+  private nextRoundRobin(provider: Provider, poolSize: number): number {
+    const current = this.roundRobinCounters.get(provider) ?? 0;
+    const next = (current + 1) % poolSize;
+    this.roundRobinCounters.set(provider, next);
+    return current;
   }
 
   /**

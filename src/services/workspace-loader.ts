@@ -137,11 +137,11 @@ export function invalidateKeyMemoriesCache(): void {
  */
 const ALWAYS_LOADED: Record<string, string[]> = {
   main:       ["SOUL.md", "USER.md", "MEMORY.md", "TOOLS.md"],
-  programmer: ["AGENTS.md", "SOUL.md"],
-  writer:     ["AGENTS.md", "SOUL.md"],
-  researcher: ["AGENTS.md", "SOUL.md"],
-  reviewer:   ["AGENTS.md", "SOUL.md"],
-  architect:  ["AGENTS.md", "SOUL.md"],
+  programmer: ["AGENTS.md", "SOUL.md", "TOOLS.md"],
+  writer:     ["AGENTS.md", "SOUL.md", "TOOLS.md"],
+  researcher: ["AGENTS.md", "SOUL.md", "TOOLS.md"],
+  reviewer:   ["AGENTS.md", "SOUL.md", "TOOLS.md"],
+  architect:  ["AGENTS.md", "SOUL.md", "TOOLS.md"],
 };
 
 const DEFAULT_ALWAYS_LOADED = ["AGENTS.md", "SOUL.md"];
@@ -164,6 +164,13 @@ function readFile(agentType: string, filename: string): string | null {
   // Main agent also checks its context dir for shared files.
   if (agentType === "main") {
     dirs.push(getAgentContextDir(agentType));
+  }
+
+  // All agents fall back to the shared agents dir (~/.lobs/agents/)
+  // for files like TOOLS.md that are shared across worker types.
+  const sharedDir = join(HOME, ".lobs", "agents");
+  if (!dirs.includes(sharedDir)) {
+    dirs.push(sharedDir);
   }
 
   for (const dir of dirs) {

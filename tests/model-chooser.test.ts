@@ -43,11 +43,9 @@ describe("Model Chooser", () => {
       expect(TIER_MODELS.strong.length).toBeGreaterThan(0);
     });
 
-    test("no Codex models in tier defaults", () => {
-      for (const [tier, models] of Object.entries(TIER_MODELS)) {
-        for (const m of models) {
-          expect(m, `Tier ${tier} contains Codex model`).not.toMatch(/^openai-codex\//);
-        }
+    test("tier defaults expose configured models without stripping Codex", () => {
+      for (const models of Object.values(TIER_MODELS)) {
+        expect(models.length).toBeGreaterThan(0);
       }
     });
   });
@@ -61,11 +59,9 @@ describe("Model Chooser", () => {
       }
     });
 
-    test("no Codex models in agent fallback chains", () => {
-      for (const [agent, chain] of Object.entries(AGENT_FALLBACK_CHAINS)) {
-        for (const m of chain) {
-          expect(m, `Agent ${agent} chain contains Codex model`).not.toMatch(/^openai-codex\//);
-        }
+    test("agent fallback chains expose configured models without stripping Codex", () => {
+      for (const chain of Object.values(AGENT_FALLBACK_CHAINS)) {
+        expect(chain.length).toBeGreaterThan(0);
       }
     });
   });
@@ -97,9 +93,9 @@ describe("Model Chooser", () => {
       expect(result.model).toContain("lmstudio");
     });
 
-    test("strong tier returns Opus or Sonnet", () => {
+    test("strong tier returns the configured strong-tier model", () => {
       const result = chooseModel("strong", undefined);
-      expect(result.model).toMatch(/opus|sonnet/i);
+      expect(result.model).toBe(TIER_MODELS.strong[0]);
     });
 
     test("source is tier-default when agent config is not available", () => {
@@ -141,16 +137,14 @@ describe("Model Chooser", () => {
       expect(chain[0]).toBe(preferred);
     });
 
-    test("no Codex models in returned chain", () => {
-      const chain = buildFallbackChain("anthropic/claude-sonnet-4-6", "standard", "programmer");
-      for (const m of chain) {
-        expect(m).not.toMatch(/^openai-codex\//);
-      }
+    test("preserves configured Codex fallbacks", () => {
+      const chain = buildFallbackChain("openai-codex/codex", "standard", "programmer");
+      expect(chain[0]).toBe("openai-codex/codex");
     });
 
-    test("Codex preferred model is replaced with tier default", () => {
-      const chain = buildFallbackChain("openai-codex/some-model", "standard", "programmer");
-      expect(chain[0]).not.toMatch(/^openai-codex\//);
+    test("does not duplicate models in returned chain", () => {
+      const chain = buildFallbackChain("openai-codex/codex", "standard", "programmer");
+      expect(chain).toEqual([...new Set(chain)]);
     });
 
     test("uses AGENT_FALLBACK_CHAINS when no agent config", () => {
