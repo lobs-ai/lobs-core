@@ -1358,11 +1358,22 @@ export class MainAgent {
           return [`[New messages received during processing]\n\n${midLoopQueued}`];
         },
         toolExecutor: async (toolName, params, toolUseId, cwd) => {
+          // Check if channel was already aborted before executing
+          const ac = this.channelAbortControllers.get(replyChannelId);
+          if (ac?.signal.aborted) {
+            return {
+              result: { tool_use_id: toolUseId, type: "tool_result" as const, content: "Execution aborted: channel recovered", is_error: true },
+              sideEffects: undefined,
+            };
+          }
           const channelExecutor = this.channelToolExecutors.get(replyChannelId);
           const overrideResult = channelExecutor
             ? await channelExecutor(toolName, params, toolUseId)
             : null;
           return overrideResult ?? executeTool(toolName, params, toolUseId, cwd, { channelId: replyChannelId });
+        },
+        onToolProgress: () => {
+          this.noteChannelProgress(replyChannelId);
         },
         onToolStart: async ({ toolName, toolUseId, input }) => {
           const inputPreview = JSON.stringify(input).substring(0, 300);
@@ -1390,6 +1401,7 @@ export class MainAgent {
           } satisfies AgentStreamEvent);
         },
         onToolResult: async ({ toolName, toolUseId, input, result, sideEffects, durationMs, currentCwd }) => {
+          this.noteChannelProgress(replyChannelId);
           if (sideEffects?.newCwd) {
             this.cwd = sideEffects.newCwd;
             console.debug(`[main-agent.loop] cwd_changed to=${this.cwd}`);

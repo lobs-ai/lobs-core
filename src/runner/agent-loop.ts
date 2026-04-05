@@ -28,6 +28,7 @@ import { asClaudeSystemReminder, buildDynamicPromptStateSections } from "../clau
 export type { AgentSpec, AgentResult };
 
 const DEFAULT_MAX_TURNS = 200;
+const TOOL_EXECUTION_TIMEOUT_MS = 5 * 60_000; // 5 minutes per tool call
 const DEFAULT_MAX_TOKENS = 16384;
 
 function buildPostToolReminder(currentCwd: string, results: ToolResult[]): string {
@@ -700,7 +701,13 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
         }
 
         // Execute tool calls with hooks
-        const results = await Promise.all(
+        // Heartbeat interval: signal liveness every 15s during tool execution
+        const toolProgressInterval = setInterval(() => {
+          spec.onToolProgress?.();
+        }, 15_000);
+        let results: ToolResult[];
+        try {
+        results = await Promise.all(
           toolCalls.map(async (call) => {
             console.debug(
               `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} ` +
@@ -750,11 +757,43 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
               };
             }
             
-            // Execute the tool
+            // Execute the tool with a per-tool timeout
             const toolStartedAt = Date.now();
-            const { result, sideEffects } = spec.toolExecutor
-              ? await spec.toolExecutor(call.name, call.input, call.id, currentCwd, { toolUseId: call.id })
-              : await executeTool(call.name, call.input, call.id, currentCwd);
+            const toolExecPromise = spec.toolExecutor
+              ? spec.toolExecutor(call.name, call.input, call.id, currentCwd, { toolUseId: call.id })
+              : executeTool(call.name, call.input, call.id, currentCwd);
+            const toolTimeoutPromise = new Promise<never>((_, reject) =>
+              setTimeout(
+                () => reject(new Error(`TOOL_TIMEOUT:${call.name}`)),
+                TOOL_EXECUTION_TIMEOUT_MS,
+              )
+            );
+            let result: ToolResult;
+            let sideEffects: import("./types.js").ToolSideEffects | undefined;
+            try {
+              const execResult = await Promise.race([toolExecPromise, toolTimeoutPromise]);
+              result = execResult.result;
+              sideEffects = execResult.sideEffects;
+            } catch (toolErr) {
+              const errMsg = toolErr instanceof Error ? toolErr.message : String(toolErr);
+              const isTimeout = errMsg.startsWith("TOOL_TIMEOUT:");
+              if (isTimeout) {
+                const timeoutSecs = TOOL_EXECUTION_TIMEOUT_MS / 1000;
+                console.warn(
+                  `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} ` +
+                  `tool_timeout name=${call.name} id=${call.id} after=${timeoutSecs}s`,
+                );
+              }
+              result = {
+                tool_use_id: call.id,
+                type: "tool_result" as const,
+                content: isTimeout
+                  ? `Tool "${call.name}" timed out after ${TOOL_EXECUTION_TIMEOUT_MS / 1000}s`
+                  : `Tool "${call.name}" failed: ${errMsg}`,
+                is_error: true,
+              };
+              sideEffects = undefined;
+            }
             
             // Apply side effects (e.g. cwd changes from cd/workdir)
             if (sideEffects?.newCwd) {
@@ -806,6 +845,9 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
             return result;
           })
         );
+        } finally {
+          clearInterval(toolProgressInterval);
+        }
 
         // Check for tool loops with the new multi-pattern detector
         for (const call of toolCalls) {

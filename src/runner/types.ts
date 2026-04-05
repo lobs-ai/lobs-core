@@ -2,6 +2,8 @@
  * Agent runner types — our own agent execution engine.
  */
 
+import type { TaskCategory } from "../services/model-router.js";
+
 export interface AgentSpec {
   /** Task prompt — what the agent should do */
   task: string;
@@ -23,6 +25,8 @@ export interface AgentSpec {
   maxTurns?: number;
   /** Context to inject (from lobs-memory, task notes, etc.) */
   context?: AgentContext;
+  /** Explicit sensitive routing categories for this run and its delegated work */
+  sensitiveCategories?: TaskCategory[];
   /** Callback for progress updates */
   onProgress?: (update: ProgressUpdate) => void;
   /** Model tier used for this agent (for tier-aware fallbacks) */
@@ -75,6 +79,8 @@ export interface AgentSpec {
     durationMs: number;
     currentCwd: string;
   }) => Promise<void> | void;
+  /** Called periodically during tool execution to signal liveness */
+  onToolProgress?: () => void;
   /** Hook after an assistant tool-use response and its tool-result roundtrip complete */
   onToolRound?: (event: {
     turn: number;
