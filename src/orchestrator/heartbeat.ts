@@ -187,7 +187,8 @@ async function checkWorkerHealth(): Promise<WorkerHealthResult> {
 async function checkInboxHealth(): Promise<InboxHealthResult> {
   const db = getRawDb();
   
-  const result = db.prepare("SELECT COUNT(*) as count FROM inbox_items WHERE is_read = 0").get() as { count: number };
+  // Count items that actually need attention: unread AND still pending action
+  const result = db.prepare("SELECT COUNT(*) as count FROM inbox_items WHERE is_read = 0 AND action_status = 'pending'").get() as { count: number };
   const unreadItems = result.count;
   
   let status: "ok" | "warning" | "error" = "ok";
