@@ -302,7 +302,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
   const startEvent = await hookRegistry.emit({
     hookName: "before_agent_start",
     agentType: spec.agent,
-    taskId: spec.context?.taskId,
+    taskId: spec.context?.taskId ?? runId,
     data: { spec },
     timestamp: new Date(),
   });
@@ -337,6 +337,8 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
         sessionId,
         maxRetries: 3,
         fallbackModels: fallbacks.length > 0 ? fallbacks : undefined,
+        taskCategory: spec.sensitiveCategories?.[0] ?? "agent-loop",
+        sensitiveData: Boolean(spec.sensitiveCategories?.length),
       });
     }
   } catch (error) {
@@ -467,7 +469,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
           await hookRegistry.emit({
             hookName: "session_compacted",
             agentType: spec.agent,
-            taskId: spec.context?.taskId,
+            taskId: spec.context?.taskId ?? runId,
             data: { beforeCount, afterCount, inputTokens: usage.inputTokens },
             timestamp: new Date(),
           });
@@ -507,7 +509,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       const beforeLlmEvent = await hookRegistry.emit({
         hookName: "before_llm_call",
         agentType: spec.agent,
-        taskId: spec.context?.taskId,
+        taskId: spec.context?.taskId ?? runId,
         data: { turn: turns, model: spec.model, messageCount: messages.length },
         timestamp: new Date(),
       });
@@ -557,7 +559,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       await hookRegistry.emit({
         hookName: "after_llm_call",
         agentType: spec.agent,
-        taskId: spec.context?.taskId,
+        taskId: spec.context?.taskId ?? runId,
         data: { 
           turn: turns, 
           stopReason: response.stopReason,
@@ -716,7 +718,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
             const beforeToolEvent = await hookRegistry.emit({
               hookName: "before_tool_call",
               agentType: spec.agent,
-              taskId: spec.context?.taskId,
+              taskId: spec.context?.taskId ?? runId,
               data: { 
                 toolName: call.name, 
                 params: call.input,
@@ -786,7 +788,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
             const afterToolEvent = await hookRegistry.emit({
               hookName: "after_tool_call",
               agentType: spec.agent,
-              taskId: spec.context?.taskId,
+              taskId: spec.context?.taskId ?? runId,
               data: { 
                 toolName: call.name,
                 toolUseId: call.id,
@@ -836,7 +838,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
             await hookRegistry.emit({
               hookName: "on_error",
               agentType: spec.agent,
-              taskId: spec.context?.taskId,
+              taskId: spec.context?.taskId ?? runId,
               data: { error: errorMsg, turns, durationSeconds },
               timestamp: new Date(),
             });
@@ -845,7 +847,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
             await hookRegistry.emit({
               hookName: "after_agent_end",
               agentType: spec.agent,
-              taskId: spec.context?.taskId,
+              taskId: spec.context?.taskId ?? runId,
               data: { result, durationSeconds, turns, error: errorMsg },
               timestamp: new Date(),
             });
@@ -937,7 +939,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       type: "summary",
       runId,
       agentType: spec.agent,
-      taskId: spec.context?.taskId,
+      taskId: spec.context?.taskId ?? runId,
       succeeded: stopReason === "end_turn",
       totalTurns: turns,
       totalUsage: usage,
@@ -973,7 +975,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
     await hookRegistry.emit({
       hookName: "after_agent_end",
       agentType: spec.agent,
-      taskId: spec.context?.taskId,
+      taskId: spec.context?.taskId ?? runId,
       data: { result, durationSeconds, turns },
       timestamp: new Date(),
     });
@@ -992,7 +994,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
     await hookRegistry.emit({
       hookName: "on_error",
       agentType: spec.agent,
-      taskId: spec.context?.taskId,
+      taskId: spec.context?.taskId ?? runId,
       data: { error: message, turns, durationSeconds },
       timestamp: new Date(),
     });
@@ -1002,7 +1004,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       type: "summary",
       runId,
       agentType: spec.agent,
-      taskId: spec.context?.taskId,
+      taskId: spec.context?.taskId ?? runId,
       succeeded: false,
       totalTurns: turns,
       totalUsage: usage,
@@ -1028,7 +1030,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
     await hookRegistry.emit({
       hookName: "after_agent_end",
       agentType: spec.agent,
-      taskId: spec.context?.taskId,
+      taskId: spec.context?.taskId ?? runId,
       data: { result, durationSeconds, turns, error: message },
       timestamp: new Date(),
     });
