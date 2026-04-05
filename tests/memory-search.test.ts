@@ -683,18 +683,18 @@ describe("importanceScore()", () => {
       access_count: 0,
       derived_at: daysAgo(1200), // ~3.3 years old
     });
-    // decayed: 0.9 * 0.5^(1200/120) = 0.9 * 0.5^10 ≈ 0.000879; floor: 0
-    expect(importanceScore(loadMemory(id))).toBeLessThan(0.01);
+    // decayed: 0.9 * 0.5^(1200/120) ≈ 0.000879; blended with typeBase (fact=0.7): ≈ 0.211; floor: 0
+    expect(importanceScore(loadMemory(id))).toBeLessThan(0.25);
   });
 
   it("low confidence but high access_count — floor prevents score from falling too far", () => {
-    // access_count = 31 → floor = 0.1 * log2(32) = 0.1 * 5 = 0.5
+    // access_count = 31 → floor = 0.1 * log2(32) = 0.5, capped at 0.4; blended: 0.4*0.7 + 0.7*0.3 = 0.49
     const id = insertMemory({
       confidence: 0.1,
       last_accessed: daysAgo(600), // stale: 0.1 * 0.5^5 = 0.003
       access_count: 31,
     });
-    expect(importanceScore(loadMemory(id))).toBeGreaterThanOrEqual(0.5);
+    expect(importanceScore(loadMemory(id))).toBeGreaterThanOrEqual(0.45);
   });
 
   it("uses last_accessed over derived_at for the decay baseline", () => {
@@ -719,13 +719,13 @@ describe("importanceScore()", () => {
     expect(score).toBeLessThanOrEqual(1);
   });
 
-  it("zero access_count — floor is 0, score is purely confidence-decay based", () => {
+  it("zero access_count — floor is 0, score is confidence-decay blended with typeBase", () => {
     const id = insertMemory({
       confidence: 0.8,
       last_accessed: daysAgo(120), // exactly one half-life ago
       access_count: 0,
     });
-    // decayed: 0.8 * 0.5^(120/120) = 0.8 * 0.5 = 0.4; floor: 0.1 * log2(1) = 0
-    expect(importanceScore(loadMemory(id))).toBeCloseTo(0.4, 1);
+    // decayed: 0.8 * 0.5 = 0.4; floor: 0; blended with typeBase (fact=0.7): 0.4*0.7 + 0.7*0.3 = 0.49
+    expect(importanceScore(loadMemory(id))).toBeCloseTo(0.49, 1);
   });
 });

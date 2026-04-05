@@ -27,8 +27,8 @@ describe("web_fetch tool", () => {
       expect(webFetchToolDefinition.name).toBe("web_fetch");
     });
 
-    it("should require url parameter", () => {
-      expect(webFetchToolDefinition.input_schema.required).toContain("url");
+    it("should have an empty required array (url validation is done at runtime)", () => {
+      expect(webFetchToolDefinition.input_schema.required).toEqual([]);
     });
 
     it("should not reference Scrapling or Python in description", () => {

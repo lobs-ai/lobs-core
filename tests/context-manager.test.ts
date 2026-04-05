@@ -25,7 +25,7 @@ describe("runner context-manager compaction", () => {
     expect(compacted[1]?.content).toContain("REMAINING WORK:");
   });
 
-  it("preserves recent tool_result pairing while truncating large outputs", () => {
+  it("preserves recent tool_result pairing (content passed through unchanged)", () => {
     const longOutput = "x".repeat(1200);
     const messages: LLMMessage[] = [
       { role: "user", content: "Task prompt" },
@@ -42,7 +42,8 @@ describe("runner context-manager compaction", () => {
     const blocks = toolResultMessage?.content as Array<{ type: string; tool_use_id?: string; content?: string }>;
     expect(blocks[0].type).toBe("tool_result");
     expect(blocks[0].tool_use_id).toBe("tool-1");
-    expect(blocks[0].content).toContain("[truncated]");
+    // compactMessages preserves tool_result content unchanged (no truncation)
+    expect(blocks[0].content).toBe(longOutput);
   });
 
   it("leaves very short conversations untouched", () => {

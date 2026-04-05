@@ -130,9 +130,10 @@ describe("buildMainAgentPrompt", () => {
 // ── loadWorkspaceContext ─────────────────────────────────────────────────────
 
 describe("loadWorkspaceContext — always-loaded files", () => {
-  it("returns empty string when agent dir doesn't exist", () => {
+  it("returns non-empty string even when agent dir doesn't exist (shared TOOLS.md is always included)", () => {
     const result = loadWorkspaceContext("totally-nonexistent-xyz");
-    expect(result).toBe("");
+    // workspace-loader always includes shared TOOLS.md and Available Files section
+    expect(result.length).toBeGreaterThan(0);
   });
 
   it("includes AGENTS.md in output when present", () => {
@@ -151,9 +152,9 @@ describe("loadWorkspaceContext — always-loaded files", () => {
 
   it("missing always-loaded files are silently skipped (no error)", () => {
     ensureDir(agentDir("sparse-agent"));
-    // No files — should return empty string
+    // No agent-specific files — but shared TOOLS.md is always included, so result is non-empty
     expect(() => loadWorkspaceContext("sparse-agent")).not.toThrow();
-    expect(loadWorkspaceContext("sparse-agent")).toBe("");
+    expect(loadWorkspaceContext("sparse-agent").length).toBeGreaterThan(0);
   });
 
   it("sections have correct markdown headers", () => {

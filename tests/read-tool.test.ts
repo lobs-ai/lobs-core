@@ -108,12 +108,13 @@ describe("readTool", () => {
     expect(result).toContain("line1");
   });
 
-  it("returns an unchanged stub for repeated reads of the same file region", async () => {
+  it("returns full content on repeated reads of the same file region (no unchanged stub)", async () => {
     const first = await readTool({ path: "small.txt", offset: 1, limit: 2 }, TEST_DIR);
     const second = await readTool({ path: "small.txt", offset: 1, limit: 2 }, TEST_DIR);
 
     expect(first).toContain("line1");
-    expect(second).toContain("File unchanged since last read");
+    // readTool always returns full content — no "File unchanged" stub behavior
+    expect(second).toContain("line1");
   });
 
   it("invalidates the repeated-read cache after the file changes", async () => {

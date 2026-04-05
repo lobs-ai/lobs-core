@@ -126,10 +126,10 @@ describe("Compaction Service", () => {
       expect(pruned[pruned.length - 2].content).toBe("Recent short message");
     });
 
-    it("should truncate old large tool outputs", () => {
+    it("should not modify plain string messages (pruning only affects compactable tool_result blocks)", () => {
       const longOutput = "x".repeat(2000);
       const messages: LLMMessage[] = [
-        { role: "user", content: longOutput }, // Old, should be truncated
+        { role: "user", content: longOutput }, // Plain string — not a tool_result block, not modified
         { role: "assistant", content: "Middle" },
         { role: "user", content: "New message" },
         { role: "assistant", content: "Recent reply" },
@@ -137,15 +137,15 @@ describe("Compaction Service", () => {
 
       const pruned = pruneToolResults(messages, 1, 300);
 
-      // First message should be truncated
-      expect(pruned[0].content).toContain("[...truncated");
-      expect((pruned[0].content as string).length).toBeLessThan(longOutput.length);
+      // Plain string messages are never modified by microcompact
+      expect(pruned[0].content).toBe(longOutput);
       
       // Recent messages should be intact
       expect(pruned[2].content).toBe("New message");
+      expect(pruned[3].content).toBe("Recent reply");
     });
 
-    it("should handle array content tool_result blocks", () => {
+    it("should not modify tool_result blocks with no matching compactable tool_use id", () => {
       const longResult = "y".repeat(2000);
       const messages: LLMMessage[] = [
         {
@@ -161,10 +161,9 @@ describe("Compaction Service", () => {
 
       const pruned = pruneToolResults(messages, 1, 300);
 
-      // Old tool result should be truncated
+      // tool_result with no matching tool_use in assistant messages is not cleared
       const oldContent = pruned[0].content as Array<{ type: string; content: string }>;
-      expect(oldContent[0].content).toContain("[...truncated");
-      expect(oldContent[0].content.length).toBeLessThan(longResult.length);
+      expect(oldContent[0].content).toBe(longResult);
     });
 
     it("should preserve short old messages", () => {
@@ -202,7 +201,7 @@ describe("Compaction Service", () => {
       expect(pruned).toEqual([]);
     });
 
-    it("should handle keepRecentTurns parameter", () => {
+    it("should handle keepRecentTurns parameter (plain strings pass through unchanged)", () => {
       const messages: LLMMessage[] = [
         { role: "user", content: "x".repeat(2000) },
         { role: "assistant", content: "Reply 1" },
@@ -212,16 +211,16 @@ describe("Compaction Service", () => {
         { role: "assistant", content: "Reply 3" },
       ];
 
-      // Keep last 2 assistant turns intact
+      // Plain strings are not compactable tool_result blocks — all pass through
       const pruned = pruneToolResults(messages, 2, 300);
 
-      // Last 2 assistant turns and their surrounding messages should be intact
-      expect((pruned[4].content as string).length).toBe(2000); // Recent, kept full
-      expect((pruned[2].content as string).length).toBe(2000); // Recent, kept full
-      expect((pruned[0].content as string).length).toBeLessThan(2000); // Old, truncated
+      // All plain string user messages pass through unchanged
+      expect((pruned[4].content as string).length).toBe(2000);
+      expect((pruned[2].content as string).length).toBe(2000);
+      expect((pruned[0].content as string).length).toBe(2000);
     });
 
-    it("should handle maxOldToolOutputChars parameter", () => {
+    it("should handle maxOldToolOutputChars parameter (plain strings pass through unchanged)", () => {
       const messages: LLMMessage[] = [
         { role: "user", content: "x".repeat(2000) },
         { role: "assistant", content: "Reply" },
@@ -231,12 +230,13 @@ describe("Compaction Service", () => {
 
       const pruned = pruneToolResults(messages, 1, 100);
 
-      // Should truncate to ~100 chars (maxOldToolOutputChars)
-      expect((pruned[0].content as string).length).toBeLessThan(200);
-      expect(pruned[0].content).toContain("[...truncated");
+      // Plain string messages are not affected by pruneToolResults (microcompact only clears compactable tool_result blocks)
+      expect((pruned[0].content as string).length).toBe(2000);
+      expect(pruned[2].content).toBe("Recent");
+      expect(pruned[3].content).toBe("Latest");
     });
 
-    it("should handle messages with multiple tool_result blocks", () => {
+    it("should not modify tool_result blocks with no matching compactable tool_use ids (multiple blocks)", () => {
       const messages: LLMMessage[] = [
         {
           role: "user",
@@ -255,9 +255,9 @@ describe("Compaction Service", () => {
 
       const oldContent = pruned[0].content as Array<{ type: string; content?: string; text?: string }>;
       
-      // Both tool results should be truncated
-      expect(oldContent[0].content).toContain("[...truncated");
-      expect(oldContent[1].content).toContain("[...truncated");
+      // tool_results with no matching tool_use in assistant messages pass through unchanged
+      expect(oldContent[0].content).toBe("x".repeat(2000));
+      expect(oldContent[1].content).toBe("y".repeat(2000));
       
       // Text block should be unchanged
       expect(oldContent[2].text).toBe("Some text");

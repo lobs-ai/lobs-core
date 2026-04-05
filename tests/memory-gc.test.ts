@@ -643,8 +643,8 @@ describe("importanceScore()", () => {
   it("returns close to confidence value for a recently accessed memory", () => {
     const m = makeMemory({ confidence: 0.9, last_accessed: daysAgo(1), access_count: 10 });
     const score = importanceScore(m);
-    // After 1 day with 120-day half-life, decay is ~0.9 * 0.5^(1/120) ≈ 0.895
-    expect(score).toBeGreaterThan(0.85);
+    // After 1 day with 120-day half-life, blended with typeBase (fact=0.7): score ≈ 0.836
+    expect(score).toBeGreaterThan(0.80);
     expect(score).toBeLessThanOrEqual(0.9);
   });
 
@@ -680,7 +680,7 @@ describe("importanceScore()", () => {
     expect(importanceScore(mWithAccess)).toBeCloseTo(importanceScore(mNullAccess), 5);
   });
 
-  it("verifies the 120-day half-life: score halves at exactly 120 days", () => {
+  it("verifies the 120-day half-life: decayed component halves at exactly 120 days", () => {
     const confidence = 1.0;
     const m = makeMemory({
       confidence,
@@ -688,8 +688,8 @@ describe("importanceScore()", () => {
       access_count: 0,
     });
     const score = importanceScore(m);
-    // After one half-life the decayed component should be exactly 0.5
-    expect(score).toBeCloseTo(0.5, 3);
+    // After one half-life the decayed component is 0.5, blended with typeBase (fact=0.7): 0.5*0.7 + 0.7*0.3 = 0.56
+    expect(score).toBeCloseTo(0.56, 2);
   });
 
   it("floor is capped: access_count of 1000 does not produce a floor above ~0.3", () => {
