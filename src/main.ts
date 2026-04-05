@@ -35,6 +35,7 @@ import { initMemoryDb } from "./memory/db.js";
 import { initFileIndexer, stopFileIndexer } from "./memory/indexer.js";
 import { registerEventRecorderHook } from "./hooks/event-recorder.js";
 import { registerReflectionTriggerHook } from "./hooks/reflection-trigger.js";
+import { registerSessionWatcher } from "./memory/session-watcher.js";
 import { runDailyReflection } from "./memory/daily-reflection.js";
 import { imagineService } from "./services/imagine.js";
 import { countActiveWorkers, getActiveWorkers } from "./orchestrator/worker-manager.js";
@@ -339,7 +340,8 @@ async function main() {
   // initMemoryDb() and initToolGate().
   registerEventRecorderHook(null as never);  // _api param is unused
   registerReflectionTriggerHook();
-  console.log("Structured memory hooks registered (event recorder + reflection trigger)");
+  registerSessionWatcher();
+  console.log("Structured memory hooks registered (event recorder + reflection trigger + session watcher)");
 
   // Load skills
   console.log("Loading skills...");

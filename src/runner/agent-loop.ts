@@ -563,6 +563,7 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
         taskId: spec.context?.taskId ?? runId,
         data: { 
           turn: turns, 
+          runId,
           stopReason: response.stopReason,
           usage: response.usage,
         },
