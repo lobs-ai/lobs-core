@@ -28,6 +28,7 @@ import { mkdirSync, appendFileSync, writeFileSync, existsSync, readFileSync } fr
 import { dirname } from "node:path";
 import type { LLMMessage, LLMResponse } from "./providers.js";
 import type { TokenUsage } from "./types.js";
+import { getMemoryDb, isMemoryDbReady } from "../memory/db.js";
 
 export interface TurnRecord {
   turn: number;
@@ -89,6 +90,68 @@ export class SessionTranscript {
     } catch (err) {
       console.error(`[session-transcript] Failed to generate markdown for ${this.runId}:`, err);
     }
+
+    // Populate session_messages table for FTS search
+    try {
+      this.populateSessionMessages(summary);
+    } catch (err) {
+      console.error(`[session-transcript] Failed to populate session messages for ${this.runId}:`, err);
+    }
+  }
+
+  /**
+   * Insert session turn text into session_messages for full-text search.
+   * Skips gracefully if the memory DB is not initialized.
+   */
+  private populateSessionMessages(_summary: SessionSummary): void {
+    if (!isMemoryDbReady()) return;
+
+    const turns = SessionTranscript.load(this.agentType, this.runId);
+    if (turns.length === 0) return;
+
+    const db = getMemoryDb();
+
+    const insert = db.prepare(
+      `INSERT OR IGNORE INTO session_messages
+         (session_id, agent_type, turn, role, content, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+
+    const populate = db.transaction(() => {
+      for (const turn of turns) {
+        // Insert user text from turn 1 (the task prompt)
+        if (turn.turn === 1) {
+          const userText = extractContentText(
+            turn.messages.find((m) => m.role === "user")?.content ?? "",
+          );
+          if (userText) {
+            insert.run(
+              this.runId,
+              this.agentType,
+              turn.turn,
+              "user",
+              userText,
+              turn.timestamp,
+            );
+          }
+        }
+
+        // Insert assistant text content (skip tool_use blocks)
+        const assistantText = extractAssistantText(turn.response);
+        if (assistantText) {
+          insert.run(
+            this.runId,
+            this.agentType,
+            turn.turn,
+            "assistant",
+            assistantText,
+            turn.timestamp,
+          );
+        }
+      }
+    });
+
+    populate();
   }
 
   /**

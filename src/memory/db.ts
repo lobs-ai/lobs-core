@@ -163,6 +163,36 @@ CREATE TABLE IF NOT EXISTS indexed_files (
 CREATE INDEX IF NOT EXISTS idx_indexed_files_collection ON indexed_files(collection);
 CREATE INDEX IF NOT EXISTS idx_indexed_files_path ON indexed_files(path);
 
+-- Session messages table — stores per-turn assistant/user text for full-text search
+CREATE TABLE IF NOT EXISTS session_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  agent_type TEXT NOT NULL,
+  turn INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  timestamp TEXT NOT NULL,
+  UNIQUE(session_id, turn, role)
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_messages_timestamp ON session_messages(timestamp);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
+  content,
+  content=session_messages,
+  content_rowid=id,
+  tokenize='porter'
+);
+
+-- Keep FTS in sync
+CREATE TRIGGER IF NOT EXISTS session_messages_fts_insert AFTER INSERT ON session_messages BEGIN
+  INSERT INTO session_messages_fts(rowid, content) VALUES (NEW.id, NEW.content);
+END;
+CREATE TRIGGER IF NOT EXISTS session_messages_fts_delete AFTER DELETE ON session_messages BEGIN
+  DELETE FROM session_messages_fts WHERE rowid = OLD.id;
+END;
+
 -- FTS5 full-text index for memories.content (porter stemmer for better recall)
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, content_rowid='id', tokenize='porter');
 

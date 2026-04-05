@@ -9,7 +9,7 @@
  *  - Full:  FTS5 + vector similarity (cosine) via LM Studio (< 2s)
  */
 
-import { getMemoryDb } from "./db.js";
+import { getMemoryDb, isMemoryDbReady } from "./db.js";
 import { log } from "../util/logger.js";
 import { importanceScore } from "./gc.js";
 import type { Memory } from "./types.js";
@@ -444,6 +444,110 @@ export async function searchMemoriesFull(
     }));
   } catch (err) {
     log().warn(`[memory-search] Full search failed: ${String(err)}`);
+    return [];
+  }
+}
+
+// ── Session transcript search ─────────────────────────────────────────────────
+
+export interface SessionSearchResult {
+  sessionId: string;
+  agentType: string;
+  turn: number;
+  role: string;
+  content: string;
+  timestamp: string;
+  score: number;
+  /** Surrounding messages (±2 turns) from the same session for context */
+  context: Array<{ turn: number; role: string; content: string }>;
+}
+
+/**
+ * Search session transcripts using FTS5.
+ *
+ * Scores use the same sigmoid formula as searchMemoriesFull, then apply a 0.85x
+ * discount because raw transcripts are lower-signal than curated memories.
+ */
+export async function searchSessionTranscripts(
+  query: string,
+  opts: { maxResults?: number } = {},
+): Promise<SessionSearchResult[]> {
+  if (!isMemoryDbReady()) return [];
+
+  const maxResults = opts.maxResults ?? 8;
+  const FTS_K = 0.1;
+  const TRANSCRIPT_DISCOUNT = 0.85;
+
+  try {
+    const db = getMemoryDb();
+
+    // FTS5 match — rank is negative (lower = better), negate to get positive
+    const rows = db
+      .prepare(
+        `SELECT sm.id, sm.session_id, sm.agent_type, sm.turn, sm.role,
+                sm.content, sm.timestamp, (-fts.rank) AS fts_rank
+         FROM session_messages_fts fts
+         JOIN session_messages sm ON sm.id = fts.rowid
+         WHERE session_messages_fts MATCH ?
+         ORDER BY fts.rank
+         LIMIT ?`,
+      )
+      .all(query, maxResults * 3) as Array<{
+      id: number;
+      session_id: string;
+      agent_type: string;
+      turn: number;
+      role: string;
+      content: string;
+      timestamp: string;
+      fts_rank: number;
+    }>;
+
+    if (rows.length === 0) return [];
+
+    // Score and sort
+    const scored = rows.map((row) => {
+      const ftsNorm = 1 / (1 + row.fts_rank * FTS_K);
+      const score = ftsNorm * TRANSCRIPT_DISCOUNT;
+      return { row, score };
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+    const top = scored.slice(0, maxResults);
+
+    // Load context (±2 turns) for each result
+    const contextStmt = db.prepare(
+      `SELECT turn, role, content
+       FROM session_messages
+       WHERE session_id = ? AND turn BETWEEN ? AND ?
+       ORDER BY turn, role`,
+    );
+
+    return top.map(({ row, score }) => {
+      const contextRows = contextStmt.all(
+        row.session_id,
+        row.turn - 2,
+        row.turn + 2,
+      ) as Array<{ turn: number; role: string; content: string }>;
+
+      // Exclude the matching row itself from context
+      const context = contextRows.filter(
+        (c) => !(c.turn === row.turn && c.role === row.role),
+      );
+
+      return {
+        sessionId: row.session_id,
+        agentType: row.agent_type,
+        turn: row.turn,
+        role: row.role,
+        content: row.content,
+        timestamp: row.timestamp,
+        score: Math.max(0, Math.min(1, score)),
+        context,
+      };
+    });
+  } catch (err) {
+    log().warn(`[memory-search] Session transcript search failed: ${String(err)}`);
     return [];
   }
 }

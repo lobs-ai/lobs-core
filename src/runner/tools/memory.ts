@@ -17,7 +17,7 @@ import type { ToolDefinition } from "../types.js";
 import { ensureTodaysMemoryFile } from "../../services/memory-condenser.js";
 import { getMemoryDb } from "../../memory/db.js";
 import { log } from "../../util/logger.js";
-import { searchMemoriesFull, type StructuredMemoryResult } from "../../memory/search.js";
+import { searchMemoriesFull, searchSessionTranscripts, type StructuredMemoryResult, type SessionSearchResult } from "../../memory/search.js";
 import { invalidateKeyMemoriesCache } from "../../services/workspace-loader.js";
 
 // ── lobs-memory document search ──────────────────────────────────────────────
@@ -131,25 +131,28 @@ export async function memorySearchTool(
   const start = Date.now();
 
   try {
-    // Fire structured-memory search and lobs-memory doc search in parallel
-    const [structuredResults, docResults] = await Promise.all([
+    // Fire structured-memory search, lobs-memory doc search, and session transcript search in parallel
+    const [structuredResults, docResults, sessionResults] = await Promise.all([
       searchMemoriesFull(query, { maxResults, minConfidence: 0.3 }),
       queryLobsMemoryServer(query, maxResults, collections, conversationContext),
+      searchSessionTranscripts(query, { maxResults }),
     ]);
 
     const timeMs = Date.now() - start;
 
     const hasStructured = structuredResults && structuredResults.length > 0;
     const hasDocs = docResults && docResults.length > 0;
+    const hasSessions = sessionResults && sessionResults.length > 0;
 
-    if (!hasStructured && !hasDocs) {
+    if (!hasStructured && !hasDocs && !hasSessions) {
       return `No results found for: "${query}"`;
     }
 
     // Build unified result list tagged by source for sorting
     type UnifiedResult =
       | { kind: "structured"; r: StructuredMemoryResult; score: number }
-      | { kind: "doc"; r: LobsMemoryResult; score: number };
+      | { kind: "doc"; r: LobsMemoryResult; score: number }
+      | { kind: "session"; r: SessionSearchResult; score: number };
 
     const unified: UnifiedResult[] = [];
 
@@ -159,18 +162,20 @@ export async function memorySearchTool(
     for (const r of docResults ?? []) {
       unified.push({ kind: "doc", r, score: r.score });
     }
+    for (const r of sessionResults ?? []) {
+      unified.push({ kind: "session", r, score: r.score });
+    }
 
     // Sort all results by score descending, cap at maxResults
     unified.sort((a, b) => b.score - a.score);
     const top = unified.slice(0, maxResults);
 
     const lines: string[] = [];
-    const sourceTag =
-      hasStructured && hasDocs
-        ? "structured-db + lobs-memory"
-        : hasStructured
-          ? "structured-db"
-          : "lobs-memory";
+    const sources: string[] = [];
+    if (hasStructured) sources.push("structured-db");
+    if (hasDocs) sources.push("lobs-memory");
+    if (hasSessions) sources.push("session-transcripts");
+    const sourceTag = sources.join(" + ") || "none";
     lines.push(`Found ${top.length} results (${timeMs}ms, source: ${sourceTag}):`);
     lines.push("");
 
@@ -196,7 +201,7 @@ export async function memorySearchTool(
         }
 
         lines.push(m.content.trim());
-      } else {
+      } else if (u.kind === "doc") {
         // Document result from lobs-memory server
         const r = u.r;
         const shortPath = r.path.replace(/^\/Users\/lobs\//, "~/");
@@ -205,6 +210,15 @@ export async function memorySearchTool(
           `[${i + 1}] ${r.source}:${shortPath}${lineRef} (score: ${r.score.toFixed(2)})`,
         );
         lines.push(r.snippet.trim());
+      } else {
+        // Session transcript result
+        const r = u.r;
+        const date = r.timestamp ? r.timestamp.slice(0, 10) : "";
+        lines.push(
+          `[${i + 1}] session:${r.sessionId}/turn-${r.turn} (score: ${r.score.toFixed(2)}, agent: ${r.agentType}, ${date})`,
+        );
+        const snippet = r.content.length > 500 ? r.content.slice(0, 500) + "…" : r.content;
+        lines.push(`**${r.role.charAt(0).toUpperCase() + r.role.slice(1)}:** ${snippet}`);
       }
 
       lines.push("");
