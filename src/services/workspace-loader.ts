@@ -19,9 +19,9 @@ const HOME = homedir();
 
 // ── Key Memory Injection ─────────────────────────────────────────────────────
 
-const KEY_MEMORIES_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const KEY_MEMORIES_MAX_CHARS = 2000;
-const KEY_MEMORIES_FETCH_LIMIT = 40; // fetch more than needed, trim to budget
+const KEY_MEMORIES_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes
+const KEY_MEMORIES_MAX_CHARS = 5000;
+const KEY_MEMORIES_FETCH_LIMIT = 80; // fetch more than needed, trim to budget
 
 interface KeyMemoriesCache {
   content: string;
@@ -30,18 +30,7 @@ interface KeyMemoriesCache {
 
 let _keyMemoriesCache: KeyMemoriesCache | null = null;
 
-/**
- * Type-based importance weights — mirrors gc.ts TYPE_BASE_IMPORTANCE.
- * Used as a secondary sort signal in the SQL query.
- */
-const TYPE_ORDER: Record<string, number> = {
-  decision:   6,
-  learning:   5,
-  pattern:    4,
-  preference: 3,
-  fact:       2,
-  document:   1,
-};
+// TYPE_ORDER removed — preferences are forced to top via SQL CASE, no redundant weight needed.
 
 /**
  * Load the top important memories from the DB for injection into the main
@@ -74,28 +63,21 @@ function loadKeyMemories(): string {
     // Fetch candidates: active, non-document memories, ordered by importance signals.
     // We fetch more than we'll show so we can trim to the char budget gracefully.
     const rows = db.prepare(`
-      SELECT memory_type, content, confidence, source_authority, access_count, last_accessed
+      SELECT memory_type, content, confidence, source_authority, access_count, last_accessed, created_at
       FROM memories
       WHERE status = 'active'
         AND memory_type != 'document'
       ORDER BY
         -- Preferences always bubble to the top
         CASE memory_type WHEN 'preference' THEN 1 ELSE 0 END DESC,
+        -- Recency boost: fresh memories (last 24h) surface immediately
+        CASE WHEN created_at >= datetime('now', '-1 day') THEN 1 ELSE 0 END DESC,
         -- Then high source_authority (user-provided = authoritative)
         source_authority DESC,
-        -- Then type weight proxy: decision > learning > pattern > fact > ...
-        CASE memory_type
-          WHEN 'decision'   THEN 6
-          WHEN 'learning'   THEN 5
-          WHEN 'pattern'    THEN 4
-          WHEN 'preference' THEN 3
-          WHEN 'fact'       THEN 2
-          ELSE 0
-        END DESC,
         -- Then confidence
         confidence DESC,
         -- Then recency of access
-        last_accessed DESC
+        access_count DESC
       LIMIT ?
     `).all(KEY_MEMORIES_FETCH_LIMIT) as Array<{
       memory_type: string;
@@ -104,6 +86,7 @@ function loadKeyMemories(): string {
       source_authority: number;
       access_count: number;
       last_accessed: string | null;
+      created_at: string | null;
     }>;
 
     if (rows.length === 0) {
