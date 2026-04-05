@@ -19,6 +19,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import type { ToolDefinition, TokenUsage } from "./types.js";
+import type { TaskCategory } from "../services/model-router.js";
 import { getKeyPool } from "../services/key-pool.js";
 import { getCodexAuth } from "../services/codex-auth.js";
 import { randomUUID } from "node:crypto";
@@ -1190,8 +1191,8 @@ const PROVIDER_DEFAULTS: Record<Provider, { baseUrl: string; envKey: string }> =
   lmstudio: { baseUrl: "http://localhost:1234", envKey: "" },
   openrouter: { baseUrl: "https://openrouter.ai/api", envKey: "OPENROUTER_API_KEY" },
   "openai-compatible": { baseUrl: "http://localhost:8080", envKey: "" },
-  "opencode-zen": { baseUrl: "https://opencode.ai/zen/v1", envKey: "OPENCODE_API_KEY" },
-  "opencode-go": { baseUrl: "https://opencode.ai/zen/go/v1", envKey: "OPENCODE_API_KEY" },
+  "opencode-zen": { baseUrl: "https://opencode.ai/zen", envKey: "OPENCODE_API_KEY" },
+  "opencode-go": { baseUrl: "https://opencode.ai/zen/go", envKey: "OPENCODE_API_KEY" },
   "z-ai": { baseUrl: "https://open.z.ai/api/paas/v4", envKey: "ZAI_API_KEY" },
   minimax: { baseUrl: "https://api.minimax.chat/v1", envKey: "MINIMAX_API_KEY" },
   kimi: { baseUrl: "https://api.moonshot.cn/v1", envKey: "KIMI_API_KEY" },
@@ -1202,6 +1203,8 @@ const PROVIDER_DEFAULTS: Record<Provider, { baseUrl: string; envKey: string }> =
 interface ResilientClientOptions {
   fallbackModels?: string[];
   maxRetries?: number;
+  taskCategory?: TaskCategory;
+  sensitiveData?: boolean;
 }
 
 class ResilientLLMClient implements LLMClient {
