@@ -778,6 +778,125 @@ function resolveOpenRouterAuth(sessionId?: string): { apiKey: string; keyIndex?:
   return undefined;
 }
 
+// ── OpenCode Go Client (Anthropic Messages API) ──────────────────────────────
+
+/**
+ * OpenCodeGoClient — routes opencode-go through the Anthropic messages API.
+ * OpenCode Go speaks native Anthropic format and supports prompt caching
+ * (cache_control ephemeral, cache_read_input_tokens, cache_creation_input_tokens).
+ * No OAuth, no key rotation, no Claude Code name mapping needed.
+ */
+class OpenCodeGoClient implements LLMClient {
+  private client: Anthropic;
+  private modelId: string;
+  private sessionId?: string;
+
+  constructor(client: Anthropic, modelId: string, sessionId?: string) {
+    this.client = client;
+    this.modelId = modelId;
+    this.sessionId = sessionId;
+  }
+
+  async createMessage(params: {
+    model: string;
+    system: string;
+    messages: LLMMessage[];
+    tools: ToolDefinition[];
+    maxTokens: number;
+    thinking?: {
+      type: "enabled";
+      budgetTokens: number;
+    } | {
+      type: "adaptive";
+    };
+  }): Promise<LLMResponse> {
+    console.log(
+      `[OpenCodeGoClient] request session=${this.sessionId?.slice(0, 40) ?? "none"} model=${params.model} stream=true`,
+    );
+
+    // Build system blocks with cache control
+    const systemBlocks: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> = [];
+    systemBlocks.push({
+      type: "text",
+      text: params.system,
+      cache_control: { type: "ephemeral" },
+    });
+
+    // Convert tools and cache the last one
+    const tools: Anthropic.Tool[] = params.tools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      input_schema: {
+        type: "object" as const,
+        properties: (t.input_schema as any).properties || {},
+        required: (t.input_schema as any).required || [],
+      },
+    }));
+    if (tools.length > 0) {
+      tools[tools.length - 1] = {
+        ...tools[tools.length - 1],
+        cache_control: { type: "ephemeral" },
+      };
+    }
+
+    // Build API params
+    const apiParams: any = {
+      model: params.model,
+      system: systemBlocks,
+      tools,
+      messages: params.messages,
+      stream: true,
+      max_tokens: params.maxTokens,
+    };
+
+    // Thinking mode
+    if (params.thinking) {
+      if (params.thinking.type === "adaptive") {
+        apiParams.thinking = { type: "adaptive" };
+      } else {
+        apiParams.thinking = {
+          type: params.thinking.type,
+          budget_tokens: params.thinking.budgetTokens,
+        };
+      }
+    }
+
+    const stream = this.client.messages.stream(apiParams);
+    const response = await awaitAnthropicFinalMessageWithInactivityTimeout(stream, this.sessionId);
+
+    const usage: TokenUsage = {
+      inputTokens: response.usage.input_tokens,
+      outputTokens: response.usage.output_tokens,
+      cacheReadTokens: (response.usage as any).cache_read_input_tokens ?? 0,
+      cacheWriteTokens: (response.usage as any).cache_creation_input_tokens ?? 0,
+      thinkingTokens: (response.usage as any).thinking_tokens,
+    };
+
+    // Extract thinking content if present
+    let thinkingContent: string | undefined;
+    const thinkingBlocks = (response.content as any[]).filter(
+      (block: any) => block.type === "thinking"
+    );
+    if (thinkingBlocks.length > 0) {
+      thinkingContent = thinkingBlocks
+        .map((block: any) => block.thinking as string)
+        .join("\n\n");
+    }
+
+    const content = response.content as LLMResponse["content"];
+
+    return {
+      content,
+      stopReason: response.stop_reason === "end_turn" ? "end_turn"
+        : response.stop_reason === "tool_use" ? "tool_use"
+        : response.stop_reason === "max_tokens" ? "max_tokens"
+        : "stop",
+      usage,
+      thinkingContent,
+    };
+  }
+}
+
 // ── OpenAI-Compatible Client ─────────────────────────────────────────────────
 
 interface OpenAIToolCall {
@@ -1815,6 +1934,29 @@ export function createClient(config: ProviderConfig, sessionId?: string): LLMCli
     return new OpenAICodexClient(baseUrl, apiKey, sessionId, extraHeaders);
   }
 
+  // opencode-go: Uses Anthropic messages API format (supports prompt caching)
+  if (config.provider === "opencode-go") {
+    const defaults = PROVIDER_DEFAULTS["opencode-go"];
+    const baseUrl = config.baseUrl ?? defaults.baseUrl;
+    const apiKey = config.apiKey ?? (defaults.envKey ? process.env[defaults.envKey] ?? "" : "");
+
+    if (!apiKey) {
+      throw new Error("No OpenCode API key found. Set OPENCODE_API_KEY environment variable.");
+    }
+
+    // Create Anthropic SDK client pointed at OpenCode Go endpoint
+    const anthropicClient = new Anthropic({
+      apiKey,
+      baseURL: baseUrl + "/v1",
+      dangerouslyAllowBrowser: true,
+      defaultHeaders: {
+        "accept": "application/json",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+    });
+
+    return new OpenCodeGoClient(anthropicClient, config.modelId, sessionId);
+  }
 
   // All other providers use OpenAI-compatible API
   const defaults = PROVIDER_DEFAULTS[config.provider] ?? PROVIDER_DEFAULTS["openai-compatible"];
