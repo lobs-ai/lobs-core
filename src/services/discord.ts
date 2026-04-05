@@ -1,4 +1,9 @@
-import { Client, GatewayIntentBits, Partials, TextChannel, EmbedBuilder, GatewayDispatchEvents } from "discord.js";
+import {
+  Client, GatewayIntentBits, Partials, TextChannel, EmbedBuilder, GatewayDispatchEvents,
+  ChannelType, OverwriteType, WebhookClient,
+  type GuildChannelCreateOptions, type GuildChannelEditOptions,
+  type PermissionOverwriteOptions,
+} from "discord.js";
 import { registerSlashCommands, handleSlashCommand, handleAutocompleteInteraction } from "./discord-commands.js";
 
 export interface DiscordConfig {
@@ -942,6 +947,518 @@ class DiscordService {
     } catch (err) {
       console.error(`[discord] listChannels failed for guild ${guildId}:`, err);
       return [];
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Message management
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** Edit an existing message's content */
+  async editMessage(channelId: string, messageId: string, newContent: string): Promise<{
+    id: string; content: string; editedAt: string;
+  }> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(channelId)) throw new Error("Invalid channel ID");
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !channel.isTextBased()) throw new Error("Channel not found or not text-based");
+      const msg = await (channel as TextChannel).messages.fetch(messageId);
+      const edited = await msg.edit(newContent);
+      return {
+        id: edited.id,
+        content: edited.content,
+        editedAt: edited.editedAt?.toISOString() ?? new Date().toISOString(),
+      };
+    } catch (err) {
+      console.error(`[discord] editMessage failed for ${channelId}/${messageId}:`, err);
+      throw err;
+    }
+  }
+
+  /** Delete a message */
+  async deleteMessage(channelId: string, messageId: string): Promise<void> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(channelId)) throw new Error("Invalid channel ID");
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !channel.isTextBased()) throw new Error("Channel not found or not text-based");
+      const msg = await (channel as TextChannel).messages.fetch(messageId);
+      await msg.delete();
+    } catch (err) {
+      console.error(`[discord] deleteMessage failed for ${channelId}/${messageId}:`, err);
+      throw err;
+    }
+  }
+
+  /** Bulk delete up to 100 messages (messages must be < 14 days old) */
+  async bulkDeleteMessages(channelId: string, messageIds: string[]): Promise<{ deleted: number }> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(channelId)) throw new Error("Invalid channel ID");
+    if (messageIds.length === 0) return { deleted: 0 };
+    if (messageIds.length > 100) throw new Error("Cannot bulk delete more than 100 messages");
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || channel.type !== ChannelType.GuildText) throw new Error("Channel not found or not a guild text channel");
+      const deleted = await (channel as TextChannel).bulkDelete(messageIds, true);
+      return { deleted: deleted.size };
+    } catch (err) {
+      console.error(`[discord] bulkDeleteMessages failed for ${channelId}:`, err);
+      throw err;
+    }
+  }
+
+  /** Pin a message */
+  async pinMessage(channelId: string, messageId: string): Promise<void> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(channelId)) throw new Error("Invalid channel ID");
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !channel.isTextBased()) throw new Error("Channel not found or not text-based");
+      const msg = await (channel as TextChannel).messages.fetch(messageId);
+      await msg.pin();
+    } catch (err) {
+      console.error(`[discord] pinMessage failed for ${channelId}/${messageId}:`, err);
+      throw err;
+    }
+  }
+
+  /** Unpin a message */
+  async unpinMessage(channelId: string, messageId: string): Promise<void> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(channelId)) throw new Error("Invalid channel ID");
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !channel.isTextBased()) throw new Error("Channel not found or not text-based");
+      const msg = await (channel as TextChannel).messages.fetch(messageId);
+      await msg.unpin();
+    } catch (err) {
+      console.error(`[discord] unpinMessage failed for ${channelId}/${messageId}:`, err);
+      throw err;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Channel management
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** Create a new text channel in a guild */
+  async createChannel(
+    guildId: string,
+    name: string,
+    type: "text" | "voice" | "category" | "announcement" | "forum" = "text",
+    options?: {
+      parentId?: string;
+      topic?: string;
+      rateLimitPerUser?: number;
+      nsfw?: boolean;
+      position?: number;
+    },
+  ): Promise<{ id: string; name: string; type: string; parentId: string | null }> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    try {
+      const guild = await this.client.guilds.fetch(guildId);
+      const typeMap: Record<string, ChannelType> = {
+        text: ChannelType.GuildText,
+        voice: ChannelType.GuildVoice,
+        category: ChannelType.GuildCategory,
+        announcement: ChannelType.GuildAnnouncement,
+        forum: ChannelType.GuildForum,
+      };
+      const channelType = typeMap[type] ?? ChannelType.GuildText;
+      const createOptions: GuildChannelCreateOptions = {
+        name,
+        type: channelType as GuildChannelCreateOptions["type"],
+        ...(options?.parentId && { parent: options.parentId }),
+        ...(options?.topic && { topic: options.topic }),
+        ...(options?.rateLimitPerUser !== undefined && { rateLimitPerUser: options.rateLimitPerUser }),
+        ...(options?.nsfw !== undefined && { nsfw: options.nsfw }),
+        ...(options?.position !== undefined && { position: options.position }),
+      };
+      const channel = await guild.channels.create(createOptions);
+      const channelTypeNameMap: Record<number, string> = {
+        0: "text", 2: "voice", 4: "category", 5: "announcement", 15: "forum",
+      };
+      return {
+        id: channel.id,
+        name: channel.name,
+        type: channelTypeNameMap[channel.type] ?? `unknown(${channel.type})`,
+        parentId: channel.parentId,
+      };
+    } catch (err) {
+      console.error(`[discord] createChannel failed for guild ${guildId}:`, err);
+      throw err;
+    }
+  }
+
+  /** Edit channel properties */
+  async editChannel(
+    channelId: string,
+    options: {
+      name?: string;
+      topic?: string;
+      rateLimitPerUser?: number;
+      nsfw?: boolean;
+      position?: number;
+      parentId?: string;
+    },
+  ): Promise<{ id: string; name: string }> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(channelId)) throw new Error("Invalid channel ID");
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !("edit" in channel)) throw new Error("Channel not found or not editable");
+      const editOptions: GuildChannelEditOptions = {
+        ...(options.name && { name: options.name }),
+        ...(options.topic !== undefined && { topic: options.topic }),
+        ...(options.rateLimitPerUser !== undefined && { rateLimitPerUser: options.rateLimitPerUser }),
+        ...(options.nsfw !== undefined && { nsfw: options.nsfw }),
+        ...(options.position !== undefined && { position: options.position }),
+        ...(options.parentId && { parent: options.parentId }),
+      };
+      const edited = await (channel as TextChannel).edit(editOptions);
+      return { id: edited.id, name: edited.name };
+    } catch (err) {
+      console.error(`[discord] editChannel failed for ${channelId}:`, err);
+      throw err;
+    }
+  }
+
+  /** Delete a channel */
+  async deleteChannel(channelId: string): Promise<void> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(channelId)) throw new Error("Invalid channel ID");
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel) throw new Error("Channel not found");
+      await channel.delete();
+    } catch (err) {
+      console.error(`[discord] deleteChannel failed for ${channelId}:`, err);
+      throw err;
+    }
+  }
+
+  /** Set permission overwrites for a role or member on a channel.
+   * `permissions` is a map of PermissionFlagsBits key names to true (allow), false (deny), or null (neutral).
+   * e.g. { SendMessages: true, ManageMessages: false }
+   */
+  async editChannelPermissions(
+    channelId: string,
+    overwriteId: string,
+    permissions: PermissionOverwriteOptions,
+    type: "role" | "member",
+  ): Promise<void> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(channelId)) throw new Error("Invalid channel ID");
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !("permissionOverwrites" in channel)) throw new Error("Channel not found or does not support permission overwrites");
+      await (channel as TextChannel).permissionOverwrites.edit(overwriteId, permissions, {
+        type: type === "role" ? OverwriteType.Role : OverwriteType.Member,
+      });
+    } catch (err) {
+      console.error(`[discord] editChannelPermissions failed for ${channelId}:`, err);
+      throw err;
+    }
+  }
+
+  /** Get info about a single channel */
+  async getChannel(channelId: string): Promise<{
+    id: string; name: string; type: string; parentId: string | null;
+    topic: string | null; position: number | null; nsfw: boolean | null;
+    rateLimitPerUser: number | null; messageCount: number | null;
+  }> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(channelId)) throw new Error("Invalid channel ID");
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel) throw new Error("Channel not found");
+      const typeMap: Record<number, string> = {
+        0: "text", 1: "dm", 2: "voice", 4: "category", 5: "announcement",
+        10: "announcement_thread", 11: "public_thread", 12: "private_thread",
+        13: "stage", 15: "forum", 16: "media",
+      };
+      return {
+        id: channel.id,
+        name: "name" in channel ? (channel.name as string) : "",
+        type: typeMap[channel.type] ?? `unknown(${channel.type})`,
+        parentId: "parentId" in channel ? (channel.parentId as string | null) : null,
+        topic: "topic" in channel ? (channel.topic as string | null) : null,
+        position: "position" in channel ? (channel.position as number) : null,
+        nsfw: "nsfw" in channel ? (channel.nsfw as boolean) : null,
+        rateLimitPerUser: "rateLimitPerUser" in channel ? (channel.rateLimitPerUser as number) : null,
+        messageCount: channel.isThread() ? (channel.messageCount ?? null) : null,
+      };
+    } catch (err) {
+      console.error(`[discord] getChannel failed for ${channelId}:`, err);
+      throw err;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Webhook management
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** Create a webhook on a channel */
+  async createWebhook(channelId: string, name: string): Promise<{ id: string; name: string; token: string }> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(channelId)) throw new Error("Invalid channel ID");
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || channel.type !== ChannelType.GuildText) throw new Error("Channel not found or not a guild text channel");
+      const webhook = await (channel as TextChannel).createWebhook({ name });
+      if (!webhook.token) throw new Error("Webhook created but token is missing");
+      return { id: webhook.id, name: webhook.name, token: webhook.token };
+    } catch (err) {
+      console.error(`[discord] createWebhook failed for ${channelId}:`, err);
+      throw err;
+    }
+  }
+
+  /** List webhooks in a channel */
+  async listWebhooks(channelId: string): Promise<Array<{ id: string; name: string; channelId: string; guildId: string | null }>> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(channelId)) throw new Error("Invalid channel ID");
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || channel.type !== ChannelType.GuildText) throw new Error("Channel not found or not a guild text channel");
+      const webhooks = await (channel as TextChannel).fetchWebhooks();
+      return [...webhooks.values()].map(w => ({
+        id: w.id,
+        name: w.name,
+        channelId: w.channelId,
+        guildId: w.guildId,
+      }));
+    } catch (err) {
+      console.error(`[discord] listWebhooks failed for ${channelId}:`, err);
+      throw err;
+    }
+  }
+
+  /** Send a message via webhook */
+  async postWebhook(
+    webhookId: string,
+    webhookToken: string,
+    content: string,
+    options?: {
+      username?: string;
+      avatarUrl?: string;
+      embeds?: Array<{ title?: string; description?: string; color?: number }>;
+    },
+  ): Promise<{ id: string }> {
+    try {
+      const webhookClient = new WebhookClient({ id: webhookId, token: webhookToken });
+      const msg = await webhookClient.send({
+        content,
+        ...(options?.username && { username: options.username }),
+        ...(options?.avatarUrl && { avatarURL: options.avatarUrl }),
+        ...(options?.embeds && {
+          embeds: options.embeds.map(e => {
+            const b = new EmbedBuilder();
+            if (e.title) b.setTitle(e.title);
+            if (e.description) b.setDescription(e.description);
+            if (e.color) b.setColor(e.color);
+            return b;
+          }),
+        }),
+      });
+      webhookClient.destroy();
+      return { id: msg.id };
+    } catch (err) {
+      console.error(`[discord] postWebhook failed for webhook ${webhookId}:`, err);
+      throw err;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Thread management
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** Archive a thread */
+  async archiveThread(threadId: string): Promise<void> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(threadId)) throw new Error("Invalid thread ID");
+    try {
+      const thread = await this.client.channels.fetch(threadId);
+      if (!thread || !thread.isThread()) throw new Error("Not a thread");
+      await thread.setArchived(true);
+    } catch (err) {
+      console.error(`[discord] archiveThread failed for ${threadId}:`, err);
+      throw err;
+    }
+  }
+
+  /** Unarchive a thread */
+  async unarchiveThread(threadId: string): Promise<void> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(threadId)) throw new Error("Invalid thread ID");
+    try {
+      const thread = await this.client.channels.fetch(threadId);
+      if (!thread || !thread.isThread()) throw new Error("Not a thread");
+      await thread.setArchived(false);
+    } catch (err) {
+      console.error(`[discord] unarchiveThread failed for ${threadId}:`, err);
+      throw err;
+    }
+  }
+
+  /** Lock a thread */
+  async lockThread(threadId: string): Promise<void> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(threadId)) throw new Error("Invalid thread ID");
+    try {
+      const thread = await this.client.channels.fetch(threadId);
+      if (!thread || !thread.isThread()) throw new Error("Not a thread");
+      await thread.setLocked(true);
+    } catch (err) {
+      console.error(`[discord] lockThread failed for ${threadId}:`, err);
+      throw err;
+    }
+  }
+
+  /** Unlock a thread */
+  async unlockThread(threadId: string): Promise<void> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(threadId)) throw new Error("Invalid thread ID");
+    try {
+      const thread = await this.client.channels.fetch(threadId);
+      if (!thread || !thread.isThread()) throw new Error("Not a thread");
+      await thread.setLocked(false);
+    } catch (err) {
+      console.error(`[discord] unlockThread failed for ${threadId}:`, err);
+      throw err;
+    }
+  }
+
+  /** Edit thread properties */
+  async editThread(
+    threadId: string,
+    options: {
+      name?: string;
+      autoArchiveDuration?: 60 | 1440 | 4320 | 10080;
+      locked?: boolean;
+      archived?: boolean;
+      appliedTags?: string[];
+    },
+  ): Promise<{ id: string; name: string }> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(threadId)) throw new Error("Invalid thread ID");
+    try {
+      const thread = await this.client.channels.fetch(threadId);
+      if (!thread || !thread.isThread()) throw new Error("Not a thread");
+      const edited = await thread.edit({
+        ...(options.name && { name: options.name }),
+        ...(options.autoArchiveDuration !== undefined && { autoArchiveDuration: options.autoArchiveDuration }),
+        ...(options.locked !== undefined && { locked: options.locked }),
+        ...(options.archived !== undefined && { archived: options.archived }),
+        ...(options.appliedTags && { appliedTags: options.appliedTags }),
+      });
+      return { id: edited.id, name: edited.name };
+    } catch (err) {
+      console.error(`[discord] editThread failed for ${threadId}:`, err);
+      throw err;
+    }
+  }
+
+  /** Delete a thread */
+  async deleteThread(threadId: string): Promise<void> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(threadId)) throw new Error("Invalid thread ID");
+    try {
+      const thread = await this.client.channels.fetch(threadId);
+      if (!thread || !thread.isThread()) throw new Error("Not a thread");
+      await thread.delete();
+    } catch (err) {
+      console.error(`[discord] deleteThread failed for ${threadId}:`, err);
+      throw err;
+    }
+  }
+
+  /** Remove a member from a thread */
+  async removeThreadMember(threadId: string, userId: string): Promise<void> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    if (!/^\d+$/.test(threadId)) throw new Error("Invalid thread ID");
+    try {
+      const thread = await this.client.channels.fetch(threadId);
+      if (!thread || !thread.isThread()) throw new Error("Not a thread");
+      await thread.members.remove(userId);
+    } catch (err) {
+      console.error(`[discord] removeThreadMember failed for ${threadId}:`, err);
+      throw err;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Guild / member / role info
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** Get guild info */
+  async getGuild(guildId: string): Promise<{
+    id: string; name: string; icon: string | null;
+    memberCount: number; description: string | null; ownerId: string;
+  }> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    try {
+      const guild = await this.client.guilds.fetch({ guild: guildId, withCounts: true });
+      return {
+        id: guild.id,
+        name: guild.name,
+        icon: guild.iconURL() ?? null,
+        memberCount: guild.approximateMemberCount ?? guild.memberCount,
+        description: guild.description,
+        ownerId: guild.ownerId,
+      };
+    } catch (err) {
+      console.error(`[discord] getGuild failed for ${guildId}:`, err);
+      throw err;
+    }
+  }
+
+  /** Get a guild member's info */
+  async getMember(guildId: string, userId: string): Promise<{
+    id: string; displayName: string; nick: string | null;
+    roles: Array<{ id: string; name: string }>; joinedAt: string | null;
+  }> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    try {
+      const guild = await this.client.guilds.fetch(guildId);
+      const member = await guild.members.fetch(userId);
+      return {
+        id: member.id,
+        displayName: member.displayName,
+        nick: member.nickname,
+        roles: [...member.roles.cache.values()]
+          .filter(r => r.id !== guild.id) // exclude @everyone
+          .map(r => ({ id: r.id, name: r.name })),
+        joinedAt: member.joinedAt?.toISOString() ?? null,
+      };
+    } catch (err) {
+      console.error(`[discord] getMember failed for guild=${guildId} user=${userId}:`, err);
+      throw err;
+    }
+  }
+
+  /** List all roles in a guild */
+  async listRoles(guildId: string): Promise<Array<{
+    id: string; name: string; color: number; position: number; mentionable: boolean; hoist: boolean;
+  }>> {
+    if (!this.client || this.state !== "ready") throw new Error("Discord not ready");
+    try {
+      const guild = await this.client.guilds.fetch(guildId);
+      const roles = await guild.roles.fetch();
+      return [...roles.values()]
+        .sort((a, b) => b.position - a.position)
+        .map(r => ({
+          id: r.id,
+          name: r.name,
+          color: r.color,
+          position: r.position,
+          mentionable: r.mentionable,
+          hoist: r.hoist,
+        }));
+    } catch (err) {
+      console.error(`[discord] listRoles failed for guild ${guildId}:`, err);
+      throw err;
     }
   }
 
