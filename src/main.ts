@@ -36,6 +36,7 @@ import { initFileIndexer, stopFileIndexer } from "./memory/indexer.js";
 import { registerEventRecorderHook } from "./hooks/event-recorder.js";
 import { registerReflectionTriggerHook } from "./hooks/reflection-trigger.js";
 import { registerSessionWatcher } from "./memory/session-watcher.js";
+import { initDynamicToolLoader } from "./runner/tools/dynamic-tools.js";
 import { runDailyReflection } from "./memory/daily-reflection.js";
 import { imagineService } from "./services/imagine.js";
 import { countActiveWorkers, getActiveWorkers } from "./orchestrator/worker-manager.js";
@@ -341,6 +342,7 @@ async function main() {
   registerEventRecorderHook(null as never);  // _api param is unused
   registerReflectionTriggerHook();
   registerSessionWatcher();
+  initDynamicToolLoader();
   console.log("Structured memory hooks registered (event recorder + reflection trigger + session watcher)");
 
   // Load skills

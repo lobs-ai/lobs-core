@@ -22,6 +22,8 @@ import { humanizeToolDefinition, humanizeTool } from "./humanize.js";
 import { imagineToolDefinition, imagineTool } from "./imagine.js";
 import { htmlToPdfToolDefinition, htmlToPdfTool } from "./html-to-pdf.js";
 import { dispatchAgentToolDefinition, dispatchAgentTool } from "./dispatch.js";
+import { toolManageDefinition, toolManageTool } from "./tool-manage.js";
+import { getDynamicToolLoader } from "./dynamic-tools.js";
 import {
   asClaudeCodeToolDefinition,
   fromClaudeCodeToolName,
@@ -205,18 +207,28 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
     definition: dispatchAgentToolDefinition,
     execute: (params, cwd) => dispatchAgentTool(params, cwd),
   },
+  tool_manage: {
+    definition: toolManageDefinition,
+    execute: toolManageTool,
+  },
 };
 
 /**
  * Get tool definitions for the Anthropic API.
  */
 export function getToolDefinitions(tools: ToolName[]): ToolDefinition[] {
-  return tools
+  const staticDefs = tools
     .filter((name) => TOOL_REGISTRY[name])
     .map((name) => {
       const definition = getDefinition(TOOL_REGISTRY[name]);
       return asClaudeCodeToolDefinition(definition);
     });
+
+  // Append dynamic tool definitions
+  const loader = getDynamicToolLoader();
+  const dynamicDefs = loader ? loader.getDefinitions() : [];
+
+  return [...staticDefs, ...dynamicDefs];
 }
 
 /**
@@ -233,6 +245,31 @@ export async function executeTool(
   const entry = TOOL_REGISTRY[internalName as ToolName];
 
   if (!entry) {
+    // Check dynamic tools
+    const loader = getDynamicToolLoader();
+    if (loader?.has(internalName)) {
+      try {
+        const output = await loader.execute(internalName, params, cwd);
+        return {
+          result: {
+            tool_use_id: toolUseId,
+            type: "tool_result",
+            content: output,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          result: {
+            tool_use_id: toolUseId,
+            type: "tool_result",
+            content: `Error executing dynamic tool: ${message}`,
+            is_error: true,
+          },
+        };
+      }
+    }
+
     return {
       result: {
         tool_use_id: toolUseId,

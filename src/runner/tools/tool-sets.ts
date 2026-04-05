@@ -32,6 +32,7 @@ const NEXUS_TOOLS: ToolName[] = [
   "humanize",
   "imagine",
   "html_to_pdf",
+  "tool_manage",
 ];
 
 // Discord DM sessions — same as nexus (no discord tool needed, replies are inline)
