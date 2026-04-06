@@ -56,6 +56,20 @@ afterAll(() => {
 vi.mock("../src/config/lobs.js", () => ({
   getAgentDir: (type: string) => join(FAKE_ROOT, type),
   getAgentContextDir: (type: string) => join(FAKE_ROOT, type, "context"),
+  getLobsRoot: () => FAKE_ROOT,
+}));
+
+vi.mock("../src/config/identity.js", () => ({
+  getBotName: () => "Lobs",
+  getBotId: () => "lobs",
+  getOwnerName: () => "Rafe",
+  getOwnerId: () => "rafe",
+  getOwnerDiscordId: () => "644578016298795010",
+  getIdentity: () => ({
+    bot: { name: "Lobs", id: "lobs" },
+    owner: { name: "Rafe", id: "rafe", discordId: "644578016298795010" },
+  }),
+  resetIdentityCache: () => {},
 }));
 
 // ── Import module under test (after mock setup) ──────────────────────────────

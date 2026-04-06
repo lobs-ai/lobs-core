@@ -34,6 +34,13 @@ vi.mock("../src/config/lobs.js", () => ({
   getGatewayConfig: vi.fn(),
 }));
 
+vi.mock("../src/config/discord.js", () => ({
+  loadDiscordConfig: vi.fn().mockReturnValue({
+    ownerId: "test-owner-id",
+    dmAllowFrom: ["test-owner-id"],
+  }),
+}));
+
 vi.mock("../src/util/logger.js", () => ({
   log: () => ({
     info: vi.fn(),
