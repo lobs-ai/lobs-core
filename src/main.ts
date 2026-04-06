@@ -853,7 +853,19 @@ async function main() {
   setInterval(() => {}, 60_000);
 }
 
-main().catch((err) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});
+// ── Mode routing ─────────────────────────────────────────────────────────────
+// LOBS_MODE=agent  → lightweight standalone agent (Briggs, Sam, Lena, etc.)
+// LOBS_MODE=lobs   → full Lobs runtime (default)
+const LOBS_MODE = process.env.LOBS_MODE ?? "lobs";
+
+if (LOBS_MODE === "agent") {
+  import("./agent-main.js").catch((err) => {
+    console.error("[agent-mode] Fatal error:", err);
+    process.exit(1);
+  });
+} else {
+  main().catch((err) => {
+    console.error("Fatal error:", err);
+    process.exit(1);
+  });
+}
