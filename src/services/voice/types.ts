@@ -1,6 +1,7 @@
 /**
  * Voice module types — shared interfaces for voice integration
  */
+import { getBotId } from "../../config/identity.js";
 
 // ---------------------------------------------------------------------------
 // Realtime mode configuration (OpenAI Realtime API — speech-to-speech)
@@ -91,7 +92,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
   conversation: {
     maxContextExchanges: 20,
     triggerMode: "keyword",
-    triggerWords: ["lobs", "hey lobs"],
+    triggerWords: [getBotId(), `hey ${getBotId()}`],
   },
   realtime: DEFAULT_REALTIME_CONFIG,
 };

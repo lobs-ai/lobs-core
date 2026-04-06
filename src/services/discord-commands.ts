@@ -12,6 +12,7 @@ import type { VoiceManager } from "./voice/index.js";
 import { getRawDb } from "../db/connection.js";
 import { getModelForTier } from "../config/models.js";
 import { getChannelModelOverride, getDefaultChatModel, getModelCatalog, isLoadedLocalModel, normalizeModelSelection, setChannelModelOverride } from "./model-catalog.js";
+import { getBotName } from "../config/identity.js";
 
 let mainAgentRef: MainAgent | null = null;
 let voiceManagerRef: VoiceManager | null = null;
@@ -536,7 +537,7 @@ async function handleVoiceCommand(interaction: ChatInputCommandInteraction): Pro
         await interaction.reply({ content: '❌ Not in a voice channel.', ephemeral: true });
       } else {
         const desc = mode === 'keyword'
-          ? '🗝️ Trigger mode: **keyword** — say "Lobs" to get a response'
+          ? `🗝️ Trigger mode: **keyword** — say "${getBotName()}" to get a response`
           : '📡 Trigger mode: **always** — responding to all speech';
         await interaction.reply(desc);
       }

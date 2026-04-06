@@ -8,6 +8,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { log } from "../util/logger.js";
+import { getBotName } from "../config/identity.js";
 
 function getGitIdentity(): { name: string; email: string } {
   const configPath = join(homedir(), ".lobs", "config", "lobs.json");
@@ -20,7 +21,7 @@ function getGitIdentity(): { name: string; email: string } {
     }
   } catch {}
   return {
-    name: process.env.LOBS_GIT_NAME ?? "Lobs",
+    name: process.env.LOBS_GIT_NAME ?? getBotName(),
     email: process.env.LOBS_GIT_EMAIL ?? "lobs@localhost",
   };
 }

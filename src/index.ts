@@ -33,13 +33,14 @@ import { ensureScheduleSeeded } from "./services/schedule-seed.js";
 import { startMemoryScanner, stopMemoryScanner } from "./services/memory-scanner.js";
 import { setLogger, log } from "./util/logger.js";
 import type { PawConfig } from "./util/types.js";
+import { getBotId } from "./config/identity.js";
 import { getGatewayConfig, getSubagentRunsPath } from "./config/lobs.js";
 
 const DEFAULT_DB_PATH = "~/.lobs/lobs.db";
 const DEFAULT_SCAN_INTERVAL = 3_000;
 
 const pawPlugin = {
-  id: "lobs",
+  id: getBotId(),
   name: "PAW — Personal AI Workforce",
   description: "Multi-agent orchestration, task management, and workflow engine",
   version: "0.1.0",

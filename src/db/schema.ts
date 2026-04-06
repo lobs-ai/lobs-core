@@ -416,7 +416,7 @@ export const initiativeDecisionRecords = sqliteTable("initiative_decision_record
   initiativeId: text("initiative_id").notNull().references(() => agentInitiatives.id),
   sweepId: text("sweep_id").references(() => systemSweeps.id),
   decision: text("decision").notNull(),
-  decidedBy: text("decided_by").notNull().default("lobs"),
+  decidedBy: text("decided_by").notNull().default("lobs"), // TODO: identity — schema default, overridden at runtime by getBotId()
   decisionSummary: text("decision_summary"),
   overlapWithIds: text("overlap_with_ids", { mode: "json" }),
   contradictionWithIds: text("contradiction_with_ids", { mode: "json" }),

@@ -23,7 +23,7 @@ export interface DeferredAction {
     | "other";
   /** Urgency level */
   priority: "high" | "medium" | "low";
-  /** Who should handle this (default: "lobs") */
+  /** Who should handle this (default: "the bot") */
   assignee: string;
   /** Brief context from the discussion that prompted this */
   context?: string;

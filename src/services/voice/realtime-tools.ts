@@ -15,6 +15,7 @@ import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { getDb } from "../../db/connection.js";
+import { getBotId } from "../../config/identity.js";
 import { inboxItems } from "../../db/schema.js";
 import { executeSpawnAgent } from "../../runner/tools/agent-control.js";
 import type { DeferredActionQueue } from "./deferred-action-queue.js";
@@ -394,7 +395,7 @@ export const deferActionTool = tool({
         description: params.description,
         actionType: params.action_type,
         priority: params.priority,
-        assignee: params.assignee ?? "lobs",
+        assignee: params.assignee ?? getBotId(),
         context: params.context,
         timestamp: Date.now(),
       });
@@ -407,7 +408,7 @@ export const deferActionTool = tool({
       .values({
         id,
         title: `Deferred: ${params.description.slice(0, 80)}`,
-        content: `Action type: ${params.action_type}\nPriority: ${params.priority}\nAssignee: ${params.assignee ?? "lobs"}\n${params.context ? `Context: ${params.context}` : ""}\n\n${params.description}`,
+        content: `Action type: ${params.action_type}\nPriority: ${params.priority}\nAssignee: ${params.assignee ?? getBotId()}\n${params.context ? `Context: ${params.context}` : ""}\n\n${params.description}`,
         type: "voice_note",
         requiresAction: true,
         actionStatus: "pending",
