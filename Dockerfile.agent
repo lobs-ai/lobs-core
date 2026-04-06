@@ -1,0 +1,32 @@
+FROM node:20-slim
+
+# Install tools that agents need for exec/grep/find
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ripgrep \
+    fd-find \
+    curl \
+    ca-certificates \
+  && ln -s /usr/bin/fdfind /usr/bin/fd \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install dependencies
+COPY package.json package-lock.json ./
+RUN npm ci --production=false
+
+# Copy source and build
+COPY tsconfig.json eslint.config.js ./
+COPY src/ src/
+RUN npm run build
+
+# Agent mode
+ENV LOBS_MODE=agent
+ENV NODE_ENV=production
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD curl -f http://localhost:${LOBS_PORT:-9421}/health || exit 1
+
+CMD ["node", "dist/main.js"]

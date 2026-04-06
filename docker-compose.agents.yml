@@ -1,0 +1,68 @@
+# docker-compose.agents.yml — Run standalone agents (Briggs, Sam, Lena)
+#
+# Each agent runs lobs-core in agent mode (LOBS_MODE=agent) with its own
+# config directory, Discord bot token, and database.
+#
+# Usage:
+#   docker compose -f docker-compose.agents.yml up -d
+#   docker compose -f docker-compose.agents.yml logs -f briggs
+#   docker compose -f docker-compose.agents.yml down
+#
+# Prerequisites:
+#   - Create Discord bot applications and get tokens
+#   - Put tokens in ~/.lobs-agents/{name}/config/secrets/discord-token.json
+#   - Or set BRIGGS_DISCORD_TOKEN etc. in .env.agents
+
+x-agent-base: &agent-base
+  build:
+    context: .
+    dockerfile: Dockerfile.agent
+  restart: unless-stopped
+  environment: &agent-env
+    LOBS_MODE: agent
+    OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+
+services:
+  briggs:
+    <<: *agent-base
+    container_name: lobs-agent-briggs
+    environment:
+      <<: *agent-env
+      AGENT_NAME: briggs
+      LOBS_ROOT: /data
+      LOBS_PORT: "9421"
+      DISCORD_BOT_TOKEN: ${BRIGGS_DISCORD_TOKEN:-}
+    ports:
+      - "9431:9421"
+    volumes:
+      - ${HOME}/.lobs-agents/briggs:/data
+
+  sam:
+    <<: *agent-base
+    container_name: lobs-agent-sam
+    environment:
+      <<: *agent-env
+      AGENT_NAME: sam
+      LOBS_ROOT: /data
+      LOBS_PORT: "9421"
+      DISCORD_BOT_TOKEN: ${SAM_DISCORD_TOKEN:-}
+    ports:
+      - "9432:9421"
+    volumes:
+      - ${HOME}/.lobs-agents/sam:/data
+
+  lena:
+    <<: *agent-base
+    container_name: lobs-agent-lena
+    environment:
+      <<: *agent-env
+      AGENT_NAME: lena
+      LOBS_ROOT: /data
+      LOBS_PORT: "9421"
+      DISCORD_BOT_TOKEN: ${LENA_DISCORD_TOKEN:-}
+    ports:
+      - "9433:9421"
+    volumes:
+      - ${HOME}/.lobs-agents/lena:/data
