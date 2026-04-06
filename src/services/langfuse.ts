@@ -19,6 +19,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { log } from "../util/logger.js";
+import { getLobsRoot } from "../config/lobs.js";
 import { getModelCost } from "../config/models.js";
 
 // ---------------------------------------------------------------------------
@@ -76,7 +77,7 @@ let _envLoaded = false;
 function loadEnvOnce(): void {
   if (_envLoaded) return;
   _envLoaded = true;
-  const envPath = `${process.env.HOME}/.lobs/.env`;
+  const envPath = `${getLobsRoot()}/.env`;
   try {
     const lines = readFileSync(envPath, "utf8").split("\n");
     for (const line of lines) {

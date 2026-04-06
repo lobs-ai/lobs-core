@@ -17,6 +17,7 @@ import { resolve } from "node:path";
 import { getRawDb } from "../db/connection.js";
 import type { PawDB } from "../db/connection.js";
 import { log } from "../util/logger.js";
+import { getLobsRoot } from "../config/lobs.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -70,8 +71,7 @@ export const HEALTH_THRESHOLDS = {
  * Returns WARN if ≥3 restarts in 10 min, CRITICAL if ≥5 or <2 min uptime
  */
 export function probeRestartFrequency(): HealthProbeResult {
-  const HOME = process.env.HOME ?? "";
-  const historyFile = resolve(HOME, ".lobs", "restart-history.json");
+  const historyFile = resolve(getLobsRoot(), "restart-history.json");
 
   let timestamps: number[] = [];
   if (existsSync(historyFile)) {
@@ -209,7 +209,6 @@ export function probeSessionStaleness(db: PawDB): HealthProbeResult {
       started_at: string;
     }>;
 
-    const HOME = process.env.HOME ?? "";
     const now = Date.now();
     const graceMs = HEALTH_THRESHOLDS.sessionMtimeGraceMs;
     const stalledSessions = [];
@@ -217,8 +216,7 @@ export function probeSessionStaleness(db: PawDB): HealthProbeResult {
     for (const run of openRuns) {
       try {
         const sessionPath = resolve(
-          HOME,
-          ".lobs",
+          getLobsRoot(),
           "agents",
           run.agent_type,
           "sessions",

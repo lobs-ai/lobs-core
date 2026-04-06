@@ -14,6 +14,7 @@
 import { statSync } from "node:fs";
 import { log } from "../util/logger.js";
 import { getRawDb } from "../db/connection.js";
+import { getLobsRoot } from "../config/lobs.js";
 
 interface MaintenanceResult {
   pruned: Record<string, number>;
@@ -103,7 +104,7 @@ export async function runDbMaintenance(): Promise<MaintenanceResult> {
 
 function getDbSizeBytes(): number {
   try {
-    const dbPath = process.env.LOBS_DB_PATH ?? `${process.env.HOME}/.lobs/lobs.db`;
+    const dbPath = process.env.LOBS_DB_PATH ?? `${getLobsRoot()}/lobs.db`;
     return statSync(dbPath).size;
   } catch {
     return 0;

@@ -21,11 +21,12 @@ import {
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { log } from "../util/logger.js";
+import { getLobsRoot } from "../config/lobs.js";
 
 const HOME = process.env.HOME ?? "";
-const DAILY_MEMORY_DIR = join(HOME, ".lobs/agents/main/context/memory");
+const DAILY_MEMORY_DIR = join(getLobsRoot(), "agents/main/context/memory");
 const PERMANENT_FILE = join(HOME, "lobs-shared-memory/learnings.md");
-const CONDENSE_STATE_FILE = join(HOME, ".lobs/config/memory-condense-state.json");
+const CONDENSE_STATE_FILE = join(getLobsRoot(), "config/memory-condense-state.json");
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

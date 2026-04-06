@@ -15,6 +15,7 @@ import { log } from "../util/logger.js";
 import { getRawDb } from "../db/connection.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { getLobsRoot } from "../config/lobs.js";
 
 export interface SchedulerConfig {
   maxConcurrentWorkers: number;
@@ -45,7 +46,7 @@ export interface DailyCostTracker {
   taskCount: number;
 }
 
-const COST_TRACKER_PATH = join(process.env.HOME ?? "", ".lobs/config/daily-cost.json");
+const COST_TRACKER_PATH = join(getLobsRoot(), "config/daily-cost.json");
 
 /**
  * Get the next batch of tasks to execute, ordered by priority score.

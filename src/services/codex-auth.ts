@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "n
 import { dirname } from "node:path";
 import os from "node:os";
 import path from "node:path";
+import { getLobsRoot } from "../config/lobs.js";
 import type { OAuthAuthInfo, OAuthPrompt } from "@mariozechner/pi-ai/oauth";
 import { loginOpenAICodex, refreshOpenAICodexToken } from "@mariozechner/pi-ai/oauth";
 
@@ -39,7 +40,7 @@ export class CodexAuthService {
   private refreshPromise: Promise<void> | null = null;
 
   constructor() {
-    this.credentialsPath = path.join(os.homedir(), ".lobs/config/secrets/codex-oauth.json");
+    this.credentialsPath = path.join(getLobsRoot(), "config/secrets/codex-oauth.json");
     this.codexCliAuthPath = path.join(os.homedir(), ".codex/auth.json");
   }
 

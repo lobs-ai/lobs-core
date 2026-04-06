@@ -10,7 +10,7 @@
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
+import { getLobsRoot } from "../config/lobs.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -121,7 +121,7 @@ const DEFAULT_LIMITS: Record<string, UsageLimits> = {
 
 // ── Storage ───────────────────────────────────────────────────────────────────
 
-const DB_PATH = join(homedir(), ".lobs", "data", "usage-tracking.json");
+const DB_PATH = join(getLobsRoot(), "data", "usage-tracking.json");
 const PRUNE_DAYS = 90;
 const MAX_RECORDS = 10_000;
 const SAVE_DEBOUNCE_MS = 5_000;

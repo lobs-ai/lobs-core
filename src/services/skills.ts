@@ -12,8 +12,8 @@
 
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
-import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { getLobsRoot } from "../config/lobs.js";
 
 export interface Skill {
   name: string;
@@ -42,7 +42,7 @@ class SkillsService {
     }
     
     // User skills
-    const userDir = join(homedir(), ".lobs", "skills");
+    const userDir = join(getLobsRoot(), "skills");
     if (existsSync(userDir)) {
       this.loadFromDir(userDir);
     }

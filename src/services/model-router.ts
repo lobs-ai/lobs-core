@@ -11,8 +11,8 @@
  */
 
 import { readFileSync, existsSync } from "fs";
-import { homedir } from "os";
 import { join } from "path";
+import { getLobsRoot } from "../config/lobs.js";
 import { log } from "../util/logger.js";
 
 // ---------------------------------------------------------------------------
@@ -642,7 +642,7 @@ interface RouterConfig {
   modelOverrides?: Record<string, Partial<Pick<ProviderModel, "quality" | "healthy">>>;
 }
 
-const CONFIG_PATH = join(homedir(), ".lobs", "config", "model-router.json");
+const CONFIG_PATH = join(getLobsRoot(), "config", "model-router.json");
 
 function loadConfig(): RouterConfig {
   if (!existsSync(CONFIG_PATH)) return {};

@@ -18,6 +18,7 @@ import { log } from "../util/logger.js";
 import { getBotName, getOwnerName } from "../config/identity.js";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { resolve, join } from "node:path";
+import { getLobsRoot } from "../config/lobs.js";
 
 const HOME = process.env.HOME ?? "";
 
@@ -316,7 +317,7 @@ async function harvestSessionTranscripts(db: ReturnType<typeof getDb>): Promise<
   const agentDirs = ["programmer", "architect", "reviewer", "researcher", "writer"];
 
   for (const agentType of agentDirs) {
-    const sessionsDir = resolve(HOME, `.lobs/agents/${agentType}/sessions`);
+    const sessionsDir = resolve(getLobsRoot(), `agents/${agentType}/sessions`);
     if (!existsSync(sessionsDir)) continue;
 
     const files = readdirSync(sessionsDir).filter(f => f.endsWith(".jsonl"));

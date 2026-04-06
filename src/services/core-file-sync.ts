@@ -18,15 +18,15 @@
  */
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { log } from "../util/logger.js";
 import { getMemoryDb, isMemoryDbReady } from "../memory/db.js";
 import { callApiModelJSON } from "../workers/base-worker.js";
+import { getLobsRoot } from "../config/lobs.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const CORE_FILES_DIR = join(homedir(), ".lobs", "agents", "main");
+const CORE_FILES_DIR = join(getLobsRoot(), "agents", "main");
 const CORE_FILES = ["MEMORY.md", "USER.md", "SOUL.md", "TOOLS.md"] as const;
 type CoreFile = (typeof CORE_FILES)[number];
 

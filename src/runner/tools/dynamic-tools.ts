@@ -10,6 +10,7 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
+import { getLobsRoot } from "../../config/lobs.js";
 import { execFile } from "node:child_process";
 import type { ToolDefinition } from "../types.js";
 
@@ -35,8 +36,7 @@ export class DynamicToolLoader {
   private registered: Map<string, DynamicToolEntry> = new Map();
 
   constructor(toolsDir?: string) {
-    const home = process.env.HOME ?? "/Users/lobs";
-    this.toolsDir = toolsDir ?? resolve(home, ".lobs/tools");
+    this.toolsDir = toolsDir ?? resolve(getLobsRoot(), "tools");
   }
 
   /**

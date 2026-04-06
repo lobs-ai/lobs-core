@@ -13,6 +13,7 @@ import { execSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
+import { getLobsRoot } from "../config/lobs.js";
 import { eq } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { meetings } from "../db/schema.js";
@@ -83,7 +84,7 @@ export interface LiveSession {
 // ── Meeting Context Loader ───────────────────────────────────────────────
 
 const HOME = homedir();
-const CONTEXT_DIR = join(HOME, ".lobs", "agents", "main", "context");
+const CONTEXT_DIR = join(getLobsRoot(), "agents", "main", "context");
 const SHARED_MEMORY_DIR = join(HOME, "lobs-shared-memory");
 
 /**

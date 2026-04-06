@@ -14,6 +14,7 @@
  */
 
 import { execSync } from "child_process";
+import { getLobsRoot } from "../config/lobs.js";
 
 const PAW_REPOS = [
   "paw-hub",
@@ -128,7 +129,7 @@ function getRecentMemory(): string {
   const sections: string[] = [];
   for (const date of [today, yesterday]) {
     const content = run(
-      `cat "${process.env.HOME}/.lobs/agents/main/context/memory/${date}.md" 2>/dev/null | tail -50`,
+      `cat "${getLobsRoot()}/agents/main/context/memory/${date}.md" 2>/dev/null | tail -50`,
     );
     if (content) {
       sections.push(`### Memory ${date}\n${content}`);
@@ -140,7 +141,7 @@ function getRecentMemory(): string {
 }
 
 function getTaskState(): string {
-  const dbPath = `${process.env.HOME}/.lobs/lobs.db`;
+  const dbPath = `${getLobsRoot()}/lobs.db`;
   const tasks = run(
     `sqlite3 "${dbPath}" "SELECT id, title, status, priority FROM tasks WHERE status NOT IN ('done', 'cancelled') ORDER BY priority DESC LIMIT 15;" 2>/dev/null`,
   );

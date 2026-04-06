@@ -11,6 +11,7 @@
 
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { getLobsRoot } from "../config/lobs.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -31,7 +32,7 @@ export interface AgentFiles {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const WORKSPACE_BASE = join(process.env.HOME ?? "~", ".lobs", "agents");
+const WORKSPACE_BASE = join(getLobsRoot(), "agents");
 
 // ── Default Templates ────────────────────────────────────────────────────────
 

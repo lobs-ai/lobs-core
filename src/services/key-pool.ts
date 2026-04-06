@@ -10,11 +10,11 @@
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
 import type { KeyEntry, KeyConfig } from "../config/keys.js";
 import { loadKeyConfig } from "../config/keys.js";
+import { getLobsRoot } from "../config/lobs.js";
 
-const KEY_HEALTH_STATE_PATH = join(homedir(), ".lobs", "key-health-state.json");
+const KEY_HEALTH_STATE_PATH = join(getLobsRoot(), "key-health-state.json");
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

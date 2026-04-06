@@ -11,12 +11,12 @@ import { google } from "googleapis";
 import { getDb } from "../db/connection.js";
 import { scheduledEvents } from "../db/schema.js";
 import { log } from "../util/logger.js";
+import { getLobsRoot } from "../config/lobs.js";
 
-const HOME = process.env.HOME ?? "";
 const CREDENTIALS_FILE = process.env.GOOGLE_CALENDAR_CREDENTIALS_FILE
-  ?? join(HOME, ".lobs/credentials/client_secret.json");
+  ?? join(getLobsRoot(), "credentials/client_secret.json");
 const TOKEN_FILE = process.env.GOOGLE_CALENDAR_TOKEN_FILE
-  ?? join(HOME, ".lobs/credentials/google_token.json");
+  ?? join(getLobsRoot(), "credentials/google_token.json");
 
 const RAFE_CALENDAR_ID = process.env.RAFE_CALENDAR_ID ?? "primary";
 let LOBS_CALENDAR_ID: string | null = process.env.LOBS_CALENDAR_ID ?? null;
