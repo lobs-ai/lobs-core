@@ -14,14 +14,13 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
-import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { getModelConfig, saveModelConfig, resetModelConfig, setTier, DEFAULT_CONFIG } from "../config/models.js";
+import { getLobsRoot } from "../config/lobs.js";
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
 
-const HOME = homedir();
-const CONFIG_DIR = resolve(HOME, ".lobs/config");
+const CONFIG_DIR = resolve(getLobsRoot(), "config");
 const SECRETS_DIR = resolve(CONFIG_DIR, "secrets");
 const KEYS_PATH = resolve(SECRETS_DIR, "keys.json");
 const MODELS_PATH = resolve(CONFIG_DIR, "models.json");

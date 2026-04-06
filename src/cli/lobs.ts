@@ -48,6 +48,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { validateAllConfigs, printValidationResults } from "../config/validator.js";
 import { getModelConfig, getModelForTier } from "../config/models.js";
 import { loadKeyConfig, getEnvKeyForProvider } from "../config/keys.js";
+import { getLobsRoot } from "../config/lobs.js";
 import { runLmStudioDiagnostic, formatDiagnosticReport } from "../diagnostics/lmstudio.js";
 import { cmdCodexAuth } from "./codex-auth.js";
 

@@ -6,7 +6,7 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-
+import { getLobsRoot } from "./lobs.js";
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface KeyEntry {

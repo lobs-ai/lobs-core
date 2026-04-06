@@ -180,7 +180,7 @@ export function getModelConfig(): ModelConfig {
  */
 export function saveModelConfig(config?: ModelConfig): void {
   const toSave = config ?? _config ?? DEFAULT_CONFIG;
-  const dir = resolve(HOME, ".lobs/config");
+  const dir = resolve(getLobsRoot(), "config");
   const { mkdirSync } = require("node:fs");
   mkdirSync(dir, { recursive: true });
   writeFileSync(CONFIG_PATH, JSON.stringify(toSave, null, 2));

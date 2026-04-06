@@ -41,7 +41,7 @@ import { runDailyReflection } from "./memory/daily-reflection.js";
 import { imagineService } from "./services/imagine.js";
 import { countActiveWorkers, getActiveWorkers } from "./orchestrator/worker-manager.js";
 import { runStartupTelemetry, startDiskSpaceMonitor } from "./services/restart-telemetry.js";
-import { getGatewayConfig } from "./config/lobs.js";
+import { getGatewayConfig, getLobsRoot } from "./config/lobs.js";
 import { WorkerRegistry } from "./workers/index.js";
 import { MemoryProcessorWorker } from "./workers/memory-processor.js";
 import { ResearchProcessorWorker } from "./workers/research-processor.js";
@@ -311,7 +311,7 @@ async function main() {
       watchDirs: [
         { path: `${HOME}/lobs-shared-memory`, collection: "workspace", recursive: true },
         { path: `${HOME}/lobs/lobs-core/docs`, collection: "lobs-core", recursive: true },
-        { path: `${HOME}/.lobs/agents/main/context`, collection: "sessions", recursive: true },
+        { path: `${getLobsRoot()}/agents/main/context`, collection: "sessions", recursive: true },
         { path: `${HOME}/paw/bot-shared`, collection: "paw-shared", recursive: true },
       ],
       chunkStrategy: "heading",
