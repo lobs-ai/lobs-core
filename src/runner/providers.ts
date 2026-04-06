@@ -887,7 +887,12 @@ class OpenCodeGoClient implements LLMClient {
         .join("\n\n");
     }
 
-    const content = response.content as LLMResponse["content"];
+    // Strip thinking blocks from content before returning — they must not be
+    // included in message history unless thinking is also enabled on the next
+    // request with the same budget. Thinking text is already captured above.
+    const content = (response.content as any[]).filter(
+      (block: any) => block.type !== "thinking"
+    ) as LLMResponse["content"];
 
     return {
       content,

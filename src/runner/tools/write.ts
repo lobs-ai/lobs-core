@@ -5,11 +5,12 @@
  * Automatically creates parent directories.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { writeFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { ToolDefinition } from "../types.js";
 import { resolveToCwd } from "./path-utils.js";
+import { hasRecentlyReadFile, updateReadSnapshot } from "./read.js";
 
 // ── Tool Definition ──────────────────────────────────────────────────────────
 
@@ -61,6 +62,12 @@ export async function writeTool(
   }
 
   await writeFile(resolved, content, "utf-8");
+
+  // Register the file so edit won't require a re-read
+  if (!hasRecentlyReadFile(resolved)) {
+    const stat = statSync(resolved);
+    updateReadSnapshot(resolved, content, stat.mtimeMs, stat.size);
+  }
 
   const bytes = Buffer.byteLength(content);
   return `Write applied: ${filePath}\nBytes written: ${bytes}`;

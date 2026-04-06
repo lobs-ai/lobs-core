@@ -60,8 +60,8 @@ type ReadSnapshot = {
   contentHash: string;
 };
 
-const recentReadCache = new Map<string, ReadSnapshot>();
-const recentlyReadFiles = new Set<string>();
+export const recentReadCache = new Map<string, ReadSnapshot>();
+export const recentlyReadFiles = new Set<string>();
 
 function hashContent(content: string): string {
   let hash = 0;
