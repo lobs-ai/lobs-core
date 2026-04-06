@@ -14,7 +14,7 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
+import { getLobsRoot } from "../config/lobs.js";
 import { getModelRouter } from "../services/model-router.js";
 import { getUsageTracker } from "../services/provider-usage-tracker.js";
 import type { TaskCategory } from "../services/model-router.js";
@@ -63,7 +63,7 @@ function pct(used: number, limit: number): string {
 
 // ── Config path ───────────────────────────────────────────────────────────────
 
-const CONFIG_PATH = join(homedir(), ".lobs", "config", "model-router.json");
+const CONFIG_PATH = join(getLobsRoot(), "config", "model-router.json");
 
 interface RouterConfig {
   policy?: unknown;
