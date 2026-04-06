@@ -9,6 +9,7 @@ import { eq } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { meetings, meetingActionItems, tasks, inboxItems } from "../db/schema.js";
 import { log } from "../util/logger.js";
+import { getBotName, getBotId, getOwnerName, getOwnerId } from "../config/identity.js";
 import { classifyApprovalTier } from "../util/approval-tier.js";
 import { getModelForTier } from "../config/models.js";
 import { createResilientClient, parseModelString } from "../runner/providers.js";
@@ -20,7 +21,7 @@ async function llmAnalyze(prompt: string): Promise<string> {
 
   const response = await client.createMessage({
     model: parseModelString(model).modelId,
-    system: `You are Lobs, Rafe's personal AI agent. Rafe is a grad student (MS CSE) at the University of Michigan, GSI for EECS 281/291, varsity Rocket League player, and interning at Microsoft this summer. You and Rafe are building an AI agent platform together (lobs-core, Nexus dashboard, PAW hosting platform with Marcus). You know Rafe well — he values directness, correctness, and momentum over perfection. When analyzing meetings, write as yourself (Lobs) with full context of who everyone is and what you're all working on. Return ONLY valid JSON — no markdown, no code fences, no extra text.`,
+    system: `You are ${getBotName()}, ${getOwnerName()}'s personal AI agent. ${getOwnerName()} is a grad student (MS CSE) at the University of Michigan, GSI for EECS 281/291, varsity Rocket League player, and interning at Microsoft this summer. You and ${getOwnerName()} are building an AI agent platform together (lobs-core, Nexus dashboard, PAW hosting platform with Marcus). You know ${getOwnerName()} well — he values directness, correctness, and momentum over perfection. When analyzing meetings, write as yourself (${getBotName()}) with full context of who everyone is and what you're all working on. Return ONLY valid JSON — no markdown, no code fences, no extra text.`,
     messages: [{ role: "user", content: prompt }],
     tools: [],
     maxTokens: 4096,
@@ -36,7 +37,7 @@ async function llmAnalyze(prompt: string): Promise<string> {
   return text;
 }
 
-const ANALYSIS_PROMPT = `Analyze this meeting transcript. You're Lobs — you know the people, the projects, and the context. Deeply understand what was discussed and produce a thorough analysis — not just extract what was explicitly said, but think about what should happen next based on everything you know.
+const ANALYSIS_PROMPT = `Analyze this meeting transcript. You're ${getBotName()} — you know the people, the projects, and the context. Deeply understand what was discussed and produce a thorough analysis — not just extract what was explicitly said, but think about what should happen next based on everything you know.
 
 Return ONLY valid JSON (no markdown, no code fences) with this exact structure:
 
@@ -65,11 +66,12 @@ Rules for action items:
 - For feature ideas discussed positively: create an action item to implement or spec each one
 - For decisions made: create action items for any follow-up work the decision requires
 - Be specific: "Fix the drag-to-reorder bug in assessments" not "Fix bugs"
-- Use lowercase first names for assignee: "rafe", "lobs", etc.
-- Default assignee is "lobs" — most action items from meetings are work for the AI agent system
-- Only assign to "rafe" if the item EXPLICITLY requires a human decision or human-only action (e.g., "Rafe will email the professor", "Rafe needs to decide on pricing")
-- Implementation tasks, design tasks, research tasks, feature specs, bug fixes, documentation — ALL go to "lobs" even if Rafe discussed them
-- If unclear who should do it, assign to "lobs" (not null)
+- Use lowercase first names for assignee: "${getOwnerId()}", "${getBotId()}", etc.
+- Default assignee is "${getBotId()}" — most action items from meetings are work for the AI agent system
+- Only assign to "${getOwnerId()}" if the item EXPLICITLY requires a human decision or human-only action (e.g., "${getOwnerName()} will email the professor", "${getOwnerName()} needs to decide on pricing")
+- Implementation tasks, design tasks, research tasks, feature specs, bug fixes, documentation — ALL go to "${getBotId()}" even if ${getOwnerName()} discussed them
+- If unclear who should do it, assign to "${getBotId()}" (not null)
+
 - Prioritize: blocking bugs = high, features discussed enthusiastically = medium, nice-to-haves = low
 - If the meeting is just a test with no real content, return empty arrays
 - Do NOT duplicate items — if the same issue is mentioned multiple times, consolidate into one item
@@ -122,8 +124,8 @@ export class MeetingAnalysisService {
         let taskId: string | null = null;
 
         // Only create PAW tasks for lobs (or unassigned) action items.
-        // Other people (rafe, etc.) don't use Nexus so they use meeting notes directly.
-        const isLobsItem = !item.assignee || item.assignee === "lobs";
+        // Other people don't use Nexus so they use meeting notes directly.
+        const isLobsItem = !item.assignee || item.assignee === getBotId();
         if (isLobsItem) {
           taskId = randomUUID();
           const agent = /redesign|architect|evaluat/i.test(item.description) ? "architect"
@@ -140,12 +142,12 @@ export class MeetingAnalysisService {
             id: taskId,
             title: item.description,
             status,
-            owner: item.assignee ?? "lobs",
+            owner: item.assignee ?? getBotId(),
             agent,
             notes,
           }).run();
 
-          // Tier C → inbox item for Rafe to review in Nexus
+          // Tier C → inbox item for ${getOwnerName()} to review in Nexus
           if (tier === "C") {
             db.insert(inboxItems).values({
               id: randomUUID(),
@@ -258,7 +260,7 @@ export class MeetingAnalysisService {
     const itemId = randomUUID();
     let taskId: string | null = null;
 
-    const isLobsItem = !action.assignee || action.assignee === "lobs";
+    const isLobsItem = !action.assignee || action.assignee === getBotId();
 
     if (isLobsItem) {
       taskId = randomUUID();
@@ -296,13 +298,13 @@ export class MeetingAnalysisService {
           id: taskId,
           title: action.description,
           status,
-          owner: action.assignee || "lobs",
+          owner: action.assignee || getBotId(),
           agent,
           notes,
         })
         .run();
 
-      // Tier C → inbox item for Rafe to review
+      // Tier C → inbox item for ${getOwnerName()} to review
       if (tier === "C") {
         db.insert(inboxItems)
           .values({

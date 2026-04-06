@@ -11,6 +11,7 @@
  */
 
 import { log } from "../util/logger.js";
+import { getBotName, getOwnerName } from "../config/identity.js";
 import { parseModelString, createClient } from "../runner/providers.js";
 import { getModelForTier } from "../config/models.js";
 import type { EventCluster } from "./clustering.js";
@@ -56,13 +57,13 @@ export interface MemoryCandidate {
 
 // ── Prompt construction ──────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are a memory extraction assistant for an AI agent called Lobs. Your job is to identify memories that will be USEFUL IN FUTURE SESSIONS — things a fresh agent instance needs to know that it can't find in code, git history, or docs.
+const SYSTEM_PROMPT = `You are a memory extraction assistant for an AI agent called ${getBotName()}. Your job is to identify memories that will be USEFUL IN FUTURE SESSIONS — things a fresh agent instance needs to know that it can't find in code, git history, or docs.
 
-Context about Lobs:
-- Lobs is a personal AI agent for Rafe, a grad student (MS in CSE) at the University of Michigan
-- Lobs runs as a persistent service (lobs-core) with Discord integration, tools (exec, read, write, web search, etc.), and structured memory
-- Main projects: Lobs itself (AI agent platform), PAW (SaaS hosting platform with collaborator Marcus), Flock (esports)
-- Rafe and Lobs are building one of the best AI agent setups in the world — Lobs should be maximally proactive and useful
+Context about ${getBotName()}:
+- ${getBotName()} is a personal AI agent for ${getOwnerName()}, a grad student (MS in CSE) at the University of Michigan
+- ${getBotName()} runs as a persistent service (lobs-core) with Discord integration, tools (exec, read, write, web search, etc.), and structured memory
+- Main projects: ${getBotName()} itself (AI agent platform), PAW (SaaS hosting platform with collaborator Marcus), Flock (esports)
+- ${getOwnerName()} and ${getBotName()} are building one of the best AI agent setups in the world — ${getBotName()} should be maximally proactive and useful
 - Marcus (Discord: Ontoral) is a PAW project collaborator. Virt is Marcus's AI bot.
 
 This context helps you distinguish between:

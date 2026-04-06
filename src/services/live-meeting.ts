@@ -17,6 +17,7 @@ import { eq } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { meetings } from "../db/schema.js";
 import { log } from "../util/logger.js";
+import { getBotName, getOwnerName } from "../config/identity.js";
 import { getModelForTier } from "../config/models.js";
 import { createResilientClient, parseModelString } from "../runner/providers.js";
 import { MeetingAnalysisService } from "./meeting-analysis.js";
@@ -185,15 +186,15 @@ async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
  * Build the meeting system prompt, injecting session context when available.
  *
  * Uses the same identity context as Nexus/Discord sessions (SOUL.md, USER.md,
- * MEMORY.md, TOOLS.md) so the meeting analysis LLM is the same Lobs — same
- * personality, same knowledge of Rafe, same awareness of projects and people.
+ * MEMORY.md, TOOLS.md) so the meeting analysis LLM is the same bot — same
+ * personality, same knowledge, same awareness of projects and people.
  */
 function buildMeetingSystemPrompt(sessionContext?: string): string {
-  const meetingRole = `You are Lobs, sitting in on a live meeting with Rafe. You're the same Lobs he talks to on Nexus and Discord — same personality, same knowledge, same relationship. You're analyzing the meeting transcript in real-time to surface useful insights.
+  const meetingRole = `You are ${getBotName()}, sitting in on a live meeting with ${getOwnerName()}. You're the same ${getBotName()} he talks to on Nexus and Discord — same personality, same knowledge, same relationship. You're analyzing the meeting transcript in real-time to surface useful insights.
 
 Session type: live meeting analysis
 
-Your job: Extract structured insights from the transcript as it grows. You're not summarizing for a stranger — you're noting things that matter to Rafe based on what you know about his projects, schedule, and priorities.
+Your job: Extract structured insights from the transcript as it grows. You're not summarizing for a stranger — you're noting things that matter to ${getOwnerName()} based on what you know about his projects, schedule, and priorities.
 
 Output format: Return ONLY valid JSON — no markdown, no code fences, no extra text.`;
 
@@ -252,7 +253,7 @@ function buildAnalysisPrompt(
 - Participants: ${session.participants.length ? JSON.stringify(session.participants) : "unknown"}
 - Meeting type: ${session.meetingType}`;
 
-  return `You are Lobs — Rafe's AI agent, an ACTIVE PARTICIPANT in this meeting, not a passive summarizer. Your job is to identify what you should DO right now to be genuinely useful.
+  return `You are ${getBotName()} — ${getOwnerName()}'s AI agent, an ACTIVE PARTICIPANT in this meeting, not a passive summarizer. Your job is to identify what you should DO right now to be genuinely useful.
 
 Classify the transcript content into intents:
 
@@ -393,13 +394,13 @@ async function executeResearch(sessionId: string, researchId: string, query: str
     }
 
     // Ask LLM to synthesize a useful response — include session context if available
-    const researchRole = `You are Lobs, doing background research during a live meeting with Rafe. Be direct and concrete — reference actual names, line numbers, patterns. Skip preamble. Just deliver the info. 2-4 sentences max.`;
+    const researchRole = `You are ${getBotName()}, doing background research during a live meeting with ${getOwnerName()}. Be direct and concrete — reference actual names, line numbers, patterns. Skip preamble. Just deliver the info. 2-4 sentences max.`;
     const researchSystem = session.sessionContext
       ? `${session.sessionContext}\n\n${researchRole}`
       : researchRole;
 
     const researchPrompt = context
-      ? `Research task from a live meeting with Rafe:
+      ? `Research task from a live meeting with ${getOwnerName()}:
 
 "${query}"
 
@@ -408,7 +409,7 @@ Here's what was found:
 ${context}
 
 Provide a concise, useful summary. Be specific — reference actual function names, line numbers, patterns you see.`
-      : `Research task from a live meeting with Rafe:
+      : `Research task from a live meeting with ${getOwnerName()}:
 
 "${query}"
 

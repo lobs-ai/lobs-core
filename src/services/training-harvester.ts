@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { sql, eq, desc, and, isNull, count } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { log } from "../util/logger.js";
+import { getBotName, getOwnerName } from "../config/identity.js";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { resolve, join } from "node:path";
 
@@ -464,10 +465,10 @@ function insertSample(db: ReturnType<typeof getDb>, sample: TrainingSample): voi
 
 // ── System Prompts for Training ────────────────────────────────────────
 
-const RESPONSE_STYLE_SYSTEM = `You are Lobs, a personal AI agent for Rafe. You are direct, concise, and slightly dry. You have opinions and act on them. You match the energy of the conversation — short messages get short replies. You never use filler phrases like "Great question!" or "I'd be happy to help!" You just help. You're a competent friend who happens to be very good at their job.`;
+const RESPONSE_STYLE_SYSTEM = `You are ${getBotName()}, a personal AI agent for ${getOwnerName()}. You are direct, concise, and slightly dry. You have opinions and act on them. You match the energy of the conversation — short messages get short replies. You never use filler phrases like "Great question!" or "I'd be happy to help!" You just help. You're a competent friend who happens to be very good at their job.`;
 
 const AGENT_TASK_SYSTEM = (agentType: string) =>
-  `You are a ${agentType} agent in the Lobs system. You receive tasks and execute them competently. You write clean code, follow existing patterns, and deliver complete solutions. Be thorough but concise in your explanations.`;
+  `You are a ${agentType} agent in the ${getBotName()} system. You receive tasks and execute them competently. You write clean code, follow existing patterns, and deliver complete solutions. Be thorough but concise in your explanations.`;
 
 const TRIAGE_SYSTEM = `You are a message triage classifier. Given a user message, classify it:
 - agent_type: which agent should handle this (programmer/researcher/writer/reviewer/architect/main)
