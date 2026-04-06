@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { google } from "googleapis";
+import { getBotName } from "../config/identity.js";
 import { getDb } from "../db/connection.js";
 import { scheduledEvents } from "../db/schema.js";
 import { log } from "../util/logger.js";
@@ -84,18 +85,19 @@ export class GoogleCalendarService {
     const calendars = res.data.items ?? [];
     log().info(`[GCAL] Available calendars: ${calendars.map((c: any) => c.summary + " (" + c.id + ")").join(", ")}`);
 
-    // Match a dedicated Lobs calendar by summary — skip the primary/email calendar
-    const lobs = calendars.find((c: any) =>
-      c.summary?.toLowerCase().includes("lobs") &&
+    // Match a dedicated bot calendar by summary — skip the primary/email calendar
+    const botName = getBotName().toLowerCase();
+    const botCal = calendars.find((c: any) =>
+      c.summary?.toLowerCase().includes(botName) &&
       c.id?.includes("@group.calendar.google.com")
     );
-    if (lobs?.id) {
-      LOBS_CALENDAR_ID = lobs.id;
-      log().info(`[GCAL] Using Lobs calendar: ${lobs.summary} (${lobs.id})`);
-      return lobs.id;
+    if (botCal?.id) {
+      LOBS_CALENDAR_ID = botCal.id;
+      log().info(`[GCAL] Using ${getBotName()} calendar: ${botCal.summary} (${botCal.id})`);
+      return botCal.id;
     }
 
-    log().warn("[GCAL] Could not find a Lobs calendar; falling back to primary for writes");
+    log().warn(`[GCAL] Could not find a ${getBotName()} calendar; falling back to primary for writes`);
     LOBS_CALENDAR_ID = "primary";
     return "primary";
   }
