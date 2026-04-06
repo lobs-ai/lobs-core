@@ -17,9 +17,15 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-// ── Temp directory setup (before mocks and imports) ──────────────────────────
+// ── Temp directory setup (vi.hoisted so FAKE_ROOT is available in mock factories) ─
 
-const FAKE_ROOT = mkdtempSync(join(tmpdir(), "lobs-ws-test-"));
+const { FAKE_ROOT } = vi.hoisted(() => {
+  // These imports are safe inside vi.hoisted — it runs before mock factories
+  const { mkdtempSync } = require("node:fs");
+  const { join } = require("node:path");
+  const { tmpdir } = require("node:os");
+  return { FAKE_ROOT: mkdtempSync(join(tmpdir(), "lobs-ws-test-")) as string };
+});
 
 function agentDir(type: string) {
   return join(FAKE_ROOT, type);
