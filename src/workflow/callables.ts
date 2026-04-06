@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { getOwnerName } from "../config/identity.js";
 import { eq, and, lte, gte, desc, isNull, inArray } from "drizzle-orm";
 import { getDb, getRawDb } from "../db/connection.js";
 import {
@@ -192,7 +193,7 @@ function reflectionRunSweep(args: Record<string, unknown>, _ctx: CallableContext
     .all();
 
   // Build reflection summaries for triage (no longer persist raw reflection blobs to inbox —
-  // they were flooding Rafe's inbox with low-value "Reflection result — X" notices)
+  // they were flooding the owner's inbox with low-value "Reflection result — X" notices)
   const reflectionSummaries = reflections.map(r => {
     const result = r.result as Record<string, unknown> | null;
 
@@ -222,18 +223,18 @@ You have ${reflections.length} agent reflections to process. Each agent spent re
 
 ## Your Job
 For EACH reflection that contains substantive ideas:
-1. Create an **inbox item** (suggestion) summarizing that agent's key insight(s) so Rafe can review/approve/reject them.
+1. Create an **inbox item** (suggestion) summarizing that agent's key insight(s) so ${getOwnerName()} can review/approve/reject them.
 2. If a reflection contains **obvious small fixes** (typos, minor config, doc updates) that don't need approval, create tasks directly.
 
 ## Classification
-- **Needs Rafe's review** (most things): Strategic decisions, new features, architecture changes, process changes, anything non-trivial → **inbox item** (suggestion, requires_action=true)
+- **Needs ${getOwnerName()}'s review** (most things): Strategic decisions, new features, architecture changes, process changes, anything non-trivial → **inbox item** (suggestion, requires_action=true)
 - **Auto-approve** (only obvious small wins): Config fixes, doc typos, minor cleanup that can't break anything → **task** directly
 - **Skip**: Pure noise, vague platitudes with no concrete action, exact duplicates of existing tasks
 
 ## Rules
 - Create at least one inbox item per agent that produced useful output — don't over-compress.
 - Rewrite into clear, actionable titles — not verbatim reflection text.
-- Include the agent's reasoning/context in the inbox item content so Rafe has enough info to decide.
+- Include the agent's reasoning/context in the inbox item content so ${getOwnerName()} has enough info to decide.
 - Merge only when two agents said the exact same thing.
 - Check existing tasks to avoid duplicates.
 
@@ -469,7 +470,7 @@ function reflectionSpawnAll(args: Record<string, unknown>, _ctx: CallableContext
  * Wake the main agent with a strategic reflection prompt.
  * Instead of spawning 6 subagent workers to produce JSON reports,
  * this fires a system event into the main agent which has full tools
- * and can investigate, create tasks, and route ideas to Rafe's inbox.
+ * and can investigate, create tasks, and route ideas to the owner's inbox.
  */
 function reflectionWakeMain(_args: Record<string, unknown>, _ctx: CallableContext): Record<string, unknown> {
   const mainAgent = (globalThis as any).__lobsMainAgent;
@@ -687,7 +688,7 @@ function inboxProcessThreads(_args: Record<string, unknown>, _ctx: CallableConte
   const prompt = [
     "[Inbox Processing] " + toProcess.length + " inbox item(s) need processing.",
     "",
-    "These items were reviewed by Rafe. For approved items, process each one.",
+    `These items were reviewed by ${getOwnerName()}. For approved items, process each one.`,
     "For each item, output a structured JSON with the actions to take:",
     "",
     "```json",

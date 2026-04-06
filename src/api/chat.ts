@@ -12,6 +12,7 @@ import { getToolDefinitions } from "../runner/tools/index.js";
 import { getToolsForSession } from "../runner/tools/tool-sets.js";
 import { onAssistantMessage, onUserMessage, forceSummarize } from "../services/chat-summarizer.js";
 import { getDefaultChatModel, getChannelModelOverride, getModelCatalog, normalizeModelSelection, setChannelModelOverride } from "../services/model-catalog.js";
+import { getOwnerName } from "../config/identity.js";
 
 const MEDIA_DIR = join(process.env.HOME || "/tmp", ".lobs/media");
 
@@ -401,7 +402,7 @@ export async function handleChatRequest(
         id: messageId,
         content: content || "(image)",
         authorId: "nexus-user",
-        authorName: "Rafe",
+        authorName: getOwnerName(),
         channelId,
         timestamp: Date.now(),
         chatType: "nexus" as const,
@@ -842,7 +843,7 @@ export async function handleMainAgentChat(
       id: randomUUID(),
       content,
       authorId: "nexus-user",
-      authorName: "Rafe",
+      authorName: getOwnerName(),
       channelId,
       timestamp: Date.now(),
     });

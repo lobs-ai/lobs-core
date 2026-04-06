@@ -20,6 +20,6 @@ export function classifyApprovalTier(agent: string, notes: string): "A" | "B" | 
   // Tier C: UI, features, architecture, design, new systems
   if (/feature|ui|architecture|design|new\s+endpoint|new\s+system|new\s+service/i.test(lower)) return "C";
 
-  // Default: Tier B (Lobs can handle) — only truly novel/risky things should reach Rafe
+  // Default: Tier B (bot can handle) — only truly novel/risky things should reach the owner
   return "B";
 }

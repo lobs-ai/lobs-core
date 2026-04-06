@@ -17,6 +17,7 @@ import { shouldTriggerReview, type ReviewTriggerResult } from "../orchestrator/r
 import { emitWorkerRunTrace } from "../services/langfuse.js";
 import { cleanupTaskSidecar } from "./compaction.js";
 import { getGatewayConfig } from "../config/lobs.js";
+import { getBotId } from "../config/identity.js";
 
 const SINK_SESSION_KEY = "agent:sink:paw-orchestrator-v2";
 
@@ -599,7 +600,7 @@ export function queueReviewerFollowup(taskId: string, triggerResult?: ReviewTrig
     id: randomUUID(),
     title: `Review: ${sourceTask.title}`,
     status: "active",
-    owner: sourceTask.owner ?? "lobs",
+    owner: sourceTask.owner ?? getBotId(),
     workState: "not_started",
     reviewState: "pending",
     projectId: sourceTask.projectId,

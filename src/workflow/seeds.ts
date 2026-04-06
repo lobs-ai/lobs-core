@@ -12,6 +12,7 @@ import { eq } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { workflowDefinitions, workflowSubscriptions } from "../db/schema.js";
 import { log } from "../util/logger.js";
+import { getBotId } from "../config/identity.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 /** Resolve CI script relative to project root (bin/ci.sh) */
@@ -354,7 +355,7 @@ const DEFAULT_WORKFLOWS = [
       },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "core", system: true },
+    metadata: { author: getBotId(), category: "core", system: true },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -458,7 +459,7 @@ const DEFAULT_WORKFLOWS = [
       },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "code" },
+    metadata: { author: getBotId(), category: "code" },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -484,7 +485,7 @@ const DEFAULT_WORKFLOWS = [
       },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "research" },
+    metadata: { author: getBotId(), category: "research" },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -533,7 +534,7 @@ const DEFAULT_WORKFLOWS = [
       { id: "done", type: "cleanup", config: { delete_session: false } },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "integration", system: true },
+    metadata: { author: getBotId(), category: "integration", system: true },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -569,7 +570,7 @@ const DEFAULT_WORKFLOWS = [
       { id: "done", type: "cleanup", config: { delete_session: false } },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "integration", system: true },
+    metadata: { author: getBotId(), category: "integration", system: true },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -605,7 +606,7 @@ const DEFAULT_WORKFLOWS = [
       { id: "done", type: "cleanup", config: { delete_session: false } },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "tracker", system: true },
+    metadata: { author: getBotId(), category: "tracker", system: true },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -658,7 +659,7 @@ const DEFAULT_WORKFLOWS = [
       { id: "done", type: "cleanup", config: { delete_session: false } },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "tracker", system: true },
+    metadata: { author: getBotId(), category: "tracker", system: true },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -697,7 +698,7 @@ const DEFAULT_WORKFLOWS = [
       { id: "done", type: "cleanup", config: { delete_session: false } },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "learning", system: true },
+    metadata: { author: getBotId(), category: "learning", system: true },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -739,7 +740,7 @@ const DEFAULT_WORKFLOWS = [
       { id: "done", type: "cleanup", config: { delete_session: false } },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "learning", system: true },
+    metadata: { author: getBotId(), category: "learning", system: true },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -775,7 +776,7 @@ const DEFAULT_WORKFLOWS = [
       { id: "done", type: "cleanup", config: { delete_session: false } },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "upkeep", system: true },
+    metadata: { author: getBotId(), category: "upkeep", system: true },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -821,7 +822,7 @@ const DEFAULT_WORKFLOWS = [
       },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "upkeep", system: true },
+    metadata: { author: getBotId(), category: "upkeep", system: true },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -845,7 +846,7 @@ const DEFAULT_WORKFLOWS = [
       { id: "done", type: "cleanup", config: { delete_session: false } },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "system", system: true },
+    metadata: { author: getBotId(), category: "system", system: true },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -897,7 +898,7 @@ const DEFAULT_WORKFLOWS = [
       { id: "done", type: "cleanup", config: { delete_session: false } },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "system", system: true },
+    metadata: { author: getBotId(), category: "system", system: true },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -939,7 +940,7 @@ const DEFAULT_WORKFLOWS = [
       { id: "done", type: "cleanup", config: { delete_session: false } },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "system", system: true },
+    metadata: { author: getBotId(), category: "system", system: true },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -961,7 +962,7 @@ const DEFAULT_WORKFLOWS = [
       { id: "done", type: "cleanup", config: { delete_session: false } },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "system", system: true },
+    metadata: { author: getBotId(), category: "system", system: true },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -983,7 +984,7 @@ const DEFAULT_WORKFLOWS = [
       { id: "done", type: "cleanup", config: { delete_session: false } },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "system", system: true },
+    metadata: { author: getBotId(), category: "system", system: true },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -1005,7 +1006,7 @@ const DEFAULT_WORKFLOWS = [
       { id: "done", type: "cleanup", config: { delete_session: false } },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "system", system: true },
+    metadata: { author: getBotId(), category: "system", system: true },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -1036,7 +1037,7 @@ const DEFAULT_WORKFLOWS = [
       { id: "done", type: "cleanup", config: { delete_session: false } },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "system", system: true },
+    metadata: { author: getBotId(), category: "system", system: true },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -1084,7 +1085,7 @@ const DEFAULT_WORKFLOWS = [
       { id: "done", type: "cleanup", config: { delete_session: false } },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "compliance", system: true },
+    metadata: { author: getBotId(), category: "compliance", system: true },
   },
 
   // ══════════════════════════════════════════════════════════════════
@@ -1106,6 +1107,6 @@ const DEFAULT_WORKFLOWS = [
       { id: "done", type: "cleanup", config: { delete_session: false } },
     ],
     edges: [],
-    metadata: { author: "lobs", category: "system", system: true },
+    metadata: { author: getBotId(), category: "system", system: true },
   },
 ];

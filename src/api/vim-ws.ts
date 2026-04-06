@@ -17,6 +17,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentStreamEvent, MainAgent } from "../services/main-agent.js";
 import type { ToolExecutionResult } from "../runner/types.js";
 import { log } from "../util/logger.js";
+import { getOwnerName } from "../config/identity.js";
 
 // ── Tool delegation config ──────────────────────────────────────
 // Tools delegated to the Neovim client (local filesystem is source of truth).
@@ -517,7 +518,7 @@ async function handleChatSend(
       id: randomUUID(),
       content,
       authorId: "vim-user",
-      authorName: "Rafe",
+      authorName: getOwnerName(),
       channelId,
       timestamp: Date.now(),
       chatType: "nexus" as const,
