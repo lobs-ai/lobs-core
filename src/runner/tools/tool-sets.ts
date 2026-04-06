@@ -41,10 +41,9 @@ const DM_TOOLS: ToolName[] = [
   ...NEXUS_TOOLS,
 ];
 
-// Discord server/guild sessions — add unified discord tool for rich interactions
+// Discord server/guild sessions — same as nexus (discord is already in NEXUS_TOOLS)
 const DISCORD_GUILD_TOOLS: ToolName[] = [
   ...NEXUS_TOOLS,
-  "discord",
 ];
 
 // Voice sessions — conversational, lightweight but capable

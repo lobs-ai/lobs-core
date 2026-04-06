@@ -249,6 +249,14 @@ export class MainAgent {
     } catch { /* already exists */ }
   }
 
+  /* ── Session Management ─────────────────────────────────────────── */
+
+  /** Delete all messages and reset session state for a channel */
+  clearChannel(channelId: string): void {
+    this.db.prepare("DELETE FROM main_agent_messages WHERE channel_id = ?").run(channelId);
+    this.db.prepare("DELETE FROM channel_sessions WHERE channel_id = ?").run(channelId);
+  }
+
   /* ── Configuration ─────────────────────────────────────────────── */
 
   setReplyHandler(handler: (channelId: string, content: string) => Promise<void>) {

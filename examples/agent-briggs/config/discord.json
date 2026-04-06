@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "guildId": "",
+  "channels": {},
+  "ownerId": "",
+  "dmAllowFrom": [],
+  "botAllowFrom": [],
+  "channelPolicies": {},
+  "guildPolicies": {}
+}

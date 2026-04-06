@@ -226,11 +226,17 @@ export function getToolDefinitions(tools: ToolName[]): ToolDefinition[] {
       return asClaudeCodeToolDefinition(definition);
     });
 
-  // Append dynamic tool definitions
+  // Append dynamic tool definitions, deduplicating by name to avoid API errors
   const loader = getDynamicToolLoader();
   const dynamicDefs = loader ? loader.getDefinitions() : [];
 
-  return [...staticDefs, ...dynamicDefs];
+  const allDefs = [...staticDefs, ...dynamicDefs];
+  const seen = new Set<string>();
+  return allDefs.filter(def => {
+    if (seen.has(def.name)) return false;
+    seen.add(def.name);
+    return true;
+  });
 }
 
 /**

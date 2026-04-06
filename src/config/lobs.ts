@@ -19,7 +19,7 @@ export interface LobsRuntimeConfig {
 }
 
 export function getLobsRoot(): string {
-  return resolve(HOME, ".lobs");
+  return process.env.LOBS_ROOT ?? resolve(HOME, ".lobs");
 }
 
 export function getLobsConfigPath(): string {

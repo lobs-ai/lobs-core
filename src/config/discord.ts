@@ -1,10 +1,10 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import type { DiscordConfig } from "../services/discord.js";
+import { getLobsRoot } from "./lobs.js";
 
 export function loadDiscordConfig(): DiscordConfig | null {
-  const configDir = join(homedir(), ".lobs", "config");
+  const configDir = join(getLobsRoot(), "config");
   const configPath = join(configDir, "discord.json");
   const newTokenPath = join(configDir, "secrets", "discord-token.json");
 

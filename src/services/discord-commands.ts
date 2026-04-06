@@ -208,20 +208,13 @@ export async function handleAutocompleteInteraction(interaction: AutocompleteInt
 /** /new - Start a new session */
 async function handleNewCommand(interaction: ChatInputCommandInteraction): Promise<void> {
   const channelId = interaction.channelId;
-  const db = getRawDb();
   
-  // Clear main_agent_messages for this channel
-  db.prepare('DELETE FROM main_agent_messages WHERE channel_id = ?').run(channelId);
+  if (!mainAgentRef) {
+    await interaction.reply({ content: 'Main agent not available', ephemeral: true });
+    return;
+  }
   
-  // Update channel_sessions to idle
-  db.prepare(`
-    INSERT INTO channel_sessions (channel_id, status, last_activity)
-    VALUES (?, 'idle', datetime('now'))
-    ON CONFLICT(channel_id) DO UPDATE SET
-      status = 'idle',
-      last_activity = datetime('now'),
-      context_summary = NULL
-  `).run(channelId);
+  mainAgentRef.clearChannel(channelId);
   
   await interaction.reply({ content: '✨ Fresh session started. What\'s up?', ephemeral: true });
 }
@@ -363,18 +356,13 @@ async function handleModelCommand(interaction: ChatInputCommandInteraction): Pro
 /** /clear - Clear conversation history */
 async function handleClearCommand(interaction: ChatInputCommandInteraction): Promise<void> {
   const channelId = interaction.channelId;
-  const db = getRawDb();
   
-  db.prepare('DELETE FROM main_agent_messages WHERE channel_id = ?').run(channelId);
+  if (!mainAgentRef) {
+    await interaction.reply({ content: 'Main agent not available', ephemeral: true });
+    return;
+  }
   
-  db.prepare(`
-    INSERT INTO channel_sessions (channel_id, status, last_activity)
-    VALUES (?, 'idle', datetime('now'))
-    ON CONFLICT(channel_id) DO UPDATE SET
-      status = 'idle',
-      last_activity = datetime('now'),
-      context_summary = NULL
-  `).run(channelId);
+  mainAgentRef.clearChannel(channelId);
   
   await interaction.reply({ content: '🧹 History cleared.', ephemeral: true });
 }
