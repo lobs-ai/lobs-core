@@ -8,6 +8,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative, extname, basename } from "node:path";
 import { json, parseQuery } from "./index.js";
+import { getAgentContextDir } from "../config/lobs.js";
 
 const HOME = process.env.HOME || "/Users/lobs";
 
@@ -18,7 +19,7 @@ interface KnowledgeSource {
 
 const SOURCES: KnowledgeSource[] = [
   { root: join(HOME, "lobs-shared-memory"), category: "learnings" },
-  { root: join(HOME, ".lobs/agents/main/context"), category: "agent-docs" },
+  { root: getAgentContextDir("main"), category: "agent-docs" },
   { root: join(HOME, "lobs/lobs-core/docs"), category: "docs" },
 ];
 

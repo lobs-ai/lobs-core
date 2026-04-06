@@ -8,8 +8,9 @@ import { writeFileSync, mkdirSync, existsSync, unlinkSync, statSync } from "fs";
 import { join, resolve } from "path";
 import { randomUUID } from "crypto";
 import { execSync } from "child_process";
+import { getLobsRoot } from "../../config/lobs.js";
 
-const MEDIA_DIR = join(process.env.HOME || "/tmp", ".lobs/media");
+const MEDIA_DIR = join(getLobsRoot(), "media");
 
 // Chrome paths to try (macOS, Linux)
 const CHROME_PATHS = [

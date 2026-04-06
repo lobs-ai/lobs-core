@@ -8,6 +8,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative, extname } from "node:path";
 import { json } from "./index.js";
+import { getAgentContextDir, getAgentDir } from "../config/lobs.js";
 
 const HOME = process.env.HOME || "/Users/lobs";
 
@@ -18,7 +19,7 @@ interface KnowledgeRoot {
 
 const ROOTS: KnowledgeRoot[] = [
   { label: "shared-memory", root: join(HOME, "lobs-shared-memory") },
-  { label: "agent-context", root: join(HOME, ".lobs/agents/main/context") },
+  { label: "agent-context", root: getAgentContextDir("main") },
   { label: "lobs-docs", root: join(HOME, "lobs/lobs-core/docs") },
 ];
 
@@ -52,7 +53,7 @@ async function walkDir(
 
 // Also collect top-level .md files from agent dir (SOUL.md, USER.md, etc.)
 async function walkAgentRootDocs(): Promise<Array<{ path: string; name: string; size: number; modified: string }>> {
-  const agentDir = join(HOME, ".lobs/agents/main");
+  const agentDir = getAgentDir("main");
   const results: Array<{ path: string; name: string; size: number; modified: string }> = [];
   try {
     const entries = await readdir(agentDir, { withFileTypes: true });
@@ -109,7 +110,7 @@ export async function handleKnowledgeFsRequest(
     if (filePath.startsWith("agent-root/")) {
       const name = filePath.replace("agent-root/", "");
       try {
-        const content = await readFile(join(HOME, ".lobs/agents/main", name), "utf-8");
+        const content = await readFile(join(getAgentDir("main"), name), "utf-8");
         return json(res, { path: filePath, content });
       } catch {
         return json(res, { error: "not found" }, 404);

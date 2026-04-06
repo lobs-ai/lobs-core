@@ -7,10 +7,11 @@ import type { ToolDefinition, ToolExecutorResult } from "../types.js";
 import { writeFileSync, mkdirSync, existsSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
+import { getLobsRoot } from "../../config/lobs.js";
 
 const IMAGINE_URL = "http://localhost:7421";
 const OUTPUT_DIR = join(process.env.HOME || "/tmp", "lobs/lobs-imagine/outputs");
-const MEDIA_DIR = join(process.env.HOME || "/tmp", ".lobs/media");
+const MEDIA_DIR = join(getLobsRoot(), "media");
 
 export const imagineToolDefinition: ToolDefinition = {
   name: "imagine",

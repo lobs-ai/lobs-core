@@ -6,8 +6,9 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { join, extname, resolve } from "node:path";
 import { URL } from "node:url";
+import { getLobsRoot } from "../config/lobs.js";
 
-const MEDIA_DIR = join(process.env.HOME || "/tmp", ".lobs/media");
+const MEDIA_DIR = join(getLobsRoot(), "media");
 
 const MIME: Record<string, string> = {
   ".png": "image/png",

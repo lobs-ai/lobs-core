@@ -6,12 +6,12 @@
 import { execSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { log } from "../util/logger.js";
 import { getBotName } from "../config/identity.js";
+import { getLobsRoot } from "../config/lobs.js";
 
 function getGitIdentity(): { name: string; email: string } {
-  const configPath = join(homedir(), ".lobs", "config", "lobs.json");
+  const configPath = join(getLobsRoot(), "config", "lobs.json");
   try {
     if (existsSync(configPath)) {
       const config = JSON.parse(readFileSync(configPath, "utf-8"));

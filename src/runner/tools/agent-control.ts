@@ -17,6 +17,7 @@ import type { ToolDefinition, ToolName } from "../types.js";
 import { getDb } from "../../db/connection.js";
 import { projects } from "../../db/schema.js";
 import { eq } from "drizzle-orm";
+import { getAgentsRoot } from "../../config/lobs.js";
 
 const HOME = process.env.HOME ?? "";
 
@@ -386,7 +387,7 @@ export async function executeSpawnAgent(
     activeAgents.delete(runId);
 
     // Log the result
-    const logDir = resolve(HOME, ".lobs/agents", agentType, "sessions");
+    const logDir = resolve(getAgentsRoot(), agentType, "sessions");
     if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true });
     const logFile = resolve(logDir, `spawned-${Date.now()}.jsonl`);
     appendFileSync(logFile, JSON.stringify({

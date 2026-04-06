@@ -13,8 +13,9 @@ import { getToolsForSession } from "../runner/tools/tool-sets.js";
 import { onAssistantMessage, onUserMessage, forceSummarize } from "../services/chat-summarizer.js";
 import { getDefaultChatModel, getChannelModelOverride, getModelCatalog, normalizeModelSelection, setChannelModelOverride } from "../services/model-catalog.js";
 import { getOwnerName } from "../config/identity.js";
+import { getLobsRoot } from "../config/lobs.js";
 
-const MEDIA_DIR = join(process.env.HOME || "/tmp", ".lobs/media");
+const MEDIA_DIR = join(getLobsRoot(), "media");
 
 /**
  * Track which channelIds have an active per-request toolListener.

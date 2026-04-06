@@ -7,11 +7,11 @@ import { discordService } from "../services/discord.js";
 import { getKeyPool } from "../services/key-pool.js";
 import { loadVoiceConfig } from "../services/voice/index.js";
 import type { VoiceManager } from "../services/voice/index.js";
+import { getLobsRoot } from "../config/lobs.js";
 
-const HOME = process.env.HOME ?? "";
-const PID_FILE = resolve(HOME, ".lobs/lobs.pid");
-const GOOGLE_TOKEN_FILE = resolve(HOME, ".lobs/credentials/google_token.json");
-const GOOGLE_CREDENTIALS_FILE = resolve(HOME, ".lobs/credentials/client_secret.json");
+const PID_FILE = resolve(getLobsRoot(), "lobs.pid");
+const GOOGLE_TOKEN_FILE = resolve(getLobsRoot(), "credentials/google_token.json");
+const GOOGLE_CREDENTIALS_FILE = resolve(getLobsRoot(), "credentials/client_secret.json");
 
 async function checkLmStudio(): Promise<boolean> {
   try {
@@ -32,7 +32,7 @@ async function checkImagine(): Promise<boolean> {
 }
 
 function checkDb(): boolean {
-  const dbPath = resolve(HOME, ".lobs/lobs.db");
+  const dbPath = resolve(getLobsRoot(), "lobs.db");
   return existsSync(dbPath);
 }
 
