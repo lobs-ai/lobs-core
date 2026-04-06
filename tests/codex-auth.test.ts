@@ -3,23 +3,42 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+// ── Mock os.homedir() and getLobsRoot() to point at temp dirs ──────────────
+
+let __homeDir = "";
+
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  const mocked = {
+    ...actual,
+    homedir: vi.fn(() => __homeDir),
+  };
+  return { ...mocked, default: mocked };
+});
+
+vi.mock("../src/config/lobs.js", () => ({
+  getLobsRoot: vi.fn(() => join(__homeDir, ".lobs")),
+}));
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
 function makeJwt(expSeconds: number): string {
   const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
   const payload = Buffer.from(JSON.stringify({ exp: expSeconds })).toString("base64url");
   return `${header}.${payload}.`;
 }
 
-describe("CodexAuthService", () => {
-  const originalHome = process.env.HOME;
+// ── Tests ──────────────────────────────────────────────────────────────────────
 
+describe("CodexAuthService", () => {
   afterEach(() => {
-    process.env.HOME = originalHome;
+    __homeDir = "";
     vi.resetModules();
   });
 
   test("imports ChatGPT Codex subscription credentials from ~/.codex/auth.json", async () => {
     const homeDir = mkdtempSync(join(tmpdir(), "lobs-codex-auth-"));
-    process.env.HOME = homeDir;
+    __homeDir = homeDir;
 
     const codexDir = join(homeDir, ".codex");
     mkdirSync(codexDir, { recursive: true });
@@ -56,7 +75,7 @@ describe("CodexAuthService", () => {
 
   test("prefers ~/.lobs credentials when they already exist", async () => {
     const homeDir = mkdtempSync(join(tmpdir(), "lobs-codex-auth-existing-"));
-    process.env.HOME = homeDir;
+    __homeDir = homeDir;
 
     const secretsDir = join(homeDir, ".lobs", "config", "secrets");
     mkdirSync(secretsDir, { recursive: true });
