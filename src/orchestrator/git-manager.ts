@@ -7,7 +7,7 @@ import { execSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "../util/logger.js";
-import { getBotName } from "../config/identity.js";
+import { getBotName, getBotId } from "../config/identity.js";
 import { getLobsRoot } from "../config/lobs.js";
 
 function getGitIdentity(): { name: string; email: string } {
@@ -22,7 +22,7 @@ function getGitIdentity(): { name: string; email: string } {
   } catch {}
   return {
     name: process.env.LOBS_GIT_NAME ?? getBotName(),
-    email: process.env.LOBS_GIT_EMAIL ?? "lobs@localhost",
+    email: process.env.LOBS_GIT_EMAIL ?? `${getBotId()}@localhost`,
   };
 }
 

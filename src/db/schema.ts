@@ -8,6 +8,7 @@
 
 import { sqliteTable, text, integer, real, uniqueIndex, index } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
+import { getBotId } from "../config/identity.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
@@ -416,7 +417,7 @@ export const initiativeDecisionRecords = sqliteTable("initiative_decision_record
   initiativeId: text("initiative_id").notNull().references(() => agentInitiatives.id),
   sweepId: text("sweep_id").references(() => systemSweeps.id),
   decision: text("decision").notNull(),
-  decidedBy: text("decided_by").notNull().default("lobs"), // TODO: identity — schema default, overridden at runtime by getBotId()
+  decidedBy: text("decided_by").notNull().$defaultFn(() => getBotId()),
   decisionSummary: text("decision_summary"),
   overlapWithIds: text("overlap_with_ids", { mode: "json" }),
   contradictionWithIds: text("contradiction_with_ids", { mode: "json" }),

@@ -19,6 +19,7 @@ import { logTrainingExample } from "../services/training-data.js";
 import { findDuplicateTask } from "../util/task-dedup.js";
 import { triageIncomingItem, triageHeuristic } from "../services/intake-triage.js";
 import { syncSuggestionStatus, enrichSuggestion } from "./suggestions.js";
+import { getOwnerId } from "../config/identity.js";
 
 const learningSvc = new LearningService();
 
@@ -251,7 +252,7 @@ Return ONLY valid JSON:
           id: taskId,
           title: t.title.trim(),
           status: "active",
-          owner: "rafe",
+          owner: getOwnerId(),
           priority: t.priority ?? "medium",
           dueDate: t.dueDate ?? null,
           shape: t.category ?? null,

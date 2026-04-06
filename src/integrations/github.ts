@@ -11,6 +11,7 @@ import { eq, and } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { tasks, projects } from "../db/schema.js";
 import { log } from "../util/logger.js";
+import { getBotId } from "../config/identity.js";
 
 interface GitHubIssue {
   number: number;
@@ -97,7 +98,7 @@ export class GitHubSyncService {
           externalUpdatedAt: issue.updatedAt,
           githubIssueNumber: issue.number,
           notes: issue.body?.slice(0, 2000) ?? null,
-          owner: "lobs",
+          owner: getBotId(),
           workState: "not_started",
           createdAt: now,
           updatedAt: now,

@@ -332,10 +332,31 @@ export function microcompact(
  *
  * Returns a new array — does NOT mutate the input.
  */
+
+/** Returns true if `outer` read range fully covers `inner` read range. */
+function rangeCovers(
+  outer: { offset: number; limit: number; full: boolean },
+  inner: { offset: number; limit: number; full: boolean },
+): boolean {
+  if (outer.full) return true;  // full read covers everything
+  if (inner.full) return false; // a partial read can't cover a full read
+  const outerEnd = outer.offset + outer.limit;
+  const innerEnd = inner.offset + inner.limit;
+  return outer.offset <= inner.offset && outerEnd >= innerEnd;
+}
+
 export function pruneSupersededReads(messages: LLMMessage[]): LLMMessage[] {
-  // Step 1: Build a map of tool_use_id → { toolName, filePath, msgIndex }
+  // Step 1: Build a map of tool_use_id → { toolName, filePath, msgIndex, offset, limit, full }
   // by scanning assistant messages for Read/Edit tool_use blocks.
-  const toolUseMap = new Map<string, { toolName: string; filePath: string; msgIndex: number }>();
+  // For Read tools, also capture offset/limit/full so we can do range-aware superseding.
+  const toolUseMap = new Map<string, {
+    toolName: string;
+    filePath: string;
+    msgIndex: number;
+    offset: number;
+    limit: number;
+    full: boolean;
+  }>();
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
@@ -352,7 +373,15 @@ export function pruneSupersededReads(messages: LLMMessage[]): LLMMessage[] {
       const filePath = String(input.file_path || input.path || "");
       if (!filePath) continue;
 
-      toolUseMap.set(String(block.id), { toolName: name, filePath, msgIndex: i });
+      const isRead = ["Read", "read"].includes(name);
+      toolUseMap.set(String(block.id), {
+        toolName: name,
+        filePath,
+        msgIndex: i,
+        offset: isRead ? (typeof input.offset === "number" ? input.offset : 1) : 1,
+        limit:  isRead ? (typeof input.limit  === "number" ? input.limit  : 500) : 500,
+        full:   isRead ? (input.full === true) : false,
+      });
     }
   }
 
@@ -363,6 +392,9 @@ export function pruneSupersededReads(messages: LLMMessage[]): LLMMessage[] {
     toolName: string;
     msgIndex: number;       // assistant message index (tool_use)
     resultMsgIndex: number; // user message index (tool_result)
+    offset: number;         // read start line (Read tools only)
+    limit: number;          // max lines read (Read tools only)
+    full: boolean;          // whether this was a full-file read
   };
   const fileOps = new Map<string, FileOperation[]>();
 
@@ -382,6 +414,9 @@ export function pruneSupersededReads(messages: LLMMessage[]): LLMMessage[] {
         toolName: info.toolName,
         msgIndex: info.msgIndex,
         resultMsgIndex: i,
+        offset: info.offset,
+        limit: info.limit,
+        full: info.full,
       });
       fileOps.set(info.filePath, ops);
     }
@@ -400,12 +435,20 @@ export function pruneSupersededReads(messages: LLMMessage[]): LLMMessage[] {
     const edits = ops.filter(op => ["Edit", "edit"].includes(op.toolName));
 
     if (reads.length > 1) {
-      // Multiple reads of same file — supersede all but the last
+      // Multiple reads of same file — only supersede a read if a LATER read
+      // fully covers its range. Non-overlapping partial reads are both kept.
       for (let i = 0; i < reads.length - 1; i++) {
-        toSupersede.set(
-          reads[i].toolUseId,
-          "[Superseded by a more recent read of this file — refer to the later result]",
-        );
+        const earlier = reads[i];
+        // Check whether any later read covers the earlier read's range
+        const coveredByLater = reads
+          .slice(i + 1)
+          .some(later => rangeCovers(later, earlier));
+        if (coveredByLater) {
+          toSupersede.set(
+            earlier.toolUseId,
+            "[Superseded by a more recent read of this file — refer to the later result]",
+          );
+        }
       }
     }
 

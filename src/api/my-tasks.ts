@@ -9,8 +9,9 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { getDb } from "../db/connection.js";
 import { tasks } from "../db/schema.js";
 import { json, error, parseBody, parseQuery } from "./index.js";
+import { getOwnerId } from "../config/identity.js";
 
-const OWNER = "rafe";
+const OWNER = getOwnerId();
 
 const PRIORITY_ORDER: Record<string, number> = {
   urgent: 0,
