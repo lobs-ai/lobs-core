@@ -1060,6 +1060,277 @@ function cmdInit() {
   console.log("");
 }
 
+// ── Setup Wizard ──────────────────────────────────────────────────────────────
+
+/** Prompt helper — shows question, returns answer (or defaultValue if Enter pressed) */
+async function ask(
+  rl: ReturnType<typeof createInterface>,
+  question: string,
+  defaultValue?: string
+): Promise<string> {
+  const hint = defaultValue ? colorize(` [${defaultValue}]`, "dim") : "";
+  const answer = await rl.question(`  ${question}${hint}: `);
+  return answer.trim() || defaultValue || "";
+}
+
+/** Confirm helper — returns true for "y", false for "n"/Enter (defaultYes=false) */
+async function confirm(
+  rl: ReturnType<typeof createInterface>,
+  question: string,
+  defaultYes = false
+): Promise<boolean> {
+  const hint = defaultYes ? "(Y/n)" : "(y/N)";
+  const answer = await rl.question(`  ${question} ${colorize(hint, "dim")} `);
+  const trimmed = answer.trim().toLowerCase();
+  if (trimmed === "") return defaultYes;
+  return trimmed === "y" || trimmed === "yes";
+}
+
+/** Masked input — reads a secret, showing only last 4 chars of any existing value */
+function maskSecret(val: string): string {
+  if (!val || val.length < 8) return val ? "****" : "";
+  return "****" + val.slice(-4);
+}
+
+async function cmdSetup(): Promise<void> {
+  const rl = createInterface({ input, output });
+
+  console.log(colorize("\n╔══════════════════════════════════════╗", "cyan"));
+  console.log(colorize("║       lobs setup wizard              ║", "cyan"));
+  console.log(colorize("╚══════════════════════════════════════╝", "cyan"));
+  console.log(colorize("\nThis walks you through configuring each part of the system.", "dim"));
+  console.log(colorize("Press Enter to keep existing values. Type 'skip' to skip a section.\n", "dim"));
+
+  // Ensure directories exist
+  if (!existsSync(CONFIG_DIR)) {
+    mkdirSync(CONFIG_DIR, { recursive: true });
+    console.log(colorize("✓", "green") + " Created " + CONFIG_DIR);
+  }
+  if (!existsSync(SECRETS_DIR)) {
+    mkdirSync(SECRETS_DIR, { recursive: true });
+    console.log(colorize("✓", "green") + " Created " + SECRETS_DIR);
+  }
+  // Ensure .gitignore exists
+  const gitignorePath = resolve(CONFIG_DIR, ".gitignore");
+  if (!existsSync(gitignorePath)) {
+    writeFileSync(gitignorePath, "secrets/\n*.log\n");
+  }
+
+  const configured: string[] = [];
+  const skipped: string[] = [];
+
+  // ── Section 1: Identity ────────────────────────────────────────────────────
+  console.log(colorize("\n━━━ 1. Identity ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", "bright"));
+  const identityPath = resolve(CONFIG_DIR, "identity.json");
+
+  let existingIdentity: { bot?: { name?: string; id?: string }; owner?: { name?: string; id?: string; discordId?: string } } = {};
+  if (existsSync(identityPath)) {
+    try {
+      existingIdentity = JSON.parse(readFileSync(identityPath, "utf-8"));
+      console.log(colorize("  Current values:", "dim"));
+      console.log(colorize(`    bot name: ${existingIdentity.bot?.name ?? "—"}  id: ${existingIdentity.bot?.id ?? "—"}`, "dim"));
+      console.log(colorize(`    owner: ${existingIdentity.owner?.name ?? "—"}  id: ${existingIdentity.owner?.id ?? "—"}  discordId: ${existingIdentity.owner?.discordId ?? "—"}`, "dim"));
+    } catch { /* ignore parse errors */ }
+  }
+
+  const skipIdentity = await confirm(rl, "Skip identity setup?", false);
+  if (skipIdentity) {
+    skipped.push("identity.json");
+  } else {
+    const botName = await ask(rl, "Bot name", existingIdentity.bot?.name ?? "Lobs");
+    const botId = await ask(rl, "Bot ID (lowercase, no spaces)", existingIdentity.bot?.id ?? "lobs");
+    const ownerName = await ask(rl, "Owner name", existingIdentity.owner?.name ?? "");
+    const ownerId = await ask(rl, "Owner ID (lowercase)", existingIdentity.owner?.id ?? "");
+    const ownerDiscordId = await ask(rl, "Owner Discord ID (numeric)", existingIdentity.owner?.discordId ?? "");
+
+    const identity = {
+      bot: { name: botName, id: botId },
+      owner: { name: ownerName, id: ownerId, discordId: ownerDiscordId },
+    };
+    writeFileSync(identityPath, JSON.stringify(identity, null, 2));
+    console.log(colorize("  ✓ identity.json saved", "green"));
+    configured.push("identity.json");
+    existingIdentity = identity;
+  }
+
+  // ── Section 2: API Keys ───────────────────────────────────────────────────
+  console.log(colorize("\n━━━ 2. API Keys ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", "bright"));
+  const keysPath = resolve(SECRETS_DIR, "keys.json");
+
+  let existingKeys: Record<string, { key: string; label?: string }[]> = {};
+  if (existsSync(keysPath)) {
+    try {
+      existingKeys = JSON.parse(readFileSync(keysPath, "utf-8"));
+      const providers = Object.keys(existingKeys);
+      console.log(colorize(`  API keys already configured for: ${providers.join(", ")}`, "dim"));
+      for (const [provider, keys] of Object.entries(existingKeys)) {
+        for (const k of keys) {
+          console.log(colorize(`    ${provider}: ${maskSecret(k.key)}`, "dim"));
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  const skipKeys = await confirm(rl, "Skip API key setup?", false);
+  if (skipKeys) {
+    skipped.push("secrets/keys.json");
+  } else {
+    const newKeys: Record<string, { key: string; label: string }[]> = { ...existingKeys } as Record<string, { key: string; label: string }[]>;
+
+    // Anthropic
+    const existingAnthropic = existingKeys.anthropic?.[0]?.key ?? "";
+    console.log(colorize(`  Anthropic API key${existingAnthropic ? ` (current: ${maskSecret(existingAnthropic)})` : " (required)"}`, "dim"));
+    const anthropicKey = await ask(rl, "Anthropic key (sk-ant-...)", existingAnthropic);
+    if (anthropicKey) {
+      newKeys.anthropic = [{ key: anthropicKey, label: "main" }];
+    }
+
+    // OpenAI
+    const existingOpenAI = existingKeys.openai?.[0]?.key ?? "";
+    console.log(colorize(`  OpenAI API key${existingOpenAI ? ` (current: ${maskSecret(existingOpenAI)})` : " (optional, Enter to skip)"}`, "dim"));
+    const openaiKey = await ask(rl, "OpenAI key (sk-...)", existingOpenAI);
+    if (openaiKey) {
+      newKeys.openai = [{ key: openaiKey, label: "main" }];
+    }
+
+    // Google
+    const existingGoogle = existingKeys.google?.[0]?.key ?? "";
+    console.log(colorize(`  Google API key${existingGoogle ? ` (current: ${maskSecret(existingGoogle)})` : " (optional, Enter to skip)"}`, "dim"));
+    const googleKey = await ask(rl, "Google key", existingGoogle);
+    if (googleKey) {
+      newKeys.google = [{ key: googleKey, label: "main" }];
+    }
+
+    writeFileSync(keysPath, JSON.stringify(newKeys, null, 2));
+    console.log(colorize("  ✓ secrets/keys.json saved", "green"));
+    configured.push("secrets/keys.json");
+  }
+
+  // ── Section 3: Discord ────────────────────────────────────────────────────
+  console.log(colorize("\n━━━ 3. Discord ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", "bright"));
+  const tokenPath = resolve(SECRETS_DIR, "discord-token.json");
+  const discordPath = resolve(CONFIG_DIR, "discord.json");
+
+  let existingToken = "";
+  if (existsSync(tokenPath)) {
+    try {
+      const t = JSON.parse(readFileSync(tokenPath, "utf-8"));
+      existingToken = t.botToken ?? "";
+      console.log(colorize(`  Discord token: ${maskSecret(existingToken)}`, "dim"));
+    } catch { /* ignore */ }
+  }
+
+  let existingDiscord: {
+    enabled?: boolean;
+    guildId?: string;
+    ownerId?: string;
+    channels?: { alerts?: string; agentWork?: string; completions?: string };
+    dmAllowFrom?: string[];
+    channelPolicies?: Record<string, unknown>;
+  } = {};
+  if (existsSync(discordPath)) {
+    try {
+      existingDiscord = JSON.parse(readFileSync(discordPath, "utf-8"));
+      console.log(colorize(`  Guild ID: ${existingDiscord.guildId ?? "—"}`, "dim"));
+      console.log(colorize(`  Alert channel: ${existingDiscord.channels?.alerts ?? "—"}`, "dim"));
+    } catch { /* ignore */ }
+  }
+
+  const skipDiscord = await confirm(rl, "Skip Discord setup?", false);
+  if (skipDiscord) {
+    skipped.push("discord");
+  } else {
+    const botToken = await ask(rl, "Discord bot token (masked display)", existingToken);
+    const guildId = await ask(rl, "Guild ID", existingDiscord.guildId ?? "");
+    // Pre-fill owner Discord ID from identity if available
+    const ownerDiscordId = await ask(
+      rl,
+      "Owner Discord ID",
+      existingDiscord.ownerId ?? existingIdentity.owner?.discordId ?? ""
+    );
+    const alertChannel = await ask(rl, "Alert channel ID (optional)", existingDiscord.channels?.alerts ?? "");
+    const agentWorkChannel = await ask(rl, "Agent work channel ID (optional)", existingDiscord.channels?.agentWork ?? "");
+
+    if (botToken) {
+      writeFileSync(tokenPath, JSON.stringify({ botToken }, null, 2));
+      console.log(colorize("  ✓ secrets/discord-token.json saved", "green"));
+    }
+
+    const discordConfig = {
+      enabled: !!(botToken && guildId),
+      guildId,
+      ownerId: ownerDiscordId,
+      dmAllowFrom: existingDiscord.dmAllowFrom ?? [],
+      channels: {
+        alerts: alertChannel,
+        agentWork: agentWorkChannel,
+        completions: existingDiscord.channels?.completions ?? "",
+      },
+      channelPolicies: existingDiscord.channelPolicies ?? {},
+    };
+    writeFileSync(discordPath, JSON.stringify(discordConfig, null, 2));
+    console.log(colorize("  ✓ discord.json saved", "green"));
+    configured.push("discord");
+  }
+
+  // ── Section 4: Models ─────────────────────────────────────────────────────
+  console.log(colorize("\n━━━ 4. Models ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", "bright"));
+  const modelsPath = resolve(CONFIG_DIR, "models.json");
+  const { DEFAULT_CONFIG } = await import("../config/models.js");
+  const defaultTiers = DEFAULT_CONFIG.tiers;
+
+  let existingModels: { tiers?: Record<string, string> } = {};
+  if (existsSync(modelsPath)) {
+    try {
+      existingModels = JSON.parse(readFileSync(modelsPath, "utf-8"));
+    } catch { /* ignore */ }
+  }
+
+  console.log(colorize("  Default tier assignments:", "dim"));
+  for (const [tier, model] of Object.entries(defaultTiers)) {
+    const current = existingModels.tiers?.[tier];
+    const display = current && current !== model ? colorize(current, "yellow") + colorize(` (default: ${model})`, "dim") : colorize(model, "dim");
+    console.log(`    ${tier.padEnd(10)} → ${display}`);
+  }
+
+  const skipModels = await confirm(rl, "Skip model configuration?", false);
+  if (skipModels) {
+    skipped.push("models.json");
+  } else {
+    const useDefaults = await confirm(rl, "Use default model configuration?", true);
+    if (useDefaults) {
+      const modelsConfig = { tiers: { ...defaultTiers, ...(existingModels.tiers ?? {}) } };
+      writeFileSync(modelsPath, JSON.stringify(modelsConfig, null, 2));
+      console.log(colorize("  ✓ models.json saved (defaults)", "green"));
+      configured.push("models.json");
+    } else {
+      console.log(colorize("  Enter model ID for each tier (Enter to keep current/default):", "dim"));
+      const tiers: Record<string, string> = { ...defaultTiers, ...(existingModels.tiers ?? {}) };
+      for (const tier of ["micro", "small", "medium", "standard", "strong"]) {
+        const current = tiers[tier] ?? defaultTiers[tier as keyof typeof defaultTiers];
+        tiers[tier] = await ask(rl, tier, current);
+      }
+      writeFileSync(modelsPath, JSON.stringify({ tiers }, null, 2));
+      console.log(colorize("  ✓ models.json saved", "green"));
+      configured.push("models.json");
+    }
+  }
+
+  // ── Summary ────────────────────────────────────────────────────────────────
+  rl.close();
+
+  console.log(colorize("\n━━━ Setup complete ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", "bright"));
+  if (configured.length > 0) {
+    console.log(colorize("  Configured:", "green") + " " + configured.join(", "));
+  }
+  if (skipped.length > 0) {
+    console.log(colorize("  Skipped:   ", "yellow") + " " + skipped.join(", "));
+  }
+  console.log("");
+  console.log(colorize("  Run 'lobs config check' to validate your setup.", "dim"));
+  console.log("");
+}
+
 // ── Chat ─────────────────────────────────────────────────────────────────────
 
 function printChatSessionList(sessions: ChatSessionSummary[]): void {
@@ -1805,6 +2076,10 @@ const subcommand = args[1];
       cmdInit();
       break;
 
+    case "setup":
+      await cmdSetup();
+      break;
+
     case "--help":
     case "-h":
     case "help":
@@ -1860,6 +2135,7 @@ const subcommand = args[1];
       console.log("  config routes            Show task→tier routing");
       console.log("  config set-route ...     Set task category route (category tier)");
       console.log("  lobs init                Initialize config directory");
+      console.log("  lobs setup               Interactive setup wizard (configure identity, keys, Discord, models)");
       console.log("");
       console.log(colorize("Codex Auth:", "cyan"));
       console.log("  lobs codex-auth login    OAuth login for openai-codex provider");
