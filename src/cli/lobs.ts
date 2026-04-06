@@ -994,6 +994,18 @@ function cmdInit() {
     console.log(colorize("✓", "gray") + " models.json exists");
   }
   
+  const identityPath = resolve(CONFIG_DIR, "identity.json");
+  if (!existsSync(identityPath)) {
+    const identityTemplate = {
+      bot: { name: "YourBot", id: "yourbot" },
+      owner: { name: "YourName", id: "yourname", discordId: "YOUR_DISCORD_USER_ID" },
+    };
+    writeFileSync(identityPath, JSON.stringify(identityTemplate, null, 2));
+    console.log(colorize("✓", "green") + " Created identity.json (UPDATE WITH YOUR DETAILS)");
+  } else {
+    console.log(colorize("✓", "gray") + " identity.json exists");
+  }
+  
   const discordPath = resolve(CONFIG_DIR, "discord.json");
   if (!existsSync(discordPath)) {
     const discordTemplate = {
@@ -1040,9 +1052,11 @@ function cmdInit() {
   console.log(colorize("✓ Config initialized", "green"));
   console.log("");
   console.log(colorize("Next steps:", "cyan"));
-  console.log("  1. Update secrets/keys.json with your API keys");
-  console.log("  2. Update secrets/discord-token.json with your Discord bot token");
-  console.log("  3. Run 'lobs config check' to validate");
+  console.log("  1. Update identity.json with your bot name and owner details");
+  console.log("  2. Update secrets/keys.json with your API keys");
+  console.log("  3. Update secrets/discord-token.json with your Discord bot token");
+  console.log("  4. Update discord.json with your guild ID and channel IDs");
+  console.log("  5. Run 'lobs config check' to validate");
   console.log("");
 }
 

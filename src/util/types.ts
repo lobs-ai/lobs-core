@@ -9,7 +9,7 @@ export type WorkState = "not_started" | "in_progress" | "needs_review" | "done" 
 
 export type ModelTier = "micro" | "small" | "medium" | "standard" | "strong";
 
-export type ApprovalTier = "auto" | "lobs" | "rafe";
+export type ApprovalTier = "auto" | "bot" | "owner";
 
 export interface PawConfig {
   dbPath?: string;

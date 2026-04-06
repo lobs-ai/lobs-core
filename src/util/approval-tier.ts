@@ -4,8 +4,8 @@
  * determine what level of approval a task needs.
  *
  * Tier A (auto): Bug fixes, docs, research, tests, internal housekeeping → active immediately
- * Tier B (lobs): Refactors, utilities, task management, consolidation → active, logged for audit
- * Tier C (rafe): UI, features, architecture, design → proposed + inbox item
+ * Tier B (bot): Refactors, utilities, task management, consolidation → active, logged for audit
+ * Tier C (owner): UI, features, architecture, design → proposed + inbox item
  */
 
 export function classifyApprovalTier(agent: string, notes: string): "A" | "B" | "C" {
