@@ -1,17 +1,23 @@
 #!/bin/bash
-# create-agent.sh — Initialize a new lobs-core agent instance
+# create-agent.sh — Create a new standalone lobs-core agent
+#
+# Creates the agent's data directory and adds it to docker-compose.
+# Run generate-compose.sh afterward to rebuild the compose file,
+# or it's done automatically here.
 #
 # Usage:
 #   ./scripts/create-agent.sh <name> [port]
 #
 # Example:
 #   ./scripts/create-agent.sh briggs 9431
-#   ./scripts/create-agent.sh sam 9432
 
 set -euo pipefail
 
 NAME="${1:-}"
-PORT="${2:-9421}"
+PORT="${2:-}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+AGENTS_BASE="$HOME/.lobs-agents"
+ROOT="$AGENTS_BASE/$NAME"
 
 if [ -z "$NAME" ]; then
   echo "Usage: $0 <agent-name> [port]"
@@ -19,12 +25,17 @@ if [ -z "$NAME" ]; then
   exit 1
 fi
 
-ROOT="$HOME/.lobs-agents/$NAME"
-
 if [ -d "$ROOT" ]; then
   echo "Agent '$NAME' already exists at $ROOT"
   echo "Delete it first if you want to recreate: rm -rf $ROOT"
   exit 1
+fi
+
+# Auto-assign port if not provided (9431, 9432, 9433, ...)
+if [ -z "$PORT" ]; then
+  EXISTING=$(find "$AGENTS_BASE" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+  PORT=$((9431 + EXISTING))
+  echo "Auto-assigned port: $PORT"
 fi
 
 echo "Creating agent '$NAME' at $ROOT..."
@@ -34,6 +45,17 @@ mkdir -p "$ROOT/config/secrets"
 mkdir -p "$ROOT/agents/main/context/memory"
 mkdir -p "$ROOT/data"
 mkdir -p "$ROOT/media"
+
+# Copy subagent personality files (programmer, researcher, writer, reviewer, architect)
+# These are needed for spawning subagents within the agent
+LOBS_AGENTS="$HOME/.lobs/agents"
+for subagent in programmer researcher writer reviewer architect; do
+  if [ -d "$LOBS_AGENTS/$subagent" ]; then
+    mkdir -p "$ROOT/agents/$subagent"
+    cp "$LOBS_AGENTS/$subagent/SOUL.md" "$ROOT/agents/$subagent/SOUL.md" 2>/dev/null || true
+    cp "$LOBS_AGENTS/$subagent/AGENTS.md" "$ROOT/agents/$subagent/AGENTS.md" 2>/dev/null || true
+  fi
+done
 
 # Discord config (template)
 cat > "$ROOT/config/discord.json" << 'EOF'
@@ -52,7 +74,7 @@ EOF
 # Discord token placeholder
 cat > "$ROOT/config/secrets/discord-token.json" << EOF
 {
-  "botToken": "REPLACE_WITH_${NAME^^}_BOT_TOKEN"
+  "botToken": "REPLACE_WITH_$(echo "$NAME" | tr '[:lower:]' '[:upper:]')_BOT_TOKEN"
 }
 EOF
 
@@ -91,29 +113,20 @@ cat > "$ROOT/agents/main/MEMORY.md" << 'EOF'
 Agent memory index. Updated as the agent learns.
 EOF
 
+# Store the port assignment
+echo "$PORT" > "$ROOT/.port"
+
 echo ""
-echo "✅ Agent '$NAME' created at $ROOT"
+echo "✅ Agent '$NAME' created at $ROOT (port $PORT)"
 echo ""
 echo "Next steps:"
-echo "  1. Edit $ROOT/agents/main/SOUL.md with the agent's personality"
-echo "  2. Create a Discord bot and put the token in:"
-echo "     $ROOT/config/secrets/discord-token.json"
+echo "  1. Edit $ROOT/agents/main/SOUL.md"
+echo "  2. Set Discord bot token in $ROOT/config/secrets/discord-token.json"
 echo "  3. Set guild/channel IDs in $ROOT/config/discord.json"
-echo "  4. Add to docker-compose.agents.yml:"
-echo ""
-echo "  $NAME:"
-echo "    <<: *agent-base"
-echo "    container_name: lobs-agent-$NAME"
-echo "    environment:"
-echo "      <<: *agent-env"
-echo "      AGENT_NAME: $NAME"
-echo "      LOBS_ROOT: /data"
-echo "      LOBS_PORT: \"9421\""
-echo "      DISCORD_BOT_TOKEN: \${${NAME^^}_DISCORD_TOKEN:-}"
-echo "    ports:"
-echo "      - \"$PORT:9421\""
-echo "    volumes:"
-echo "      - \${HOME}/.lobs-agents/$NAME:/data"
-echo "      - $NAME-workspace:/home/agent"
-echo ""
-echo "  And add '$NAME-workspace:' to the volumes section."
+
+# Auto-regenerate docker-compose
+if [ -x "$SCRIPT_DIR/generate-compose.sh" ]; then
+  echo ""
+  echo "Regenerating docker-compose.agents.yml..."
+  "$SCRIPT_DIR/generate-compose.sh"
+fi
