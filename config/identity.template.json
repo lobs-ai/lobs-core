@@ -1,0 +1,11 @@
+{
+  "bot": {
+    "name": "YourBot",
+    "id": "yourbot"
+  },
+  "owner": {
+    "name": "YourName",
+    "id": "yourname",
+    "discordId": "YOUR_DISCORD_USER_ID"
+  }
+}

@@ -40,7 +40,13 @@ mkdir -p $LOBS_ROOT/agents/{programmer,researcher,writer,reviewer,architect}
 
 This tells lobs-core who the bot is and who owns it.
 
-Create `$LOBS_ROOT/config/identity.json`:
+A template is provided at `config/identity.template.json` — copy it to `$LOBS_ROOT/config/identity.json` and fill in your values:
+
+```bash
+cp config/identity.template.json $LOBS_ROOT/config/identity.json
+```
+
+Then edit the file:
 
 ```json
 {
