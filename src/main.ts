@@ -54,10 +54,9 @@ import { runLmStudioAlertCheck } from "./services/lm-studio-monitor.js";
 import { runDbMaintenance } from "./services/db-maintenance.js";
 import { VoiceManager } from "./services/voice/index.js";
 
-const HOME = process.env.HOME ?? "";
-const DB_PATH = resolve(HOME, ".lobs/lobs.db");
-const PID_FILE = resolve(HOME, ".lobs/lobs.pid");
-const LOG_FILE = resolve(HOME, ".lobs/lobs.log");
+const DB_PATH = resolve(getLobsRoot(), "lobs.db");
+const PID_FILE = resolve(getLobsRoot(), "lobs.pid");
+const LOG_FILE = resolve(getLobsRoot(), "lobs.log");
 const LOG_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
 const LOG_KEEP = 3; // keep lobs.log.1, .2, .3
 const SCAN_INTERVAL_MS = 10_000;

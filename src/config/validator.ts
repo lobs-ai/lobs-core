@@ -8,9 +8,9 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { getLobsRoot } from "./lobs.js";
 
-const HOME = process.env.HOME ?? "";
-const CONFIG_DIR = resolve(HOME, ".lobs/config");
+const CONFIG_DIR = resolve(getLobsRoot(), "config");
 const SECRETS_DIR = resolve(CONFIG_DIR, "secrets");
 
 export interface ValidationResult {

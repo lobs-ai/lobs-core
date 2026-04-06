@@ -53,7 +53,7 @@ export function getEnvKeyForProvider(provider: string): string {
 
 // ── Config Loading ───────────────────────────────────────────────────────────
 
-const CONFIG_DIR = resolve(process.env.HOME ?? "~", ".lobs", "config");
+const CONFIG_DIR = resolve(getLobsRoot(), "config");
 const NEW_KEYS_PATH = resolve(CONFIG_DIR, "secrets", "keys.json");
 const LEGACY_KEYS_PATH = resolve(CONFIG_DIR, "keys.json");
 

@@ -13,6 +13,20 @@ import { VoiceTranscript } from "../src/services/voice/transcript.js";
 // fs mock — must be declared before any imports that touch node:fs
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Identity mock (voice/types.ts calls getBotId() at load time)
+vi.mock("../src/config/identity.js", () => ({
+  getBotName: () => "Lobs",
+  getBotId: () => "lobs",
+  getOwnerName: () => "Rafe",
+  getOwnerId: () => "rafe",
+  getOwnerDiscordId: () => "644578016298795010",
+  getIdentity: () => ({
+    bot: { name: "Lobs", id: "lobs" },
+    owner: { name: "Rafe", id: "rafe", discordId: "644578016298795010" },
+  }),
+  resetIdentityCache: () => {},
+}));
+
 // Shared state object so individual tests can control what the mock returns.
 const __fsMock = {
   exists: false as boolean,

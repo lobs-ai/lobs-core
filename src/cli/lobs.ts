@@ -51,13 +51,13 @@ import { loadKeyConfig, getEnvKeyForProvider } from "../config/keys.js";
 import { runLmStudioDiagnostic, formatDiagnosticReport } from "../diagnostics/lmstudio.js";
 import { cmdCodexAuth } from "./codex-auth.js";
 
-const HOME = process.env.HOME ?? "";
 const LOBS_PORT = parseInt(process.env.LOBS_PORT ?? "9420", 10);
 const API_BASE = `http://localhost:${LOBS_PORT}/api`;
-const CONFIG_DIR = resolve(HOME, ".lobs/config");
+const CONFIG_DIR = resolve(getLobsRoot(), "config");
 const SECRETS_DIR = resolve(CONFIG_DIR, "secrets");
-const PID_FILE = resolve(HOME, ".lobs/lobs.pid");
-const LOG_FILE = resolve(HOME, ".lobs/lobs.log");
+const PID_FILE = resolve(getLobsRoot(), "lobs.pid");
+const LOG_FILE = resolve(getLobsRoot(), "lobs.log");
+const HOME = process.env.HOME ?? "";
 const LOBS_CORE_DIR = resolve(HOME, "lobs/lobs-core");
 const LAUNCHD_PLIST = resolve(HOME, "Library/LaunchAgents/com.lobs.core.plist");
 

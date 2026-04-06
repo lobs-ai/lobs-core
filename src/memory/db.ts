@@ -9,15 +9,15 @@
 import Database from "better-sqlite3";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { homedir } from "node:os";
 import { log } from "../util/logger.js";
+import { getLobsRoot } from "../config/lobs.js";
 
 let _db: Database.Database | null = null;
 
 /**
  * Default path for the memory database.
  */
-export const DEFAULT_MEMORY_DB_PATH = resolve(homedir(), ".lobs", "structured-memory.db");
+export const DEFAULT_MEMORY_DB_PATH = resolve(getLobsRoot(), "structured-memory.db");
 
 /**
  * DDL for all memory tables and indexes.

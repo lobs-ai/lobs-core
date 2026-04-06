@@ -8,6 +8,21 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+// ── Identity mock (voice/types.ts calls getBotId() at load time) ─────────────
+
+vi.mock("../src/config/identity.js", () => ({
+  getBotName: () => "Lobs",
+  getBotId: () => "lobs",
+  getOwnerName: () => "Rafe",
+  getOwnerId: () => "rafe",
+  getOwnerDiscordId: () => "644578016298795010",
+  getIdentity: () => ({
+    bot: { name: "Lobs", id: "lobs" },
+    owner: { name: "Rafe", id: "rafe", discordId: "644578016298795010" },
+  }),
+  resetIdentityCache: () => {},
+}));
+
 // ── Mock state (each test flips these before calling the module) ──────────────
 
 const __fsMock = {

@@ -5,9 +5,9 @@
 
 import Database from "better-sqlite3";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { getLobsRoot } from "../config/lobs.js";
 
-const DB_PATH = process.env.PAW_DB_PATH ?? join(homedir(), ".lobs/lobs.db");
+const DB_PATH = process.env.PAW_DB_PATH ?? join(getLobsRoot(), "lobs.db");
 
 let _db: Database.Database | null = null;
 
