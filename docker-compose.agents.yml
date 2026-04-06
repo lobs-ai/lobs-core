@@ -1,7 +1,7 @@
-# docker-compose.agents.yml — Run standalone agents (Briggs, Sam, Lena)
+# docker-compose.agents.yml — Run full lobs-core instances as standalone agents
 #
-# Each agent runs lobs-core in agent mode (LOBS_MODE=agent) with its own
-# config directory, Discord bot token, and database.
+# Each agent is a complete lobs-core with its own config, DB, and Discord bot.
+# Repo clones and working files persist in the workspace volume.
 #
 # Usage:
 #   docker compose -f docker-compose.agents.yml up -d
@@ -19,10 +19,10 @@ x-agent-base: &agent-base
     dockerfile: Dockerfile.agent
   restart: unless-stopped
   environment: &agent-env
-    LOBS_MODE: agent
     OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
     ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    GH_TOKEN: ${GH_TOKEN:-}
 
 services:
   briggs:
@@ -38,6 +38,7 @@ services:
       - "9431:9421"
     volumes:
       - ${HOME}/.lobs-agents/briggs:/data
+      - briggs-workspace:/home/agent
 
   sam:
     <<: *agent-base
@@ -52,6 +53,7 @@ services:
       - "9432:9421"
     volumes:
       - ${HOME}/.lobs-agents/sam:/data
+      - sam-workspace:/home/agent
 
   lena:
     <<: *agent-base
@@ -66,3 +68,9 @@ services:
       - "9433:9421"
     volumes:
       - ${HOME}/.lobs-agents/lena:/data
+      - lena-workspace:/home/agent
+
+volumes:
+  briggs-workspace:
+  sam-workspace:
+  lena-workspace:

@@ -1,6 +1,6 @@
 FROM node:20-slim
 
-# Install tools that agents need for exec/grep/find
+# Install tools that agents need for exec/grep/find/git
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ripgrep \
@@ -21,8 +21,9 @@ COPY tsconfig.json eslint.config.js ./
 COPY src/ src/
 RUN npm run build
 
-# Agent mode
-ENV LOBS_MODE=agent
+# Create agent home directory — repo clones, git config, etc. go here
+RUN mkdir -p /home/agent && chmod 755 /home/agent
+ENV HOME=/home/agent
 ENV NODE_ENV=production
 
 # Health check
