@@ -1141,8 +1141,19 @@ export class MainAgent {
       messages = this.mergeConsecutiveRoles(messages);
 
       // 4. Add queued messages for this channel
+      const queueBefore = this.channelQueues.get(replyChannelId);
+      const oldestQueuedTs = queueBefore && queueBefore.length > 0 ? queueBefore[0].timestamp : null;
       const queuedText = this.drainQueue(replyChannelId);
       if (queuedText) {
+        // Inject a context bridge when queued messages waited more than 2 minutes
+        const waitMs = oldestQueuedTs ? Date.now() - oldestQueuedTs : 0;
+        if (waitMs > 2 * 60 * 1000) {
+          const waitMins = Math.round(waitMs / 60000);
+          messages.push({
+            role: "user",
+            content: `[System] The following messages arrived while you were busy processing another request (waited ~${waitMins}m). They may refer to the previous conversation topic.`,
+          });
+        }
         messages.push({
           role: "user",
           content: `[Queued messages while agent was busy]\n\n${queuedText}`,
@@ -1279,8 +1290,18 @@ export class MainAgent {
           );
         },
         getInjectedMessages: () => {
+          const midLoopQueueBefore = this.channelQueues.get(replyChannelId);
+          const midLoopOldestTs = midLoopQueueBefore && midLoopQueueBefore.length > 0 ? midLoopQueueBefore[0].timestamp : null;
           const midLoopQueued = this.drainQueue(replyChannelId, true);
           if (!midLoopQueued) return [];
+          const midLoopWaitMs = midLoopOldestTs ? Date.now() - midLoopOldestTs : 0;
+          const injected: string[] = [];
+          if (midLoopWaitMs > 2 * 60 * 1000) {
+            const waitMins = Math.round(midLoopWaitMs / 60000);
+            injected.push(`[System] The following messages arrived while you were busy processing another request (waited ~${waitMins}m). They may refer to the previous conversation topic.`);
+          }
+          injected.push(`[New messages received during processing]\n\n${midLoopQueued}`);
+          const fullContent = injected.join("\n\n");
           this.db
             .prepare(
               `INSERT INTO main_agent_messages
@@ -1289,12 +1310,12 @@ export class MainAgent {
             )
             .run(
               randomUUID(),
-              `[New messages received during processing]\n\n${midLoopQueued}`,
+              fullContent,
               replyChannelId,
-              Math.ceil(midLoopQueued.length / 4),
+              Math.ceil(fullContent.length / 4),
             );
           this.noteChannelProgress(replyChannelId);
-          return [`[New messages received during processing]\n\n${midLoopQueued}`];
+          return injected;
         },
         toolExecutor: async (toolName, params, toolUseId, cwd) => {
           // Check if channel was already aborted before executing
@@ -1967,6 +1988,22 @@ export class MainAgent {
 
     // Prepend compaction summary if we have one
     if (compaction) {
+      // Detect stale summaries: if many messages have accumulated since the
+      // compaction boundary, the summary is likely about a different topic.
+      const POST_COMPACTION_STALE_THRESHOLD = 20;
+      const postCompactionCount = reconstructed.length;
+      const isStale = postCompactionCount > POST_COMPACTION_STALE_THRESHOLD;
+
+      const summaryHeader = isStale
+        ? `[Old conversation context — ${postCompactionCount} messages have occurred since this summary. It may not be relevant to the current topic.]`
+        : `[Conversation summary — earlier messages compacted]`;
+
+      if (isStale) {
+        console.log(
+          `[main-agent] Compaction summary is stale (${postCompactionCount} post-compaction messages), labelling as old context`,
+        );
+      }
+
       const summaryMessages: Array<{
         role: string;
         content: string | Array<Record<string, unknown>>;
@@ -1975,7 +2012,7 @@ export class MainAgent {
       }> = [
         {
           role: "user",
-          content: `[Conversation summary — earlier messages compacted]\n\n${compaction.summary}`,
+          content: `${summaryHeader}\n\n${compaction.summary}`,
           created_at: compaction.up_to_created_at,
           metadata: null,
         },
@@ -2689,9 +2726,35 @@ export class MainAgent {
   private async compactIfNeeded(messages: LLMMessage[], channelId?: string): Promise<LLMMessage[]> {
     const COMPACT_THRESHOLD = 120000; // chars
     const HARD_CAP = 250000; // absolute maximum chars to send to API
+    const MAX_POST_COMPACTION_MESSAGES = 80; // message-count trigger regardless of char count
     const totalChars = calculateContextSize(messages);
 
-    if (totalChars < COMPACT_THRESHOLD) return messages;
+    // Count synthetic prefix messages (compaction summary + ack are not real DB rows)
+    let syntheticCount = 0;
+    for (const m of messages) {
+      const txt = typeof m.content === "string" ? m.content : "";
+      if (
+        txt.startsWith("[Conversation summary") ||
+        txt.startsWith("[Old conversation context") ||
+        txt.startsWith("[Conversation compacted") ||
+        txt === "Understood, I have the context from the summary. Continuing." ||
+        txt === "Understood, I have the context from the summary. Continuing from where we left off."
+      ) {
+        syntheticCount++;
+      } else {
+        break;
+      }
+    }
+    const realMessageCount = messages.length - syntheticCount;
+    const overMessageLimit = realMessageCount > MAX_POST_COMPACTION_MESSAGES;
+
+    if (totalChars < COMPACT_THRESHOLD && !overMessageLimit) return messages;
+
+    if (overMessageLimit && totalChars < COMPACT_THRESHOLD) {
+      console.log(
+        `[main-agent] Context has ${realMessageCount} real messages (limit: ${MAX_POST_COMPACTION_MESSAGES}), triggering message-count compaction...`,
+      );
+    }
 
     console.log(`[main-agent] Context at ${totalChars} chars, compacting...`);
 
