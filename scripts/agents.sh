@@ -45,6 +45,33 @@ check_compose() {
   fi
 }
 
+# Read Discord token for an agent from its secrets file and export as env var
+# Usage: load_agent_token briggs
+load_agent_token() {
+  local name="$1"
+  local upper
+  upper=$(echo "$name" | tr '[:lower:]' '[:upper:]')
+  local token_file="$HOME/.lobs-agents/${name}/config/secrets/discord-token.json"
+  if [[ -f "$token_file" ]]; then
+    local token
+    token=$(python3 -c "import json,sys; d=json.load(open('$token_file')); print(d.get('botToken',''))" 2>/dev/null)
+    if [[ -n "$token" ]]; then
+      export "${upper}_DISCORD_TOKEN=$token"
+    else
+      echo -e "${YELLOW}Warning:${NC} No botToken in $token_file"
+    fi
+  else
+    echo -e "${YELLOW}Warning:${NC} Token file not found: $token_file"
+  fi
+}
+
+# Load tokens for all known agents
+load_all_tokens() {
+  for name in briggs sam lena; do
+    load_agent_token "$name"
+  done
+}
+
 cmd_build() {
   check_compose
   echo -e "${CYAN}Building agent image...${NC}"
@@ -56,9 +83,11 @@ cmd_start() {
   check_compose
   local agent="${1:-}"
   if [[ -n "$agent" ]]; then
+    load_agent_token "$agent"
     echo -e "${CYAN}Starting ${agent}...${NC}"
     docker compose -f "$COMPOSE_FILE" up -d "$agent"
   else
+    load_all_tokens
     echo -e "${CYAN}Starting all agents...${NC}"
     docker compose -f "$COMPOSE_FILE" up -d
   fi
@@ -83,9 +112,11 @@ cmd_restart() {
   check_compose
   local agent="${1:-}"
   if [[ -n "$agent" ]]; then
+    load_agent_token "$agent"
     echo -e "${CYAN}Restarting ${agent}...${NC}"
     docker compose -f "$COMPOSE_FILE" restart "$agent"
   else
+    load_all_tokens
     echo -e "${CYAN}Restarting all agents...${NC}"
     docker compose -f "$COMPOSE_FILE" restart
   fi
