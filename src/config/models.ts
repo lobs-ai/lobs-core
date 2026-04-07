@@ -175,6 +175,7 @@ export function getModelConfig(): ModelConfig {
       if (fileData.scheduler) _config.scheduler = { ..._config.scheduler, ...fileData.scheduler };
       if (fileData.costs) _config.costs = { ..._config.costs, ...fileData.costs };
       if (fileData.contextLimits) _config.contextLimits = { ..._config.contextLimits, ...fileData.contextLimits };
+      if (fileData.discord) _config.discord = { ..._config.discord, ...fileData.discord };
     } catch { /* use defaults */ }
   }
 
