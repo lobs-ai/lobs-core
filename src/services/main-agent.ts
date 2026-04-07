@@ -505,115 +505,6 @@ export class MainAgent {
     ).run(title, channelId);
   }
 
-  /**
-   * Auto-generate or update a session title based on conversation content.
-   * Uses local LM Studio model for free, fast title generation.
-   * Only runs after the first reply and then every ~5 messages.
-   */
-  async maybeUpdateSessionTitle(channelId: string): Promise<void> {
-    // Count user+assistant messages (skip tool_use/tool_result)
-    const countRow = this.db.prepare(
-      `SELECT COUNT(*) as cnt FROM main_agent_messages
-       WHERE channel_id = ? AND role IN ('user', 'assistant')`
-    ).get(channelId) as { cnt: number } | undefined;
-    const msgCount = countRow?.cnt ?? 0;
-
-    // Generate title after first exchange (2 messages), then every 5 messages
-    const existingTitle = this.getSessionTitle(channelId);
-    const shouldGenerate = (!existingTitle && msgCount >= 2) || (msgCount > 0 && msgCount % 5 === 0);
-    if (!shouldGenerate) return;
-
-    // Grab the last few user+assistant messages for context
-    const recentMessages = this.db.prepare(
-      `SELECT role, content FROM main_agent_messages
-       WHERE channel_id = ? AND role IN ('user', 'assistant')
-       ORDER BY created_at DESC LIMIT 6`
-    ).all(channelId) as { role: string; content: string }[];
-
-    if (recentMessages.length === 0) return;
-
-    // Build a summary of the conversation for title generation
-    const conversationSnippet = recentMessages.reverse().map((m) => {
-      // Extract text content, strip tool blocks
-      let text = m.content;
-      try {
-        const parsed = JSON.parse(text);
-        if (Array.isArray(parsed)) {
-          text = parsed
-            .filter((b: any) => b.type === "text")
-            .map((b: any) => b.text)
-            .join("\n");
-        }
-      } catch {
-        // already plain text
-      }
-      // Truncate long messages
-      if (text.length > 300) text = text.slice(0, 300) + "...";
-      return `${m.role}: ${text}`;
-    }).join("\n");
-
-    if (!conversationSnippet.trim()) return;
-
-    try {
-      const modelConfig = getModelConfig();
-      const baseUrl = modelConfig.local?.baseUrl ?? "http://localhost:1234/v1";
-      const rawModel = modelConfig.local?.chatModel ?? getModelConfig().local.chatModel;
-      const model = rawModel.replace(/^lmstudio\//, "");
-
-      const systemPrompt = "Generate a very short title (3-6 words) for this conversation. Return ONLY the title, no quotes, no punctuation at the end. Be specific about the topic, not generic.";
-
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 30_000);
-
-      try {
-        const response = await fetch(`${baseUrl}/chat/completions`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model,
-            messages: [
-              { role: "system", content: systemPrompt },
-              { role: "user", content: conversationSnippet },
-              { role: "assistant", content: "<think>\n\n</think>\n\n" },
-            ],
-            max_tokens: 32,
-            temperature: 0.3,
-            stream: false,
-          }),
-          signal: controller.signal,
-        });
-
-        if (!response.ok) {
-          throw new Error(`LM Studio returned ${response.status}: ${await response.text()}`);
-        }
-
-        const data = await response.json() as {
-          choices?: Array<{ message?: { content?: string } }>;
-        };
-        let rawTitle = data.choices?.[0]?.message?.content?.trim() ?? "";
-        rawTitle = rawTitle.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
-
-        const title = rawTitle.replace(/^["']|["']$/g, "").replace(/[.!?]+$/, "").slice(0, 60);
-        if (!title) return;
-
-        this.setSessionTitle(channelId, title);
-        console.log(`[main-agent] Session title for ${this.channelTag(channelId)}: "${title}"`);
-
-        // Emit title update event so frontends can display it
-        this.events.emit("stream", {
-          type: "title_update",
-          channelId,
-          title,
-          timestamp: Date.now(),
-        } satisfies AgentStreamEvent);
-      } finally {
-        clearTimeout(timeout);
-      }
-    } catch (e) {
-      console.error(`[main-agent] Title generation error:`, e);
-    }
-  }
-
   /** Resume sessions that were active before a restart */
   async resumeAfterRestart(): Promise<void> {
     console.log("[main-agent] Checking for sessions to resume after restart...");
@@ -1122,7 +1013,7 @@ export class MainAgent {
         if (wasMentioned) {
           chatContextNote = `\n\nYou are in a GROUP CHAT and were directly mentioned/addressed. You MUST respond to this message — the user is expecting your input.`;
         } else {
-          chatContextNote = `\n\nYou are in a GROUP CHAT. You are an active participant in this channel — respond to messages directed at you, questions you can answer, and conversations where you have something useful to contribute. Reply with just "NO_REPLY" (nothing else) ONLY if the message is clearly a private conversation between other people that has nothing to do with you. When in doubt, respond.`;
+          chatContextNote = `\n\nYou are in a GROUP CHAT. Responding is OPTIONAL. Reply with just "NO_REPLY" (nothing else) if the message isn't directed at you or doesn't need your input. Only respond when mentioned, directly addressed, or when you have something genuinely useful to add. Don't respond just to acknowledge.`;
         }
       } else {
         chatContextNote = `\n\nThis is a DIRECT conversation. You MUST always respond to every message. Never reply with "NO_REPLY" — the user is talking directly to you and expects a response.`;
@@ -1660,9 +1551,6 @@ export class MainAgent {
         `in ${Date.now() - conversationStartedAt}ms`,
       );
       this.conversationRetryCount.delete(replyChannelId);
-      this.maybeUpdateSessionTitle(replyChannelId).catch((e) =>
-        console.error(`[main-agent] Title generation failed for ${replyChannelId}:`, e)
-      );
     } catch (err) {
       console.error("[main-agent] Error in conversation loop:", err);
       // Flush any remaining Discord tool batch
@@ -2944,7 +2832,18 @@ export class MainAgent {
       WHERE channel_id = ? AND role = 'assistant'
       ORDER BY created_at DESC LIMIT 1
     `).get(channelId) as { content: string } | undefined;
-    return row?.content ?? null;
+    if (!row?.content) return null;
+    // Flatten JSON content blocks (e.g. [{ type: "text", text: "..." }]) to plain text
+    try {
+      const parsed = JSON.parse(row.content) as unknown;
+      if (Array.isArray(parsed)) {
+        return (parsed as Array<{ type: string; text?: string }>)
+          .filter(b => b.type === "text")
+          .map(b => b.text ?? "")
+          .join("\n");
+      }
+    } catch { /* already plain text */ }
+    return row.content;
   }
 
   /** Get the count of assistant messages for a channel (for tracking new responses) */

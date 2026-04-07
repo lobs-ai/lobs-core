@@ -392,6 +392,40 @@ export async function handleChatRequest(
           // Cleanup listener when done — global fallback takes over for system events
           activeRequestListeners.delete(channelId);
           mainAgent.events.off("stream", toolListener);
+
+          // Safety net: if assistant_reply fired but the DB write failed silently
+          // (e.g. a listener race), fall back to writing from main_agent_messages.
+          // We check for any assistant message created after this request started.
+          const written = db.select({ id: chatMessages.id })
+            .from(chatMessages)
+            .where(and(
+              eq(chatMessages.sessionKey, sessionKey),
+              eq(chatMessages.role, "assistant"),
+              gt(chatMessages.createdAt, now),
+            ))
+            .get();
+          if (!written) {
+            // No assistant message was written — pull from main_agent_messages via public method
+            const text = mainAgent.getLastAssistantMessage(channelId);
+            if (text) {
+              log().warn(`[chat] safety-net: assistant_reply not in chatMessages — writing from main_agent_messages session=${sessionKey}`);
+              const ts = new Date().toISOString();
+              db.insert(chatMessages).values({
+                id: randomUUID().replace(/-/g, ""),
+                sessionKey,
+                role: "assistant",
+                content: text,
+                createdAt: ts,
+              }).run();
+              db.update(chatSessions)
+                .set({ lastMessageAt: ts })
+                .where(eq(chatSessions.sessionKey, sessionKey))
+                .run();
+              onAssistantMessage(sessionKey);
+            } else {
+              log().warn(`[chat] safety-net: no assistant reply found for session=${sessionKey} channel=${channelId}`);
+            }
+          }
         }
       };
 
