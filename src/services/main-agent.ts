@@ -1304,6 +1304,19 @@ export class MainAgent {
             throw new Error(`Channel paused: stale response for ${replyChannelId}`);
           }
           this.noteChannelProgress(replyChannelId);
+          // Log every text block so we can see if the LLM outputs duplicate responses
+          const textBlocks = response.content.filter(b => b.type === "text") as { type: "text"; text: string }[];
+          if (textBlocks.length > 0) {
+            console.log(
+              `[main-agent.loop] 📦 llm_response turn=${turn} channel=${replyChannelId.slice(0, 20)} ` +
+              `text_blocks=${textBlocks.length} total_chars=${textBlocks.reduce((s, b) => s + b.text.length, 0)}`,
+            );
+            textBlocks.forEach((b, i) => {
+              console.log(
+                `[main-agent.loop]   block[${i}] len=${b.text.length} preview=${b.text.slice(0, 120).replace(/\n/g, "\\n")}`,
+              );
+            });
+          }
           console.debug(
             `[main-agent.loop] channel=${replyChannelId} iter=${turn} ` +
             `llm_response blocks=${response.content.length} stop=${response.stopReason}`,
@@ -1533,19 +1546,16 @@ export class MainAgent {
       // alongside it, the intent is silence.
       // Also suppress group-chat meta-explanations ("I'll let Briggs...", etc.).
       const firstLine = trimmedForCheck.split("\n")[0].trim();
+      // NO_REPLY only applies in group chats. In direct chats the model is
+      // explicitly told never to use it, so even if the text contains the
+      // token (e.g. quoting the system prompt), we treat it as a real reply.
       const isNoReply =
-        /\bNO_REPLY\b/.test(trimmedForCheck) ||
-        (channelChatType === "group" &&
-          !(this.channelMentioned.get(replyChannelId) ?? false) &&
-          /^(I['']ll let|that'?s directed at|not my domain|staying quiet|I should (stay|remain|let)|this (is|isn'?t) (directed|for) (me|@?\w)|deferring to|leaving this (to|for))/i.test(firstLine));
+        !isDirectChat &&
+        (/\bNO_REPLY\b/.test(trimmedForCheck) ||
+          (channelChatType === "group" &&
+            !(this.channelMentioned.get(replyChannelId) ?? false) &&
+            /^(I['']ll let|that'?s directed at|not my domain|staying quiet|I should (stay|remain|let)|this (is|isn'?t) (directed|for) (me|@?\w)|deferring to|leaving this (to|for))/i.test(firstLine)));
       const isRoutineHeartbeat = this.isRoutineHeartbeat(trimmedForCheck || "");
-
-      // In direct chats, NO_REPLY should never happen (system prompt says so).
-      // If it does, treat it as an empty response rather than injecting a
-      // canned fallback — the "no text" path will log a warning.
-      if (isNoReply && isDirectChat) {
-        textResponse = "";
-      }
 
       console.log(
         `[main-agent.loop] channel=${replyChannelId.slice(0, 20)} completed iter=${loopIteration} final_len=${textResponse.length} ` +
@@ -1575,22 +1585,14 @@ export class MainAgent {
           try {
             await this.emitReply(replyChannelId, textResponse);
           } catch (replyErr) {
+            // Do NOT retry — Discord sometimes throws after successfully delivering
+            // the message (rate limits, timeouts), so a retry causes duplicates.
+            // The response is already saved to DB.
             console.error(
               `[main-agent] ⚠️ Discord reply failed for ${this.channelTag(replyChannelId)}, ` +
-              `response is saved to DB — will retry once:`,
+              `response is saved to DB — not retrying to avoid duplicates:`,
               replyErr,
             );
-            // One retry after a short delay
-            try {
-              await new Promise(r => setTimeout(r, 2000));
-              await this.emitReply(replyChannelId, textResponse);
-              console.log(`[main-agent] ✅ Discord reply retry succeeded for ${this.channelTag(replyChannelId)}`);
-            } catch (retryErr) {
-              console.error(
-                `[main-agent] ❌ Discord reply retry also failed for ${this.channelTag(replyChannelId)}:`,
-                retryErr,
-              );
-            }
           }
         }
 
