@@ -1528,7 +1528,16 @@ export class MainAgent {
       // whitespace).  A real reply that happens to mention "NO_REPLY" (e.g.
       // quoting the system prompt) should still be delivered.
       const trimmedForCheck = textResponse.trim();
-      const isNoReply = trimmedForCheck === "NO_REPLY";
+      // If NO_REPLY appears anywhere in the response, suppress entirely.
+      // The model is signaling "don't send this" — even if there's real content
+      // alongside it, the intent is silence.
+      // Also suppress group-chat meta-explanations ("I'll let Briggs...", etc.).
+      const firstLine = trimmedForCheck.split("\n")[0].trim();
+      const isNoReply =
+        /\bNO_REPLY\b/.test(trimmedForCheck) ||
+        (channelChatType === "group" &&
+          !(this.channelMentioned.get(replyChannelId) ?? false) &&
+          /^(I['']ll let|that'?s directed at|not my domain|staying quiet|I should (stay|remain|let)|this (is|isn'?t) (directed|for) (me|@?\w)|deferring to|leaving this (to|for))/i.test(firstLine));
       const isRoutineHeartbeat = this.isRoutineHeartbeat(trimmedForCheck || "");
 
       // In direct chats, NO_REPLY should never happen (system prompt says so).

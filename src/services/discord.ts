@@ -17,9 +17,9 @@ export interface DiscordConfig {
   ownerId?: string;       // Primary owner's Discord user ID
   dmAllowFrom: string[];  // User IDs allowed to DM the bot
   botAllowFrom: string[]; // Bot user IDs whose messages are accepted (not silently dropped)
-  channelPolicies: Record<string, { allow: boolean; requireMention: boolean }>;
+  channelPolicies: Record<string, { allow: boolean; requireMention: boolean; dropBotMessages?: boolean }>;
   /** Guild-level allow policies — all channels in these guilds are allowed by default */
-  guildPolicies?: Record<string, { allow: boolean; requireMention: boolean }>;
+  guildPolicies?: Record<string, { allow: boolean; requireMention: boolean; dropBotMessages?: boolean }>;
 }
 
 /** Connection health states */
@@ -563,11 +563,13 @@ class DiscordService {
           return; // Silently drop if mention required but not present
         }
 
-        // Bot messages in guild channels only get processed if the bot is mentioned
-        if (msg.author.bot && !msg.mentions.has(this.client!.user!)) {
-          console.debug(`[discord] Dropping bot message from ${msg.author.tag} (${msg.author.id}) — not mentioned`);
+        // Drop bot messages unless they @mention us
+        if (policy.dropBotMessages && msg.author.bot && !msg.mentions.has(this.client!.user!)) {
+          console.debug(`[discord] Dropping bot message from ${msg.author.tag} (${msg.author.id}) — dropBotMessages enabled`);
           return;
         }
+
+
       }
 
       // Detect DMs: guildId alone is unreliable — Discord can send DMs with a
