@@ -562,6 +562,12 @@ class DiscordService {
           console.debug(`[discord] Dropping message from ${msg.channelId} without required mention`);
           return; // Silently drop if mention required but not present
         }
+
+        // Bot messages in guild channels only get processed if the bot is mentioned
+        if (msg.author.bot && !msg.mentions.has(this.client!.user!)) {
+          console.debug(`[discord] Dropping bot message from ${msg.author.tag} (${msg.author.id}) — not mentioned`);
+          return;
+        }
       }
 
       // Detect DMs: guildId alone is unreliable — Discord can send DMs with a
