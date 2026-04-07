@@ -590,9 +590,9 @@ export class MainAgent {
       const hasQueuedMessages = queuedChannelSet.has(channelId);
       const resumeText = [
         `[System] lobs-core restarted. This session was active at ${lastActivity}.`,
-        session?.context_summary ? `Last context: ${session.context_summary}` : null,
+        session?.context_summary ? `Context before restart — ${session.context_summary}` : null,
         persistedMsgs.length > 0 ? `${persistedMsgs.length} queued message(s) waiting.` : null,
-        !hasQueuedMessages ? `You were mid-response when the process died. Continue where you left off.` : null,
+        !hasQueuedMessages ? `You were mid-task when the process died. Resume that task now.` : null,
         `Orient fast: check state (git status/log, build status) before re-reading files. Act on what you find — don't re-investigate from scratch.`,
       ].filter(Boolean).join(" ");
 
@@ -648,23 +648,53 @@ export class MainAgent {
 
     // Save a context summary for each active channel
     for (const channelId of allProcessingIds) {
-      // Get the last few messages — prioritize user messages and assistant text
-      // (tool outputs are noise for restart context)
+      // Get more messages to find a real human question (tool results are noise)
       const recent = this.db.prepare(`
         SELECT role, content FROM main_agent_messages
-        WHERE channel_id = ? ORDER BY created_at DESC LIMIT 10
+        WHERE channel_id = ? ORDER BY created_at DESC LIMIT 30
       `).all(channelId) as Array<{ role: string; content: string }>;
 
-      // Find the last user message (the task) and last assistant text (progress)
-      const lastUser = recent.find(r => r.role === "user" && !r.content.startsWith("[System]"));
-      const lastAssistant = recent.find(r => r.role === "assistant" && !r.content.startsWith("["));
+      // Find the last genuine human message — skip system events and tool result blocks.
+      // Tool results are injected as role=user with content starting with '[Tool results]'
+      // or containing JSON content blocks like '[{"type":"tool_result"'.
+      const isToolResult = (content: string) =>
+        content.startsWith("[Tool results]") ||
+        content.startsWith('[{"type":"tool_result') ||
+        content.includes('"type":"tool_result"');
+
+      const lastHuman = recent.find(
+        r => r.role === "user" &&
+          !r.content.startsWith("[System]") &&
+          !isToolResult(r.content)
+      );
+
+      // Find the last substantive assistant message (not a bare tool-call block).
+      // Assistant messages that are only tool calls start with '[' (JSON array of tool_use blocks).
+      const lastAssistant = recent.find(
+        r => r.role === "assistant" && !r.content.startsWith("[")
+      );
 
       const parts: string[] = [];
-      if (lastUser) parts.push(`Task: ${lastUser.content.substring(0, 200)}`);
-      if (lastAssistant) parts.push(`Last response: ${lastAssistant.content.substring(0, 200)}`);
+      if (lastHuman) {
+        // Trim cleanly at a word boundary; 300 chars gives more context
+        const q = lastHuman.content.length > 300
+          ? lastHuman.content.substring(0, 300).replace(/\s\S*$/, "…")
+          : lastHuman.content;
+        parts.push(`User asked: "${q}"`);
+      }
+      if (lastAssistant) {
+        const a = lastAssistant.content.length > 200
+          ? lastAssistant.content.substring(0, 200).replace(/\s\S*$/, "…")
+          : lastAssistant.content;
+        parts.push(`Agent was: "${a}"`);
+      }
       if (parts.length === 0) {
-        // Fallback to raw recent content
-        parts.push(recent.slice(0, 3).reverse().map(r => r.content.substring(0, 100)).join(" | "));
+        // Fallback: last 3 messages stripped of bulk
+        parts.push(
+          recent.slice(0, 3).reverse()
+            .map(r => r.content.substring(0, 100).replace(/\n/g, " "))
+            .join(" | ")
+        );
       }
 
       this.updateChannelSession(channelId, "processing", null, null, parts.join(" | "));
@@ -1452,20 +1482,25 @@ export class MainAgent {
 
       let textResponse = result.output ?? "";
       const isDirectChat = channelChatType !== "group";
-      const containsNoReply = /\bNO_REPLY\b/.test(textResponse.trim() || "");
-      const isNoReply = containsNoReply;
-      const isRoutineHeartbeat = this.isRoutineHeartbeat(textResponse.trim() || "");
+      // NO_REPLY means the agent chose not to respond.  Only treat the
+      // response as NO_REPLY when it's the *entire* message (with optional
+      // whitespace).  A real reply that happens to mention "NO_REPLY" (e.g.
+      // quoting the system prompt) should still be delivered.
+      const trimmedForCheck = textResponse.trim();
+      const isNoReply = trimmedForCheck === "NO_REPLY";
+      const isRoutineHeartbeat = this.isRoutineHeartbeat(trimmedForCheck || "");
 
-      if (containsNoReply && textResponse) {
-        textResponse = textResponse.replace(/\s*\bNO_REPLY\b\s*/g, "").trim();
-      }
+      // In direct chats, NO_REPLY should never happen (system prompt says so).
+      // If it does, treat it as an empty response rather than injecting a
+      // canned fallback — the "no text" path will log a warning.
       if (isNoReply && isDirectChat) {
-        textResponse = "I'm here — what can I help with?";
+        textResponse = "";
       }
 
-      console.debug(
-        `[main-agent.loop] channel=${replyChannelId} completed iter=${loopIteration} final_len=${textResponse.length} ` +
-        `direct=${isDirectChat} no_reply=${isNoReply} heartbeat=${isRoutineHeartbeat}`,
+      console.log(
+        `[main-agent.loop] channel=${replyChannelId.slice(0, 20)} completed iter=${loopIteration} final_len=${textResponse.length} ` +
+        `direct=${isDirectChat} no_reply=${isNoReply} heartbeat=${isRoutineHeartbeat} ` +
+        `hasOnReply=${!!this.onReply} chatType=${channelChatType} output_preview="${(textResponse || "").slice(0, 80)}"`,
       );
 
       if (textResponse && !isRoutineHeartbeat && !(isNoReply && !isDirectChat)) {
@@ -1483,8 +1518,30 @@ export class MainAgent {
           );
         this.noteChannelProgress(replyChannelId);
 
+        // Deliver to Discord — isolated so a send failure can't prevent the
+        // assistant_reply / done events from firing (response is already in DB).
         if (this.onReply) {
-          await this.emitReply(replyChannelId, textResponse);
+          console.log(`[main-agent.loop] calling emitReply channel=${replyChannelId.slice(0, 20)} len=${textResponse.length}`);
+          try {
+            await this.emitReply(replyChannelId, textResponse);
+          } catch (replyErr) {
+            console.error(
+              `[main-agent] ⚠️ Discord reply failed for ${this.channelTag(replyChannelId)}, ` +
+              `response is saved to DB — will retry once:`,
+              replyErr,
+            );
+            // One retry after a short delay
+            try {
+              await new Promise(r => setTimeout(r, 2000));
+              await this.emitReply(replyChannelId, textResponse);
+              console.log(`[main-agent] ✅ Discord reply retry succeeded for ${this.channelTag(replyChannelId)}`);
+            } catch (retryErr) {
+              console.error(
+                `[main-agent] ❌ Discord reply retry also failed for ${this.channelTag(replyChannelId)}:`,
+                retryErr,
+              );
+            }
+          }
         }
 
         this.events.emit("stream", {
@@ -1493,6 +1550,12 @@ export class MainAgent {
           result: textResponse,
           timestamp: Date.now(),
         } satisfies AgentStreamEvent);
+      } else if (!textResponse && isDirectChat && !isRoutineHeartbeat) {
+        // Agent completed but produced no text — log it so we can diagnose
+        console.warn(
+          `[main-agent] ⚠️ Empty textResponse for direct chat channel=${replyChannelId.slice(0, 20)} ` +
+          `output_len=${result.output?.length ?? 0} stop=${result.stopReason}`,
+        );
       } else if (isRoutineHeartbeat) {
         this.db
           .prepare(
@@ -1512,6 +1575,7 @@ export class MainAgent {
       this.events.emit("stream", {
         type: "done",
         channelId: replyChannelId,
+        result: textResponse || undefined, // Include text so frontend has a direct fallback
         timestamp: Date.now(),
       } satisfies AgentStreamEvent);
 
@@ -2769,14 +2833,42 @@ export class MainAgent {
     console.log(
       `[main-agent.queue] channel=${this.channelTag(channelId)} drain_all count=${queue.length}`,
     );
-    
-    const texts = queue.map(
-      (m, i) =>
-        `---\nQueued #${i + 1} from ${m.authorName} (${new Date(m.timestamp).toLocaleTimeString()}):\n${m.content}`,
-    );
-    
+
+    const now = Date.now();
+
+    // Deduplicate: collapse runs of identical content from the same author
+    interface CollapsedMsg {
+      msg: PendingMessage;
+      count: number;
+    }
+    const collapsed: CollapsedMsg[] = [];
+    for (const m of queue) {
+      const last = collapsed[collapsed.length - 1];
+      if (last && last.msg.authorId === m.authorId && last.msg.content.trim() === m.content.trim()) {
+        last.count++;
+        // Keep the latest timestamp so age annotation reflects the most recent send
+        last.msg = m;
+      } else {
+        collapsed.push({ msg: m, count: 1 });
+      }
+    }
+
+    const formatAge = (ts: number): string => {
+      const secs = Math.round((now - ts) / 1000);
+      if (secs < 60) return `${secs}s ago`;
+      const mins = Math.round(secs / 60);
+      if (mins < 60) return `${mins}m ago`;
+      return `${Math.round(mins / 60)}h ago`;
+    };
+
+    const texts = collapsed.map((c, i) => {
+      const age = formatAge(c.msg.timestamp);
+      const countNote = c.count > 1 ? ` (sent ${c.count}x while waiting)` : "";
+      return `---\nQueued #${i + 1} from ${c.msg.authorName} [${age}]${countNote}:\n${c.msg.content}`;
+    });
+
     const queuedBlock = texts.join("\n\n");
-    
+
     // Store the queued block as a single DB entry (caller can skip if they persist separately)
     if (!skipDbPersist) {
       this.db.prepare(`
@@ -2790,7 +2882,7 @@ export class MainAgent {
         Math.ceil(queuedBlock.length / 4),
       );
     }
-    
+
     // Clear this channel's in-memory queue and mark DB queue processed
     this.channelQueues.delete(channelId);
     this.markQueueProcessed(channelId);
