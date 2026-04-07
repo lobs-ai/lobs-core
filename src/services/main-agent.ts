@@ -121,6 +121,8 @@ export class MainAgent {
   private channelChatType = new Map<string, string>();
   // Track guild ID per channel (for Discord server context)
   private channelGuildId = new Map<string, string>();
+  // Track whether the latest message in a channel mentioned/addressed the bot
+  private channelMentioned = new Map<string, boolean>();
   // Batched tool progress for Discord — accumulates until near 2000 chars or turn ends
   private discordToolBatches = new Map<string, string[]>();
   private queueRecoveryTimer: NodeJS.Timeout;
@@ -805,6 +807,7 @@ export class MainAgent {
     );
     this.channelChatType.set(channelId, chatType);
     if (msg.guildId) this.channelGuildId.set(channelId, msg.guildId);
+    if (msg.isMentioned !== undefined) this.channelMentioned.set(channelId, msg.isMentioned);
 
     // Check if this specific channel is already being processed or at concurrency limit
     if (this.processingChannels.has(channelId) || this.processingChannels.size >= MAX_CONCURRENT_CHANNELS) {
@@ -1115,7 +1118,12 @@ export class MainAgent {
       if (isVoiceChannel) {
         chatContextNote = "\n\nYou are in a LIVE VOICE CALL. Always respond — keep it short and conversational.";
       } else if (channelChatType === "group") {
-        chatContextNote = `\n\nYou are in a GROUP CHAT. Responding is OPTIONAL. Reply with just "NO_REPLY" (nothing else) if the message isn't directed at you or doesn't need your input. Only respond when mentioned, directly addressed, or when you have something genuinely useful to add. Don't respond just to acknowledge.`;
+        const wasMentioned = this.channelMentioned.get(replyChannelId) ?? false;
+        if (wasMentioned) {
+          chatContextNote = `\n\nYou are in a GROUP CHAT and were directly mentioned/addressed. You MUST respond to this message — the user is expecting your input.`;
+        } else {
+          chatContextNote = `\n\nYou are in a GROUP CHAT. You are an active participant in this channel — respond to messages directed at you, questions you can answer, and conversations where you have something useful to contribute. Reply with just "NO_REPLY" (nothing else) ONLY if the message is clearly a private conversation between other people that has nothing to do with you. When in doubt, respond.`;
+        }
       } else {
         chatContextNote = `\n\nThis is a DIRECT conversation. You MUST always respond to every message. Never reply with "NO_REPLY" — the user is talking directly to you and expects a response.`;
       }
