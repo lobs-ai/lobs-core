@@ -11,6 +11,7 @@ x-agent-base: &agent-base
     ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     GH_TOKEN: ${GH_TOKEN:-}
+    OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
     LM_STUDIO_URL: http://host.docker.internal:1234
 
 services:

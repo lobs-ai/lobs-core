@@ -405,10 +405,10 @@ export async function handleChatRequest(
             ))
             .get();
           if (!written) {
-            // No assistant message was written — pull from main_agent_messages via public method
-            const text = mainAgent.getLastAssistantMessage(channelId);
+            // No assistant message was written — try event.result first, then main_agent_messages
+            const text = event.result || mainAgent.getLastAssistantMessage(channelId);
             if (text) {
-              log().warn(`[chat] safety-net: assistant_reply not in chatMessages — writing from main_agent_messages session=${sessionKey}`);
+              log().warn(`[chat] safety-net: writing missing assistant reply session=${sessionKey} source=${event.result ? "done-event" : "main_agent_messages"}`);
               const ts = new Date().toISOString();
               db.insert(chatMessages).values({
                 id: randomUUID().replace(/-/g, ""),

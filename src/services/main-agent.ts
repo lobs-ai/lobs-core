@@ -134,6 +134,9 @@ export class MainAgent {
   private channelLastSessionHeartbeatAt = new Map<string, number>();
   /** AbortController per channel — allows stale recovery to cancel in-flight LLM requests */
   private channelAbortControllers = new Map<string, AbortController>();
+  /** Cooldown tracking for error notifications — key is `${channelId}:${errorType}`, value is last-sent timestamp */
+  private errorNotifyCooldown = new Map<string, number>();
+  private static readonly ERROR_NOTIFY_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
   
   /** EventEmitter for SSE streaming — Nexus subscribes to this */
   public readonly events = new EventEmitter();
@@ -343,6 +346,23 @@ export class MainAgent {
         () => this.onReply!(channelId, chunk),
       );
     }
+  }
+
+  /**
+   * Send an error notification to a channel, but only if we haven't sent the same
+   * error type recently (1-hour cooldown). Returns true if the message was sent.
+   */
+  private async emitErrorOnce(channelId: string, errorType: string, content: string): Promise<boolean> {
+    const key = `${channelId}:${errorType}`;
+    const lastSent = this.errorNotifyCooldown.get(key) ?? 0;
+    const now = Date.now();
+    if (now - lastSent < MainAgent.ERROR_NOTIFY_COOLDOWN_MS) {
+      console.log(`[main-agent.error-cooldown] suppressed "${errorType}" on channel=${this.channelTag(channelId)} (sent ${Math.round((now - lastSent) / 60000)}m ago)`);
+      return false;
+    }
+    this.errorNotifyCooldown.set(key, now);
+    await this.emitReply(channelId, content);
+    return true;
   }
 
   /** Check if a channel should see tool step progress (DMs + Nexus only, not group chats) */
@@ -1043,7 +1063,7 @@ export class MainAgent {
         if (wasMentioned) {
           chatContextNote = `\n\nYou are in a GROUP CHAT and were directly mentioned/addressed. You MUST respond to this message — the user is expecting your input.`;
         } else {
-          chatContextNote = `\n\nYou are in a GROUP CHAT. Responding is OPTIONAL. Reply with just "NO_REPLY" (nothing else) if the message isn't directed at you or doesn't need your input. Only respond when mentioned, directly addressed, or when you have something genuinely useful to add. Don't respond just to acknowledge.`;
+          chatContextNote = `\n\nYou are in a GROUP CHAT. Responding is OPTIONAL. If you choose not to respond, your ENTIRE message must be exactly the text NO_REPLY — nothing else. Do NOT say "noted", "acknowledged", "not my domain", "staying quiet", or any other filler. Those get sent as real messages. Only NO_REPLY (alone, as the complete response) gets suppressed. Respond only when directly mentioned, explicitly addressed by name, or when you have genuinely new information to contribute.`;
         }
       } else {
         chatContextNote = `\n\nThis is a DIRECT conversation. You MUST always respond to every message. Never reply with "NO_REPLY" — the user is talking directly to you and expects a response.`;
@@ -1697,18 +1717,26 @@ export class MainAgent {
         try {
           if (this.onReply) {
             let friendlyMsg: string;
+            let errorType: string;
             if (errStr.includes("500") && errStr.includes("api_error")) {
+              errorType = "provider_500";
               friendlyMsg = "⚠️ The AI provider (Anthropic) is having issues — try again in a minute.";
             } else if (errStr.includes("overloaded")) {
+              errorType = "provider_overloaded";
               friendlyMsg = "⚠️ The AI provider is overloaded — try again in a minute.";
             } else if (errStr.includes("rate_limit") || errStr.includes("429")) {
+              errorType = "rate_limit";
               friendlyMsg = "⚠️ Rate limited — try again shortly.";
             } else if (isTimeout) {
+              errorType = "timeout";
               friendlyMsg = "⚠️ The AI request timed out before completing.";
             } else {
+              // Use a stable key based on the error message so the same error
+              // doesn't spam; different errors still get through independently.
+              errorType = `error:${errStr.substring(0, 80)}`;
               friendlyMsg = `❌ Error: ${errStr.substring(0, 200)}`;
             }
-            await this.emitReply(replyChannelId, friendlyMsg);
+            await this.emitErrorOnce(replyChannelId, errorType, friendlyMsg);
           }
         } catch (replyErr) {
           console.error("[main-agent] Failed to send error reply:", replyErr);

@@ -596,13 +596,18 @@ class AnthropicClient implements LLMClient {
         getKeyPool().markHealthy("anthropic", this.keyIndex);
       }
 
-      // Map tool names back from Claude Code names to original names
-      const content = (response.content as any[]).map((block: any) => {
-        if (block.type === "tool_use" && this.isOAuth) {
-          return { ...block, name: fromClaudeCodeName(block.name, params.tools) };
-        }
-        return block;
-      }) as LLMResponse["content"];
+      // Map tool names back from Claude Code names to original names,
+      // and strip thinking blocks — they must not be included in message
+      // history (signatures expire and Anthropic rejects stale ones).
+      // Thinking text is already captured in thinkingContent above.
+      const content = (response.content as any[])
+        .filter((block: any) => block.type !== "thinking")
+        .map((block: any) => {
+          if (block.type === "tool_use" && this.isOAuth) {
+            return { ...block, name: fromClaudeCodeName(block.name, params.tools) };
+          }
+          return block;
+        }) as LLMResponse["content"];
 
       return {
         content,

@@ -564,7 +564,14 @@ class DiscordService {
         }
       }
 
-      const isDm = !msg.guildId;
+      // Detect DMs: guildId alone is unreliable — Discord can send DMs with a
+      // guildId when the bot shares a server with the user.  Fall back to the
+      // dmAllowFrom list as the authoritative signal: if the author is in that
+      // list AND doesn't match a channel-specific policy, treat it as a DM.
+      const hasChannelPolicy = !!this.config!.channelPolicies[msg.channelId];
+      const isDm = !msg.guildId
+        || (this.config!.dmAllowFrom.includes(msg.author.id) && !hasChannelPolicy);
+      console.log(`[discord] isDm=${isDm} guildId=${msg.guildId} channelType=${msg.channel.type} hasChannelPolicy=${hasChannelPolicy} channel=${msg.channelId}`);
       const isMentioned = msg.mentions.has(this.client!.user!);
 
       // Build content: message text + embeds + any text file attachments
