@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-COMPOSE_FILE="$SCRIPT_DIR/docker-compose.agents.yml"
+COMPOSE_FILE="$SCRIPT_DIR/../docker-compose.agents.yml"
 
 # Load .env if it exists
 [[ -f "$SCRIPT_DIR/.env" ]] && set -a && source "$SCRIPT_DIR/.env" && set +a
