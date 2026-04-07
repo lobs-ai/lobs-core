@@ -6,3 +6,4 @@ coverage/
 *.db-shm
 .DS_Store
 tools-venv/
+.env
