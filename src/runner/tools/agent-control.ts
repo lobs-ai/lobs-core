@@ -255,7 +255,7 @@ const BUILTIN_PIPELINES: Record<string, Array<{ agentType: string; modelTier: st
     { agentType: "reviewer", modelTier: "small", taskPrefix: "Review the code changes from the previous implementation. Check for bugs, edge cases, and code quality. Provide specific feedback.\n\nImplementation task:\n" },
   ],
   "design-and-implement": [
-    { agentType: "architect", modelTier: "standard", taskPrefix: "Create a design document for:\n\n" },
+    { agentType: "architect", modelTier: "medium", taskPrefix: "Create a design document for:\n\n" },
     { agentType: "programmer", modelTier: "medium", taskPrefix: "Implement the following design. Follow the architecture exactly as specified.\n\nDesign:\n" },
   ],
   "research-and-write": [

@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createResilientClient } from "../runner/providers.js";
 import type { LLMMessage, LLMClient } from "../runner/providers.js";
-import { getModelConfig } from "../config/models.js";
+import { getDiscordDefaultTier, getModelConfig } from "../config/models.js";
 import { getToolDefinitions, executeTool } from "../runner/tools/index.js";
 import type { ToolName } from "../runner/types.js";
 import { getToolsForSession, getSessionType } from "../runner/tools/tool-sets.js";
@@ -1230,7 +1230,9 @@ export class MainAgent {
       
       // Voice channels default to "standard" tier (Sonnet 4.6) for low latency
       const voiceModelDefault = isVoiceChannel ? "standard" : null;
-      let effectiveModel = sessionRow?.model_override || voiceModelDefault || this.model;
+      // Priority: channel override > Discord global default tier > voice default > agent default
+      const discordDefaultTier = getDiscordDefaultTier();
+      let effectiveModel = sessionRow?.model_override || discordDefaultTier || voiceModelDefault || this.model;
       
       // If the model is a tier name, resolve it to actual model
       if (["micro", "small", "medium", "standard", "strong"].includes(effectiveModel)) {
@@ -1263,7 +1265,7 @@ export class MainAgent {
         }
       }
 
-      console.log(`[main-agent] Using model: ${effectiveModel} (raw: ${this.model}, override: ${sessionRow?.model_override ?? 'none'})`);
+      console.log(`[main-agent] Using model: ${effectiveModel} (raw: ${this.model}, override: ${sessionRow?.model_override ?? 'none'}, discord-default: ${discordDefaultTier ?? 'none'})`);
       const fallbackModels = ["micro", "small", "medium", "standard", "strong"].includes(this.model)
         ? buildFallbackChain(effectiveModel, this.model as ModelTier, "main").slice(1)
         : [];

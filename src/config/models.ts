@@ -5,7 +5,7 @@
  * To swap models, change this file — nothing else.
  */
 
-import { readFileSync, existsSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { getLobsRoot } from "./lobs.js";
 
@@ -68,6 +68,12 @@ export interface ModelConfig {
 
   /** Context window sizes */
   contextLimits: Record<string, number>;
+
+  /** Discord-specific settings */
+  discord?: {
+    /** Default model tier for all Discord channels (overridden per-channel) */
+    defaultTier?: "micro" | "small" | "medium" | "standard" | "strong";
+  };
 }
 
 export interface ModelChain {
@@ -181,7 +187,6 @@ export function getModelConfig(): ModelConfig {
 export function saveModelConfig(config?: ModelConfig): void {
   const toSave = config ?? _config ?? DEFAULT_CONFIG;
   const dir = resolve(getLobsRoot(), "config");
-  const { mkdirSync } = require("node:fs");
   mkdirSync(dir, { recursive: true });
   writeFileSync(CONFIG_PATH, JSON.stringify(toSave, null, 2));
   _config = toSave;
@@ -249,6 +254,22 @@ export function setTier(tier: string, model: string): void {
     throw new Error(`Unknown tier: ${tier}. Valid: ${Object.keys(cfg.tiers).join(", ")}`);
   }
   (cfg.tiers as Record<string, string>)[tier] = model;
+  saveModelConfig(cfg);
+}
+
+/** Get Discord default model tier */
+export function getDiscordDefaultTier(): "micro" | "small" | "medium" | "standard" | "strong" | null {
+  return getModelConfig().discord?.defaultTier ?? null;
+}
+
+/** Set Discord default model tier */
+export function setDiscordDefaultTier(tier: "micro" | "small" | "medium" | "standard" | "strong" | null): void {
+  const cfg = getModelConfig();
+  if (tier === null) {
+    delete cfg.discord;
+  } else {
+    cfg.discord = { defaultTier: tier };
+  }
   saveModelConfig(cfg);
 }
 

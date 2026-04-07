@@ -339,7 +339,7 @@ export async function editTool(
 
   validateEdits(edits);
 
-  if (!hasRecentlyReadFile(resolved)) {
+  if (!hasRecentlyReadFile(filePath, cwd)) {
     throw new Error(
       "You must use Read on this file before editing it. Read the file first so your old_string matches the exact current contents.",
     );

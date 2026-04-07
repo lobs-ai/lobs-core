@@ -609,7 +609,7 @@ export function queueReviewerFollowup(taskId: string, triggerResult?: ReviewTrig
     agent: "reviewer",
     externalSource: "auto-review",
     externalId: taskId,
-    modelTier: sourceTask.modelTier ?? "standard",
+    modelTier: sourceTask.modelTier ?? "medium",
     createdAt: now,
     updatedAt: now,
   }).run();

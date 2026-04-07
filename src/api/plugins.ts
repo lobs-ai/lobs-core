@@ -171,7 +171,7 @@ export async function invokeAffordance(
   if (plan.mode === "draft" && options?.refine) {
     const refinementPrompt = buildRefinementPrompt(plan, context, draft, options.refinementNotes);
     const refined = await callModel(refinementPrompt, {
-      modelTier: plan.refinementTier ?? "standard",
+      modelTier: plan.refinementTier ?? "medium",
     });
     return {
       result: refined,
@@ -180,7 +180,7 @@ export async function invokeAffordance(
       affordanceId: options?.affordanceId,
       mode: "refined",
       draftModelTier: plan.modelTier,
-      refinementModelTier: plan.refinementTier ?? "standard",
+      refinementModelTier: plan.refinementTier ?? "medium",
       draftKind: plan.draftKind ?? "generic",
     };
   }
@@ -266,7 +266,7 @@ function buildDraftPrompt(affordance: UIAffordance, context: string): PromptPlan
   const cfg = (affordance.config ?? {}) as Record<string, unknown>;
   const template = typeof cfg.template === "string" ? cfg.template : "commit-message";
   const modelTier = typeof cfg.modelTier === "string" ? cfg.modelTier : "micro";
-  const refinementTier = typeof cfg.refinementTier === "string" ? cfg.refinementTier : "standard";
+  const refinementTier = typeof cfg.refinementTier === "string" ? cfg.refinementTier : "medium";
 
   const commonPrefix = [
     "Produce a fast first draft only.",

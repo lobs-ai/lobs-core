@@ -16,7 +16,7 @@ import { createResilientClient, parseModelString } from "../runner/providers.js"
 import { isDuplicateAction, type DeferredAction } from "./voice/deferred-action-queue.js";
 
 async function llmAnalyze(prompt: string): Promise<string> {
-  const model = getModelForTier("standard");
+  const model = getModelForTier("small");
   const client = createResilientClient(model, { sessionId: "meeting-analysis" });
 
   const response = await client.createMessage({

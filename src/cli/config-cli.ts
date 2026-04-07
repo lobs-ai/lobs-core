@@ -327,8 +327,8 @@ function cmdRoutes(): void {
 
   // Defaults for categories not explicitly set
   const DEFAULT_ROUTES: Record<TaskCategory, string> = {
-    "agent-loop":         "standard",
-    "subagent":           "standard",
+    "agent-loop":         "medium",
+    "subagent":           "medium",
     "memory-processing":  "small",
     "classification":     "small",
     "summarization":      "local",

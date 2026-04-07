@@ -1566,7 +1566,7 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
   // Choose model
   const modelChoice = req.modelTier
     ? chooseModel(req.modelTier, req.agentType)
-    : chooseModel("standard", req.agentType);
+    : chooseModel("medium", req.agentType);
   
   const orchestratorModel = modelChoice.model;
   const runnerModel = mapModelForRunner(orchestratorModel);
@@ -1687,7 +1687,7 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
   // Catches model-ID drift early and prevents cascade failures on restart.
   // Fail-open: diagnostic errors (network/timeout) must never block spawning.
   try {
-    const fallbackChain = buildFallbackChain(orchestratorModel, "standard", req.agentType);
+    const fallbackChain = buildFallbackChain(orchestratorModel, (req.modelTier ?? "medium") as ModelTier, req.agentType);
     const modelsToCheck = [orchestratorModel, ...fallbackChain].map(
       m => mapModelForRunner(m)
     );
@@ -2672,7 +2672,7 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
         )
       : req.modelTier
         ? chooseModel(req.modelTier, req.agentType)
-        : chooseModel("standard", req.agentType);
+        : chooseModel("medium", req.agentType);
 
     // Build fallback chain: uses AGENT_FALLBACK_CHAINS if available, else tier-level alternatives
     const primaryModel = modelChoice.model;

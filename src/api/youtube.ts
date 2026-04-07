@@ -77,7 +77,7 @@ USER QUESTION: ${body.message}`;
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
         body: JSON.stringify({
           tool: "sessions/spawn",
-          args: { task: prompt, mode: "run", model: getModelForTier("standard"), runTimeoutSeconds: 60, cleanup: "keep" },
+          args: { task: prompt, mode: "run", model: getModelForTier("medium"), runTimeoutSeconds: 60, cleanup: "keep" },
           sessionKey: "agent:sink:paw-orchestrator-v2",
         }),
       });

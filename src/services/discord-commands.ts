@@ -5,7 +5,7 @@
  * Commands: /new, /status, /tasks, /model, /clear, /help
  */
 
-import { Client, REST, Routes, SlashCommandBuilder, EmbedBuilder, ChatInputCommandInteraction, AutocompleteInteraction } from "discord.js";
+import { Client, REST, Routes, SlashCommandBuilder, EmbedBuilder, ChatInputCommandInteraction, AutocompleteInteraction, MessageFlags } from "discord.js";
 import type { DiscordConfig } from "./discord.js";
 import type { MainAgent } from "./main-agent.js";
 import type { VoiceManager } from "./voice/index.js";
@@ -13,6 +13,7 @@ import { getRawDb } from "../db/connection.js";
 import { getModelForTier } from "../config/models.js";
 import { getChannelModelOverride, getDefaultChatModel, getModelCatalog, isLoadedLocalModel, normalizeModelSelection, setChannelModelOverride } from "./model-catalog.js";
 import { getBotName } from "../config/identity.js";
+import { getDiscordDefaultTier, setDiscordDefaultTier } from "../config/models.js";
 
 let mainAgentRef: MainAgent | null = null;
 let voiceManagerRef: VoiceManager | null = null;
@@ -62,6 +63,16 @@ export async function registerSlashCommands(client: Client, config: DiscordConfi
       .addSubcommand(sub =>
         sub.setName('reset')
           .setDescription('Clear the channel model override and use the default')
+      )
+      .addSubcommand(sub =>
+        sub.setName('default')
+          .setDescription('Set or clear the global Discord default tier')
+          .addStringOption(opt =>
+            opt.setName('tier')
+              .setDescription('Tier to set as default (e.g. standard, strong) — omit to clear')
+              .setRequired(false)
+              .setAutocomplete(true)
+          )
       )
       .addSubcommand(sub =>
         sub.setName('lmstudio')
@@ -174,13 +185,13 @@ export async function handleSlashCommand(interaction: ChatInputCommandInteractio
         await handleVoiceCommand(interaction);
         break;
       default:
-        await interaction.reply({ content: 'Unknown command', ephemeral: true });
+        await interaction.reply({ content: 'Unknown command', flags: MessageFlags.Ephemeral });
     }
   } catch (err) {
     console.error(`[discord-commands] Error handling /${commandName}:`, err);
     try {
       if (!interaction.replied && !interaction.deferred) {
-        await interaction.reply({ content: 'An error occurred', ephemeral: true });
+        await interaction.reply({ content: 'An error occurred', flags: MessageFlags.Ephemeral });
       }
     } catch {}
   }
@@ -188,22 +199,40 @@ export async function handleSlashCommand(interaction: ChatInputCommandInteractio
 
 export async function handleAutocompleteInteraction(interaction: AutocompleteInteraction): Promise<void> {
   if (interaction.commandName !== 'model') return;
-  const focused = interaction.options.getFocused().toLowerCase();
-  const catalog = await getModelCatalog(1500);
+  const focused = interaction.options.getFocused(true);
+  const query = focused.value.toLowerCase();
+  const subcommand = interaction.options.getSubcommand();
 
-  const choices = catalog.options
+  // For /model default — autocomplete tier names
+  if (subcommand === 'default' && focused.name === 'tier') {
+    const VALID_TIERS = ['micro', 'small', 'medium', 'standard', 'strong'];
+    const choices = VALID_TIERS
+      .filter(t => !query || t.includes(query))
+      .map(t => ({ name: t, value: t }));
+    await interaction.respond(choices);
+    return;
+  }
+
+  // For /model set — autocomplete model names + tier names
+  const VALID_TIERS = ['micro', 'small', 'medium', 'standard', 'strong'];
+  const tierChoices = VALID_TIERS
+    .filter(t => !query || t.includes(query))
+    .map(t => ({ name: `${t} (tier)`, value: t }));
+
+  const catalog = await getModelCatalog(1500);
+  const modelChoices = catalog.options
     .filter(option =>
-      !focused ||
-      option.id.toLowerCase().includes(focused) ||
-      option.label.toLowerCase().includes(focused)
+      !query ||
+      option.id.toLowerCase().includes(query) ||
+      option.label.toLowerCase().includes(query)
     )
-    .slice(0, 25)
+    .slice(0, 25 - tierChoices.length)
     .map(option => ({
       name: option.id.length > 100 ? option.id.slice(0, 97) + '...' : option.id,
       value: option.id,
     }));
 
-  await interaction.respond(choices);
+  await interaction.respond([...tierChoices, ...modelChoices]);
 }
 
 /** /new - Start a new session */
@@ -211,13 +240,13 @@ async function handleNewCommand(interaction: ChatInputCommandInteraction): Promi
   const channelId = interaction.channelId;
   
   if (!mainAgentRef) {
-    await interaction.reply({ content: 'Main agent not available', ephemeral: true });
+    await interaction.reply({ content: 'Main agent not available', flags: MessageFlags.Ephemeral });
     return;
   }
   
   mainAgentRef.clearChannel(channelId);
   
-  await interaction.reply({ content: '✨ Fresh session started. What\'s up?', ephemeral: true });
+  await interaction.reply({ content: '✨ Fresh session started. What\'s up?', flags: MessageFlags.Ephemeral });
 }
 
 /** /status - Show bot status */
@@ -258,7 +287,7 @@ async function handleStatusCommand(interaction: ChatInputCommandInteraction): Pr
     )
     .setTimestamp();
   
-  await interaction.reply({ embeds: [embed], ephemeral: true });
+  await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 }
 
 /** /tasks - List active/recent tasks */
@@ -280,7 +309,7 @@ async function handleTasksCommand(interaction: ChatInputCommandInteraction): Pro
   }>;
   
   if (tasks.length === 0) {
-    await interaction.reply({ content: 'No active tasks.', ephemeral: true });
+    await interaction.reply({ content: 'No active tasks.', flags: MessageFlags.Ephemeral });
     return;
   }
   
@@ -296,7 +325,7 @@ async function handleTasksCommand(interaction: ChatInputCommandInteraction): Pro
     .addFields(fields)
     .setTimestamp();
   
-  await interaction.reply({ embeds: [embed], ephemeral: true });
+  await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 }
 
 /** /model - Show or set model for this channel */
@@ -306,10 +335,43 @@ async function handleModelCommand(interaction: ChatInputCommandInteraction): Pro
 
   if (subcommand === 'show') {
     const overrideModel = getChannelModelOverride(channelId);
-    const currentModel = overrideModel || getDefaultChatModel();
+    const discordDefault = getDiscordDefaultTier();
+    const currentModel = overrideModel || discordDefault || getDefaultChatModel();
+    let msg = `**Current model for this channel:** \`${currentModel}\`\n`;
+    msg += `Channel override: ${overrideModel ? `\`${overrideModel}\`` : '`none`'}`;
+    if (discordDefault) msg += ` | Discord default: \`${discordDefault}\``;
+    msg += `\n\nUse \`/model set\`, \`/model default\`, \`/model reset\`, or \`/model lmstudio\`.`;
+    await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  if (subcommand === 'default') {
+    const tier = interaction.options.getString('tier');
+    if (!tier) {
+      const current = getDiscordDefaultTier();
+      await interaction.reply({
+        content: current
+          ? `**Discord default tier:** \`${current}\`\n\nUse \`/model default <tier>\` to change it, or \`/model default\` (with no value) to clear it.`
+          : `No Discord default tier set. Using the agent default: \`${getDefaultChatModel()}\`\n\nUse \`/model default <tier>\` to set a default tier for all channels.`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const VALID_TIERS = ['micro', 'small', 'medium', 'standard', 'strong'];
+    const rawTier = tier.toLowerCase().trim();
+    if (!VALID_TIERS.includes(rawTier)) {
+      await interaction.reply({
+        content: `Invalid tier \`${tier}\`. Valid tiers: ${VALID_TIERS.map(t => `\`${t}\``).join(', ')}`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    setDiscordDefaultTier(rawTier as "micro" | "small" | "medium" | "standard" | "strong");
     await interaction.reply({
-      content: `**Current model for this channel:** \`${currentModel}\`\nOverride: ${overrideModel ? `\`${overrideModel}\`` : '`none`'}\n\nUse \`/model set\`, \`/model reset\`, or \`/model lmstudio\`.`,
-      ephemeral: true,
+      content: `✅ Discord default tier set to: \`${rawTier}\`\nThis will be used in all channels that don't have their own override.`,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -323,20 +385,22 @@ async function handleModelCommand(interaction: ChatInputCommandInteraction): Pro
       : `LM Studio is unreachable at \`${catalog.lmstudio.baseUrl}\``;
     await interaction.reply({
       content: `**LM Studio models**\n${content}`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
   if (!mainAgentRef) {
-    await interaction.reply({ content: 'Main agent not available', ephemeral: true });
+    await interaction.reply({ content: 'Main agent not available', flags: MessageFlags.Ephemeral });
     return;
   }
 
   if (subcommand === 'reset') {
+    const discordDefault = getDiscordDefaultTier();
     mainAgentRef.setChannelModel(channelId, null);
     setChannelModelOverride(channelId, null);
-    await interaction.reply({ content: `✅ Model override cleared. Using default: \`${getDefaultChatModel()}\``, ephemeral: true });
+    const fallback = discordDefault || getDefaultChatModel();
+    await interaction.reply({ content: `✅ Channel override cleared. Using: \`${fallback}\`${discordDefault ? ' (Discord default)' : ''}`, flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -351,7 +415,7 @@ async function handleModelCommand(interaction: ChatInputCommandInteraction): Pro
     note = loaded ? '\nLM Studio reports this model is currently loaded.' : '\nWarning: LM Studio does not currently report this model as loaded.';
   }
 
-  await interaction.reply({ content: `✅ Model for this channel set to: \`${normalizedModel}\`${note}`, ephemeral: true });
+  await interaction.reply({ content: `✅ Model for this channel set to: \`${normalizedModel}\`${note}`, flags: MessageFlags.Ephemeral });
 }
 
 /** /clear - Clear conversation history */
@@ -359,13 +423,13 @@ async function handleClearCommand(interaction: ChatInputCommandInteraction): Pro
   const channelId = interaction.channelId;
   
   if (!mainAgentRef) {
-    await interaction.reply({ content: 'Main agent not available', ephemeral: true });
+    await interaction.reply({ content: 'Main agent not available', flags: MessageFlags.Ephemeral });
     return;
   }
   
   mainAgentRef.clearChannel(channelId);
   
-  await interaction.reply({ content: '🧹 History cleared.', ephemeral: true });
+  await interaction.reply({ content: '🧹 History cleared.', flags: MessageFlags.Ephemeral });
 }
 
 /** /help - Show available commands */
@@ -401,7 +465,7 @@ async function handleHelpCommand(interaction: ChatInputCommandInteraction): Prom
     .setFooter({ text: 'Just ask — "create a #feedback channel", "archive this thread", etc.' })
     .setTimestamp();
 
-  await interaction.reply({ embeds: [embed], ephemeral: true });
+  await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 }
 
 /** /toolsteps - Control tool step visibility for this Discord channel */
@@ -410,7 +474,7 @@ async function handleToolStepsCommand(interaction: ChatInputCommandInteraction):
   const mode = interaction.options.get('mode')?.value as string | undefined;
 
   if (!mainAgentRef) {
-    await interaction.reply({ content: 'Main agent not available', ephemeral: true });
+    await interaction.reply({ content: 'Main agent not available', flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -424,7 +488,7 @@ async function handleToolStepsCommand(interaction: ChatInputCommandInteraction):
     };
     await interaction.reply({
       content: `🔧 Tool steps in this channel: ${descriptions[current]}\n\nChange with \`/toolsteps mode:<on|compact|off>\``,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -437,7 +501,7 @@ async function handleToolStepsCommand(interaction: ChatInputCommandInteraction):
     off: '🔧 Tool steps: **off** — hiding all tool steps',
   };
 
-  await interaction.reply({ content: labels[mode] || `Tool steps set to: ${mode}`, ephemeral: true });
+  await interaction.reply({ content: labels[mode] || `Tool steps set to: ${mode}`, flags: MessageFlags.Ephemeral });
 }
 
 /** /voice - Voice channel commands */
@@ -445,18 +509,18 @@ async function handleVoiceCommand(interaction: ChatInputCommandInteraction): Pro
   const subcommand = interaction.options.getSubcommand();
 
   if (!voiceManagerRef) {
-    await interaction.reply({ content: '🔇 Voice module not initialized.', ephemeral: true });
+    await interaction.reply({ content: '🔇 Voice module not initialized.', flags: MessageFlags.Ephemeral });
     return;
   }
 
   if (!voiceManagerRef.isEnabled) {
-    await interaction.reply({ content: '🔇 Voice is disabled. Enable it in `~/.lobs/config/voice.json`.', ephemeral: true });
+    await interaction.reply({ content: '🔇 Voice is disabled. Enable it in `~/.lobs/config/voice.json`.', flags: MessageFlags.Ephemeral });
     return;
   }
 
   const guildId = interaction.guildId;
   if (!guildId) {
-    await interaction.reply({ content: 'Voice commands only work in servers.', ephemeral: true });
+    await interaction.reply({ content: 'Voice commands only work in servers.', flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -490,7 +554,7 @@ async function handleVoiceCommand(interaction: ChatInputCommandInteraction): Pro
     case 'leave': {
       const error = await voiceManagerRef.leave(guildId);
       if (error) {
-        await interaction.reply({ content: `❌ ${error}`, ephemeral: true });
+        await interaction.reply({ content: `❌ ${error}`, flags: MessageFlags.Ephemeral });
       } else {
         await interaction.reply('👋 Left the voice channel.');
       }
@@ -500,7 +564,7 @@ async function handleVoiceCommand(interaction: ChatInputCommandInteraction): Pro
     case 'status': {
       const status = await voiceManagerRef.getStatus(guildId);
       if (!status) {
-        await interaction.reply({ content: '🔇 Not in a voice channel.', ephemeral: true });
+        await interaction.reply({ content: '🔇 Not in a voice channel.', flags: MessageFlags.Ephemeral });
         return;
       }
 
@@ -526,7 +590,7 @@ async function handleVoiceCommand(interaction: ChatInputCommandInteraction): Pro
         )
         .setTimestamp();
 
-      await interaction.reply({ embeds: [embed], ephemeral: true });
+      await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
       break;
     }
 
@@ -534,7 +598,7 @@ async function handleVoiceCommand(interaction: ChatInputCommandInteraction): Pro
       const mode = interaction.options.getString('mode', true) as 'keyword' | 'always';
       const ok = voiceManagerRef.setTriggerMode(guildId, mode);
       if (!ok) {
-        await interaction.reply({ content: '❌ Not in a voice channel.', ephemeral: true });
+        await interaction.reply({ content: '❌ Not in a voice channel.', flags: MessageFlags.Ephemeral });
       } else {
         const desc = mode === 'keyword'
           ? `🗝️ Trigger mode: **keyword** — say "${getBotName()}" to get a response`
@@ -545,6 +609,6 @@ async function handleVoiceCommand(interaction: ChatInputCommandInteraction): Pro
     }
 
     default:
-      await interaction.reply({ content: 'Unknown voice subcommand.', ephemeral: true });
+      await interaction.reply({ content: 'Unknown voice subcommand.', flags: MessageFlags.Ephemeral });
   }
 }

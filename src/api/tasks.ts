@@ -305,7 +305,7 @@ Return ONLY valid JSON:
         const dup = findDuplicateTask({
           title: t.title.trim(),
           agent: t.agent,
-          modelTier: t.model_tier ?? "standard",
+          modelTier: t.model_tier ?? "medium",
         });
         if (dup) {
           skipped.push({ title: t.title, existing_id: dup.id, reason: "duplicate_within_24h" });
@@ -321,7 +321,7 @@ Return ONLY valid JSON:
           projectId: t.project_id || inferProjectId(t.title, t.notes),
           notes: t.notes,
           agent: t.agent,
-          modelTier: t.model_tier ?? "standard",
+          modelTier: t.model_tier ?? "medium",
           isCompliant: braindumpIsCompliant,
           createdAt: now,
           updatedAt: now,

@@ -152,7 +152,7 @@ ${rawText}`;
         await gatewayInvoke("sessions/spawn", {
           task: prompt,
           mode: "run",
-          model: getModelForTier("standard"),
+          model: getModelForTier("medium"),
           runTimeoutSeconds: 300,
           cleanup: "keep",
         });

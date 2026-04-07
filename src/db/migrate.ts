@@ -922,7 +922,7 @@ export function runMigrations(db: PawDB): void {
   for (const agentType of ["programmer", "architect", "reviewer", "researcher", "writer"]) {
     fallbackChains[agentType] = [getAgentModel(agentType), ...getAgentFallbacks(agentType)];
   }
-  fallbackChains["inbox-responder"] = [getModelForTier("small"), getModelForTier("standard")];
+  fallbackChains["inbox-responder"] = [getModelForTier("small"), getModelForTier("medium")];
   try {
     for (const [agentType, chain] of Object.entries(fallbackChains)) {
       db.run(sql`INSERT OR IGNORE INTO orchestrator_settings (key, value, updated_at)

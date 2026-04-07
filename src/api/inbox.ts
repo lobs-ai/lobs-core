@@ -147,7 +147,7 @@ export async function handleInboxRequest(
         title: `Respond to inbox feedback: ${item.title}`,
         status: "inbox",
         agent,
-        modelTier: "standard",
+        modelTier: "medium",
         projectId: inferProjectId(`Respond to inbox feedback: ${item.title}`, text as string),
         notes: `Feedback for inbox item ${item.id}\n\n${text}`,
         createdAt: now,

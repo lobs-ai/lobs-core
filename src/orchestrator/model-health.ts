@@ -215,7 +215,7 @@ export function chooseHealthyModel(
 ): { model: string; degraded: boolean } {
   const { enabled } = getSettings();
   if (!enabled || fallbackChain.length === 0) {
-    return { model: fallbackChain[0] ?? getModelForTier("standard"), degraded: false };
+    return { model: fallbackChain[0] ?? getModelForTier("medium"), degraded: false };
   }
   try {
     for (const model of fallbackChain) {

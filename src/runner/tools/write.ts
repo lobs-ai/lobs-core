@@ -64,7 +64,7 @@ export async function writeTool(
   await writeFile(resolved, content, "utf-8");
 
   // Register the file so edit won't require a re-read
-  if (!hasRecentlyReadFile(resolved)) {
+  if (!hasRecentlyReadFile(filePath, cwd)) {
     const stat = statSync(resolved);
     updateReadSnapshot(resolved, content, stat.mtimeMs, stat.size);
   }

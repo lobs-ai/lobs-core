@@ -700,7 +700,7 @@ Use prior suggestion outcomes to calibrate — suggest things similar to what wa
         title,
         status,
         agent: agentType,
-        modelTier: "standard",
+        modelTier: "medium",
         projectId: inferProjectId(title, suggestion),
         notes: `## Problem\n${suggestion}\n\n## Acceptance Criteria\n- [ ] (to be defined when activated)\n\n## Context\nProposed by ${agentType} reflection (size=${size}, tier=${tier}, auto=${autoApprove})`,
         createdAt: new Date().toISOString(),

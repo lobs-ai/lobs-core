@@ -110,7 +110,7 @@ export function getNextTasks(config: SchedulerConfig): Task[] {
   const now = Date.now();
   const scored = readyTasks.map((task) => {
     const priority = task.priority ?? "medium";
-    const modelTier = task.model_tier ?? "standard";
+    const modelTier = task.model_tier ?? "medium";
     const createdAt = new Date(task.created_at).getTime();
     const waitMinutes = (now - createdAt) / 60000;
 

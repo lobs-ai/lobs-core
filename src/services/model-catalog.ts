@@ -188,6 +188,11 @@ export async function normalizeModelSelection(input: string): Promise<string> {
   const trimmed = input.trim();
   if (!trimmed) return trimmed;
 
+  // If it's a tier name, keep it as-is — main-agent resolves tiers dynamically
+  if (["micro", "small", "medium", "standard", "strong"].includes(trimmed.toLowerCase())) {
+    return trimmed.toLowerCase();
+  }
+
   const alias = FRIENDLY_ALIASES[trimmed.toLowerCase()];
   if (alias) return ensureProviderPrefix(getModelForTier(alias));
 

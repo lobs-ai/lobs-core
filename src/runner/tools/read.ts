@@ -62,6 +62,16 @@ type ReadSnapshot = {
 
 export const recentReadCache = new Map<string, ReadSnapshot>();
 export const recentlyReadFiles = new Set<string>();
+export const recentReadPaths = new Map<string, Set<string>>();
+
+function getOrCreateReadPathSet(resolved: string): Set<string> {
+  let set = recentReadPaths.get(resolved);
+  if (!set) {
+    set = new Set<string>();
+    recentReadPaths.set(resolved, set);
+  }
+  return set;
+}
 
 function hashContent(content: string): string {
   let hash = 0;
@@ -71,8 +81,14 @@ function hashContent(content: string): string {
   return hash.toString(16);
 }
 
-export function hasRecentlyReadFile(filePath: string): boolean {
-  return recentlyReadFiles.has(filePath);
+export function hasRecentlyReadFile(filePath: string, cwd: string): boolean {
+  const resolved = resolveToCwd(filePath, cwd);
+  // Check resolved path directly
+  if (recentlyReadFiles.has(resolved)) return true;
+  // Check any alias (e.g. original path was ~/.file, resolved is /Users/lobs/.file)
+  const aliases = recentReadPaths.get(resolved);
+  if (aliases && aliases.has(filePath)) return true;
+  return false;
 }
 
 export function getReadSnapshot(resolvedPath: string): ReadSnapshot | null {
@@ -189,6 +205,7 @@ export async function readTool(
       );
     }
     recentlyReadFiles.add(resolved);
+    getOrCreateReadPathSet(resolved).add(filePath);
     recentReadCache.set(cacheKey, currentSnapshot);
     return content;
   }
@@ -211,6 +228,7 @@ export async function readTool(
     const from = offset + shownLines;
     result += `\n\n[Truncated. ${lines.length - (startIdx + shownLines)} more lines. Use offset=${from} to continue.]`;
     recentlyReadFiles.add(resolved);
+    getOrCreateReadPathSet(resolved).add(filePath);
     recentReadCache.set(cacheKey, currentSnapshot);
     return result;
   }
@@ -226,6 +244,7 @@ export async function readTool(
 
   const finalResult = meta.length > 0 ? `${result}\n\n[${meta.join(". ")}]` : result;
   recentlyReadFiles.add(resolved);
+  getOrCreateReadPathSet(resolved).add(filePath);
   recentReadCache.set(cacheKey, currentSnapshot);
   return finalResult;
 }
