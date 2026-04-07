@@ -1316,7 +1316,7 @@ const PROVIDER_DEFAULTS: Record<Provider, { baseUrl: string; envKey: string }> =
   anthropic: { baseUrl: "https://api.anthropic.com", envKey: "ANTHROPIC_API_KEY" },
   openai: { baseUrl: "https://api.openai.com", envKey: "OPENAI_API_KEY" },
   "openai-codex": { baseUrl: "https://chatgpt.com/backend-api/codex", envKey: "OPENAI_CODEX_TOKEN" },
-  lmstudio: { baseUrl: "http://localhost:1234", envKey: "" },
+  lmstudio: { baseUrl: process.env.LM_STUDIO_URL || "http://localhost:1234", envKey: "" },
   openrouter: { baseUrl: "https://openrouter.ai/api", envKey: "OPENROUTER_API_KEY" },
   "openai-compatible": { baseUrl: "http://localhost:8080", envKey: "" },
   "opencode-zen": { baseUrl: "https://opencode.ai/zen", envKey: "OPENCODE_API_KEY" },

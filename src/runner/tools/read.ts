@@ -115,6 +115,7 @@ export function createReadSnapshot(content: string, mtimeMs: number, size: numbe
 export function clearRecentReadTracking(): void {
   recentReadCache.clear();
   recentlyReadFiles.clear();
+  recentReadPaths.clear();
 }
 
 /**

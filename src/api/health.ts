@@ -15,7 +15,7 @@ const GOOGLE_CREDENTIALS_FILE = resolve(getLobsRoot(), "credentials/client_secre
 
 async function checkLmStudio(): Promise<boolean> {
   try {
-    const res = await fetch("http://localhost:1234/v1/models", { signal: AbortSignal.timeout(1000) });
+    const res = await fetch(`${process.env.LM_STUDIO_URL || "http://localhost:1234"}/v1/models`, { signal: AbortSignal.timeout(1000) });
     return res.ok;
   } catch {
     return false;

@@ -98,7 +98,7 @@ export const AGENT_FALLBACK_CHAINS: Record<string, string[]> = new Proxy({} as R
 /** Per-agent-type default tier. Costs go down fast with medium vs standard. */
 const AGENT_TIER_DEFAULTS: Record<string, ModelTier> = {
   main: "strong",
-  programmer: "medium",
+  programmer: "standard",
   researcher: "medium",
   writer: "small",
   architect: "strong",
@@ -174,7 +174,7 @@ export function buildFallbackChain(
 function resolveTier(tier?: string, agentType?: string): ModelTier {
   if (tier && isValidTier(tier)) return tier as ModelTier;
   if (agentType && agentType in AGENT_TIER_DEFAULTS) return AGENT_TIER_DEFAULTS[agentType];
-  return "medium";
+  return "standard";
 }
 
 /**
@@ -185,7 +185,7 @@ export function resolveTaskTier(task: Record<string, unknown>): ModelTier {
   if (rawTier && isValidTier(rawTier)) return rawTier as ModelTier;
   const agentType = task["agent"] as string | undefined;
   if (agentType && agentType in AGENT_TIER_DEFAULTS) return AGENT_TIER_DEFAULTS[agentType];
-  return "medium";
+  return "standard";
 }
 
 /**
@@ -201,7 +201,7 @@ export function escalationModel(currentTier: ModelTier, agentType?: string): Mod
 /**
  * Force-select a specific model (e.g., local model for testing).
  */
-export function forceModel(model: string, tier: ModelTier = "medium"): ModelChoice {
+export function forceModel(model: string, tier: ModelTier = "standard"): ModelChoice {
   return { model, tier, source: "tier-default" };
 }
 

@@ -6,6 +6,13 @@ export default defineConfig({
     environment: "node",
     include: ["tests/**/*.test.ts"],
     setupFiles: ["tests/setup.ts"],
+    pool: "forks",
+    poolOptions: {
+      forks: {
+        maxForks: 4,
+        minForks: 1,
+      },
+    },
 
     // --- CI Safety Limits ---
     // Default per-test timeout: 5s (tests needing more must declare it explicitly)

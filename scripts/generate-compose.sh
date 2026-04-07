@@ -49,6 +49,7 @@ lines.append("  restart: unless-stopped")
 lines.append("  environment: &agent-env")
 for var in env_vars:
     lines.append("    " + var + ": ${" + var + ":-}")
+lines.append("    LM_STUDIO_URL: http://host.docker.internal:1234")
 lines.append("")
 lines.append("services:")
 

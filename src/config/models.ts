@@ -102,7 +102,7 @@ export const DEFAULT_CONFIG: ModelConfig = {
   },
 
   local: {
-    baseUrl: "http://localhost:1234/v1",
+    baseUrl: (process.env.LM_STUDIO_URL || "http://localhost:1234") + "/v1",
     chatModel: "qwen/qwen3.5-9b",
     embeddingModel: "text-embedding-qwen3-embedding-4b",
   },
