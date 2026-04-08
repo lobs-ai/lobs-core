@@ -310,9 +310,21 @@ JSON only:
       }
 
       try {
+        // Dedup: skip if inbox item with same title already exists
+        const icon = insight.actionability === "urgent" ? "🚨" : insight.actionability === "actionable" ? "💡" : "📰";
+        const rawDb = getRawDb();
+        const existingInbox = rawDb.prepare(
+          `SELECT id FROM inbox_items WHERE substr(title, 1, 100) = substr(?, 1, 100) LIMIT 1`
+        ).get(`${icon} Intel: ${insight.title}`) as { id: string } | undefined;
+        if (existingInbox) {
+          // Mark as routed to avoid re-processing, but don't create duplicate
+          this.intelSweep.markInsightRouted(insight.id, "inbox", existingInbox.id);
+          routed++;
+          continue;
+        }
+
         // Create inbox item
         const inboxId = `intel_${randomUUID().slice(0, 8)}`;
-        const icon = insight.actionability === "urgent" ? "🚨" : insight.actionability === "actionable" ? "💡" : "📰";
         const categoryTag = insight.category ? ` [${insight.category}]` : "";
 
         db.insert(inboxItems).values({

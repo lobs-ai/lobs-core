@@ -825,6 +825,16 @@ export class IntelSweepService {
     const id = randomUUID();
     const now = new Date().toISOString();
 
+    // Dedup: skip if an insight with same source_id and title (first 80 chars) already exists
+    if (input.sourceId) {
+      const existingInsight = this.db.prepare(
+        `SELECT id FROM intel_insights WHERE source_id = ? AND substr(title, 1, 80) = substr(?, 1, 80) LIMIT 1`
+      ).get(input.sourceId, input.title) as { id: string } | undefined;
+      if (existingInsight) {
+        return this.getInsight(existingInsight.id)!;
+      }
+    }
+
     this.db.prepare(
       `INSERT INTO intel_insights
         (id, source_id, feed_id, title, insight, category, relevance_score, actionability, created_at)

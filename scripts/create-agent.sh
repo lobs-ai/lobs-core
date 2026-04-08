@@ -143,8 +143,23 @@ EOF
 }
 MODELS
 
-  # SOUL.md template
+  # identity.json
   DISPLAY_NAME="$(echo "$NAME" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')"
+  cat > "$ROOT/config/identity.json" << EOF
+{
+  "bot": {
+    "name": "${DISPLAY_NAME}",
+    "id": "${NAME}"
+  },
+  "owner": {
+    "name": "Rafe",
+    "id": "rafe",
+    "discordId": "644578016298795010"
+  }
+}
+EOF
+
+  # SOUL.md template
   cat > "$ROOT/agents/main/SOUL.md" << EOF
 # ${DISPLAY_NAME}
 

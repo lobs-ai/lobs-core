@@ -542,9 +542,8 @@ class DiscordService {
     this.client.on("messageCreate", async (msg) => {
       // Always ignore our own messages to prevent loops
       if (msg.author.id === this.client!.user!.id) return;
-      console.log(`[discord] messageCreate guild=${msg.guildId} channel=${msg.channelId} author=${msg.author.tag}(${msg.author.id}) bot=${msg.author.bot} content=${JSON.stringify(msg.content.slice(0,80))}`);
-      // Ignore bot messages unless they're in the allow list or @mention us
-      if (msg.author.bot && !this.config!.botAllowFrom.includes(msg.author.id) && !msg.mentions.has(this.client!.user!)) return;
+      // Ignore bot messages unless they're in the allow list
+      if (msg.author.bot && !this.config!.botAllowFrom.includes(msg.author.id)) return;
       this.metrics.messagesReceived++;
 
       // Filter DMs
@@ -558,17 +557,24 @@ class DiscordService {
         const policy = this.config!.channelPolicies[msg.channelId]
           ?? (msg.guildId ? this.config!.guildPolicies?.[msg.guildId] : undefined);
         if (!policy || !policy.allow) {
-          console.log(`[discord] Dropping message from disallowed channel ${msg.channelId} guild=${msg.guildId}`);
+          console.debug(`[discord] Dropping message from disallowed channel ${msg.channelId} guild=${msg.guildId}`);
           return; // Silently drop messages from disallowed channels
         }
 
         // Check mention requirement — accept @mention OR plain text name (case-insensitive)
-        const isMentioned = msg.mentions.has(this.client!.user!)
-          || getAgentMentionNames().some(name => msg.content.toLowerCase().includes(name));
-        if (policy.requireMention && !isMentioned) {
-          console.log(`[discord] Dropping message from ${msg.channelId} (requireMention) content=${msg.content.slice(0,60)}`);
+        const hasMention = msg.mentions.has(this.client!.user!)
+          || getAgentNames().some(name => msg.content.toLowerCase().includes(name));
+        if (policy.requireMention && !hasMention) {
+          console.debug(`[discord] Dropping message from ${msg.channelId} without required mention`);
           return; // Silently drop if mention required but not present
         }
+
+        // Drop bot messages unless they @mention us or are in the allow list
+        if (msg.author.bot && !this.config!.botAllowFrom.includes(msg.author.id) && !hasMention) {
+          console.debug(`[discord] Dropping bot message from ${msg.author.tag} (${msg.author.id}) — not mentioned, not allow-listed`);
+          return;
+        }
+
 
       }
 
@@ -579,8 +585,10 @@ class DiscordService {
       const hasChannelPolicy = !!this.config!.channelPolicies[msg.channelId];
       const isDm = !msg.guildId
         || (this.config!.dmAllowFrom.includes(msg.author.id) && !hasChannelPolicy);
+      console.log(`[discord] isDm=${isDm} guildId=${msg.guildId} channelType=${msg.channel.type} hasChannelPolicy=${hasChannelPolicy} channel=${msg.channelId}`);
+      // Also catch plain-text agent names (e.g. "Briggs what do you think" without @mention)
       const isMentioned = msg.mentions.has(this.client!.user!)
-        || getAgentMentionNames().some(name => msg.content.toLowerCase().includes(name));
+        || getAgentNames().some(name => msg.content.toLowerCase().includes(name));
 
       // Build content: message text + embeds + any text file attachments
       let content = msg.content;

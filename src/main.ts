@@ -41,7 +41,7 @@ import { runDailyReflection } from "./memory/daily-reflection.js";
 import { imagineService } from "./services/imagine.js";
 import { countActiveWorkers, getActiveWorkers } from "./orchestrator/worker-manager.js";
 import { runStartupTelemetry, startDiskSpaceMonitor } from "./services/restart-telemetry.js";
-import { getGatewayConfig, getLobsRoot } from "./config/lobs.js";
+import { getGatewayConfig, getLobsRoot, getServerPort } from "./config/lobs.js";
 import { WorkerRegistry } from "./workers/index.js";
 import { MemoryProcessorWorker } from "./workers/memory-processor.js";
 import { ResearchProcessorWorker } from "./workers/research-processor.js";
@@ -60,7 +60,7 @@ const LOG_FILE = resolve(getLobsRoot(), "lobs.log");
 const LOG_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
 const LOG_KEEP = 3; // keep lobs.log.1, .2, .3
 const SCAN_INTERVAL_MS = 10_000;
-const HTTP_PORT = parseInt(process.env.LOBS_PORT ?? "9420", 10);
+const HTTP_PORT = getServerPort();
 const ACTIVITY_LOG_INTERVAL_MS = 30_000;
 const LOG_TO_FILE = process.env.LOBS_LOG_TO_FILE !== "0";
 
