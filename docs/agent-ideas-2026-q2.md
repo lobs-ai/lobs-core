@@ -237,6 +237,23 @@
 - **Docs:** `paw-hub/docs/agent-replay-debugger.md`
 - **Classification:** OSS — already usable, no additional prototype work needed.
 
+### 2026-04-12 — Job Application Tailor prototype built ✅
+- **Prototype:** `~/lobs/prototypes/job-tailor/job-tailor-agent.ts` (~440 lines)
+- **Status:** Working end-to-end. Smoke-tested with demo Stripe Senior ML Infra Engineer posting vs. sample resume.
+- **What it does:** Job posting + resume → 6-agent pipeline:
+  1. **Job Analyst** — extracts required skills, nice-to-haves, culture signals, red flags, ATS key phrases, hiring persona
+  2. **Resume Profiler** — extracts skills, achievements, weaknesses, structured sections
+  3. **Gap Strategist** — gap analysis (blocking/major/minor gaps with mitigations), positioning strategy
+  4. **Resume Writer** — rewrites each experience section with job-specific language, explains every change
+  5. **Cover Letter Writer** — 3-4 paragraph letter, addresses gaps honestly, no template boilerplate
+  6. **Fit Scorer** — 0-100 score with breakdown (skills/experience/culture/seniority), brutal honest assessment
+- **Smoke test result:** Stripe Sr ML Infra role → score 68/100 (COMPETITIVE). Correctly identified Go + ML model serving as blocking gaps, recommended honest positioning over false claims. Cover letter led with specific hook, addressed gaps directly. Resume rewrites added ATS keywords while keeping facts accurate.
+- **Output:** Markdown (default) or JSON (`--output json`). Supports `--job <file>`, `--job-url <url>`, `--resume <file>`, `--demo`.
+- **Cost per run:** ~$0.005-0.02 (6 × claude-haiku-4-5 calls, ~2-4K tokens each)
+- **Agents run in parallel where possible:** Job Analyst + Resume Profiler run concurrently; Resume Writer + Cover Letter Writer run concurrently after gap analysis.
+- **Key differentiator:** Honest gap acknowledgment + specific mitigations. Most tools just optimize keywords; this one tells you which gaps are blocking vs. addressable and gives a real positioning strategy.
+- **SaaS path:** Pay-as-you-go ($5/application) or $10/month subscription. Distribution: job boards partnership, LinkedIn extension, or standalone web app.
+
 ### 2026-04-12 — GitHub Webhook Integration (code review → live automation) ✅
 - **Service:** `src/services/code-review.ts` (370 lines) — review engine extracted from prototype as a reusable module
 - **Webhook handler:** `POST /api/github/webhook` added to `src/api/github.ts`
