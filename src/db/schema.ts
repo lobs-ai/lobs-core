@@ -6,6 +6,7 @@
  * Phase 2+: Workflow engine, reflections, learning, integrations
  */
 
+import { randomUUID } from "node:crypto";
 import { sqliteTable, text, integer, real, uniqueIndex, index } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
 import { getBotId } from "../config/identity.js";
@@ -36,6 +37,23 @@ export const projects = sqliteTable("projects", {
   // Cascades down to every task dispatch in processSpawnRequest.
   complianceRequired: integer("compliance_required", { mode: "boolean" }).notNull().default(false),
   defaultModelTier: text("default_model_tier"),
+  ...timestamps,
+});
+
+// ─── Goals ─────────────────────────────────────────────────────────────────
+
+export const goals = sqliteTable("goals", {
+  id: text("id").primaryKey().$defaultFn(() => randomUUID().slice(0, 8)),
+  title: text("title").notNull(),
+  description: text("description"),
+  status: text("status").notNull().default("active"), // active | paused | completed | archived
+  priority: integer("priority").notNull().default(50), // 1-100
+  owner: text("owner").notNull().default("lobs"),
+  projectId: text("project_id").references(() => projects.id),
+  tags: text("tags", { mode: "json" }).$type<string[]>(),
+  lastWorked: text("last_worked"),
+  taskCount: integer("task_count").default(0),
+  notes: text("notes"),
   ...timestamps,
 });
 
@@ -100,6 +118,7 @@ export const tasks = sqliteTable("tasks", {
   // Null/empty = no check (safe default — existing tasks are unaffected).
   // @see src/orchestrator/artifact-check.ts for ArtifactSpec type and logic.
   expectedArtifacts: text("expected_artifacts"),
+  goalId: text("goal_id").references(() => goals.id),
   ...timestamps,
 });
 

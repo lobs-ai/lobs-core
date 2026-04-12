@@ -34,6 +34,15 @@ const NEXUS_TOOLS: ToolName[] = [
   "html_to_pdf",
   "tool_manage",
   "discord",
+  "task_create",
+  "task_update",
+  "task_delete",
+  "task_list",
+  "task_view",
+  "goal_create",
+  "goal_update",
+  "goal_list",
+  "goal_view",
 ];
 
 // Discord DM sessions — same as nexus (no discord tool needed, replies are inline)

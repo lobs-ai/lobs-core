@@ -3,6 +3,7 @@ import { getEnvKeyForProvider, loadKeyConfig } from "../config/keys.js";
 import { fetchLoadedModels } from "../diagnostics/lmstudio.js";
 import { parseModelString } from "../runner/providers.js";
 import { getRawDb } from "../db/connection.js";
+import { getMinimaxAuth } from "./minimax-auth.js";
 
 export type ModelOptionSource = "tier" | "configured" | "lmstudio" | "available";
 
@@ -48,6 +49,10 @@ const AVAILABLE_PROVIDER_MODELS: Record<string, string[]> = {
     "opencode-go/minimax-m2.7",
     "opencode-go/glm-5",
     "opencode-go/kimi-k2.5",
+  ],
+  minimax: [
+    "minimax/minimax-m2.5",
+    "minimax/minimax-m2.7",
   ],
 };
 
@@ -187,7 +192,12 @@ function hasProviderCredentials(
   const pool = keyConfig[provider];
   if (pool?.keys?.length) return true;
   const envKey = getEnvKeyForProvider(provider);
-  return Boolean(process.env[envKey]?.trim());
+  if (process.env[envKey]?.trim()) return true;
+  // MiniMax uses OAuth instead of an API key
+  if (provider === "minimax") {
+    return Boolean(getMinimaxAuth().getCachedAccessToken());
+  }
+  return false;
 }
 
 export async function normalizeModelSelection(input: string): Promise<string> {

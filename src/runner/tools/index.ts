@@ -24,6 +24,7 @@ import { htmlToPdfToolDefinition, htmlToPdfTool } from "./html-to-pdf.js";
 import { dispatchAgentToolDefinition, dispatchAgentTool } from "./dispatch.js";
 import { librarianAskToolDefinition, librarianAskTool, librarianReindexToolDefinition, reindexKnowledgeBaseTool } from "./librarian.js";
 import { toolManageDefinition, toolManageTool } from "./tool-manage.js";
+import { TASK_TOOL_DEFINITIONS, TASK_TOOL_EXECUTORS } from "./tasks.js";
 import { getDynamicToolLoader } from "./dynamic-tools.js";
 import { getToolManager } from "./tool-manager.js";
 import {
@@ -221,6 +222,16 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
     definition: librarianReindexToolDefinition,
     execute: (params, cwd) => reindexKnowledgeBaseTool(params, cwd),
   },
+  // Task and goal management tools
+  task_create: { definition: TASK_TOOL_DEFINITIONS[0], execute: TASK_TOOL_EXECUTORS.task_create },
+  task_update: { definition: TASK_TOOL_DEFINITIONS[1], execute: TASK_TOOL_EXECUTORS.task_update },
+  task_delete: { definition: TASK_TOOL_DEFINITIONS[2], execute: TASK_TOOL_EXECUTORS.task_delete },
+  task_list:   { definition: TASK_TOOL_DEFINITIONS[3], execute: TASK_TOOL_EXECUTORS.task_list },
+  task_view:   { definition: TASK_TOOL_DEFINITIONS[4], execute: TASK_TOOL_EXECUTORS.task_view },
+  goal_create: { definition: TASK_TOOL_DEFINITIONS[5], execute: TASK_TOOL_EXECUTORS.goal_create },
+  goal_update: { definition: TASK_TOOL_DEFINITIONS[6], execute: TASK_TOOL_EXECUTORS.goal_update },
+  goal_list:   { definition: TASK_TOOL_DEFINITIONS[7], execute: TASK_TOOL_EXECUTORS.goal_list },
+  goal_view:   { definition: TASK_TOOL_DEFINITIONS[8], execute: TASK_TOOL_EXECUTORS.goal_view },
 };
 
 /**

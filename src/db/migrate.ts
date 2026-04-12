@@ -333,10 +333,35 @@ export function runMigrations(db: PawDB): void {
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
 
+  db.run(sql`CREATE TABLE IF NOT EXISTS goals (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    priority INTEGER NOT NULL DEFAULT 50,
+    owner TEXT NOT NULL DEFAULT 'lobs',
+    project_id TEXT REFERENCES projects(id),
+    tags TEXT,
+    last_worked TEXT,
+    task_count INTEGER DEFAULT 0,
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  // Idempotent column additions for tasks
+  try { db.run(sql`ALTER TABLE tasks ADD COLUMN goal_id TEXT REFERENCES goals(id)`); } catch (_) { /* already exists */ }
+  try { db.run(sql`ALTER TABLE tasks ADD COLUMN priority TEXT`); } catch (_) { /* already exists */ }
+  try { db.run(sql`ALTER TABLE tasks ADD COLUMN estimated_minutes INTEGER`); } catch (_) { /* already exists */ }
+  try { db.run(sql`ALTER TABLE tasks ADD COLUMN due_date TEXT`); } catch (_) { /* already exists */ }
+  try { db.run(sql`ALTER TABLE tasks ADD COLUMN expected_artifacts TEXT`); } catch (_) { /* already exists */ }
+
   // Indexes
   db.run(sql`CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)`);
   db.run(sql`CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id)`);
   db.run(sql`CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(agent)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS idx_tasks_goal ON tasks(goal_id)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS idx_goals_status ON goals(status)`);
   db.run(sql`CREATE INDEX IF NOT EXISTS idx_worker_runs_task ON worker_runs(task_id)`);
   db.run(sql`CREATE INDEX IF NOT EXISTS idx_worker_runs_session ON worker_runs(child_session_key)`);
   db.run(sql`CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status)`);
