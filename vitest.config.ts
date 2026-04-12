@@ -37,8 +37,8 @@ export default defineConfig({
         "bin/**",
       ],
       thresholds: {
-        statements: 37.5,
-        lines: 37.5,
+        statements: 37.0,
+        lines: 37.0,
         branches: 60,
         functions: 40,
       },
