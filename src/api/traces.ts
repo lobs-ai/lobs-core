@@ -344,7 +344,7 @@ function getReplayUiHtml(): string {
 <div class="tooltip" id="tooltip"></div>
 
 <script>
-const API = '';  // relative — served from same origin
+const API = '/api';  // all trace endpoints are under /api/traces
 let currentTrace = null;
 let currentSpans = [];
 let replayIndex = -1;
