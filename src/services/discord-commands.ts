@@ -19,6 +19,7 @@ import { answerStudentQuestion, formatAnswerForDiscord, formatEscalationChannelR
 import { seedCourse } from "../gsi/gsi-seed.js";
 import { logQaEvent, getCourseStats, getAllCoursesStats } from "../gsi/gsi-store.js";
 import { chaseCitations } from "./citation-chaser.js";
+import { analyzeCoverage, fetchPrFilesForCoverage, makeStubReview } from "./test-coverage.js";
 let mainAgentRef: MainAgent | null = null;
 let voiceManagerRef: VoiceManager | null = null;
 
@@ -224,6 +225,20 @@ export async function registerSlashCommands(client: Client, config: DiscordConfi
         .setDescription('Optional: title or abstract of the paper you are writing')
         .setRequired(false)
     ),
+
+    new SlashCommandBuilder()
+    .setName('test-stubs')
+    .setDescription('Generate test stubs for a GitHub PR')
+    .addStringOption(opt =>
+      opt.setName('repo')
+        .setDescription('Repository in owner/repo format (e.g. lobs-ai/lobs-core)')
+        .setRequired(true)
+    )
+    .addIntegerOption(opt =>
+      opt.setName('pr')
+        .setDescription('PR number')
+        .setRequired(true)
+    ),
   ];
 
   const rest = new REST({ version: '10' }).setToken(config.botToken);
@@ -285,6 +300,9 @@ export async function handleSlashCommand(interaction: ChatInputCommandInteractio
         break;
       case 'cite':
         await handleCiteCommand(interaction);
+        break;
+      case 'test-stubs':
+        await handleTestStubsCommand(interaction);
         break;
       default:
         await interaction.reply({ content: 'Unknown command', flags: MessageFlags.Ephemeral });
@@ -1166,6 +1184,58 @@ export async function handleGsiTAReply(
   }
 
   return true;
+}
+
+async function handleTestStubsCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const repoArg = interaction.options.getString('repo', true);
+  const prNumber = interaction.options.getInteger('pr', true);
+
+  const parts = repoArg.split('/');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    await interaction.reply({ content: '❌ Repo must be in `owner/repo` format, e.g. `lobs-ai/lobs-core`.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const [owner, repo] = parts as [string, string];
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  try {
+    const files = await fetchPrFilesForCoverage(owner, repo, prNumber);
+    const stubReview = makeStubReview(owner, repo, prNumber);
+    const report = await analyzeCoverage(files, stubReview);
+
+    if (report.suggestions.length === 0) {
+      await interaction.editReply({
+        content: `✅ Coverage looks **${report.coverage}** — no stub suggestions generated for \`${owner}/${repo}#${prNumber}\`.`,
+      });
+      return;
+    }
+
+    const coverageEmoji = { adequate: '✅', minimal: '⚠️', missing: '🚨' }[report.coverage];
+    const lines: string[] = [
+      `${coverageEmoji} **Coverage: ${report.coverage}** for \`${owner}/${repo}#${prNumber}\``,
+      ``,
+      report.summary,
+    ];
+
+    if (report.untestedFunctions.length > 0) {
+      lines.push(``, `**Untested functions:** ${report.untestedFunctions.map(f => `\`${f}\``).join(', ')}`);
+    }
+
+    lines.push(``, `**Suggested test stubs** (${report.suggestions.length}):`);
+    for (const stub of report.suggestions.slice(0, 3)) {
+      lines.push(``, `**${stub.testFile}** — ${stub.description}`, `\`\`\`typescript`, stub.stubCode.slice(0, 600), `\`\`\``);
+    }
+
+    // Discord messages have a 2000 char limit — truncate gracefully
+    const fullMsg = lines.join('\n');
+    const msg = fullMsg.length > 1900 ? fullMsg.slice(0, 1900) + '\n…*(truncated)*' : fullMsg;
+
+    await interaction.editReply({ content: msg });
+  } catch (err) {
+    console.error('[discord-commands] /test-stubs error:', err);
+    await interaction.editReply({ content: `❌ Coverage analysis failed: ${(err as Error).message}` });
+  }
 }
 
 async function handleCiteCommand(interaction: ChatInputCommandInteraction): Promise<void> {

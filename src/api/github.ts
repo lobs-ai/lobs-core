@@ -3,6 +3,7 @@ import { exec } from "node:child_process";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { json, error, parseQuery, readRawBody } from "./index.js";
 import { runCodeReview } from "../services/code-review.js";
+import { analyzeCoverage, formatCoverageComment, postCoverageComment, fetchPrFilesForCoverage } from "../services/test-coverage.js";
 import { discordService } from "../services/discord.js";
 
 /**
@@ -396,12 +397,37 @@ async function runWebhookReview(
     const mergeEmoji = { ready: "✅", "needs-changes": "⚠️", blocked: "🚫" }[review.mergeReadiness];
     const issueCount = review.overallIssues.length + review.fileReviews.reduce((n, fr) => n + fr.issues.length, 0);
 
+    // ── Coverage Analysis ────────────────────────────────────────────────────
+    let coverageLine = "";
+    if (review.testCoverage !== "adequate") {
+      try {
+        const prFiles = await fetchPrFilesForCoverage(owner, repo, prNumber);
+        const coverageReport = await analyzeCoverage(prFiles, review);
+
+        // Post a second PR comment with test stubs if coverage is lacking
+        if (
+          (coverageReport.coverage === "missing" || coverageReport.coverage === "minimal") &&
+          coverageReport.suggestions.length > 0
+        ) {
+          const commentBody = formatCoverageComment(coverageReport);
+          await postCoverageComment(owner, repo, prNumber, commentBody);
+          console.log(`[github-webhook] Coverage stubs posted for ${owner}/${repo}#${prNumber}`);
+        }
+
+        const stubCount = coverageReport.suggestions.length;
+        coverageLine = `\n🧪 Coverage: ${coverageReport.coverage} — ${stubCount} suggested stub${stubCount !== 1 ? "s" : ""}`;
+      } catch (coverageErr) {
+        console.warn(`[github-webhook] Coverage analysis failed:`, coverageErr);
+        // Non-fatal — code review already posted successfully
+      }
+    }
+
     const discordMsg = [
       `## 🤖 Code Review: \`${owner}/${repo}#${prNumber}\``,
       `**${prTitle}**`,
       `${prUrl}`,
       ``,
-      `${mergeEmoji} **${review.mergeReadiness.toUpperCase()}** · ${riskEmoji} Risk: ${review.riskLevel} · ${issueCount} issue(s) · ${elapsed}s`,
+      `${mergeEmoji} **${review.mergeReadiness.toUpperCase()}** · ${riskEmoji} Risk: ${review.riskLevel} · ${issueCount} issue(s) · ${elapsed}s${coverageLine}`,
       ``,
       review.summary,
     ].join("\n");
