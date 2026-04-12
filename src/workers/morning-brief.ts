@@ -230,6 +230,18 @@ async function buildBriefMessage(): Promise<string> {
     .slice(0, 2)
     .map(r => `  • ${truncate(r.summary ?? "", 80)}`);
 
+  // Identify repeatedly-failing workers (3+ failures in last 24h)
+  const failedRows = recentRunRows.filter(r => !r.succeeded);
+  const failCountByWorker = new Map<string, number>();
+  for (const r of failedRows) {
+    const key = r.agentType ?? "unknown";
+    failCountByWorker.set(key, (failCountByWorker.get(key) ?? 0) + 1);
+  }
+  const repeatedFailures = [...failCountByWorker.entries()]
+    .filter(([, count]) => count >= 3)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 4);
+
   // ── Format Message ───────────────────────────────────────────────────────
 
   const dayLabel = now.toLocaleDateString("en-US", {
@@ -269,6 +281,12 @@ async function buildBriefMessage(): Promise<string> {
     lines.push(`✅ ${succeededRuns} succeeded · ❌ ${failedRuns} failed${costStr}`);
     if (highlights.length > 0) {
       lines.push(...highlights);
+    }
+    if (repeatedFailures.length > 0) {
+      lines.push(`⚠️ Repeated failures:`);
+      for (const [worker, count] of repeatedFailures) {
+        lines.push(`  ❌ ${worker}: ${count}x in last 24h`);
+      }
     }
   }
   lines.push("");
