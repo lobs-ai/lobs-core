@@ -4,7 +4,7 @@ import {
   type GuildChannelCreateOptions, type GuildChannelEditOptions,
   type PermissionOverwriteOptions,
 } from "discord.js";
-import { registerSlashCommands, handleSlashCommand, handleAutocompleteInteraction } from "./discord-commands.js";
+import { registerSlashCommands, handleSlashCommand, handleAutocompleteInteraction, handleGsiTAReply } from "./discord-commands.js";
 import { getAgentMentionNames } from "../config/lobs.js";
 
 export interface DiscordConfig {
@@ -549,6 +549,12 @@ class DiscordService {
 
       // Filter DMs
       if (!msg.guildId) {
+        // Before the allowFrom gate: check if this is a GSI TA reply to an escalation.
+        // TAs are real users who won't be in dmAllowFrom, so we intercept them here.
+        if (await handleGsiTAReply(msg)) {
+          console.debug(`[discord] Handled GSI TA reply DM from ${msg.author.tag} (${msg.author.id})`);
+          return;
+        }
         if (!this.config!.dmAllowFrom.includes(msg.author.id)) {
           console.debug(`[discord] Dropping unauthorized DM from ${msg.author.tag} (${msg.author.id})`);
           return; // Silently drop unauthorized DMs

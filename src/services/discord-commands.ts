@@ -15,7 +15,7 @@ import { getChannelModelOverride, getDefaultChatModel, getModelCatalog, isLoaded
 import { getBotName } from "../config/identity.js";
 import { getDiscordDefaultTier, setDiscordDefaultTier } from "../config/models.js";
 import { getCourseForChannel, getCourseForGuild, loadAllCourseConfigs, loadCourseConfig, saveCourseConfig, defaultCourseConfig, type GsiCourseConfig } from "../gsi/gsi-config.js";
-import { answerStudentQuestion, formatAnswerForDiscord, formatEscalationChannelReply, formatEscalationDM } from "../gsi/gsi-agent.js";
+import { answerStudentQuestion, formatAnswerForDiscord, formatEscalationChannelReply, formatEscalationDM, registerEscalation, resolveEscalationForTA, getPendingEscalationTAIds } from "../gsi/gsi-agent.js";
 import { seedCourse } from "../gsi/gsi-seed.js";
 let mainAgentRef: MainAgent | null = null;
 let voiceManagerRef: VoiceManager | null = null;
@@ -891,11 +891,22 @@ async function handleAskCommand(interaction: ChatInputCommandInteraction): Promi
       });
 
       if (course.dmEscalations) {
-        // DM each TA privately
+        // DM each TA privately and register the pending escalation so their reply loops back
         for (const userId of course.escalationUserIds) {
           try {
             const user = await interaction.client.users.fetch(userId);
             await user.send(escalationMsg);
+            // Register so we can match this TA's reply DM back to the original channel
+            registerEscalation({
+              taUserId: userId,
+              channelId,
+              guildId: interaction.guildId ?? '',
+              question,
+              askedBy: `<@${interaction.user.id}>`,
+              courseName: course.courseName,
+              draftAnswer: answer.answer,
+              createdAt: Date.now(),
+            });
           } catch (dmErr) {
             console.warn(`[gsi] Could not DM escalation to user ${userId}:`, dmErr);
           }
@@ -942,5 +953,80 @@ async function handleAskCommand(interaction: ChatInputCommandInteraction): Promi
     console.error('[gsi] Error in /ask handler:', err);
     await interaction.editReply('❌ Something went wrong processing your question. Please try again or ask your TA directly.');
   }
+}
+
+/**
+ * Handle a TA reply DM that resolves a pending GSI escalation.
+ * Called from the Discord messageCreate handler when a DM comes in from a TA.
+ *
+ * Flow:
+ *   1. Student uses /ask — answer confidence is too low → bot DMs the TA
+ *   2. TA replies to that DM with the correct answer
+ *   3. This function posts the TA's reply back to the original course channel
+ *   4. Student gets the authoritative answer with TA attribution
+ *
+ * @returns true if the message was handled as a GSI TA reply, false otherwise
+ */
+export async function handleGsiTAReply(
+  message: import('discord.js').Message
+): Promise<boolean> {
+  const taUserId = message.author.id;
+
+  // Quick gate: only bother for DMs from TAs with pending escalations
+  if (!getPendingEscalationTAIds().has(taUserId)) return false;
+
+  const escalation = resolveEscalationForTA(taUserId);
+  if (!escalation) return false;
+
+  const replyText = message.content.trim();
+  if (!replyText) return false;
+
+  // Acknowledge the TA in their DM
+  try {
+    await message.reply(
+      `✅ Got it! I've posted your answer to <#${escalation.channelId}> for ${escalation.askedBy}.`
+    );
+  } catch {
+    // Non-fatal — still post to the channel
+  }
+
+  // Post the TA's answer back to the course channel
+  try {
+    const channel = await message.client.channels.fetch(escalation.channelId);
+    if (!channel?.isTextBased()) {
+      console.warn(`[gsi] TA reply: channel ${escalation.channelId} not found or not text-based`);
+      return true; // Still "handled" — just can't post
+    }
+
+    const embed = {
+      color: 0x22c55e, // green
+      title: `✅ TA Answer — ${escalation.courseName}`,
+      description: replyText,
+      fields: [
+        {
+          name: 'Original question',
+          value: escalation.question.length > 200
+            ? escalation.question.slice(0, 197) + '…'
+            : escalation.question,
+          inline: false,
+        },
+      ],
+      footer: {
+        text: `Answered by your TA · ${escalation.courseName}`,
+      },
+      timestamp: new Date().toISOString(),
+    };
+
+    await (channel as import('discord.js').TextChannel).send({
+      content: `${escalation.askedBy} — your question was answered by a TA:`,
+      embeds: [embed],
+    });
+
+    console.info(`[gsi] TA ${taUserId} reply posted to channel ${escalation.channelId} for ${escalation.askedBy}`);
+  } catch (err) {
+    console.error('[gsi] Failed to post TA reply to channel:', err);
+  }
+
+  return true;
 }
 
