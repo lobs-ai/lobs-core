@@ -52,10 +52,37 @@ export class GoalsWorker extends BaseWorker {
       .where(
         and(
           eq(tasks.status, "active"),
+          eq(tasks.agent, "programmer"),
+          sql`${tasks.goalId} IS NOT NULL`,
+          like(tasks.notes, "Agent session in progress%"),
+          lt(tasks.updatedAt, staleThreshold),
+        ),
+      );
+
+    // Also reap legacy-format tracking tasks (pre-title-fix format "[goals-worker] Working on: ...")
+    const legacyStale = await db
+      .select({ id: tasks.id })
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.status, "active"),
           like(tasks.title, "[goals-worker]%"),
           lt(tasks.updatedAt, staleThreshold),
         ),
       );
+    if (legacyStale.length > 0) {
+      await db
+        .update(tasks)
+        .set({
+          status: "rejected",
+          notes: "Reaped by goals-worker: legacy tracking task (orphaned)",
+          updatedAt: new Date().toISOString(),
+        })
+        .where(inArray(tasks.id, legacyStale.map((t) => t.id)));
+      log().info(
+        `[goals-worker] Reaped ${legacyStale.length} legacy tracking task(s)`,
+      );
+    }
 
     if (staleTracking.length > 0) {
       const staleIds = staleTracking.map((t) => t.id);
@@ -92,23 +119,26 @@ export class GoalsWorker extends BaseWorker {
 
     for (const goal of activeGoals) {
       try {
-        // Count open tasks already linked to this goal
-        const openCountResult = await db
+        // Check if there's already an active agent session tracking task for this goal.
+        // We only skip if a session is actively in-flight — not just because Rafe has open tasks.
+        const activeSessionResult = await db
           .select({ count: sql<number>`count(*)` })
           .from(tasks)
           .where(
             and(
               eq(tasks.goalId, goal.id),
-              inArray(tasks.status, ["inbox", "active"]),
+              eq(tasks.status, "active"),
+              eq(tasks.agent, "programmer"),
+              like(tasks.notes, "Agent session in progress%"),
             ),
           );
 
-        const openCount = Number(openCountResult[0]?.count ?? 0);
+        const openCount = Number(activeSessionResult[0]?.count ?? 0);
 
-        if (openCount >= 2) {
+        if (openCount >= 1) {
           goalsSkipped++;
           log().info(
-            `[goals-worker] Goal "${goal.title}" already has ${openCount} open tasks — skipping`,
+            `[goals-worker] Goal "${goal.title}" already has an active agent session — skipping`,
           );
           continue;
         }
@@ -130,11 +160,11 @@ export class GoalsWorker extends BaseWorker {
         const trackingTaskId = randomUUID().slice(0, 8);
         await db.insert(tasks).values({
           id: trackingTaskId,
-          title: `[goals-worker] Working on: ${goal.title.slice(0, 120)}`,
+          title: goal.title.slice(0, 120),
           status: "active",
           owner: "lobs",
           goalId: goal.id,
-          notes: "Spawned by goals-worker. Will be updated on completion.",
+          notes: `Agent session in progress (spawned ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC). Will be updated on completion.`,
           agent: "programmer",
           modelTier: "medium",
         });

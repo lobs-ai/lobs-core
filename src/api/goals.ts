@@ -7,15 +7,31 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import { getDb } from "../db/connection.js";
 import { goals, tasks } from "../db/schema.js";
-import { json, error } from "./index.js";
+import { json, error, parseBody } from "./index.js";
 
 export async function handleGoalsRequest(
   req: IncomingMessage,
   res: ServerResponse,
-  _sub?: string,
+  sub?: string,
 ): Promise<void> {
+  // POST /api/goals — create a new goal
+  if (req.method === "POST" && !sub) {
+    return handleCreateGoal(req, res);
+  }
+
+  // PATCH /api/goals/:id — update a goal (status, priority, title, description)
+  if (req.method === "PATCH" && sub) {
+    return handleUpdateGoal(req, res, sub);
+  }
+
+  // DELETE /api/goals/:id — archive a goal
+  if (req.method === "DELETE" && sub) {
+    return handleDeleteGoal(req, res, sub);
+  }
+
   if (req.method !== "GET") {
     return error(res, "Method not allowed", 405);
   }
@@ -131,5 +147,93 @@ export async function handleGoalsRequest(
     return json(res, { goals: result });
   } catch (err) {
     return error(res, `Failed to fetch goals: ${String(err)}`, 500);
+  }
+}
+
+// ── Create Goal ────────────────────────────────────────────────────────────
+
+async function handleCreateGoal(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  try {
+    const body = (await parseBody(req)) as Record<string, unknown>;
+    const title = typeof body.title === "string" ? body.title.trim() : "";
+    if (!title) return error(res, "title is required", 400);
+
+    const db = getDb();
+    const id = randomUUID().slice(0, 8);
+    const now = new Date().toISOString();
+
+    await db.insert(goals).values({
+      id,
+      title,
+      description: typeof body.description === "string" ? body.description : null,
+      status: "active",
+      priority: typeof body.priority === "number" ? body.priority : 50,
+      owner: "lobs",
+      tags: Array.isArray(body.tags) ? (body.tags as string[]) : [],
+      notes: typeof body.notes === "string" ? body.notes : null,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    return json(res, { id, title, status: "active" }, 201);
+  } catch (err) {
+    return error(res, `Failed to create goal: ${String(err)}`, 500);
+  }
+}
+
+// ── Update Goal ────────────────────────────────────────────────────────────
+
+async function handleUpdateGoal(
+  req: IncomingMessage,
+  res: ServerResponse,
+  goalId: string,
+): Promise<void> {
+  try {
+    const db = getDb();
+    const existing = db.select().from(goals).where(eq(goals.id, goalId)).get();
+    if (!existing) return error(res, "Goal not found", 404);
+
+    const body = (await parseBody(req)) as Record<string, unknown>;
+    const updates: Partial<typeof goals.$inferInsert> = {
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (typeof body.title === "string") updates.title = body.title.trim();
+    if (typeof body.description === "string") updates.description = body.description;
+    if (typeof body.status === "string") updates.status = body.status;
+    if (typeof body.priority === "number") updates.priority = body.priority;
+    if (typeof body.notes === "string") updates.notes = body.notes;
+    if (Array.isArray(body.tags)) updates.tags = body.tags as string[];
+
+    await db.update(goals).set(updates).where(eq(goals.id, goalId));
+    return json(res, { id: goalId, ...updates });
+  } catch (err) {
+    return error(res, `Failed to update goal: ${String(err)}`, 500);
+  }
+}
+
+// ── Delete (Archive) Goal ──────────────────────────────────────────────────
+
+async function handleDeleteGoal(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  goalId: string,
+): Promise<void> {
+  try {
+    const db = getDb();
+    const existing = db.select().from(goals).where(eq(goals.id, goalId)).get();
+    if (!existing) return error(res, "Goal not found", 404);
+
+    await db.update(goals).set({
+      status: "archived",
+      updatedAt: new Date().toISOString(),
+    }).where(eq(goals.id, goalId));
+
+    return json(res, { id: goalId, status: "archived" });
+  } catch (err) {
+    return error(res, `Failed to archive goal: ${String(err)}`, 500);
   }
 }
