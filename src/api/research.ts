@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { initResearchQueueService } from "../services/research-queue.js";
 import { runLiteratureReview, lookupPaper } from "../services/literature-review.js";
+import { findAndPopulateGaps } from "../services/research-gap-finder.js";
 
 const RESEARCH_BASE = join(homedir(), "lobs-control", "state", "research");
 
@@ -85,7 +86,47 @@ export async function handleResearchRequest(
   }
 
   // Literature review: POST /api/research/literature-review
+  //                    GET  /api/research/literature-review/list
   if (projectId === "literature-review") {
+    // List saved reviews
+    if (req.method === "GET" && sub === "list") {
+      const outDir = join(RESEARCH_BASE, "literature-reviews");
+      if (!existsSync(outDir)) return json(res, { reviews: [] });
+      try {
+        const files = readdirSync(outDir)
+          .filter(f => f.endsWith(".md"))
+          .sort()
+          .reverse();
+        const reviews = files.map(filename => {
+          const raw = readFileSync(join(outDir, filename), "utf-8");
+          // Extract question from first H1 line (# Literature Review: <question>)
+          const h1Match = raw.match(/^#\s+Literature Review:\s*(.+)$/m);
+          const question = h1Match ? h1Match[1].trim() : filename.replace(/^\d{4}-\d{2}-\d{2}-/, "").replace(/\.md$/, "").replace(/-/g, " ");
+          // Extract date from filename prefix
+          const dateMatch = filename.match(/^(\d{4}-\d{2}-\d{2})/);
+          const date = dateMatch ? dateMatch[1] : null;
+          // Count papers: look for "## Paper" or "papers analyzed" in content
+          const paperCountMatch = raw.match(/Papers Analyzed[:\s]*(\d+)/i);
+          const papersAnalyzed = paperCountMatch ? parseInt(paperCountMatch[1], 10) : null;
+          // First 300 chars of content after the header as preview
+          const preview = raw.replace(/^#[^\n]*\n/, "").replace(/^#+[^\n]*\n/gm, "").trim().slice(0, 300);
+          return { filename, question, date, papersAnalyzed, preview, size: raw.length };
+        });
+        return json(res, { reviews });
+      } catch (err) {
+        return error(res, `Failed to list reviews: ${String(err)}`, 500);
+      }
+    }
+
+    // Read a single saved review
+    if (req.method === "GET" && sub && sub !== "list") {
+      const outDir = join(RESEARCH_BASE, "literature-reviews");
+      const filePath = join(outDir, sub);
+      if (!existsSync(filePath)) return error(res, "Not found", 404);
+      const content = readFileSync(filePath, "utf-8");
+      return json(res, { filename: sub, content });
+    }
+
     if (req.method === "POST") {
       const rawBody = await parseBody(req) as Record<string, unknown> | null;
       const body = rawBody ?? {};
@@ -125,6 +166,11 @@ export async function handleResearchRequest(
           writeFileSync(join(outDir, texFilename), review.latex, "utf-8");
           savedFiles.push(join(outDir, texFilename));
         }
+
+        // Fire-and-forget: auto-populate Research Radar with gaps from this review
+        findAndPopulateGaps(review).catch((err) => {
+          console.error("[research] gap-finder error:", err);
+        });
 
         return json(res, { ...review, savedTo: savedFiles[0], savedFiles });
       } catch (err) {
