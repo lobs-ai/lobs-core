@@ -10,7 +10,7 @@
  */
 
 import { getHookRegistry, type HookEvent } from "../runner/hooks.js";
-import type { PawDB } from "../db/connection.js";
+import type Database from "better-sqlite3";
 import {
   createAgentTrace,
   updateAgentTrace,
@@ -39,7 +39,7 @@ interface ActiveTrace {
 // Keyed by runId (derived from taskId or agentType+timestamp)
 const activeTraces = new Map<string, ActiveTrace>();
 
-function getOrCreateTrace(db: PawDB, event: HookEvent): ActiveTrace {
+function getOrCreateTrace(db: Database.Database, event: HookEvent): ActiveTrace {
   const runKey = event.taskId ?? `${event.agentType}__${event.timestamp.getTime()}`;
   if (activeTraces.has(runKey)) return activeTraces.get(runKey)!;
 
@@ -89,7 +89,7 @@ function getOrCreateTrace(db: PawDB, event: HookEvent): ActiveTrace {
 
 // ── Hook handlers ─────────────────────────────────────────────────────────────
 
-export function registerTracerHook(db: PawDB): void {
+export function registerTracerHook(db: Database.Database): void {
   const hookRegistry = getHookRegistry();
 
   // ── before_agent_start ────────────────────────────────────────────────────

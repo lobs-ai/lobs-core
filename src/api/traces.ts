@@ -10,8 +10,9 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { PawDB } from "../db/connection.js";
+import type Database from "better-sqlite3";
 import type { LobsPluginApi } from "../types/lobs-plugin.js";
+import { getRawDb as getRawDbConnection } from "../db/connection.js";
 import {
   listTraces,
   getTrace,
@@ -21,15 +22,16 @@ import {
 } from "../tracer/trace-store.js";
 import { seedDemoTraces } from "../tracer/demo-traces.js";
 
-let _db: PawDB | null = null;
+let _db: Database.Database | null = null;
 
-export function initTracesApi(api: LobsPluginApi, db: PawDB): void {
+export function initTracesApi(api: LobsPluginApi, db: Database.Database): void {
   _db = db;
 }
 
-function getDb(): PawDB {
-  if (!_db) throw new Error("traces API not initialized");
-  return _db;
+function getDb(): Database.Database {
+  // Fall back to the shared DB connection if not explicitly initialized
+  // (e.g. in standalone server mode where initTracesApi isn't called)
+  return _db ?? getRawDbConnection();
 }
 
 function json(res: ServerResponse, data: unknown, status = 200) {
@@ -53,7 +55,7 @@ export async function handleTracesRequest(
     // POST /traces/seed-demo — populate demo traces for HN demo
     if (id === "seed-demo" && method === "POST") {
       try {
-        const db = getDb();
+        const db = getRawDbConnection();
         await seedDemoTraces(db, {
           taskId: "demo-research-2025-04",
           agentType: "research-agent",

@@ -20,7 +20,7 @@ import { handleTextDumpsRequest } from "./text-dumps.js";
 import { handleTopicsRequest } from "./topics.js";
 import { handleTilesRequest } from "./tiles.js";
 import { handleTrackerRequest } from "./tracker.js";
-import { getDb } from "../db/connection.js";
+import { getRawDb } from "../db/connection.js";
 import { initTracesApi, handleTracesRequest } from "./traces.js";
 import { handleWorkflowRunsRequest } from "./workflow-runs.js";
 import { handleKnowledgeRequest } from "./knowledge.js";
@@ -59,7 +59,7 @@ import { error } from "./index.js";
 const PREFIXES = ["/paw/api/", "/api/"];
 
 export function registerPawRouter(api: LobsPluginApi): void {
-  initTracesApi(api, getDb());
+  initTracesApi(api, getRawDb());
   const handler = async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const pathname = decodeURIComponent(url.pathname);

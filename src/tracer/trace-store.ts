@@ -10,8 +10,7 @@
  * OTLP-compatible backend (Jaeger, Tempo, Honeycomb, etc.).
  */
 
-import { sql } from "drizzle-orm";
-import type { PawDB } from "../db/connection.js";
+import type Database from "better-sqlite3";
 import { randomBytes } from "node:crypto";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -62,7 +61,7 @@ export interface AgentTrace {
 // ── DB helpers ────────────────────────────────────────────────────────────────
 
 export function createAgentTrace(
-  db: PawDB,
+  db: Database.Database,
   params: {
     traceId: string;
     runId: string;
@@ -72,20 +71,24 @@ export function createAgentTrace(
     model?: string | null;
   }
 ): void {
-  db.run(sql`
+  db.prepare(`
     INSERT OR IGNORE INTO agent_traces (
       trace_id, run_id, agent_type, task_id, task_summary, model,
       status, start_time_ms
-    ) VALUES (
-      ${params.traceId}, ${params.runId}, ${params.agentType},
-      ${params.taskId ?? null}, ${params.taskSummary ?? null}, ${params.model ?? null},
-      'running', ${Date.now()}
-    )
-  `);
+    ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?)
+  `).run(
+    params.traceId,
+    params.runId,
+    params.agentType,
+    params.taskId ?? null,
+    params.taskSummary ?? null,
+    params.model ?? null,
+    Date.now(),
+  );
 }
 
 export function updateAgentTrace(
-  db: PawDB,
+  db: Database.Database,
   traceId: string,
   update: Partial<{
     status: AgentTrace["status"];
@@ -118,38 +121,37 @@ export function updateAgentTrace(
 
   if (sets.length === 0) return;
 
-  // drizzle raw sql with positional params doesn't support dynamic lists well,
-  // so we use the underlying better-sqlite3 instance directly.
-  const stmt = (db as unknown as { _client: { prepare: (q: string) => { run: (...a: unknown[]) => void } } })._client?.prepare(
-    `UPDATE agent_traces SET ${sets.join(", ")} WHERE trace_id = ?`
-  );
-  if (stmt) {
-    stmt.run(...vals, traceId);
-  }
+  vals.push(traceId);
+  db.prepare(`UPDATE agent_traces SET ${sets.join(", ")} WHERE trace_id = ?`).run(...vals);
 }
 
 export function insertSpan(
-  db: PawDB,
+  db: Database.Database,
   span: Omit<TraceSpan, "events"> & { events?: SpanEvent[] }
 ): void {
-  db.run(sql`
+  db.prepare(`
     INSERT OR IGNORE INTO trace_spans (
       span_id, trace_id, parent_span_id, name, kind,
       start_time_ms, end_time_ms, duration_ms, status,
       attributes_json, events_json
-    ) VALUES (
-      ${span.spanId}, ${span.traceId}, ${span.parentSpanId ?? null},
-      ${span.name}, ${span.kind},
-      ${span.startTimeMs}, ${span.endTimeMs ?? null}, ${span.durationMs ?? null},
-      ${span.status},
-      ${JSON.stringify(span.attributes)},
-      ${JSON.stringify(span.events ?? [])}
-    )
-  `);
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    span.spanId,
+    span.traceId,
+    span.parentSpanId ?? null,
+    span.name,
+    span.kind,
+    span.startTimeMs,
+    span.endTimeMs ?? null,
+    span.durationMs ?? null,
+    span.status,
+    JSON.stringify(span.attributes),
+    JSON.stringify(span.events ?? []),
+  );
 }
 
 export function updateSpan(
-  db: PawDB,
+  db: Database.Database,
   spanId: string,
   update: {
     endTimeMs: number;
@@ -159,63 +161,52 @@ export function updateSpan(
     events?: SpanEvent[];
   }
 ): void {
-  const stmt = (db as unknown as { _client: { prepare: (q: string) => { run: (...a: unknown[]) => void } } })._client?.prepare(
+  db.prepare(
     `UPDATE trace_spans SET end_time_ms = ?, duration_ms = ?, status = ?, attributes_json = ?, events_json = ? WHERE span_id = ?`
+  ).run(
+    update.endTimeMs,
+    update.durationMs,
+    update.status,
+    update.attributes ? JSON.stringify(update.attributes) : null,
+    update.events ? JSON.stringify(update.events) : null,
+    spanId,
   );
-  if (stmt) {
-    stmt.run(
-      update.endTimeMs,
-      update.durationMs,
-      update.status,
-      update.attributes ? JSON.stringify(update.attributes) : null,
-      update.events ? JSON.stringify(update.events) : null,
-      spanId,
-    );
-  }
 }
 
 // ── Query helpers ─────────────────────────────────────────────────────────────
 
-export function listTraces(db: PawDB, limit = 50, offset = 0): AgentTrace[] {
-  const stmt = (db as unknown as { _client: { prepare: (q: string) => { all: (...a: unknown[]) => unknown[] } } })._client?.prepare(
+export function listTraces(db: Database.Database, limit = 50, offset = 0): AgentTrace[] {
+  const rows = db.prepare(
     `SELECT * FROM agent_traces ORDER BY start_time_ms DESC LIMIT ? OFFSET ?`
-  );
-  if (!stmt) return [];
-  return (stmt.all(limit, offset) as Record<string, unknown>[]).map(rowToTrace);
+  ).all(limit, offset) as Record<string, unknown>[];
+  return rows.map(rowToTrace);
 }
 
-export function getTrace(db: PawDB, traceId: string): AgentTrace | null {
-  const stmt = (db as unknown as { _client: { prepare: (q: string) => { get: (...a: unknown[]) => unknown } } })._client?.prepare(
+export function getTrace(db: Database.Database, traceId: string): AgentTrace | null {
+  const row = db.prepare(
     `SELECT * FROM agent_traces WHERE trace_id = ?`
-  );
-  if (!stmt) return null;
-  const row = stmt.get(traceId) as Record<string, unknown> | null;
+  ).get(traceId) as Record<string, unknown> | null;
   return row ? rowToTrace(row) : null;
 }
 
-export function getTraceByRunId(db: PawDB, runId: string): AgentTrace | null {
-  const stmt = (db as unknown as { _client: { prepare: (q: string) => { get: (...a: unknown[]) => unknown } } })._client?.prepare(
+export function getTraceByRunId(db: Database.Database, runId: string): AgentTrace | null {
+  const row = db.prepare(
     `SELECT * FROM agent_traces WHERE run_id = ? ORDER BY start_time_ms DESC LIMIT 1`
-  );
-  if (!stmt) return null;
-  const row = stmt.get(runId) as Record<string, unknown> | null;
+  ).get(runId) as Record<string, unknown> | null;
   return row ? rowToTrace(row) : null;
 }
 
-export function getSpansForTrace(db: PawDB, traceId: string): TraceSpan[] {
-  const stmt = (db as unknown as { _client: { prepare: (q: string) => { all: (...a: unknown[]) => unknown[] } } })._client?.prepare(
+export function getSpansForTrace(db: Database.Database, traceId: string): TraceSpan[] {
+  const rows = db.prepare(
     `SELECT * FROM trace_spans WHERE trace_id = ? ORDER BY start_time_ms ASC`
-  );
-  if (!stmt) return [];
-  return (stmt.all(traceId) as Record<string, unknown>[]).map(rowToSpan);
+  ).all(traceId) as Record<string, unknown>[];
+  return rows.map(rowToSpan);
 }
 
-export function countTraces(db: PawDB): number {
-  const stmt = (db as unknown as { _client: { prepare: (q: string) => { get: () => unknown } } })._client?.prepare(
+export function countTraces(db: Database.Database): number {
+  const row = db.prepare(
     `SELECT COUNT(*) as count FROM agent_traces`
-  );
-  if (!stmt) return 0;
-  const row = stmt.get() as { count: number } | null;
+  ).get() as { count: number } | null;
   return row?.count ?? 0;
 }
 

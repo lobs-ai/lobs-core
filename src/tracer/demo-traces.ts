@@ -13,8 +13,8 @@
  */
 
 import { randomBytes } from "node:crypto";
-import type { PawDB } from "../db/connection.js";
-import { getDb } from "../db/connection.js";
+import type Database from "better-sqlite3";
+import { getRawDb } from "../db/connection.js";
 import {
   createAgentTrace,
   insertSpan,
@@ -31,7 +31,7 @@ interface DemoTraceConfig {
   withErrors?: boolean;
 }
 
-export async function seedDemoTraces(db: PawDB, config: DemoTraceConfig = {}): Promise<void> {
+export async function seedDemoTraces(db: Database.Database, config: DemoTraceConfig = {}): Promise<void> {
   const {
     taskId = "demo-task-2025-04",
     agentType = "research-agent",
@@ -266,7 +266,7 @@ export async function seedDemoTraces(db: PawDB, config: DemoTraceConfig = {}): P
 
 // CLI entry point
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const db = getDb();
+  const db = getRawDb();
   seedDemoTraces(db, {
     taskId: "demo-research-2025-04",
     agentType: "research-agent",
