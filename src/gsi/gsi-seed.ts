@@ -22,8 +22,24 @@ const HOME = os.homedir();
 const SEED_STAMP_DIR = resolve(HOME, ".lobs/gsi/seeds");
 
 // Built-in seed data shipped with lobs-core
-const BUILTIN_SEEDS: Record<string, string> = {
-  eecs281: resolve(__dirname, "seed-data/eecs281-faq.json"),
+interface BuiltinSeedFile {
+  file: string;
+  label: string;
+  tags?: string[];
+}
+const BUILTIN_SEEDS: Record<string, BuiltinSeedFile[]> = {
+  eecs281: [
+    {
+      file: resolve(__dirname, "seed-data/eecs281-faq.json"),
+      label: "EECS 281 Frequently Asked Questions",
+      tags: ["eecs281", "faq", "seed"],
+    },
+    {
+      file: resolve(__dirname, "seed-data/eecs281-syllabus.md"),
+      label: "EECS 281 Course Syllabus",
+      tags: ["eecs281", "syllabus", "seed", "policies", "grading"],
+    },
+  ],
 };
 
 // ── Stamp tracking ────────────────────────────────────────────────────────────
@@ -36,7 +52,7 @@ interface SeedStamp {
   version: number;
 }
 
-const SEED_VERSION = 1; // increment to force re-seed on data updates
+const SEED_VERSION = 2; // v2: added eecs281-syllabus.md seed document
 
 function getStampPath(courseId: string): string {
   return join(SEED_STAMP_DIR, `${courseId}.seed.json`);
@@ -91,39 +107,55 @@ export async function seedCourse(courseId: string, force = false): Promise<SeedR
     return result;
   }
 
-  const seedFile = BUILTIN_SEEDS[courseId];
-  if (!seedFile || !existsSync(seedFile)) {
+  const seedFiles = BUILTIN_SEEDS[courseId];
+  if (!seedFiles || seedFiles.length === 0) {
     log().debug?.(`[gsi-seed] ${courseId}: no built-in seed data, skipping`);
     result.skipped = true;
     return result;
   }
 
-  log().info(`[gsi-seed] Seeding ${courseId} from ${seedFile}...`);
+  const seededFilePaths: string[] = [];
 
-  const opts: IngestOptions = {
-    courseId,
-    label: `${courseId.toUpperCase()} Frequently Asked Questions`,
-    tags: [courseId, "faq", "seed"],
-  };
+  for (const seed of seedFiles) {
+    if (!existsSync(seed.file)) {
+      log().warn(`[gsi-seed] ${courseId}: seed file not found: ${seed.file}`);
+      result.errors.push(`Seed file not found: ${seed.file}`);
+      continue;
+    }
 
-  const ingestResult = await ingestFile(seedFile, opts);
+    log().info(`[gsi-seed] Seeding ${courseId} from ${seed.file}...`);
 
-  if (ingestResult.success) {
-    result.filesIndexed = 1;
-    result.totalChunks = ingestResult.chunkCount ?? 0;
+    const opts: IngestOptions = {
+      courseId,
+      label: seed.label,
+      tags: seed.tags ?? [courseId, "seed"],
+    };
 
+    const ingestResult = await ingestFile(seed.file, opts);
+
+    if (ingestResult.success) {
+      result.filesIndexed += 1;
+      result.totalChunks += ingestResult.chunkCount ?? 0;
+      seededFilePaths.push(seed.file);
+      log().info(`[gsi-seed] ✓ Ingested "${seed.label}": ${ingestResult.chunkCount} chunks`);
+    } else {
+      result.errors.push(ingestResult.error ?? `Unknown error ingesting ${seed.label}`);
+      log().warn(`[gsi-seed] ✗ Failed to ingest "${seed.label}": ${ingestResult.error}`);
+    }
+  }
+
+  if (result.filesIndexed > 0) {
     writeStamp({
       courseId,
       seededAt: new Date().toISOString(),
-      files: [seedFile],
+      files: seededFilePaths,
       chunkCount: result.totalChunks,
       version: SEED_VERSION,
     });
 
-    log().info(`[gsi-seed] ✓ Seeded ${courseId}: ${result.totalChunks} chunks indexed`);
+    log().info(`[gsi-seed] ✓ Seeded ${courseId}: ${result.filesIndexed} files, ${result.totalChunks} chunks indexed`);
   } else {
-    result.errors.push(ingestResult.error ?? "Unknown ingest error");
-    log().warn(`[gsi-seed] ✗ Failed to seed ${courseId}: ${ingestResult.error}`);
+    log().warn(`[gsi-seed] ✗ Failed to seed ${courseId}: no files indexed`);
   }
 
   return result;

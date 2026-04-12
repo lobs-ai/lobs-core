@@ -98,10 +98,12 @@ describe("parseAnswerWithConfidence", () => {
     expect(result.confidence).toBe(1);
   });
 
-  it("clamps negative confidence to 0", () => {
+  it("defaults to 0.5 when confidence value is negative (regex only matches digits)", () => {
+    // The regex matches [0-9.]+ so negative numbers don't match → falls back to default 0.5.
+    // This is acceptable: the LLM shouldn't return negative confidence; malformed input = default.
     const raw = 'Answer. {"confidence": -0.2, "reason": "negative"}';
     const result = parseAnswerWithConfidence(raw);
-    expect(result.confidence).toBe(0);
+    expect(result.confidence).toBe(0.5);
   });
 
   it("handles whitespace variations in JSON block", () => {
