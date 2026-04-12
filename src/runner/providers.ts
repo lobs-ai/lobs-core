@@ -22,7 +22,6 @@ import type { ToolDefinition, TokenUsage } from "./types.js";
 import type { TaskCategory } from "../services/model-router.js";
 import { getKeyPool } from "../services/key-pool.js";
 import { getCodexAuth } from "../services/codex-auth.js";
-import { getMinimaxAuth } from "../services/minimax-auth.js";
 import { randomUUID } from "node:crypto";
 import {
   fromClaudeCodeToolName,
@@ -1389,7 +1388,7 @@ class ResilientLLMClient implements LLMClient {
           const useOriginalPrimary = attempt === 1 && !isFallback && !this.primaryClientUsed;
           const client = useOriginalPrimary
             ? this.primaryClient
-            : createClient(parseModelString(model), this.sessionId);
+            : await createClient(parseModelString(model), this.sessionId);
           if (useOriginalPrimary) this.primaryClientUsed = true;
 
           return await client.createMessage(modelParams);
@@ -1561,13 +1560,13 @@ class ResilientLLMClient implements LLMClient {
  * Create a resilient LLM client with retry and fallback support.
  * @param sessionId - Optional session ID for sticky key assignment
  */
-export function createResilientClient(
+export async function createResilientClient(
   model: string,
   options?: ResilientClientOptions & { sessionId?: string }
-): LLMClient {
+): Promise<LLMClient> {
   const config = parseModelString(model);
   const sessionId = options?.sessionId;
-  const primaryClient = createClient(config, sessionId);
+  const primaryClient = await createClient(config, sessionId);
   return new ResilientLLMClient(primaryClient, model, { ...options, sessionId });
 }
 
@@ -1880,7 +1879,7 @@ class OpenAICodexClient implements LLMClient {
  * Create an LLM client for the given provider config.
  * @param sessionId - Optional session ID for sticky key assignment
  */
-export function createClient(config: ProviderConfig, sessionId?: string): LLMClient {
+export async function createClient(config: ProviderConfig, sessionId?: string): Promise<LLMClient> {
   if (config.provider === "anthropic") {
     const keyPool = getKeyPool();
     const auth = resolveAnthropicAuth(sessionId);
@@ -1959,6 +1958,34 @@ export function createClient(config: ProviderConfig, sessionId?: string): LLMCli
       throw new Error("No OpenCode API key found. Set OPENCODE_API_KEY environment variable.");
     }
 
+    // Pre-flight probe: confirm the API key is actually active
+    try {
+      const probeResponse = await fetch(`${baseUrl}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({ model: config.modelId, max_tokens: 1, messages: [] }),
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (probeResponse.status >= 500) {
+        throw new Error(`OpenCode Go probe failed with ${probeResponse.status}`);
+      }
+      if (probeResponse.status === 401 || probeResponse.status === 403) {
+        throw new Error("OpenCode Go subscription is inactive or expired");
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("subscription is inactive")) {
+        throw err;
+      }
+      // Network-level errors (timeout, DNS, etc.) are also surfaced clearly
+      throw new Error(
+        `OpenCode Go subscription is inactive or expired: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     // Create Anthropic SDK client pointed at OpenCode Go endpoint
     const anthropicClient = new Anthropic({
       apiKey,
@@ -2006,18 +2033,6 @@ export function createClient(config: ProviderConfig, sessionId?: string): LLMCli
   if (config.provider === "openrouter") {
     extraHeaders["HTTP-Referer"] = "https://lobs.ai";
     extraHeaders["X-Title"] = "Lobs Agent Runner";
-  }
-
-  // MiniMax: inject OAuth Bearer token if available (falls back to MINIMAX_API_KEY env var)
-  if (config.provider === "minimax") {
-    const minimaxAuth = getMinimaxAuth();
-    const cachedToken = minimaxAuth.getCachedAccessToken();
-    if (cachedToken) {
-      extraHeaders["Authorization"] = `Bearer ${cachedToken}`;
-      // If we have an OAuth token, we don't need the env var key at all
-      // (OAuth tokens are per-user, not per-key-pool)
-      apiKey = "";
-    }
   }
 
   return new OpenAICompatibleClient(baseUrl, apiKey, config.provider, sessionId, extraHeaders, keyIndex, keyLabel);

@@ -51,7 +51,6 @@ import { loadKeyConfig, getEnvKeyForProvider } from "../config/keys.js";
 import { getLobsRoot } from "../config/lobs.js";
 import { runLmStudioDiagnostic, formatDiagnosticReport } from "../diagnostics/lmstudio.js";
 import { cmdCodexAuth } from "./codex-auth.js";
-import { cmdMinimaxAuth } from "./minimax-auth.js";
 
 const LOBS_PORT = parseInt(process.env.LOBS_PORT ?? "9420", 10);
 const API_BASE = `http://localhost:${LOBS_PORT}/api`;
@@ -2130,10 +2129,6 @@ const subcommand = args[1];
     case "codex-auth":
       await cmdCodexAuth(subcommand);
       break;
-    case "minimax-auth":
-      await cmdMinimaxAuth(subcommand, args.slice(2));
-      break;
-
     case "init":
       cmdInit();
       break;
@@ -2203,11 +2198,6 @@ const subcommand = args[1];
       console.log("  lobs codex-auth login    OAuth login for openai-codex provider");
       console.log("  lobs codex-auth status   Show token status and expiry");
       console.log("  lobs codex-auth refresh  Refresh the access token");
-      console.log("");
-      console.log(colorize("MiniMax Auth:", "cyan"));
-      console.log("  lobs minimax-auth login [--region cn|global]  OAuth login for minimax provider");
-      console.log("  lobs minimax-auth status   Show token status and expiry");
-      console.log("  lobs minimax-auth refresh  Refresh the access token");
       console.log("");
       console.log(colorize("Logs:", "cyan"));
       console.log("  lobs logs [--tail N]     Show recent log output");

@@ -3,7 +3,6 @@ import { getEnvKeyForProvider, loadKeyConfig } from "../config/keys.js";
 import { fetchLoadedModels } from "../diagnostics/lmstudio.js";
 import { parseModelString } from "../runner/providers.js";
 import { getRawDb } from "../db/connection.js";
-import { getMinimaxAuth } from "./minimax-auth.js";
 
 export type ModelOptionSource = "tier" | "configured" | "lmstudio" | "available";
 
@@ -145,7 +144,7 @@ export async function getModelCatalog(timeoutMs = 2500): Promise<ModelCatalog> {
   }
 
   for (const [provider, models] of Object.entries(AVAILABLE_PROVIDER_MODELS)) {
-    if (!hasProviderCredentials(provider, keyConfig)) continue;
+    if (!await probeProviderCredentials(provider, keyConfig)) continue;
     for (const model of models) {
       add(model, "available", {
         label: `${provider} -> ${model}`,
@@ -185,6 +184,56 @@ export async function getModelCatalog(timeoutMs = 2500): Promise<ModelCatalog> {
   };
 }
 
+// ── Credential Validation Probe ─────────────────────────────────────────────
+
+const PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * Lightweight probe to verify a provider's credentials are actually active.
+ * Returns true if the probe succeeds, false if it fails or credentials are absent.
+ */
+async function probeProviderCredentials(
+  provider: string,
+  keyConfig: ReturnType<typeof loadKeyConfig>,
+): Promise<boolean> {
+  const pool = keyConfig[provider];
+  const envKey = getEnvKeyForProvider(provider);
+
+  if (provider === "opencode-go") {
+    // Use API key from pool or env var
+    const apiKey = pool?.keys?.[0]?.key ?? process.env[envKey] ?? "";
+    if (!apiKey) return false;
+    // Probe: POST /v1/messages with max_tokens=1 (Anthropic format)
+    try {
+      const defaults = { baseUrl: "https://opencode.ai/zen/go", envKey: "OPENCODE_API_KEY" };
+      const baseUrl = defaults.baseUrl;
+      const response = await fetch(`${baseUrl}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({ model: "", max_tokens: 1, messages: [] }),
+        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+      });
+      // 4xx = bad credentials, but the endpoint responded (provider is up)
+      return response.status < 500;
+    } catch {
+      return false;
+    }
+  }
+
+  // For other providers, fall back to presence check
+  if (pool?.keys?.length) return true;
+  if (process.env[envKey]?.trim()) return true;
+  return false;
+}
+
+/**
+ * Sync wrapper — checks credential presence only (no API probe).
+ * Used by non-async contexts; async callers should use probeProviderCredentials.
+ */
 function hasProviderCredentials(
   provider: string,
   keyConfig: ReturnType<typeof loadKeyConfig>,
@@ -193,10 +242,6 @@ function hasProviderCredentials(
   if (pool?.keys?.length) return true;
   const envKey = getEnvKeyForProvider(provider);
   if (process.env[envKey]?.trim()) return true;
-  // MiniMax uses OAuth instead of an API key
-  if (provider === "minimax") {
-    return Boolean(getMinimaxAuth().getCachedAccessToken());
-  }
   return false;
 }
 
