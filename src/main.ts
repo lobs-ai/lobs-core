@@ -52,6 +52,8 @@ import { IntelSweepWorker } from "./workers/intel-sweep.js";
 import { ResearchRadarWorker } from "./workers/research-radar.js";
 import { GoalsWorker } from "./workers/goals-worker.js";
 import { MorningBriefWorker } from "./workers/morning-brief.js";
+import { DeadlineSentinelWorker } from "./workers/deadline-sentinel-worker.js";
+import { PriorityAdvisorWorker } from "./workers/priority-advisor.js";
 import { initResearchQueueService } from "./services/research-queue.js";
 import { initIntelSweepService } from "./services/intel-sweep.js";
 import { initResearchRadarService } from "./services/research-radar.js";
@@ -386,6 +388,8 @@ async function main() {
   workerRegistry.register(new ResearchRadarWorker(researchRadar, intelSweep));
   workerRegistry.register(new GoalsWorker());
   workerRegistry.register(new MorningBriefWorker());
+  workerRegistry.register(new DeadlineSentinelWorker());
+  workerRegistry.register(new PriorityAdvisorWorker());
 
   // Register system jobs (code handlers, not DB-backed)
   cronService.registerSystemJob({
