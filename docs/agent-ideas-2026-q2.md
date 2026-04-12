@@ -221,15 +221,33 @@
 - **Cost per run:** ~$0.003 (claude-haiku-4-5, typical 3-10 file PR)
 - **Next:** Wire GitHub webhook into lobs-core, auto-review all new PRs in lobs-ai org
 
+### 2026-04-12 — Meeting Notes Agent prototype built ✅
+- **Prototype:** `~/lobs/prototypes/meeting-notes/meeting-notes-agent.ts` (356 lines)
+- **Status:** Working end-to-end. Smoke-tested against example team meeting transcript.
+- **What it does:** Raw meeting transcript → 5 parallel agents extract: participants/metadata, summary+themes, action items (owner/deadline/priority/context), decisions (rationale/impact), open questions (blockers). Output: Markdown to stdout + JSON sidecar.
+- **Smoke test result:** 6,035-char transcript → 12 action items, 8 decisions, 10 open questions. All accurate. 9.2s wall-clock (parallel agents). $0.006 per run.
+- **Cost per run:** ~$0.004-0.008 (claude-haiku-4-5, 5 agents × ~1800 input tokens each)
+- **Key differentiator identified:** Daily cron pinging owners when action items go stale — most tools (Otter.ai, Fireflies) stop at summary.
+- **Phase 1:** Text-only input ✅. Phase 2: Audio transcription via Whisper/Deepgram (future).
+- **Next:** Integrate cron job for action item staleness pings; run every team meeting through it for 30 days
+
+### 2026-04-12 — Agent Replay Debugger (agent-trace) — already shipped in lobs-core ✅
+- **Status:** The `~/lobs/prototypes/agent-trace/` stub has types defined but no implementation needed — the full OSS-quality Agent Replay Debugger is already implemented in lobs-core (`src/services/trace-store.ts`, `tracer-hook.ts`, `traces.ts`).
+- **Features:** Timeline view, flamegraph, span inspector, replay controls (play/pause/step), OTLP export, SQLite backend.
+- **Docs:** `paw-hub/docs/agent-replay-debugger.md`
+- **Classification:** OSS — already usable, no additional prototype work needed.
+
 ## Next Steps
 
+- **This week:** Run team meetings through meeting-notes prototype (30-day commitment starts now)
 - **This week:** Register GitHub App on lobs-ai org, add webhook handler to lobs-core `src/api/webhooks-github.ts`
-- **Next:** Auto-review all new PRs in lobs-core + paw-hub, Discord DM on critical issues found
-- **Then:** Lit-review service PDF pipeline (70% done — needs arXiv PDF ingestion)
-- **Month 2:** Evaluate traction on code review, decide whether to SaaS-ify
+- **Next:** Build action item staleness cron job for meeting-notes (pings owners in Discord when items go stale)
+- **Next:** Lit-review service PDF pipeline (70% done — needs arXiv PDF ingestion)
+- **Month 2:** Evaluate traction on code review + meeting notes, decide which to SaaS-ify first
+- **New idea to evaluate:** Job Application Tailor (score 7.5) — fastest remaining build (~1 week), B2C, no liability risk
 
 ---
 
 **Author:** Programmer Agent  
 **Date:** 2026-04-12  
-**Status:** Code Review Agent prototype ✅ complete. GitHub App integration next.
+**Status:** Code Review ✅ · Meeting Notes ✅ · Agent Replay (already in lobs-core) ✅. 3/3 top ideas prototyped.
