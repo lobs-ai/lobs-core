@@ -22,7 +22,7 @@ import { humanizeToolDefinition, humanizeTool } from "./humanize.js";
 import { imagineToolDefinition, imagineTool } from "./imagine.js";
 import { htmlToPdfToolDefinition, htmlToPdfTool } from "./html-to-pdf.js";
 import { dispatchAgentToolDefinition, dispatchAgentTool } from "./dispatch.js";
-import { librarianAskToolDefinition, librarianAskTool, librarianReindexToolDefinition, reindexKnowledgeBaseTool, librarianAuditToolDefinition, librarianAuditTool, librarianStatusToolDefinition, librarianStatusTool } from "./librarian.js";
+import { librarianAskToolDefinition, librarianAskTool, librarianReindexToolDefinition, reindexKnowledgeBaseTool, librarianAuditToolDefinition, librarianAuditTool, librarianStatusToolDefinition, librarianStatusTool, librarianAddDocumentToolDefinition, librarianAddDocumentTool } from "./librarian.js";
 import { toolManageDefinition, toolManageTool } from "./tool-manage.js";
 import { TASK_TOOL_DEFINITIONS, TASK_TOOL_EXECUTORS } from "./tasks.js";
 import { getDynamicToolLoader } from "./dynamic-tools.js";
@@ -229,6 +229,10 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   librarian_status: {
     definition: librarianStatusToolDefinition,
     execute: (params, cwd) => librarianStatusTool(params, cwd),
+  },
+  librarian_add_document: {
+    definition: librarianAddDocumentToolDefinition,
+    execute: (params, cwd) => librarianAddDocumentTool(params, cwd),
   },
   // Task and goal management tools
   task_create: { definition: TASK_TOOL_DEFINITIONS[0], execute: TASK_TOOL_EXECUTORS.task_create },

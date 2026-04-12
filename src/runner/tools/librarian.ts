@@ -8,7 +8,7 @@
  *  - librarianStatusTool: KB health check
  */
 
-import { readFileSync, existsSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, statSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
@@ -139,6 +139,32 @@ export const librarianAuditToolDefinition: ToolDefinition = {
       },
     },
     required: [],
+  },
+};
+
+export const librarianAddDocumentToolDefinition: ToolDefinition = {
+  name: "librarian_add_document",
+  description:
+    "Write a document to disk and register it in the docs registry so future agents can find it. " +
+    "Use for research findings, design docs, runbooks, ADRs, and other significant documents. " +
+    "Automatically triggers a re-index so the content is immediately searchable.",
+  input_schema: {
+    type: "object",
+    properties: {
+      filepath: {
+        type: "string",
+        description: "Absolute path where the document should be written (e.g. ~/lobs/lobs-shared-memory/research/my-finding.md)",
+      },
+      content: {
+        type: "string",
+        description: "Full markdown content to write to the file.",
+      },
+      description: {
+        type: "string",
+        description: "Short one-line description for the registry (max 100 chars).",
+      },
+    },
+    required: ["filepath", "content"],
   },
 };
 
@@ -788,6 +814,57 @@ export async function librarianAuditTool(
 
   log().info(`[librarian-audit] Done: ${untracked.length} untracked, ${missing.length} missing, ${staleCount} stale`);
   return parts.join("\n");
+}
+
+// ── librarianAddDocumentTool ──────────────────────────────────────────────────
+
+export async function librarianAddDocumentTool(
+  params: Record<string, unknown>,
+  _cwd: string,
+): Promise<string> {
+  const rawPath = params["filepath"] as string;
+  const content = params["content"] as string;
+  const description = (params["description"] as string | undefined) ?? "";
+
+  if (!rawPath || !content) {
+    return "Error: filepath and content are required.";
+  }
+
+  // Expand ~ to home dir
+  const filepath = rawPath.startsWith("~")
+    ? join(os.homedir(), rawPath.slice(1))
+    : resolve(rawPath);
+
+  // Ensure parent directory exists
+  const dir = join(filepath, "..");
+  mkdirSync(dir, { recursive: true });
+
+  // Write the document
+  writeFileSync(filepath, content, "utf8");
+
+  // Update docs registry
+  const registryPath = join(os.homedir(), "lobs/lobs-shared-memory/docs-registry.md");
+  if (existsSync(registryPath)) {
+    const displayPath = filepath.replace(os.homedir(), "~");
+    const filename = filepath.split("/").pop() ?? filepath;
+    const date = new Date().toISOString().split("T")[0];
+    const desc = description || filename;
+    const registryEntry = `\n| \`${displayPath}\` | ${desc} | 🆕 | ${date} | Added via librarian_add_document |`;
+    appendFileSync(registryPath, registryEntry, "utf8");
+  }
+
+  // Trigger re-index so the new doc is immediately searchable
+  try {
+    await fetch(`${MEMORY_URL}/reindex`, {
+      method: "POST",
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch {
+    // Non-fatal — doc was saved; reindex will happen on next scheduled run
+  }
+
+  const displayPath = filepath.replace(os.homedir(), "~");
+  return `Document saved to ${displayPath} and registered in docs registry. Re-index triggered.`;
 }
 
 // ── librarianStatusTool ───────────────────────────────────────────────────────

@@ -47,6 +47,7 @@ import { MemoryProcessorWorker } from "./workers/memory-processor.js";
 import { ResearchProcessorWorker } from "./workers/research-processor.js";
 import { IntelSweepWorker } from "./workers/intel-sweep.js";
 import { ResearchRadarWorker } from "./workers/research-radar.js";
+import { GoalsWorker } from "./workers/goals-worker.js";
 import { initResearchQueueService } from "./services/research-queue.js";
 import { initIntelSweepService } from "./services/intel-sweep.js";
 import { initResearchRadarService } from "./services/research-radar.js";
@@ -365,6 +366,7 @@ async function main() {
   // Research radar — identifies novel paper opportunities from intel insights
   const researchRadar = initResearchRadarService(getRawDb());
   workerRegistry.register(new ResearchRadarWorker(researchRadar, intelSweep));
+  workerRegistry.register(new GoalsWorker());
 
   // Register system jobs (code handlers, not DB-backed)
   cronService.registerSystemJob({
