@@ -1,13 +1,22 @@
 /**
  * Goals Worker — autonomous execution loop for active goals.
  *
- * Runs every 30 minutes. For each active goal, spawns a full agent session
- * to assess the current state and do real work toward the goal. Does not
- * just create inbox tasks — it launches a medium-tier session that can
- * look around, make decisions, and execute.
+ * Runs every 30 minutes. Picks the SINGLE highest-priority goal that:
+ *   - has no session currently in flight
+ *   - hasn't been worked in the last MIN_COOLDOWN_MINUTES
  *
- * Cap: max 2 active goal sessions in flight at once per goal.
+ * Global cap: MAX_CONCURRENT_SESSIONS across ALL goals at once.
+ * This prevents burning money by running 6+ parallel sessions.
+ * Goals rotate by least-recently-worked so nothing starves.
  */
+
+// ── Scheduling constants ─────────────────────────────────────────────────
+/** Only one goal session spawned per cycle (to keep costs controlled). */
+const MAX_SESSIONS_PER_CYCLE = 1;
+/** Don't re-work the same goal within this window (in minutes). */
+const MIN_COOLDOWN_MINUTES = 60;
+/** Abort if this many sessions are already in-flight across all goals. */
+const MAX_CONCURRENT_SESSIONS = 2;
 
 import { eq, and, inArray, desc, sql, lt, like } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
@@ -117,32 +126,97 @@ export class GoalsWorker extends BaseWorker {
       };
     }
 
-    for (const goal of activeGoals) {
+    // 2. Count globally how many agent sessions are currently in-flight
+    //    across ALL goals. If at cap, skip this cycle entirely.
+    const globalActiveResult = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.status, "active"),
+          eq(tasks.agent, "programmer"),
+          sql`${tasks.goalId} IS NOT NULL`,
+          like(tasks.notes, "Agent session in progress%"),
+        ),
+      );
+    const globalActiveSessions = Number(globalActiveResult[0]?.count ?? 0);
+
+    if (globalActiveSessions >= MAX_CONCURRENT_SESSIONS) {
+      log().info(
+        `[goals-worker] ${globalActiveSessions} sessions in-flight — at global cap (${MAX_CONCURRENT_SESSIONS}), skipping cycle`,
+      );
+      return {
+        success: true,
+        artifacts: [],
+        alerts: [],
+        tokensUsed: 0,
+        durationMs: 0,
+        summary: `${globalActiveSessions} sessions already in-flight — skipping cycle (cap: ${MAX_CONCURRENT_SESSIONS})`,
+      };
+    }
+
+    // 3. Find the single best goal to work on this cycle:
+    //    - no active session already in-flight for it
+    //    - cooled down (lastWorked > MIN_COOLDOWN_MINUTES ago)
+    //    - sorted by priority DESC, then by least-recently-worked (null = never = highest priority)
+    const cooldownThreshold = new Date(
+      Date.now() - MIN_COOLDOWN_MINUTES * 60 * 1000,
+    ).toISOString();
+
+    // Get the set of goalIds that currently have an active session
+    const activeGoalSessionRows = await db
+      .select({ goalId: tasks.goalId })
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.status, "active"),
+          eq(tasks.agent, "programmer"),
+          sql`${tasks.goalId} IS NOT NULL`,
+          like(tasks.notes, "Agent session in progress%"),
+        ),
+      );
+    const activeGoalIds = new Set(
+      activeGoalSessionRows.map((r) => r.goalId).filter(Boolean),
+    );
+
+    // Pick the best eligible goal
+    const eligibleGoal = activeGoals.find((goal) => {
+      // Skip if already has a session in-flight
+      if (activeGoalIds.has(goal.id)) {
+        goalsSkipped++;
+        return false;
+      }
+      // Skip if worked too recently (null lastWorked = never worked = always eligible)
+      if (goal.lastWorked && goal.lastWorked > cooldownThreshold) {
+        goalsSkipped++;
+        log().info(
+          `[goals-worker] Goal "${goal.title}" cooled down (worked ${goal.lastWorked}) — skipping`,
+        );
+        return false;
+      }
+      return true;
+    });
+
+    if (!eligibleGoal) {
+      const reasons =
+        globalActiveSessions > 0
+          ? `${globalActiveSessions} in-flight, ${goalsSkipped} cooling down`
+          : `all ${goalsSkipped} goals cooling down`;
+      return {
+        success: true,
+        artifacts: [],
+        alerts: [],
+        tokensUsed: 0,
+        durationMs: 0,
+        summary: `Nothing to spawn this cycle (${reasons})`,
+      };
+    }
+
+    // 4. Spawn a single session for the chosen goal
+    const goal = eligibleGoal;
+
+    {
       try {
-        // Check if there's already an active agent session tracking task for this goal.
-        // We only skip if a session is actively in-flight — not just because Rafe has open tasks.
-        const activeSessionResult = await db
-          .select({ count: sql<number>`count(*)` })
-          .from(tasks)
-          .where(
-            and(
-              eq(tasks.goalId, goal.id),
-              eq(tasks.status, "active"),
-              eq(tasks.agent, "programmer"),
-              like(tasks.notes, "Agent session in progress%"),
-            ),
-          );
-
-        const openCount = Number(activeSessionResult[0]?.count ?? 0);
-
-        if (openCount >= 1) {
-          goalsSkipped++;
-          log().info(
-            `[goals-worker] Goal "${goal.title}" already has an active agent session — skipping`,
-          );
-          continue;
-        }
-
         // Load recent completed tasks for context
         const recentCompleted = await db
           .select({ title: tasks.title, notes: tasks.notes })
@@ -153,8 +227,31 @@ export class GoalsWorker extends BaseWorker {
           .orderBy(desc(tasks.updatedAt))
           .limit(5);
 
+        // Load queued (inbox) tasks for this goal so agent knows what's next
+        const inboxTasks = await db
+          .select({ title: tasks.title, notes: tasks.notes, priority: tasks.priority })
+          .from(tasks)
+          .where(
+            and(eq(tasks.goalId, goal.id), eq(tasks.status, "inbox")),
+          )
+          .orderBy(desc(tasks.priority))
+          .limit(10);
+
+        // Load active (in-flight) tasks for this goal so agent doesn't duplicate
+        const activeTasks = await db
+          .select({ title: tasks.title })
+          .from(tasks)
+          .where(
+            and(
+              eq(tasks.goalId, goal.id),
+              eq(tasks.status, "active"),
+              sql`${tasks.notes} NOT LIKE 'Agent session in progress%'`,
+            ),
+          )
+          .limit(5);
+
         // Build the agent prompt
-        const prompt = buildGoalSessionPrompt(goal, recentCompleted, openCount);
+        const prompt = buildGoalSessionPrompt(goal, recentCompleted, inboxTasks, activeTasks);
 
         // Create a tracking task so we know a session is in flight
         const trackingTaskId = randomUUID().slice(0, 8);
@@ -250,15 +347,14 @@ export class GoalsWorker extends BaseWorker {
       }
     }
 
-    const parts: string[] = [];
-    if (sessionsSpawned > 0)
-      parts.push(
-        `${sessionsSpawned} session${sessionsSpawned !== 1 ? "s" : ""} spawned`,
-      );
-    if (goalsSkipped > 0)
-      parts.push(
-        `${goalsSkipped} goal${goalsSkipped !== 1 ? "s" : ""} skipped (enough in flight)`,
-      );
+    const skippedNote =
+      goalsSkipped > 0
+        ? ` (${goalsSkipped} cooling down)`
+        : "";
+    const summary =
+      sessionsSpawned > 0
+        ? `Spawned 1 session for goal "${goal.title}"${skippedNote}`
+        : `Nothing spawned${skippedNote}`;
 
     return {
       success: true,
@@ -266,10 +362,7 @@ export class GoalsWorker extends BaseWorker {
       alerts,
       tokensUsed: 0,
       durationMs: 0,
-      summary:
-        parts.length > 0
-          ? parts.join(" · ")
-          : `Processed ${activeGoals.length} active goal${activeGoals.length !== 1 ? "s" : ""}, nothing to do`,
+      summary,
     };
   }
 }
@@ -316,7 +409,8 @@ function extractSessionSummary(rawOutput: string): string {
 function buildGoalSessionPrompt(
   goal: typeof goals.$inferSelect,
   recentCompleted: Array<{ title: string; notes: string | null }>,
-  openCount: number,
+  inboxTasks: Array<{ title: string; notes: string | null; priority: string | null }>,
+  activeTasks: Array<{ title: string }>,
 ): string {
   const completedSection =
     recentCompleted.length > 0
@@ -328,10 +422,17 @@ function buildGoalSessionPrompt(
           .join("\n")
       : "none yet — this is fresh territory";
 
-  const openSection =
-    openCount > 0
-      ? `${openCount} task${openCount !== 1 ? "s" : ""} currently in progress`
-      : "none — you have a clear runway";
+  const inboxSection =
+    inboxTasks.length > 0
+      ? inboxTasks
+          .map((t) => `- [${t.priority ?? "medium"}] ${t.title}`)
+          .join("\n")
+      : "none queued — use your judgment to decide what to work on";
+
+  const activeSection =
+    activeTasks.length > 0
+      ? activeTasks.map((t) => `- ${t.title}`).join("\n")
+      : "none";
 
   return `You are an autonomous agent working on behalf of Rafe's personal AI system (Lobs).
 
@@ -343,17 +444,23 @@ ${goal.description ?? "No description provided."}
 Priority: ${goal.priority}/100
 
 ## Current state
-Recent completed work:
+
+**Recently completed:**
 ${completedSection}
 
-Open tasks in flight:
-${openSection}
+**Queued for this session (inbox tasks — work these first if relevant):**
+${inboxSection}
+
+**Currently in progress (don't duplicate):**
+${activeSection}
 
 ## Instructions
 
 Your job is to make real, concrete progress on this goal RIGHT NOW. This is a full working session — not planning, not summarizing. Act.
 
-Start by looking around: check the relevant repos, read recent code or docs, understand what's actually been done and what hasn't. Then identify the single most valuable thing you can do in this session and do it.
+If there are queued inbox tasks above, start with the highest-priority one. Otherwise, look around: check the relevant repos, read recent code or docs, understand what's actually been done and what hasn't. Then identify the single most valuable thing you can do in this session and do it.
+
+**Before starting work**, run a quick memory search for "${goal.title}" — this will surface relevant learnings, prior decisions, and known gotchas that could save you time.
 
 **Be proactive and novel.** Don't just continue existing work mechanically — ask yourself what would actually move the needle. If the obvious next step is boring or incremental, consider whether there's a higher-leverage angle you're missing. Surprise us with something good.
 

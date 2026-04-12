@@ -51,6 +51,7 @@ import { ResearchProcessorWorker } from "./workers/research-processor.js";
 import { IntelSweepWorker } from "./workers/intel-sweep.js";
 import { ResearchRadarWorker } from "./workers/research-radar.js";
 import { GoalsWorker } from "./workers/goals-worker.js";
+import { MorningBriefWorker } from "./workers/morning-brief.js";
 import { initResearchQueueService } from "./services/research-queue.js";
 import { initIntelSweepService } from "./services/intel-sweep.js";
 import { initResearchRadarService } from "./services/research-radar.js";
@@ -384,6 +385,7 @@ async function main() {
   const researchRadar = initResearchRadarService(getRawDb());
   workerRegistry.register(new ResearchRadarWorker(researchRadar, intelSweep));
   workerRegistry.register(new GoalsWorker());
+  workerRegistry.register(new MorningBriefWorker());
 
   // Register system jobs (code handlers, not DB-backed)
   cronService.registerSystemJob({
