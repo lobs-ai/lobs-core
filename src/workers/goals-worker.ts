@@ -114,7 +114,7 @@ export class GoalsWorker extends BaseWorker {
           const result = await callLocalModelJSON<TaskSuggestion | null>(prompt, {
             maxTokens: this.config.maxTokens,
             timeoutMs: this.config.timeoutMs,
-            taskCategory: "planning",
+            taskCategory: "background",
           });
           suggestion = result.data;
           tokensUsed = result.tokensUsed;
