@@ -79,7 +79,16 @@ interface DailyBriefResponse {
   activeTasks: Array<{ id: string; title: string; status: string; priority: string | null; project: string | null }>;
   completedToday: Array<{ id: string; title: string; completedAt: string }>;
   blockedTasks: Array<{ id: string; title: string; blockedBy: string | null }>;
-  goals: Array<{ id: string; title: string; priority: number; openTaskCount: number; completedToday: number }>;
+  goals: Array<{
+    id: string;
+    title: string;
+    priority: number;
+    openTaskCount: number;
+    completedToday: number;
+    completedTotal: number;
+    lastSessionAt: string | null;
+    daysSinceActivity: number | null;
+  }>;
   recentAgentWork: Array<{
     id: number;
     agentType: string;
@@ -201,7 +210,16 @@ export async function handleDailyBriefRequest(
         .all();
 
       const goalIds = activeGoals.map(g => g.id);
-      const goalSummaries: Array<{ id: string; title: string; priority: number; openTaskCount: number; completedToday: number }> = [];
+      const goalSummaries: Array<{
+        id: string;
+        title: string;
+        priority: number;
+        openTaskCount: number;
+        completedToday: number;
+        completedTotal: number;
+        lastSessionAt: string | null;
+        daysSinceActivity: number | null;
+      }> = [];
 
       if (goalIds.length > 0) {
         const openTaskRows = db
@@ -225,16 +243,47 @@ export async function handleDailyBriefRequest(
           .groupBy(tasks.goalId)
           .all();
 
+        const doneTotalRows = db
+          .select({ goalId: tasks.goalId, count: sql<number>`COUNT(*)` })
+          .from(tasks)
+          .where(and(
+            inArray(tasks.goalId, goalIds),
+            eq(tasks.status, "completed"),
+          ))
+          .groupBy(tasks.goalId)
+          .all();
+
+        // Last activity per goal: most recent completed task updatedAt
+        const lastActivityRows = db
+          .select({ goalId: tasks.goalId, lastAt: sql<string>`MAX(updatedAt)` })
+          .from(tasks)
+          .where(and(
+            inArray(tasks.goalId, goalIds),
+            eq(tasks.status, "completed"),
+          ))
+          .groupBy(tasks.goalId)
+          .all();
+
         const openByGoal = new Map(openTaskRows.map(r => [r.goalId, Number(r.count)]));
         const doneByGoal = new Map(doneTaskRows.map(r => [r.goalId, Number(r.count)]));
+        const doneTotalByGoal = new Map(doneTotalRows.map(r => [r.goalId, Number(r.count)]));
+        const lastActivityByGoal = new Map(lastActivityRows.map(r => [r.goalId, r.lastAt as string | null]));
 
+        const nowMs = Date.now();
         for (const g of activeGoals) {
+          const lastAt = lastActivityByGoal.get(g.id) ?? null;
+          const daysSince = lastAt
+            ? Math.floor((nowMs - new Date(lastAt).getTime()) / (1000 * 60 * 60 * 24))
+            : null;
           goalSummaries.push({
             id: g.id,
             title: g.title,
             priority: g.priority,
             openTaskCount: openByGoal.get(g.id) ?? 0,
             completedToday: doneByGoal.get(g.id) ?? 0,
+            completedTotal: doneTotalByGoal.get(g.id) ?? 0,
+            lastSessionAt: lastAt,
+            daysSinceActivity: daysSince,
           });
         }
       }
@@ -314,6 +363,10 @@ export async function handleDailyBriefRequest(
       const urgentTasks = activeRows.filter(t => t.priority === "high" || t.priority === "urgent");
       if (urgentTasks.length > 0) {
         highlights.push(`🔴 ${urgentTasks.length} high-priority task${urgentTasks.length > 1 ? "s" : ""}`);
+      }
+      const stagnantGoals = goalSummaries.filter(g => g.daysSinceActivity !== null && g.daysSinceActivity >= 3);
+      if (stagnantGoals.length > 0) {
+        highlights.push(`⏸️ ${stagnantGoals.length} goal${stagnantGoals.length > 1 ? "s" : ""} with no activity in 3+ days: ${stagnantGoals.map(g => g.title).join(", ")}`);
       }
       if (highlights.length === 0) {
         highlights.push("📋 No urgent items — steady state");
