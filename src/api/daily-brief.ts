@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { exec } from "node:child_process";
 import { eq, and, gte, inArray, desc, sql } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import { tasks, projects, goals, workerRuns } from "../db/schema.js";
@@ -11,6 +12,61 @@ import { getCachedBrief, getCachedHealth, generateDailyBriefSummary } from "../s
  * GET /api/daily-brief → returns today's brief with AI narrative
  * POST /api/daily-brief/refresh → force regenerate the AI summary
  */
+
+interface RecentCommit {
+  sha: string;
+  message: string;
+  author: string;
+  date: string;
+  repo: string;
+  url: string;
+}
+
+// Repos to monitor for recent commits
+const MONITORED_REPOS = [
+  "lobs-ai/lobs-core",
+  "lobs-ai/lobs-nexus",
+  "paw-engineering/paw-hub",
+  "paw-engineering/trident",
+];
+
+function ghApiExec(cmd: string, timeoutMs = 12_000): Promise<string> {
+  return new Promise((resolve) => {
+    exec(cmd, { encoding: "utf-8", timeout: timeoutMs }, (err, stdout) => {
+      if (err) resolve("");
+      else resolve(stdout);
+    });
+  });
+}
+
+async function fetchRecentCommits(since: string): Promise<RecentCommit[]> {
+  const results = await Promise.allSettled(
+    MONITORED_REPOS.map(async (repo) => {
+      const raw = await ghApiExec(
+        `gh api "repos/${repo}/commits?since=${since}&per_page=10" --jq '[.[] | {sha: .sha[0:8], message: (.commit.message | split("\n")[0]), author: .commit.author.name, date: .commit.author.date}]'`,
+      );
+      if (!raw.trim()) return [];
+      try {
+        const commits: Array<{ sha: string; message: string; author: string; date: string }> = JSON.parse(raw);
+        return commits.map(c => ({
+          ...c,
+          repo,
+          url: `https://github.com/${repo}/commit/${c.sha}`,
+        }));
+      } catch (_) {
+        return [];
+      }
+    }),
+  );
+
+  const commits: RecentCommit[] = [];
+  for (const r of results) {
+    if (r.status === "fulfilled") commits.push(...r.value);
+  }
+  // Sort newest first
+  commits.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  return commits;
+}
 
 interface DailyBriefResponse {
   date: string;
@@ -37,6 +93,7 @@ interface DailyBriefResponse {
   agentStats: {
     last24h: { total: number; succeeded: number; failed: number; totalCostUsd: number };
   };
+  recentCommits: RecentCommit[];
   calendar: any[]; // Populated by calendar sentinel when available
   highlights: string[];
   aiSummary: {
@@ -262,6 +319,9 @@ export async function handleDailyBriefRequest(
         highlights.push("📋 No urgent items — steady state");
       }
 
+      // Recent commits from monitored GitHub repos (last 24h)
+      const recentCommits = await fetchRecentCommits(since24h);
+
       // Get AI-generated content from sentinel cache
       const aiSummary = getCachedBrief();
       const health = getCachedHealth();
@@ -280,6 +340,7 @@ export async function handleDailyBriefRequest(
         goals: goalSummaries,
         recentAgentWork,
         agentStats,
+        recentCommits,
         calendar: [], // Populated when Google Calendar sentinel is running
         highlights,
         aiSummary: aiSummary ? {
