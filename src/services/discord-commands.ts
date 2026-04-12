@@ -18,7 +18,6 @@ import { getCourseForChannel } from "../gsi/gsi-config.js";
 import { answerStudentQuestion, formatAnswerForDiscord, formatEscalationChannelReply, formatEscalationDM } from "../gsi/gsi-agent.js";
 let mainAgentRef: MainAgent | null = null;
 let voiceManagerRef: VoiceManager | null = null;
-let voiceManagerRef: VoiceManager | null = null;
 
 /** Set the main agent reference for command handlers */
 export function setMainAgentForCommands(agent: MainAgent): void {
