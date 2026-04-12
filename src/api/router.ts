@@ -20,6 +20,8 @@ import { handleTextDumpsRequest } from "./text-dumps.js";
 import { handleTopicsRequest } from "./topics.js";
 import { handleTilesRequest } from "./tiles.js";
 import { handleTrackerRequest } from "./tracker.js";
+import { getDb } from "../db/connection.js";
+import { initTracesApi, handleTracesRequest } from "./traces.js";
 import { handleWorkflowRunsRequest } from "./workflow-runs.js";
 import { handleKnowledgeRequest } from "./knowledge.js";
 import { handleKnowledgeFsRequest } from "./knowledge-fs.js";
@@ -57,6 +59,7 @@ import { error } from "./index.js";
 const PREFIXES = ["/paw/api/", "/api/"];
 
 export function registerPawRouter(api: LobsPluginApi): void {
+  initTracesApi(api, getDb());
   const handler = async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const pathname = decodeURIComponent(url.pathname);
@@ -125,6 +128,7 @@ export function registerPawRouter(api: LobsPluginApi): void {
         case "structured-memory": await handleStructuredMemoryRequest(req, res, parts[1]); return true;
         case "suggestions":    await handleSuggestionsRequest(req, res, parts[1], parts); return true;
         case "goals":          await handleGoalsRequest(req, res, parts[1]); return true;
+        case "traces":         await handleTracesRequest(req, res, parts[1], parts); return true;
         case "public":
           if (parts[1] === "pulse") { await handlePublicPulseRequest(req, res); return true; }
           error(res, "Not found", 404); return true;
@@ -205,6 +209,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       case "structured-memory": await handleStructuredMemoryRequest(req, res, parts[1]); return;
       case "suggestions":    await handleSuggestionsRequest(req, res, parts[1], parts); return;
       case "goals":          await handleGoalsRequest(req, res, parts[1]); return;
+      case "traces":         await handleTracesRequest(req, res, parts[1], parts); return;
       case "public":
         if (parts[1] === "pulse") { await handlePublicPulseRequest(req, res); return; }
         error(res, "Not found", 404); return;

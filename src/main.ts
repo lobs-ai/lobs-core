@@ -6,7 +6,7 @@
  * Worker agents run through our own agent runner.
  */
 
-import { initDb, closeDb, getRawDb } from "./db/connection.js";
+import { initDb, closeDb, getDb, getRawDb } from "./db/connection.js";
 import { runMigrations } from "./db/migrate.js";
 import { seedDefaultWorkflows } from "./workflow/seeds.js";
 import { startControlLoop, stopControlLoop, flushWorkerCheckpoints } from "./orchestrator/control-loop.js";
@@ -36,6 +36,7 @@ import { initMemoryDb } from "./memory/db.js";
 import { initFileIndexer, stopFileIndexer } from "./memory/indexer.js";
 import { registerEventRecorderHook } from "./hooks/event-recorder.js";
 import { registerReflectionTriggerHook } from "./hooks/reflection-trigger.js";
+import { registerTracerHook } from "./hooks/tracer-hook.js";
 import { initDynamicToolLoader } from "./runner/tools/dynamic-tools.js";
 import { runDailyReflection } from "./memory/daily-reflection.js";
 import { imagineService } from "./services/imagine.js";
@@ -342,6 +343,9 @@ async function main() {
   // initMemoryDb() and initToolGate().
   registerEventRecorderHook(null as never);  // _api param is unused
   registerReflectionTriggerHook();
+  registerTracerHook(getDb());
+
+
   initDynamicToolLoader();
   console.log("Structured memory hooks registered (event recorder + reflection trigger)");
 

@@ -188,7 +188,9 @@ async function checkInboxHealth(): Promise<InboxHealthResult> {
   const db = getRawDb();
   
   // Count items that actually need attention: unread AND still pending action
-  const result = db.prepare("SELECT COUNT(*) as count FROM inbox_items WHERE is_read = 0 AND action_status = 'pending'").get() as { count: number };
+  // Exclude intel_insight — those are batch-generated feed items, not actionable inbox items
+  // NULL action_status means the item was inserted before the action_status column existed — treat as pending
+  const result = db.prepare("SELECT COUNT(*) as count FROM inbox_items WHERE is_read = 0 AND type != 'intel_insight' AND (action_status = 'pending' OR action_status IS NULL)").get() as { count: number };
   const unreadItems = result.count;
   
   let status: "ok" | "warning" | "error" = "ok";

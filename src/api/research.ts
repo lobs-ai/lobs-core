@@ -4,10 +4,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { getDb, getRawDb } from "../db/connection.js";
 import { researchMemos, agentInitiatives } from "../db/schema.js";
 import { json, error, parseBody } from "./index.js";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { initResearchQueueService } from "../services/research-queue.js";
+import { runLiteratureReview, lookupPaper } from "../services/literature-review.js";
 
 const RESEARCH_BASE = join(homedir(), "lobs-control", "state", "research");
 
@@ -81,6 +82,65 @@ export async function handleResearchRequest(
       if (!brief) return error(res, "Not found", 404);
       return json(res, { brief });
     }
+  }
+
+  // Literature review: POST /api/research/literature-review
+  if (projectId === "literature-review") {
+    if (req.method === "POST") {
+      const rawBody = await parseBody(req) as Record<string, unknown> | null;
+      const body = rawBody ?? {};
+      const question = typeof body.question === "string" ? body.question : "";
+      if (!question) return error(res, "Missing required field: question", 400);
+
+      try {
+        const outputFormat = ["markdown", "latex", "both"].includes(body.outputFormat as string)
+          ? (body.outputFormat as "markdown" | "latex" | "both")
+          : "markdown";
+
+        const review = await runLiteratureReview({
+          question,
+          seedCount: typeof body.seedCount === "number" ? body.seedCount : undefined,
+          expansionDepth: typeof body.expansionDepth === "number" ? body.expansionDepth : undefined,
+          relatedPerPaper: typeof body.relatedPerPaper === "number" ? body.relatedPerPaper : undefined,
+          maxPapers: typeof body.maxPapers === "number" ? body.maxPapers : undefined,
+          tier: ["micro", "small", "standard", "strong"].includes(body.tier as string)
+            ? (body.tier as "micro" | "small" | "standard" | "strong")
+            : undefined,
+          ssApiKey: typeof body.ssApiKey === "string" ? body.ssApiKey : undefined,
+          outputFormat,
+        });
+
+        // Save output files
+        const outDir = join(RESEARCH_BASE, "literature-reviews");
+        mkdirSync(outDir, { recursive: true });
+        const slug = question.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 50);
+        const datePrefix = new Date().toISOString().split("T")[0];
+        const mdFilename = `${datePrefix}-${slug}.md`;
+        writeFileSync(join(outDir, mdFilename), review.markdown, "utf-8");
+
+        const savedFiles: string[] = [join(outDir, mdFilename)];
+
+        if (review.latex) {
+          const texFilename = `${datePrefix}-${slug}.tex`;
+          writeFileSync(join(outDir, texFilename), review.latex, "utf-8");
+          savedFiles.push(join(outDir, texFilename));
+        }
+
+        return json(res, { ...review, savedTo: savedFiles[0], savedFiles });
+      } catch (err) {
+        return error(res, `Literature review failed: ${(err as Error).message}`, 500);
+      }
+    }
+
+    if (req.method === "GET") {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const q = url.searchParams.get("q");
+      if (!q) return error(res, "Missing query param: q", 400);
+      const papers = await lookupPaper(q);
+      return json(res, { papers });
+    }
+
+    return error(res, "Method not allowed", 405);
   }
 
   // If no projectId, return empty results gracefully

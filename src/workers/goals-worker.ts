@@ -9,7 +9,7 @@
  * Cap: max 2 active goal sessions in flight at once per goal.
  */
 
-import { eq, and, inArray, desc, sql } from "drizzle-orm";
+import { eq, and, inArray, desc, sql, lt, like } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { getDb } from "../db/connection.js";
 import { goals, tasks } from "../db/schema.js";
@@ -42,6 +42,35 @@ export class GoalsWorker extends BaseWorker {
     const alerts: WorkerResult["alerts"] = [];
     let sessionsSpawned = 0;
     let goalsSkipped = 0;
+
+    // 0. Reap stale tracking tasks — goals-worker tasks stuck "active" for > 2h
+    //    are orphaned from crashed/restarted sessions and will block future runs.
+    const staleThreshold = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const staleTracking = await db
+      .select({ id: tasks.id, title: tasks.title })
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.status, "active"),
+          like(tasks.title, "[goals-worker]%"),
+          lt(tasks.updatedAt, staleThreshold),
+        ),
+      );
+
+    if (staleTracking.length > 0) {
+      const staleIds = staleTracking.map((t) => t.id);
+      await db
+        .update(tasks)
+        .set({
+          status: "rejected",
+          notes: "Reaped by goals-worker: session orphaned (server restarted or timed out)",
+          updatedAt: new Date().toISOString(),
+        })
+        .where(inArray(tasks.id, staleIds));
+      log().info(
+        `[goals-worker] Reaped ${staleTracking.length} stale tracking task(s): ${staleIds.join(", ")}`,
+      );
+    }
 
     // 1. Load all active goals ordered by priority DESC
     const activeGoals = await db

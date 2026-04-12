@@ -14,6 +14,8 @@ import { getModelForTier } from "../config/models.js";
 import { getChannelModelOverride, getDefaultChatModel, getModelCatalog, isLoadedLocalModel, normalizeModelSelection, setChannelModelOverride } from "./model-catalog.js";
 import { getBotName } from "../config/identity.js";
 import { getDiscordDefaultTier, setDiscordDefaultTier } from "../config/models.js";
+import { getCourseForChannel } from "../gsi/gsi-config.js";
+import { answerStudentQuestion, formatAnswerForDiscord, formatEscalationChannelReply, formatEscalationDM } from "../gsi/gsi-agent.js";
 
 let mainAgentRef: MainAgent | null = null;
 let voiceManagerRef: VoiceManager | null = null;
