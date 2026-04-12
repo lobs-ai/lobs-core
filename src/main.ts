@@ -347,7 +347,7 @@ async function main() {
   // initMemoryDb() and initToolGate().
   registerEventRecorderHook(null as never);  // _api param is unused
   registerReflectionTriggerHook();
-  registerTracerHook(getRawDb());
+  registerTracerHook(db);
 
 
   initDynamicToolLoader();
