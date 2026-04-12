@@ -17,6 +17,8 @@ import { getDiscordDefaultTier, setDiscordDefaultTier } from "../config/models.j
 import { getCourseForChannel, getCourseForGuild, loadAllCourseConfigs, loadCourseConfig, saveCourseConfig, defaultCourseConfig, type GsiCourseConfig } from "../gsi/gsi-config.js";
 import { answerStudentQuestion, formatAnswerForDiscord, formatEscalationChannelReply, formatEscalationDM, registerEscalation, resolveEscalationForTA, resolveEscalationById, getPendingEscalationTAIds, getPendingEscalationSummary, getPendingEscalationCount } from "../gsi/gsi-agent.js";
 import { seedCourse } from "../gsi/gsi-seed.js";
+import { logQaEvent, getCourseStats, getAllCoursesStats } from "../gsi/gsi-store.js";
+import { chaseCitations } from "./citation-chaser.js";
 let mainAgentRef: MainAgent | null = null;
 let voiceManagerRef: VoiceManager | null = null;
 
@@ -208,6 +210,20 @@ export async function registerSlashCommands(client: Client, config: DiscordConfi
         .setDescription('Course to show stats for (omit for all courses in this server)')
         .setRequired(false)
     ),
+
+  new SlashCommandBuilder()
+    .setName('cite')
+    .setDescription('Find papers that support or challenge a specific claim')
+    .addStringOption(opt =>
+      opt.setName('claim')
+        .setDescription('The specific claim you want to find citations for')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('context')
+        .setDescription('Optional: title or abstract of the paper you are writing')
+        .setRequired(false)
+    ),
   ];
 
   const rest = new REST({ version: '10' }).setToken(config.botToken);
@@ -266,6 +282,9 @@ export async function handleSlashCommand(interaction: ChatInputCommandInteractio
         break;
       case 'gsi-stats':
         await handleGsiStatsCommand(interaction);
+        break;
+      case 'cite':
+        await handleCiteCommand(interaction);
         break;
       default:
         await interaction.reply({ content: 'Unknown command', flags: MessageFlags.Ephemeral });
@@ -946,6 +965,19 @@ async function handleAskCommand(interaction: ChatInputCommandInteraction): Promi
       await interaction.editReply(reply);
     }
 
+    // Persist Q&A event to SQLite for analytics
+    logQaEvent({
+      courseId: course.courseId,
+      guildId: guildId,
+      channelId,
+      userId: interaction.user.id,
+      question,
+      answer: answer.answer,
+      confidence: answer.confidence,
+      escalated: answer.shouldEscalate,
+      answeredBy: answer.shouldEscalate ? 'ta:pending' : 'bot',
+    });
+
     // Log to log channel if configured
     if (course.logChannelId) {
       try {
@@ -1134,5 +1166,47 @@ export async function handleGsiTAReply(
   }
 
   return true;
+}
+
+async function handleCiteCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const claim = interaction.options.getString('claim', true);
+  const context = interaction.options.getString('context') ?? undefined;
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  try {
+    const result = await chaseCitations({ claim, paperContext: context, maxResults: 8 });
+    const top5 = result.suggestions.slice(0, 5);
+
+    if (top5.length === 0) {
+      await interaction.editReply({ content: '🔍 No relevant papers found for that claim. Try rephrasing.' });
+      return;
+    }
+
+    const stanceEmoji = (stance: string) =>
+      stance === 'supporting' ? '✅' : stance === 'contradicting' ? '⚔️' : '🔗';
+
+    const fields = top5.map((s) => ({
+      name: `${stanceEmoji(s.stance)} ${s.title.slice(0, 80)}${s.title.length > 80 ? '…' : ''} (${s.year ?? '?'})`,
+      value: `${s.relevanceNote.slice(0, 200)}\n[View paper](${s.url})`,
+    }));
+
+    const embed = new EmbedBuilder()
+      .setTitle('📚 Citation Suggestions')
+      .setDescription(`**Claim:** ${claim.slice(0, 200)}`)
+      .addFields(fields)
+      .setColor(0x5865f2)
+      .setTimestamp();
+
+    const total = result.suggestions.length;
+    if (total > 5) {
+      embed.setFooter({ text: `${total - 5} more results available via POST /api/research/cite` });
+    }
+
+    await interaction.editReply({ embeds: [embed] });
+  } catch (err) {
+    console.error('[discord-commands] /cite error:', err);
+    await interaction.editReply({ content: `❌ Citation search failed: ${(err as Error).message}` });
+  }
 }
 

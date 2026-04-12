@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { initResearchQueueService } from "../services/research-queue.js";
 import { runLiteratureReview, lookupPaper } from "../services/literature-review.js";
 import { findAndPopulateGaps } from "../services/research-gap-finder.js";
+import { chaseCitations } from "../services/citation-chaser.js";
 
 const RESEARCH_BASE = join(homedir(), "lobs-control", "state", "research");
 
@@ -82,6 +83,26 @@ export async function handleResearchRequest(
       const brief = queue.getBrief(sub);
       if (!brief) return error(res, "Not found", 404);
       return json(res, { brief });
+    }
+  }
+
+  // Citation chaser: POST /api/research/cite
+  if (projectId === "cite" && req.method === "POST") {
+    const rawBody = await parseBody(req) as Record<string, unknown> | null;
+    const body = rawBody ?? {};
+    const claim = typeof body.claim === "string" ? body.claim.trim() : "";
+    if (!claim) return error(res, "Missing required field: claim", 400);
+
+    try {
+      const result = await chaseCitations({
+        claim,
+        paperContext: typeof body.paperContext === "string" ? body.paperContext : undefined,
+        maxResults: typeof body.maxResults === "number" ? body.maxResults : undefined,
+        ssApiKey: typeof body.ssApiKey === "string" ? body.ssApiKey : undefined,
+      });
+      return json(res, result);
+    } catch (err) {
+      return error(res, `Citation chase failed: ${(err as Error).message}`, 500);
     }
   }
 

@@ -126,7 +126,7 @@ function parseArxivDate(dateStr: string): number | null {
 
 // ─── arXiv Client ─────────────────────────────────────────────────────────────
 
-async function searchArxiv(query: string, maxResults = 10): Promise<PaperSummary[]> {
+export async function searchArxiv(query: string, maxResults = 10): Promise<PaperSummary[]> {
   const encoded = encodeURIComponent(query);
   const url = `${ARXIV_BASE}?search_query=all:${encoded}&start=0&max_results=${maxResults}&sortBy=relevance&sortOrder=descending`;
 
@@ -213,7 +213,7 @@ function parseArxivAtom(xml: string, discoveryPath: string): PaperSummary[] {
 
 // ─── Semantic Scholar Client ───────────────────────────────────────────────────
 
-async function searchSemanticScholar(
+export async function searchSemanticScholar(
   query: string,
   maxResults = 10,
   apiKey?: string,
