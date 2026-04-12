@@ -16,8 +16,6 @@ import { getBotName } from "../config/identity.js";
 import { getDiscordDefaultTier, setDiscordDefaultTier } from "../config/models.js";
 import { getCourseForChannel } from "../gsi/gsi-config.js";
 import { answerStudentQuestion, formatAnswerForDiscord, formatEscalationChannelReply, formatEscalationDM } from "../gsi/gsi-agent.js";
-
-let mainAgentRef: MainAgent | null = null;
 let voiceManagerRef: VoiceManager | null = null;
 
 /** Set the main agent reference for command handlers */
@@ -88,6 +86,15 @@ export async function registerSlashCommands(client: Client, config: DiscordConfi
     new SlashCommandBuilder()
       .setName('help')
       .setDescription('Show available commands'),
+
+    new SlashCommandBuilder()
+      .setName('ask')
+      .setDescription('Ask the GSI assistant a question about course material')
+      .addStringOption(opt =>
+        opt.setName('question')
+          .setDescription('Your question')
+          .setRequired(true)
+      ),
     
     new SlashCommandBuilder()
       .setName('voice')
@@ -135,6 +142,15 @@ export async function registerSlashCommands(client: Client, config: DiscordConfi
             { name: 'compact — show tool names only', value: 'compact' },
             { name: 'off — hide all tool steps', value: 'off' },
           )
+      ),
+
+    new SlashCommandBuilder()
+      .setName('ask')
+      .setDescription('Ask a course question — answered from course materials by the GSI assistant')
+      .addStringOption(opt =>
+        opt.setName('question')
+          .setDescription('Your question about the course')
+          .setRequired(true)
       ),
   ];
 
@@ -185,6 +201,9 @@ export async function handleSlashCommand(interaction: ChatInputCommandInteractio
         break;
       case 'voice':
         await handleVoiceCommand(interaction);
+        break;
+      case 'ask':
+        await handleAskCommand(interaction);
         break;
       default:
         await interaction.reply({ content: 'Unknown command', flags: MessageFlags.Ephemeral });
@@ -453,6 +472,7 @@ async function handleHelpCommand(interaction: ChatInputCommandInteraction): Prom
       { name: '/voice leave', value: 'Leave the voice channel', inline: false },
       { name: '/voice status', value: 'Show voice session status', inline: false },
       { name: '/voice trigger <mode>', value: 'Set voice response trigger (keyword/always)', inline: false },
+      { name: '/ask question:<your question>', value: 'Ask a course question — GSI assistant answers from course materials, escalates to TA if unsure', inline: false },
       { name: '/clear', value: 'Clear conversation history', inline: false },
       { name: '/help', value: 'Show this help message', inline: false },
     )
@@ -612,5 +632,14 @@ async function handleVoiceCommand(interaction: ChatInputCommandInteraction): Pro
 
     default:
       await interaction.reply({ content: 'Unknown voice subcommand.', flags: MessageFlags.Ephemeral });
+  }
+}
+
+// ── /ask — GSI Office Hours Assistant ────────────────────────────────────────
+
+    }
+  } catch (err) {
+    console.error('[gsi] Error in /ask handler:', err);
+    await interaction.editReply('❌ Something went wrong processing your question. Please try again or ask your TA directly.');
   }
 }
