@@ -368,6 +368,41 @@ export function runMigrations(db: PawDB): void {
   db.run(sql`CREATE INDEX IF NOT EXISTS idx_workflow_events_type ON workflow_events(event_type)`);
   db.run(sql`CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON model_usage_events(timestamp)`);
 
+  // ── GSI Office Hours tables ────────────────────────────────────────────
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS gsi_qa_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id   TEXT    NOT NULL,
+    guild_id    TEXT    NOT NULL,
+    channel_id  TEXT    NOT NULL,
+    user_id     TEXT    NOT NULL,
+    question    TEXT    NOT NULL,
+    answer      TEXT    NOT NULL DEFAULT '',
+    confidence  REAL    NOT NULL DEFAULT 0,
+    escalated   INTEGER NOT NULL DEFAULT 0,
+    answered_by TEXT    NOT NULL DEFAULT 'bot',
+    created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+  )`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS gsi_qa_log_course_idx  ON gsi_qa_log(course_id)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS gsi_qa_log_guild_idx   ON gsi_qa_log(guild_id)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS gsi_qa_log_created_idx ON gsi_qa_log(created_at)`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS gsi_escalations (
+    id            TEXT    PRIMARY KEY,
+    ta_user_id    TEXT    NOT NULL,
+    channel_id    TEXT    NOT NULL,
+    guild_id      TEXT    NOT NULL,
+    question      TEXT    NOT NULL,
+    asked_by      TEXT    NOT NULL,
+    course_name   TEXT    NOT NULL,
+    draft_answer  TEXT    NOT NULL DEFAULT '',
+    created_at    INTEGER NOT NULL,
+    resolved      INTEGER NOT NULL DEFAULT 0,
+    resolved_at   TEXT
+  )`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS gsi_esc_ta_idx      ON gsi_escalations(ta_user_id, resolved)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS gsi_esc_created_idx ON gsi_escalations(created_at)`);
+
   // ── Phase 3-5 tables ──────────────────────────────────────────────────
 
   db.run(sql`CREATE TABLE IF NOT EXISTS agent_capabilities (

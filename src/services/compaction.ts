@@ -161,7 +161,7 @@ export async function compactMessages(
 
   try {
     const modelConfig = parseModelString(cfg.model);
-    const client = createClient(modelConfig);
+    const client = await createClient(modelConfig);
 
     const response = await client.createMessage({
       model: modelConfig.modelId,

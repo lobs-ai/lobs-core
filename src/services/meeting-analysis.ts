@@ -17,7 +17,7 @@ import { isDuplicateAction, type DeferredAction } from "./voice/deferred-action-
 
 async function llmAnalyze(prompt: string): Promise<string> {
   const model = getModelForTier("small");
-  const client = createResilientClient(model, { sessionId: "meeting-analysis" });
+  const client = await createResilientClient(model, { sessionId: "meeting-analysis" });
 
   const response = await client.createMessage({
     model: parseModelString(model).modelId,

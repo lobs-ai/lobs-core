@@ -84,7 +84,7 @@ export const tasks = sqliteTable("tasks", {
   syncState: text("sync_state"),
   conflictPayload: text("conflict_payload", { mode: "json" }),
   workspaceId: text("workspace_id"),
-  modelTier: text("model_tier"),
+  modelTier: text("model_tier").default("medium"),
   escalationTier: integer("escalation_tier").default(0),
   retryCount: integer("retry_count").default(0),
   failureReason: text("failure_reason"),

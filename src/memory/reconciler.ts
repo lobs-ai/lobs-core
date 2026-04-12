@@ -152,7 +152,7 @@ export async function classifyRelationship(
 
   try {
     const config = parseModelString(CLASSIFICATION_MODEL);
-    const client = createClient(config);
+    const client = await createClient(config);
 
     const response = await client.createMessage({
       model: config.modelId,

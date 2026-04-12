@@ -115,7 +115,50 @@ export class GoalsWorker extends BaseWorker {
       .where(eq(goals.status, "active"))
       .orderBy(desc(goals.priority));
 
-    if (activeGoals.length === 0) {
+    // 1a. Auto-complete goals that have 0 open tasks and ≥2 completed tasks.
+    //     This prevents the worker from repeatedly spawning sessions for goals
+    //     that are already done (which just wastes money confirming nothing to do).
+    //     Goals with 0 completed tasks are left active — they haven't started yet.
+    for (const goal of activeGoals) {
+      const taskStats = await db
+        .select({
+          total: sql<number>`count(*)`,
+          open: sql<number>`sum(case when ${tasks.status} in ('inbox','active','waiting_on') then 1 else 0 end)`,
+          done: sql<number>`sum(case when ${tasks.status} = 'completed' then 1 else 0 end)`,
+        })
+        .from(tasks)
+        .where(
+          and(
+            eq(tasks.goalId, goal.id),
+            sql`${tasks.notes} NOT LIKE 'Agent session in progress%'`,
+          ),
+        );
+
+      const open = Number(taskStats[0]?.open ?? 0);
+      const done = Number(taskStats[0]?.done ?? 0);
+
+      if (open === 0 && done >= 2) {
+        log().info(
+          `[goals-worker] Auto-completing goal "${goal.title}" — 0 open tasks, ${done} completed`,
+        );
+        await db
+          .update(goals)
+          .set({
+            status: "completed",
+            updatedAt: new Date().toISOString(),
+          })
+          .where(eq(goals.id, goal.id));
+      }
+    }
+
+    // Reload after auto-completion
+    const remainingGoals = await db
+      .select()
+      .from(goals)
+      .where(eq(goals.status, "active"))
+      .orderBy(desc(goals.priority));
+
+    if (remainingGoals.length === 0) {
       return {
         success: true,
         artifacts: [],
@@ -180,7 +223,7 @@ export class GoalsWorker extends BaseWorker {
     );
 
     // Pick the best eligible goal
-    const eligibleGoal = activeGoals.find((goal) => {
+    const eligibleGoal = remainingGoals.find((goal) => {
       // Skip if already has a session in-flight
       if (activeGoalIds.has(goal.id)) {
         goalsSkipped++;

@@ -210,7 +210,7 @@ Current time: ${new Date().toLocaleString("en-US", { timeZone: "America/New_York
 
 async function llmAnalyze(prompt: string, systemPrompt?: string): Promise<string> {
   const model = getModelForTier("small");
-  const client = createResilientClient(model, { sessionId: "live-meeting" });
+  const client = await createResilientClient(model, { sessionId: "live-meeting" });
 
   const response = await client.createMessage({
     model: parseModelString(model).modelId,

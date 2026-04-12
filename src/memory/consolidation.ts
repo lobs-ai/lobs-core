@@ -73,7 +73,7 @@ async function mergeMemories(contents: string[]): Promise<string | null> {
 
   try {
     const config = parseModelString(CONSOLIDATION_MODEL);
-    const client = createClient(config);
+    const client = await createClient(config);
 
     const response = await client.createMessage({
       model: config.modelId,

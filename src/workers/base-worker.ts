@@ -319,7 +319,7 @@ export async function callApiModel(
 ): Promise<{ text: string; tokensUsed: number }> {
   const modelStr = options?.model ?? getModelForTier(options?.tier ?? "small");
   const config = parseModelString(modelStr);
-  const client = createClient(config);
+  const client = await createClient(config);
 
   const response = await client.createMessage({
     model: config.modelId,

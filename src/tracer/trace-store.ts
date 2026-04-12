@@ -44,7 +44,7 @@ export interface AgentTrace {
   taskId: string | null;
   taskSummary: string | null;
   model: string | null;
-  status: "running" | "completed" | "failed" | "timeout";
+  status: "running" | "completed" | "failed" | "timeout" | "interrupted";
   startTimeMs: number;
   endTimeMs: number | null;
   durationMs: number | null;
@@ -201,6 +201,72 @@ export function getSpansForTrace(db: Database.Database, traceId: string): TraceS
     `SELECT * FROM trace_spans WHERE trace_id = ? ORDER BY start_time_ms ASC`
   ).all(traceId) as Record<string, unknown>[];
   return rows.map(rowToSpan);
+}
+
+/**
+ * Recover traces stuck in "running" from a previous process.
+ * Counts actual spans to populate stats, marks status as "interrupted".
+ * Also closes all running/stale spans for those traces.
+ * Call once at startup before new traces begin.
+ */
+export function recoverStaleTraces(db: Database.Database): number {
+  const staleRows = db.prepare(
+    `SELECT trace_id, start_time_ms FROM agent_traces WHERE status = 'running'`
+  ).all() as { trace_id: string; start_time_ms: number }[];
+
+  if (staleRows.length === 0) return 0;
+
+  const countSpans = db.prepare(
+    `SELECT COUNT(*) as total,
+            SUM(kind = 'llm') as llm_count,
+            SUM(kind = 'tool') as tool_count,
+            MAX(COALESCE(end_time_ms, start_time_ms)) as last_end
+     FROM trace_spans WHERE trace_id = ?`
+  );
+  const updateTraceStmt = db.prepare(
+    `UPDATE agent_traces
+     SET status = 'interrupted',
+         end_time_ms = ?,
+         duration_ms = ?,
+         total_turns = ?,
+         total_tool_calls = ?,
+         span_count = ?
+     WHERE trace_id = ?`
+  );
+  // Close any running spans — set end_time = start_time (duration=0) so timeline still renders
+  const closeRunningSpansStmt = db.prepare(
+    `UPDATE trace_spans
+     SET status = 'interrupted',
+         end_time_ms = COALESCE(end_time_ms, start_time_ms),
+         duration_ms = COALESCE(duration_ms, 0)
+     WHERE trace_id = ? AND status = 'running'`
+  );
+
+  let recovered = 0;
+  for (const row of staleRows) {
+    // Close running spans first so last_end is accurate
+    closeRunningSpansStmt.run(row.trace_id);
+
+    const stats = countSpans.get(row.trace_id) as {
+      total: number;
+      llm_count: number;
+      tool_count: number;
+      last_end: number | null;
+    } | null;
+    const endMs = stats?.last_end ?? Date.now();
+    const durationMs = endMs - row.start_time_ms;
+    updateTraceStmt.run(
+      endMs,
+      durationMs,
+      stats?.llm_count ?? 0,
+      stats?.tool_count ?? 0,
+      stats?.total ?? 0,
+      row.trace_id,
+    );
+    recovered++;
+  }
+
+  return recovered;
 }
 
 export function countTraces(db: Database.Database): number {

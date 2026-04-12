@@ -2158,6 +2158,20 @@ function incrementAndCheckSpawnCount(taskId: string): "ok" | "researcher" | "blo
       return "blocked";
     }
 
+    // Researcher audit tasks must NEVER be re-escalated to another researcher audit.
+    // If an audit task itself fails repeatedly, block it — don't spawn audit-of-audit cascade.
+    if (task.agent === "researcher") {
+      log().warn(
+        `[SPAWN_GUARD] Task ${taskId.slice(0, 8)} is a researcher audit task that failed — blocking (no recursive escalation)`
+      );
+      db.update(tasksTable).set({
+        workState: "blocked",
+        failureReason: `Researcher audit task failed after ${(task.spawnCount ?? 0) + 1} attempts — blocked to prevent recursive escalation cascade.`,
+        updatedAt: new Date().toISOString(),
+      }).where(eq(tasksTable.id, taskId)).run();
+      return "blocked";
+    }
+
     const limit = spawnCountLimitForType(task.shape, task.agent);
     const newSpawnCount = (task.spawnCount ?? 0) + 1;
     const crashCount = task.crashCount ?? 0;

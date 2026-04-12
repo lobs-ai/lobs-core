@@ -10,7 +10,7 @@
  */
 
 import { getHookRegistry, type HookEvent } from "../runner/hooks.js";
-import type Database from "better-sqlite3";
+import { getRawDb } from "../db/connection.js";
 import {
   createAgentTrace,
   updateAgentTrace,
@@ -18,7 +18,9 @@ import {
   updateSpan,
   newSpanId,
   newTraceId,
+  recoverStaleTraces,
 } from "../tracer/trace-store.js";
+import type Database from "better-sqlite3";
 
 // ── In-memory bookkeeping ─────────────────────────────────────────────────────
 
@@ -89,8 +91,19 @@ function getOrCreateTrace(db: Database.Database, event: HookEvent): ActiveTrace 
 
 // ── Hook handlers ─────────────────────────────────────────────────────────────
 
-export function registerTracerHook(db: Database.Database): void {
+export function registerTracerHook(): void {
   const hookRegistry = getHookRegistry();
+  const db: Database.Database = getRawDb();
+
+  // Heal any traces left in "running" status from a previous process restart
+  try {
+    const recovered = recoverStaleTraces(db);
+    if (recovered > 0) {
+      console.log(`[tracer-hook] Recovered ${recovered} stale trace(s) from previous session`);
+    }
+  } catch (err) {
+    console.warn("[tracer-hook] recoverStaleTraces error:", err);
+  }
 
   // ── before_agent_start ────────────────────────────────────────────────────
   hookRegistry.register("before_agent_start", async (event: HookEvent) => {

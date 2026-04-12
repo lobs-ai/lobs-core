@@ -13,6 +13,14 @@ import { log } from "../util/logger.js";
 import { createClient, parseModelString } from "../runner/providers.js";
 import { getModelForTier } from "../config/models.js";
 import type { GsiCourseConfig } from "./gsi-config.js";
+import {
+  persistEscalation,
+  resolvePersistedEscalationById,
+  resolvePersistedEscalationForTA,
+  getPersistentPendingTAIds,
+  getPersistentPendingCount,
+  getPersistentPendingSummary,
+} from "./gsi-store.js";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -82,27 +90,15 @@ export interface PendingEscalation {
   createdAt: number;
 }
 
-// ── Pending Escalation Store ──────────────────────────────────────────────────
-
-/** TTL for pending escalations: 24 hours */
-const ESCALATION_TTL_MS = 24 * 60 * 60 * 1000;
-
-/**
- * In-memory store of pending escalations keyed by TA user ID.
- * Each TA can have multiple pending escalations (FIFO queue).
- * Entries expire after 24 hours.
- */
-const pendingEscalations = new Map<string, PendingEscalation[]>();
+// ── Persistent Escalation Store (DB-backed) ───────────────────────────────────
 
 /**
  * Register a pending escalation so we can match TA reply DMs back
- * to the original channel.
+ * to the original channel. Persisted to SQLite — survives restarts.
  */
 export function registerEscalation(escalation: PendingEscalation): void {
-  const existing = pendingEscalations.get(escalation.taUserId) ?? [];
-  existing.push(escalation);
-  pendingEscalations.set(escalation.taUserId, existing);
-  log().info(`[gsi] Registered escalation for TA ${escalation.taUserId} in channel ${escalation.channelId}`);
+  persistEscalation(escalation);
+  log().info(`[gsi] Registered escalation ${escalation.id} for TA ${escalation.taUserId} in channel ${escalation.channelId}`);
 }
 
 /**
@@ -110,26 +106,7 @@ export function registerEscalation(escalation: PendingEscalation): void {
  * Returns null if the TA has no pending escalations or all are expired.
  */
 export function resolveEscalationForTA(taUserId: string): PendingEscalation | null {
-  const queue = pendingEscalations.get(taUserId);
-  if (!queue || queue.length === 0) return null;
-
-  const now = Date.now();
-  // Drop expired entries
-  const fresh = queue.filter(e => now - e.createdAt < ESCALATION_TTL_MS);
-
-  if (fresh.length === 0) {
-    pendingEscalations.delete(taUserId);
-    return null;
-  }
-
-  // Return oldest (FIFO) and keep the rest
-  const [resolved, ...remaining] = fresh;
-  if (remaining.length === 0) {
-    pendingEscalations.delete(taUserId);
-  } else {
-    pendingEscalations.set(taUserId, remaining);
-  }
-  return resolved;
+  return resolvePersistedEscalationForTA(taUserId);
 }
 
 /**
@@ -138,16 +115,7 @@ export function resolveEscalationForTA(taUserId: string): PendingEscalation | nu
  * Returns null if not found or expired.
  */
 export function resolveEscalationById(id: string): PendingEscalation | null {
-  const now = Date.now();
-  for (const [taId, queue] of pendingEscalations) {
-    const idx = queue.findIndex(e => e.id === id && now - e.createdAt < ESCALATION_TTL_MS);
-    if (idx >= 0) {
-      const [resolved] = queue.splice(idx, 1);
-      if (queue.length === 0) pendingEscalations.delete(taId);
-      return resolved;
-    }
-  }
-  return null;
+  return resolvePersistedEscalationById(id);
 }
 
 /**
@@ -155,42 +123,21 @@ export function resolveEscalationById(id: string): PendingEscalation | null {
  * Used by the DM intercept to quickly check if an incoming DM is a TA reply.
  */
 export function getPendingEscalationTAIds(): Set<string> {
-  const now = Date.now();
-  const ids = new Set<string>();
-  for (const [taId, queue] of pendingEscalations) {
-    if (queue.some(e => now - e.createdAt < ESCALATION_TTL_MS)) {
-      ids.add(taId);
-    }
-  }
-  return ids;
+  return getPersistentPendingTAIds();
 }
 
 /**
- * Get count of pending escalations per TA (for logging/monitoring).
+ * Get count of pending escalations (for logging/monitoring).
  */
 export function getPendingEscalationCount(): number {
-  const now = Date.now();
-  let total = 0;
-  for (const queue of pendingEscalations.values()) {
-    total += queue.filter(e => now - e.createdAt < ESCALATION_TTL_MS).length;
-  }
-  return total;
+  return getPersistentPendingCount();
 }
 
 /**
  * Get a summary of pending escalations for /gsi-stats display.
  */
 export function getPendingEscalationSummary(): { taUserId: string; count: number; oldest: number }[] {
-  const now = Date.now();
-  const summary: { taUserId: string; count: number; oldest: number }[] = [];
-  for (const [taId, queue] of pendingEscalations) {
-    const fresh = queue.filter(e => now - e.createdAt < ESCALATION_TTL_MS);
-    if (fresh.length > 0) {
-      const oldest = Math.min(...fresh.map(e => e.createdAt));
-      summary.push({ taUserId: taId, count: fresh.length, oldest });
-    }
-  }
-  return summary;
+  return getPersistentPendingSummary();
 }
 
 // ── Vector Search ─────────────────────────────────────────────────────────────
@@ -293,7 +240,7 @@ Please answer the student's question using the course materials above. Remember 
   try {
     const modelStr = MODEL;
     const parsed = parseModelString(modelStr);
-    const client = createClient(parsed, "gsi-agent");
+    const client = await createClient(parsed, "gsi-agent");
 
     const response = await client.createMessage({
       model: parsed.modelId,

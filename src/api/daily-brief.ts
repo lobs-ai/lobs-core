@@ -153,7 +153,7 @@ export async function handleDailyBriefRequest(
         })
         .from(tasks)
         .where(inArray(tasks.status, ["active", "in_progress"]))
-        .orderBy(desc(tasks.updatedAt))
+        .orderBy(desc(tasks.createdAt))
         .all();
 
       // Build project map
@@ -174,18 +174,18 @@ export async function handleDailyBriefRequest(
 
       // Completed today
       const completedRows = db
-        .select({ id: tasks.id, title: tasks.title, updatedAt: tasks.updatedAt })
+        .select({ id: tasks.id, title: tasks.title, finishedAt: tasks.finishedAt })
         .from(tasks)
         .where(and(
           eq(tasks.status, "completed"),
-          gte(tasks.updatedAt, todayStartISO),
+          gte(tasks.finishedAt, todayStartISO),
         ))
         .all();
 
       const completedToday = completedRows.map(t => ({
         id: t.id,
         title: t.title,
-        completedAt: t.updatedAt,
+        completedAt: t.finishedAt ?? "",
       }));
 
       // Blocked tasks
@@ -238,7 +238,7 @@ export async function handleDailyBriefRequest(
           .where(and(
             inArray(tasks.goalId, goalIds),
             eq(tasks.status, "completed"),
-            gte(tasks.updatedAt, todayStartISO),
+            gte(tasks.finishedAt, todayStartISO),
           ))
           .groupBy(tasks.goalId)
           .all();
@@ -255,7 +255,7 @@ export async function handleDailyBriefRequest(
 
         // Last activity per goal: most recent completed task updatedAt
         const lastActivityRows = db
-          .select({ goalId: tasks.goalId, lastAt: sql<string>`MAX(updatedAt)` })
+          .select({ goalId: tasks.goalId, lastAt: sql<string>`MAX(finished_at)` })
           .from(tasks)
           .where(and(
             inArray(tasks.goalId, goalIds),

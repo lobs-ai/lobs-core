@@ -181,7 +181,7 @@ async function callHaiku(
   userPrompt: string,
 ): Promise<{ text: string; tokensUsed: number }> {
   const config = parseModelString(EXTRACTION_MODEL);
-  const client = createClient(config);
+  const client = await createClient(config);
 
   const response = await client.createMessage({
     model: config.modelId,

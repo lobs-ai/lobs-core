@@ -87,6 +87,9 @@ interface PendingMessage {
   chatType?: "dm" | "group" | "nexus" | "system";
   // Attachments
   images?: ImageAttachment[];  // Image attachments to include in the message
+  // If true, this message should NOT be persisted to main_agent_messages — it is
+  // injected into the in-memory context only for the current processing turn.
+  isEphemeral?: boolean;
 }
 
 /** SSE event types emitted during agent processing */
@@ -439,7 +442,23 @@ export class MainAgent {
    * This must be idempotent because restart recovery and queue-drain paths can
    * see the same logical message after a crash/restart boundary.
    */
-  private promoteQueuedMessage(msg: PendingMessage, source: string): boolean {
+  /**
+   * Returns the ephemeral content string if the message is ephemeral (so callers can pass
+   * it as ephemeralPrefix to processConversation), or null if it was stored in DB normally.
+   */
+  private promoteQueuedMessage(msg: PendingMessage, source: string): string | null | false {
+    // Ephemeral messages (heartbeats, reflections) must never be persisted to history
+    if (msg.isEphemeral) {
+      console.log(
+        `[main-agent.queue] channel=${this.channelTag(msg.channelId)} source=${source} ephemeral_msg_id=${msg.id.slice(0, 8)} skipping_db_persist=true`,
+      );
+      // Update in-memory maps so processConversation sees correct context for this message
+      if (msg.isMentioned !== undefined) this.channelMentioned.set(msg.channelId, msg.isMentioned);
+      if (msg.chatType) this.channelChatType.set(msg.channelId, msg.chatType);
+      // Return the ephemeral content so caller can pass it to processConversation
+      return msg.content;
+    }
+
     const res = this.db
       .prepare(
         `INSERT OR IGNORE INTO main_agent_messages
@@ -470,7 +489,8 @@ export class MainAgent {
     console.log(
       `[main-agent.queue] channel=${this.channelTag(msg.channelId)} source=${source} promoted_msg_id=${msg.id.slice(0, 8)}`,
     );
-    return true;
+    // Return null (not ephemeral content) to signal "stored in DB, no ephemeral prefix needed"
+    return null;
   }
 
   /** Load unprocessed queued messages from DB (for restart recovery) */
@@ -847,16 +867,29 @@ export class MainAgent {
       `active=${this.processingChannels.has(ch)} global_active=${this.processingChannels.size}/${MAX_CONCURRENT_CHANNELS}`,
     );
 
-    // If channel is idle and we have capacity, store + process immediately
+    // Heartbeat alerts and strategic reflections are ephemeral — they must be processed
+    // by the LLM this turn but must NOT be persisted to main_agent_messages, otherwise
+    // they replay as fresh alerts on every new session.
+    const isEphemeral =
+      content.includes("[HEARTBEAT ALERT]") ||
+      content.includes("[STRATEGIC REFLECTION]") ||
+      content.includes("[System Heartbeat]");
+
+    // If channel is idle and we have capacity, process immediately
     if (!this.processingChannels.has(ch) && this.processingChannels.size < MAX_CONCURRENT_CHANNELS) {
-      this.db
-        .prepare(
-          `INSERT INTO main_agent_messages
-             (id, role, content, channel_id, platform_message_id, token_estimate)
-           VALUES (?, 'user', ?, ?, ?, ?)`,
-        )
-        .run(id, content, ch, null, Math.ceil(text.length / 4));
-      await this.processConversation(ch);
+      if (!isEphemeral) {
+        this.db
+          .prepare(
+            `INSERT INTO main_agent_messages
+               (id, role, content, channel_id, platform_message_id, token_estimate)
+             VALUES (?, 'user', ?, ?, ?, ?)`,
+          )
+          .run(id, content, ch, null, Math.ceil(text.length / 4));
+        await this.processConversation(ch);
+      } else {
+        // Ephemeral: inject into in-memory context only — never stored in DB
+        await this.processConversation(ch, content);
+      }
       return;
     }
 
@@ -870,6 +903,7 @@ export class MainAgent {
       authorName: "System",
       channelId: ch,
       timestamp: Date.now(),
+      isEphemeral,
     };
     if (!this.channelQueues.has(ch)) {
       this.channelQueues.set(ch, []);
@@ -988,7 +1022,7 @@ export class MainAgent {
 
   /* ── Core conversation loop ────────────────────────────────────── */
 
-  private async processConversation(replyChannelId: string): Promise<void> {
+  private async processConversation(replyChannelId: string, ephemeralPrefix?: string): Promise<void> {
     const conversationStartedAt = Date.now();
     const sessionId = `main-agent:${replyChannelId}`;
     let conversationTimedOut = false;
@@ -1058,6 +1092,13 @@ export class MainAgent {
       history = this.pruneHistory(history);
       history = this.repairOrphanedToolUse(history);
       history = this.sanitizeToolHistory(history);
+
+      // Inject ephemeral prefix (e.g. heartbeat alert, strategic reflection) into in-memory
+      // context only — it was never stored in DB so it won't replay in future sessions.
+      if (ephemeralPrefix) {
+        history = [...history, { role: "user" as const, content: ephemeralPrefix, created_at: new Date().toISOString() }];
+      }
+
       const historyChars = history.reduce((sum, msg) => sum + (typeof msg.content === 'string' ? msg.content.length : JSON.stringify(msg.content).length), 0);
       console.log(
         `[main-agent.context] channel=${this.channelTag(replyChannelId)} session=${sessionId} ` +
@@ -1276,8 +1317,8 @@ export class MainAgent {
       const client: LLMClient = {
         createMessage: (params) => {
           const baseClient: LLMClient = {
-            createMessage: (innerParams) => {
-              const realClient = createResilientClient(effectiveModel, {
+            createMessage: async (innerParams) => {
+              const realClient = await createResilientClient(effectiveModel, {
                 sessionId: `main-agent:${replyChannelId}`,
                 fallbackModels,
                 maxRetries: 3,
@@ -1855,11 +1896,11 @@ export class MainAgent {
             this.channelQueues.delete(replyChannelId);
           }
 
-          this.promoteQueuedMessage(nextMsg, "same-channel-drain");
+          const ephemeralContent1 = this.promoteQueuedMessage(nextMsg, "same-channel-drain");
 
           this.updateChannelSession(replyChannelId, "processing", nextMsg.authorId, nextMsg.authorName);
           // Schedule drain asynchronously to avoid return-in-finally
-          void this.processConversation(replyChannelId);
+          void this.processConversation(replyChannelId, ephemeralContent1 || undefined);
         } else {
           // No more queued messages — mark channel idle (skip if pending retry)
           if (!pendingDelay && !conversationTimedOut) {
@@ -1878,11 +1919,11 @@ export class MainAgent {
                 this.channelQueues.delete(channelId);
               }
 
-              this.promoteQueuedMessage(nextMsg, "cross-channel-dispatch");
+              const ephemeralContent2 = this.promoteQueuedMessage(nextMsg, "cross-channel-dispatch");
 
               this.updateChannelSession(channelId, "processing", nextMsg.authorId, nextMsg.authorName);
               // Don't await — fire concurrently so we fill all slots
-              this.processConversation(channelId).catch((err) =>
+              this.processConversation(channelId, ephemeralContent2 || undefined).catch((err) =>
                 console.error(`[main-agent] Error processing queued channel ${channelId}:`, err),
               );
             }
@@ -3036,17 +3077,28 @@ export class MainAgent {
 
     const queuedBlock = texts.join("\n\n");
 
+    // Build the persistable block: exclude ephemeral messages (heartbeats, reflections)
+    // so they don't replay as stale alerts in future sessions.
+    const persistableTexts = collapsed
+      .filter((c) => !c.msg.isEphemeral)
+      .map((c, i) => {
+        const age = formatAge(c.msg.timestamp);
+        const countNote = c.count > 1 ? ` (sent ${c.count}x while waiting)` : "";
+        return `---\nQueued #${i + 1} from ${c.msg.authorName} [${age}]${countNote}:\n${c.msg.content}`;
+      });
+    const persistableBlock = persistableTexts.join("\n\n");
+
     // Store the queued block as a single DB entry (caller can skip if they persist separately)
-    if (!skipDbPersist) {
+    if (!skipDbPersist && persistableBlock.trim()) {
       this.db.prepare(`
         INSERT INTO main_agent_messages (id, role, content, channel_id, platform_message_id, token_estimate)
         VALUES (?, 'user', ?, ?, ?, ?)
       `).run(
         randomUUID(),
-        `[Queued messages while agent was busy]\n\n${queuedBlock}`,
+        `[Queued messages while agent was busy]\n\n${persistableBlock}`,
         channelId,
         null,
-        Math.ceil(queuedBlock.length / 4),
+        Math.ceil(persistableBlock.length / 4),
       );
     }
 
@@ -3288,9 +3340,9 @@ export class MainAgent {
           this.channelQueues.delete(channelId);
         }
 
-        this.promoteQueuedMessage(nextMsg, "timer-recovery");
+        const ephemeralContent3 = this.promoteQueuedMessage(nextMsg, "timer-recovery");
         this.updateChannelSession(channelId, "processing", nextMsg.authorId, nextMsg.authorName);
-        this.processConversation(channelId).catch((err) =>
+        this.processConversation(channelId, ephemeralContent3 || undefined).catch((err) =>
           console.error(`[main-agent] Queue recovery failed for ${channelId.slice(0, 16)}:`, err),
         );
       } catch (err) {
