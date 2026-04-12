@@ -211,7 +211,8 @@ describe("spawn preflight — control-loop wiring smoke test", () => {
     global.fetch = mockFetch;
 
     try {
-      await checkModelsBeforeSpawn(["phi-4-mini"]);
+      // Pass an explicit baseUrl so the test is not sensitive to ~/.lobs/config/models.json
+      await checkModelsBeforeSpawn(["phi-4-mini"], { baseUrl: "http://localhost:1234/v1" });
       expect(mockFetch).toHaveBeenCalledTimes(1);
       const [url] = (mockFetch as Mock).mock.calls[0] as [string, ...unknown[]];
       expect(String(url)).toContain("v1/models");
