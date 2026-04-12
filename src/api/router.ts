@@ -51,6 +51,7 @@ import { handleIntelRequest } from "./intel.js";
 import { handleResearchRadarRequest } from "./research-radar.js";
 import { handleStructuredMemoryRequest } from "./structured-memory.js";
 import { handleSuggestionsRequest } from "./suggestions.js";
+import { handleGoalsRequest } from "./goals.js";
 import { error } from "./index.js";
 
 const PREFIXES = ["/paw/api/", "/api/"];
@@ -123,6 +124,7 @@ export function registerPawRouter(api: LobsPluginApi): void {
         case "research-radar": await handleResearchRadarRequest(req, res, parts[1], parts); return true;
         case "structured-memory": await handleStructuredMemoryRequest(req, res, parts[1]); return true;
         case "suggestions":    await handleSuggestionsRequest(req, res, parts[1], parts); return true;
+        case "goals":          await handleGoalsRequest(req, res, parts[1]); return true;
         case "public":
           if (parts[1] === "pulse") { await handlePublicPulseRequest(req, res); return true; }
           error(res, "Not found", 404); return true;
@@ -202,6 +204,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       case "research-radar": await handleResearchRadarRequest(req, res, parts[1], parts); return;
       case "structured-memory": await handleStructuredMemoryRequest(req, res, parts[1]); return;
       case "suggestions":    await handleSuggestionsRequest(req, res, parts[1], parts); return;
+      case "goals":          await handleGoalsRequest(req, res, parts[1]); return;
       case "public":
         if (parts[1] === "pulse") { await handlePublicPulseRequest(req, res); return; }
         error(res, "Not found", 404); return;

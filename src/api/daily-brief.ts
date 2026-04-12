@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { eq, and, gte, inArray, desc } from "drizzle-orm";
+import { eq, and, gte, inArray, desc, sql } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
-import { tasks, projects } from "../db/schema.js";
+import { tasks, projects, goals } from "../db/schema.js";
 import { json, error } from "./index.js";
 import { getCachedBrief, getCachedHealth, generateDailyBriefSummary } from "../services/system-sentinel.js";
 
@@ -23,6 +23,7 @@ interface DailyBriefResponse {
   activeTasks: Array<{ id: string; title: string; status: string; priority: string | null; project: string | null }>;
   completedToday: Array<{ id: string; title: string; completedAt: string }>;
   blockedTasks: Array<{ id: string; title: string; blockedBy: string | null }>;
+  goals: Array<{ id: string; title: string; priority: number; openTaskCount: number; completedToday: number }>;
   calendar: any[]; // Populated by calendar sentinel when available
   highlights: string[];
   aiSummary: {
@@ -121,6 +122,53 @@ export async function handleDailyBriefRequest(
         blockedBy: typeof t.blockedBy === "string" ? t.blockedBy : null,
       }));
 
+      // Goals with open task counts and completions today
+      const activeGoals = db
+        .select({ id: goals.id, title: goals.title, priority: goals.priority })
+        .from(goals)
+        .where(eq(goals.status, "active"))
+        .orderBy(goals.priority)
+        .all();
+
+      const goalIds = activeGoals.map(g => g.id);
+      const goalSummaries: Array<{ id: string; title: string; priority: number; openTaskCount: number; completedToday: number }> = [];
+
+      if (goalIds.length > 0) {
+        const openTaskRows = db
+          .select({ goalId: tasks.goalId, count: sql<number>`COUNT(*)` })
+          .from(tasks)
+          .where(and(
+            inArray(tasks.goalId, goalIds),
+            inArray(tasks.status, ["inbox", "active", "in_progress"]),
+          ))
+          .groupBy(tasks.goalId)
+          .all();
+
+        const doneTaskRows = db
+          .select({ goalId: tasks.goalId, count: sql<number>`COUNT(*)` })
+          .from(tasks)
+          .where(and(
+            inArray(tasks.goalId, goalIds),
+            eq(tasks.status, "completed"),
+            gte(tasks.updatedAt, todayStartISO),
+          ))
+          .groupBy(tasks.goalId)
+          .all();
+
+        const openByGoal = new Map(openTaskRows.map(r => [r.goalId, Number(r.count)]));
+        const doneByGoal = new Map(doneTaskRows.map(r => [r.goalId, Number(r.count)]));
+
+        for (const g of activeGoals) {
+          goalSummaries.push({
+            id: g.id,
+            title: g.title,
+            priority: g.priority,
+            openTaskCount: openByGoal.get(g.id) ?? 0,
+            completedToday: doneByGoal.get(g.id) ?? 0,
+          });
+        }
+      }
+
       // Overdue tasks
       const now = new Date().toISOString();
       const overdueRows = db
@@ -170,6 +218,7 @@ export async function handleDailyBriefRequest(
         activeTasks,
         completedToday,
         blockedTasks,
+        goals: goalSummaries,
         calendar: [], // Populated when Google Calendar sentinel is running
         highlights,
         aiSummary: aiSummary ? {

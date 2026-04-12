@@ -1,9 +1,12 @@
 /**
  * Goals Worker — autonomous execution loop for active goals.
  *
- * Runs every 30 minutes. For each active goal, checks how many open tasks
- * are already in flight. If < 2, calls the LLM to suggest the next concrete
- * task and inserts it into the tasks table as 'inbox'.
+ * Runs every 30 minutes. For each active goal, spawns a full agent session
+ * to assess the current state and do real work toward the goal. Does not
+ * just create inbox tasks — it launches a medium-tier session that can
+ * look around, make decisions, and execute.
+ *
+ * Cap: max 2 active goal sessions in flight at once per goal.
  */
 
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
@@ -11,24 +14,14 @@ import { randomUUID } from "node:crypto";
 import { getDb } from "../db/connection.js";
 import { goals, tasks } from "../db/schema.js";
 import { log } from "../util/logger.js";
+import { executeSpawnAgent } from "../runner/tools/agent-control.js";
 import {
   BaseWorker,
-  callLocalModelJSON,
   type WorkerArtifact,
   type WorkerConfig,
   type WorkerContext,
   type WorkerResult,
 } from "./base-worker.js";
-
-// ── LLM Response Types ───────────────────────────────────────────────────
-
-interface TaskSuggestion {
-  title: string;
-  notes: string;
-  agent: string;
-  model_tier: string;
-  estimated_minutes: number;
-}
 
 // ── Worker ───────────────────────────────────────────────────────────────
 
@@ -36,20 +29,18 @@ export class GoalsWorker extends BaseWorker {
   readonly config: WorkerConfig = {
     id: "goals-worker",
     name: "Goals Worker",
-    description: "Generates tasks for active goals",
+    description: "Spawns full agent sessions to work toward active goals",
     schedule: "*/30 * * * *",
     enabled: true,
-    maxTokens: 512,
-    timeoutMs: 60_000,
+    maxTokens: 1024,
+    timeoutMs: 120_000,
   };
 
   async execute(_ctx: WorkerContext): Promise<WorkerResult> {
     const db = getDb();
     const artifacts: WorkerArtifact[] = [];
     const alerts: WorkerResult["alerts"] = [];
-    let totalTokens = 0;
-    let tasksCreated = 0;
-    let goalsProcessed = 0;
+    let sessionsSpawned = 0;
     let goalsSkipped = 0;
 
     // 1. Load all active goals ordered by priority DESC
@@ -72,7 +63,7 @@ export class GoalsWorker extends BaseWorker {
 
     for (const goal of activeGoals) {
       try {
-        // 2a. Count open tasks already linked to this goal
+        // Count open tasks already linked to this goal
         const openCountResult = await db
           .select({ count: sql<number>`count(*)` })
           .from(tasks)
@@ -83,101 +74,107 @@ export class GoalsWorker extends BaseWorker {
             ),
           );
 
-        const openCount = openCountResult[0]?.count ?? 0;
+        const openCount = Number(openCountResult[0]?.count ?? 0);
 
         if (openCount >= 2) {
           goalsSkipped++;
-          log().info(`[goals-worker] Goal "${goal.title}" already has ${openCount} open tasks — skipping`);
+          log().info(
+            `[goals-worker] Goal "${goal.title}" already has ${openCount} open tasks — skipping`,
+          );
           continue;
         }
 
-        // 2b. Load last 5 completed tasks for this goal (for context)
+        // Load recent completed tasks for context
         const recentCompleted = await db
           .select({ title: tasks.title, notes: tasks.notes })
           .from(tasks)
           .where(
-            and(
-              eq(tasks.goalId, goal.id),
-              eq(tasks.status, "completed"),
-            ),
+            and(eq(tasks.goalId, goal.id), eq(tasks.status, "completed")),
           )
           .orderBy(desc(tasks.updatedAt))
           .limit(5);
 
-        // 2c. Build prompt and call LLM
-        const prompt = buildPrompt(goal, recentCompleted, openCount);
+        // Build the agent prompt
+        const prompt = buildGoalSessionPrompt(goal, recentCompleted, openCount);
 
-        let suggestion: TaskSuggestion | null = null;
-        let tokensUsed = 0;
-
-        try {
-          const result = await callLocalModelJSON<TaskSuggestion | null>(prompt, {
-            maxTokens: this.config.maxTokens,
-            timeoutMs: this.config.timeoutMs,
-            taskCategory: "background",
-          });
-          suggestion = result.data;
-          tokensUsed = result.tokensUsed;
-          totalTokens += tokensUsed;
-        } catch (llmErr) {
-          const msg = llmErr instanceof Error ? llmErr.message : String(llmErr);
-          alerts.push({
-            severity: "warning",
-            title: `Goals Worker: LLM failed for goal "${goal.title}"`,
-            message: msg,
-            actionRequired: false,
-          });
-          continue;
-        }
-
-        if (!suggestion || !suggestion.title) {
-          log().info(`[goals-worker] No task suggested for goal "${goal.title}"`);
-          goalsProcessed++;
-          continue;
-        }
-
-        // 2d. Insert the suggested task
-        const now = new Date().toISOString();
-        const taskId = randomUUID().slice(0, 8);
-
+        // Create a tracking task so we know a session is in flight
+        const trackingTaskId = randomUUID().slice(0, 8);
         await db.insert(tasks).values({
-          id: taskId,
-          title: suggestion.title.slice(0, 200),
-          status: "inbox",
+          id: trackingTaskId,
+          title: `[goals-worker] Working on: ${goal.title.slice(0, 120)}`,
+          status: "active",
           owner: "lobs",
           goalId: goal.id,
-          notes: suggestion.notes ?? null,
-          agent: suggestion.agent ?? null,
-          modelTier: suggestion.model_tier ?? null,
-          estimatedMinutes: typeof suggestion.estimated_minutes === "number"
-            ? suggestion.estimated_minutes
-            : null,
+          notes: "Spawned by goals-worker. Will be updated on completion.",
+          agent: "programmer",
+          modelTier: "medium",
         });
 
-        // 2e. Update goal.lastWorked and increment goal.taskCount
+        // Spawn a full agent session — fire and forget, it runs async
+        const now = new Date().toISOString();
+
+        executeSpawnAgent(
+          {
+            prompt,
+            subagent_type: "programmer",
+            model_tier: "medium",
+            cwd: process.cwd(),
+          },
+          undefined,
+          undefined,
+          async (result) => {
+            // On completion: mark tracking task done or failed
+            const db2 = getDb();
+            await db2
+              .update(tasks)
+              .set({
+                status: result.succeeded ? "completed" : "rejected",
+                notes: result.output?.slice(0, 500) ?? result.error ?? "No output",
+                updatedAt: new Date().toISOString(),
+              })
+              .where(eq(tasks.id, trackingTaskId));
+
+            // Update goal metadata
+            await db2
+              .update(goals)
+              .set({
+                lastWorked: new Date().toISOString(),
+                taskCount: (goal.taskCount ?? 0) + 1,
+              })
+              .where(eq(goals.id, goal.id));
+
+            log().info(
+              `[goals-worker] Session for goal "${goal.title}" ${result.succeeded ? "succeeded" : "failed"}`,
+            );
+          },
+        ).catch((err) => {
+          log().error(
+            `[goals-worker] Failed to spawn session for goal "${goal.title}": ${String(err)}`,
+          );
+        });
+
+        // Update lastWorked immediately so next run doesn't double-spawn
         await db
           .update(goals)
-          .set({
-            lastWorked: now,
-            taskCount: (goal.taskCount ?? 0) + 1,
-          })
+          .set({ lastWorked: now })
           .where(eq(goals.id, goal.id));
 
-        tasksCreated++;
-        goalsProcessed++;
+        sessionsSpawned++;
 
         artifacts.push({
           type: "db_record",
-          content: `Created task "${suggestion.title}" for goal "${goal.title}" (id: ${taskId})`,
-          metadata: { taskId, goalId: goal.id },
+          content: `Spawned session for goal "${goal.title}" (tracking task: ${trackingTaskId})`,
+          metadata: { trackingTaskId, goalId: goal.id },
         });
 
-        log().info(`[goals-worker] Created task "${suggestion.title}" for goal "${goal.title}"`);
-
+        log().info(
+          `[goals-worker] Spawned session for goal "${goal.title}"`,
+        );
       } catch (err) {
-        // One goal failing shouldn't stop others
         const msg = err instanceof Error ? err.message : String(err);
-        log().error(`[goals-worker] Failed processing goal "${goal.title}": ${msg}`);
+        log().error(
+          `[goals-worker] Failed processing goal "${goal.title}": ${msg}`,
+        );
         alerts.push({
           severity: "warning",
           title: `Goals Worker: Error processing goal "${goal.title}"`,
@@ -188,60 +185,78 @@ export class GoalsWorker extends BaseWorker {
     }
 
     const parts: string[] = [];
-    if (tasksCreated > 0) parts.push(`${tasksCreated} task${tasksCreated !== 1 ? "s" : ""} created`);
-    if (goalsSkipped > 0) parts.push(`${goalsSkipped} goal${goalsSkipped !== 1 ? "s" : ""} skipped (enough in flight)`);
-    if (goalsProcessed === 0 && goalsSkipped === activeGoals.length) {
-      parts.push("all goals have sufficient open tasks");
-    }
+    if (sessionsSpawned > 0)
+      parts.push(
+        `${sessionsSpawned} session${sessionsSpawned !== 1 ? "s" : ""} spawned`,
+      );
+    if (goalsSkipped > 0)
+      parts.push(
+        `${goalsSkipped} goal${goalsSkipped !== 1 ? "s" : ""} skipped (enough in flight)`,
+      );
 
     return {
       success: true,
       artifacts,
       alerts,
-      tokensUsed: totalTokens,
+      tokensUsed: 0,
       durationMs: 0,
-      summary: parts.length > 0
-        ? parts.join(" · ")
-        : `Processed ${activeGoals.length} active goal${activeGoals.length !== 1 ? "s" : ""}, no new tasks needed`,
+      summary:
+        parts.length > 0
+          ? parts.join(" · ")
+          : `Processed ${activeGoals.length} active goal${activeGoals.length !== 1 ? "s" : ""}, nothing to do`,
     };
   }
 }
 
-// ── Prompt Builder ───────────────────────────────────────────────────────
+// ── Prompt Builder ────────────────────────────────────────────────────────
 
-function buildPrompt(
+function buildGoalSessionPrompt(
   goal: typeof goals.$inferSelect,
   recentCompleted: Array<{ title: string; notes: string | null }>,
   openCount: number,
 ): string {
-  const completedSection = recentCompleted.length > 0
-    ? recentCompleted.map(t => `- ${t.title}${t.notes ? `: ${t.notes.slice(0, 100)}` : ""}`).join("\n")
-    : "none yet";
+  const completedSection =
+    recentCompleted.length > 0
+      ? recentCompleted
+          .map(
+            (t) =>
+              `- ${t.title}${t.notes ? `: ${t.notes.slice(0, 120)}` : ""}`,
+          )
+          .join("\n")
+      : "none yet — this is fresh territory";
 
-  const openSection = openCount > 0
-    ? `${openCount} task${openCount !== 1 ? "s" : ""} currently in progress`
-    : "none";
+  const openSection =
+    openCount > 0
+      ? `${openCount} task${openCount !== 1 ? "s" : ""} currently in progress`
+      : "none — you have a clear runway";
 
-  return `You are a task planner for an AI agent system called Lobs.
+  return `You are an autonomous agent working on behalf of Rafe's personal AI system (Lobs).
 
-Goal: ${goal.title}
-Description: ${goal.description ?? "No description provided"}
+## Your goal
+**${goal.title}**
+
+${goal.description ?? "No description provided."}
+
 Priority: ${goal.priority}/100
 
-Recent completed tasks for this goal:
+## Current state
+Recent completed work:
 ${completedSection}
 
-Current open tasks:
+Open tasks in flight:
 ${openSection}
 
-What is the single most valuable next concrete task to make progress on this goal?
-Respond with JSON only:
-{
-  "title": "...",       // specific, actionable, <80 chars
-  "notes": "...",       // 1-2 sentences of context/approach
-  "agent": "programmer|researcher|writer|architect",
-  "model_tier": "small|standard|strong",
-  "estimated_minutes": 30
-}
-Or respond with null if there is genuinely nothing to do right now.`;
+## Instructions
+
+Your job is to make real, concrete progress on this goal RIGHT NOW. This is a full working session — not planning, not summarizing. Act.
+
+Start by looking around: check the relevant repos, read recent code or docs, understand what's actually been done and what hasn't. Then identify the single most valuable thing you can do in this session and do it.
+
+**Be proactive and novel.** Don't just continue existing work mechanically — ask yourself what would actually move the needle. If the obvious next step is boring or incremental, consider whether there's a higher-leverage angle you're missing. Surprise us with something good.
+
+**Bias toward action over planning.** If you find something broken, fix it. If you find something missing, build it. If you find something that needs research, do the research and write up the findings. Leave the codebase, docs, or task list in a better state than you found it.
+
+**When you're done:** Use the task_create tool to log what you accomplished as a completed task linked to goal_id \`${goal.id}\`. If you found important next steps, create them as inbox tasks with goal_id \`${goal.id}\` so they're tracked.
+
+The lobs-core repo is at ~/lobs/lobs-core/. Other relevant repos may be in ~/lobs/ or ~/paw/. Use your judgment on where to look.`;
 }
