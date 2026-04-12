@@ -182,13 +182,20 @@ export class GoalsWorker extends BaseWorker {
           undefined,
           undefined,
           async (result) => {
-            // On completion: mark tracking task done or failed
+            // On completion: mark tracking task done or failed.
+            // Extract the "## Session Summary" section if present — that's the
+            // structured summary the agent was asked to write. Fall back to the
+            // last 800 chars of output (agents usually conclude with a summary),
+            // then full output truncated.
+            const rawOutput = result.output ?? result.error ?? "No output";
+            const sessionNotes = extractSessionSummary(rawOutput);
+
             const db2 = getDb();
             await db2
               .update(tasks)
               .set({
                 status: result.succeeded ? "completed" : "rejected",
-                notes: result.output?.slice(0, 2000) ?? result.error ?? "No output",
+                notes: sessionNotes,
                 updatedAt: new Date().toISOString(),
               })
               .where(eq(tasks.id, trackingTaskId));
@@ -267,6 +274,43 @@ export class GoalsWorker extends BaseWorker {
   }
 }
 
+// ── Session Summary Extractor ─────────────────────────────────────────────
+
+/**
+ * Extract a clean summary from raw agent output.
+ *
+ * Priority:
+ * 1. Text after a "## Session Summary" or "## Summary" header (agent explicitly wrote one)
+ * 2. Last 1200 chars of output (agents usually wrap up at the end)
+ * 3. First 800 chars as fallback
+ */
+function extractSessionSummary(rawOutput: string): string {
+  if (!rawOutput) return "No output";
+
+  // Look for explicit summary section
+  const summaryMatch = rawOutput.match(
+    /##\s+(?:Session\s+)?Summary\s*\n([\s\S]+?)(?=\n##\s|\n---|\n===|$)/i,
+  );
+  if (summaryMatch) {
+    return summaryMatch[1].trim().slice(0, 2000);
+  }
+
+  // Look for "Done." or "Done:" followed by substantive text (agent sign-off pattern)
+  const doneMatch = rawOutput.match(
+    /\bDone[.:]\s*([\s\S]{50,})/i,
+  );
+  if (doneMatch) {
+    return doneMatch[1].trim().slice(0, 1500);
+  }
+
+  // Fall back to last 1200 chars (agents typically summarise at the end)
+  const trimmed = rawOutput.trim();
+  if (trimmed.length > 1200) {
+    return "…" + trimmed.slice(-1200);
+  }
+  return trimmed;
+}
+
 // ── Prompt Builder ────────────────────────────────────────────────────────
 
 function buildGoalSessionPrompt(
@@ -316,6 +360,8 @@ Start by looking around: check the relevant repos, read recent code or docs, und
 **Bias toward action over planning.** If you find something broken, fix it. If you find something missing, build it. If you find something that needs research, do the research and write up the findings. Leave the codebase, docs, or task list in a better state than you found it.
 
 **When you're done:** Use the task_create tool to log what you accomplished as a completed task (status: "completed") linked to goal_id \`${goal.id}\`. If you found important next steps, create them as inbox tasks (status: "inbox") with goal_id \`${goal.id}\` so they get picked up next session. If the goal's description is outdated or needs updating based on what you discovered, use goal_update to refine it.
+
+**Write a Session Summary:** At the very end of your final response, write a \`## Session Summary\` section with a concise bullet-list of what you actually built, fixed, or researched. This is shown directly in the Nexus dashboard so Rafe can see what happened between conversations. Keep it factual — ✅ for completed items, ❌ for things that didn't work out.
 
 The lobs-core repo is at ~/lobs/lobs-core/. Other relevant repos may be in ~/lobs/ or ~/paw/. Use your judgment on where to look.`;
 }
