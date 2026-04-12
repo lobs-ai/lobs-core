@@ -118,8 +118,8 @@ describe("generateChatTitle", () => {
     ]);
 
     const title = await generateChatTitle("s1");
-    // Custom title → returned as-is, no LLM call
-    expect(title).toBe("My Custom Title");
+    // Custom title → null (already titled, nothing to update)
+    expect(title).toBeNull();
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
