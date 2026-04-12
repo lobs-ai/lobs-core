@@ -60,6 +60,103 @@ export interface GsiEscalation {
   confidence: number;
 }
 
+/** A pending escalation waiting for a TA reply */
+export interface PendingEscalation {
+  /** Discord user ID of the TA who was notified */
+  taUserId: string;
+  /** Channel ID where the question was asked */
+  channelId: string;
+  /** Guild ID where the question was asked */
+  guildId: string;
+  /** The original question text */
+  question: string;
+  /** The student who asked (<@userId> mention string) */
+  askedBy: string;
+  /** Course name for display */
+  courseName: string;
+  /** The bot's draft answer that was deemed too low confidence */
+  draftAnswer: string;
+  /** When the escalation was created (for TTL cleanup) */
+  createdAt: number;
+}
+
+// ── Pending Escalation Store ──────────────────────────────────────────────────
+
+/** TTL for pending escalations: 24 hours */
+const ESCALATION_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * In-memory store of pending escalations keyed by TA user ID.
+ * Each TA can have multiple pending escalations (FIFO queue).
+ * Entries expire after 24 hours.
+ */
+const pendingEscalations = new Map<string, PendingEscalation[]>();
+
+/**
+ * Register a pending escalation so we can match TA reply DMs back
+ * to the original channel.
+ */
+export function registerEscalation(escalation: PendingEscalation): void {
+  const existing = pendingEscalations.get(escalation.taUserId) ?? [];
+  existing.push(escalation);
+  pendingEscalations.set(escalation.taUserId, existing);
+  log().info(`[gsi] Registered escalation for TA ${escalation.taUserId} in channel ${escalation.channelId}`);
+}
+
+/**
+ * Retrieve and remove the oldest pending escalation for a TA.
+ * Returns null if the TA has no pending escalations or all are expired.
+ */
+export function resolveEscalationForTA(taUserId: string): PendingEscalation | null {
+  const queue = pendingEscalations.get(taUserId);
+  if (!queue || queue.length === 0) return null;
+
+  const now = Date.now();
+  // Drop expired entries
+  const fresh = queue.filter(e => now - e.createdAt < ESCALATION_TTL_MS);
+
+  if (fresh.length === 0) {
+    pendingEscalations.delete(taUserId);
+    return null;
+  }
+
+  // Return oldest (FIFO) and keep the rest
+  const [resolved, ...remaining] = fresh;
+  if (remaining.length === 0) {
+    pendingEscalations.delete(taUserId);
+  } else {
+    pendingEscalations.set(taUserId, remaining);
+  }
+  return resolved;
+}
+
+/**
+ * Get all TA user IDs that currently have pending escalations.
+ * Used by the DM intercept to quickly check if an incoming DM is a TA reply.
+ */
+export function getPendingEscalationTAIds(): Set<string> {
+  const now = Date.now();
+  const ids = new Set<string>();
+  for (const [taId, queue] of pendingEscalations) {
+    if (queue.some(e => now - e.createdAt < ESCALATION_TTL_MS)) {
+      ids.add(taId);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Get count of pending escalations per TA (for logging/monitoring).
+ */
+export function getPendingEscalationCount(): number {
+  const now = Date.now();
+  let total = 0;
+  for (const queue of pendingEscalations.values()) {
+    total += queue.filter(e => now - e.createdAt < ESCALATION_TTL_MS).length;
+  }
+  return total;
+}
+
 // ── Vector Search ─────────────────────────────────────────────────────────────
 
 async function searchCourseKnowledge(
