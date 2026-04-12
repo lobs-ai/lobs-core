@@ -19,6 +19,7 @@ import {
   exportTraceAsOtlp,
   countTraces,
 } from "../tracer/trace-store.js";
+import { seedDemoTraces } from "../tracer/demo-traces.js";
 
 let _db: PawDB | null = null;
 
@@ -48,6 +49,24 @@ export async function handleTracesRequest(
 ): Promise<void> {
   try {
     const method = req.method ?? "GET";
+
+    // POST /traces/seed-demo — populate demo traces for HN demo
+    if (id === "seed-demo" && method === "POST") {
+      try {
+        const db = getDb();
+        await seedDemoTraces(db, {
+          taskId: "demo-research-2025-04",
+          agentType: "research-agent",
+          turns: 3,
+          withErrors: true,
+        });
+        json(res, { ok: true, message: "Demo trace seeded" });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        json(res, { ok: false, error: msg }, 500);
+      }
+      return;
+    }
 
     // GET /traces/ui — serve replay UI
     if (id === "ui") {
@@ -258,6 +277,7 @@ function getReplayUiHtml(): string {
     <div class="header">
       <div class="logo">Lobs <span>Replay</span></div>
       <div class="header-actions">
+        <button class="btn" onclick="seedDemo()" id="seed-btn">✦ Seed Demo</button>
         <button class="btn" onclick="loadTraces()">↻ Refresh</button>
       </div>
     </div>
@@ -329,6 +349,31 @@ let replayIndex = -1;
 let replayTimer = null;
 
 // ── Data loading ───────────────────────────────────────────────────────────
+
+async function seedDemo() {
+  const btn = document.getElementById('seed-btn');
+  btn.textContent = '⏳ Seeding…';
+  btn.disabled = true;
+  try {
+    const r = await fetch(API + '/traces/seed-demo', { method: 'POST' });
+    const data = await r.json();
+    if (data.ok) {
+      btn.textContent = '✓ Seeded!';
+      await loadTraces();
+    } else {
+      btn.textContent = '✗ Error';
+      console.error('seed-demo error:', data.error);
+    }
+  } catch(e) {
+    btn.textContent = '✗ Error';
+    console.error('seed-demo fetch error:', e);
+  } finally {
+    setTimeout(() => {
+      btn.textContent = '✦ Seed Demo';
+      btn.disabled = false;
+    }, 2000);
+  }
+}
 
 async function loadTraces() {
   const list = document.getElementById('trace-list');
