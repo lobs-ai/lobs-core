@@ -129,7 +129,7 @@ export type AgentPhase =
   | { phase: 'between_turns'; turn: number; startedAt: number }
   | { phase: 'compacting'; turn: number; startedAt: number };
 
-export type ToolName = "exec" | "read" | "write" | "edit" | "ls" | "grep" | "glob" | "find_files" | "code_search" | "web_search" | "web_fetch" | "memory_search" | "memory_read" | "memory_write" | "spawn_agent" | "run_pipeline" | "list_agents" | "check_agents" | "message_agent" | "stop_agent" | "cron" | "discord" | "process" | "humanize" | "imagine" | "html_to_pdf" | "dispatch_agent" | "tool_manage";
+export type ToolName = "exec" | "read" | "write" | "edit" | "ls" | "grep" | "glob" | "find_files" | "code_search" | "web_search" | "web_fetch" | "memory_search" | "memory_read" | "memory_write" | "spawn_agent" | "run_pipeline" | "list_agents" | "check_agents" | "message_agent" | "stop_agent" | "cron" | "discord" | "process" | "humanize" | "imagine" | "html_to_pdf" | "dispatch_agent" | "tool_manage" | "librarian_ask" | "librarian_reindex_knowledge_base";
 
 export interface AgentContext {
   taskId?: string;

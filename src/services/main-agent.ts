@@ -463,6 +463,10 @@ export class MainAgent {
       return false;
     }
 
+    // Update in-memory maps so processConversation sees correct context for this message
+    if (msg.isMentioned !== undefined) this.channelMentioned.set(msg.channelId, msg.isMentioned);
+    if (msg.chatType) this.channelChatType.set(msg.channelId, msg.chatType);
+
     console.log(
       `[main-agent.queue] channel=${this.channelTag(msg.channelId)} source=${source} promoted_msg_id=${msg.id.slice(0, 8)}`,
     );
@@ -471,13 +475,28 @@ export class MainAgent {
 
   /** Load unprocessed queued messages from DB (for restart recovery) */
   private loadPersistedQueue(channelId: string): PendingMessage[] {
+    // Only load messages queued within the last 2 minutes — anything older is
+    // stale context from a previous session that the user has moved on from.
+    // This prevents the restart-replay loop where old queued messages get
+    // processed long after the conversation has moved on.
     const rows = this.db.prepare(`
       SELECT id, channel_id, message_id, content, author_id, author_name, queued_at
-      FROM message_queue WHERE channel_id = ? AND processed = 0 ORDER BY queued_at ASC
+      FROM message_queue
+      WHERE channel_id = ? AND processed = 0
+        AND queued_at >= datetime('now', '-2 minutes')
+      ORDER BY queued_at ASC
     `).all(channelId) as Array<{
       id: string; channel_id: string; message_id: string | null;
       content: string; author_id: string; author_name: string; queued_at: string;
     }>;
+
+    // Also mark stale messages (older than 2 min) as processed so they never
+    // surface again — prevents them from being retried on a future restart.
+    this.db.prepare(`
+      UPDATE message_queue SET processed = 1
+      WHERE channel_id = ? AND processed = 0
+        AND queued_at < datetime('now', '-2 minutes')
+    `).run(channelId);
 
     return rows.map(r => ({
       id: r.id,
@@ -1060,7 +1079,11 @@ export class MainAgent {
         chatContextNote = "\n\nYou are in a LIVE VOICE CALL. Always respond — keep it short and conversational.";
       } else if (channelChatType === "group") {
         const wasMentioned = this.channelMentioned.get(replyChannelId) ?? false;
-        if (wasMentioned) {
+        // Check if the triggering message is from Rafe (always respond to him)
+        const lastAuthorRow = this.db.prepare(`SELECT last_author_id FROM channel_sessions WHERE channel_id = ?`).get(replyChannelId) as { last_author_id: string | null } | undefined;
+        const isFromRafe = lastAuthorRow?.last_author_id === "644578016298795010";
+        console.log(`[main-agent.group-chat] channel=${this.channelTag(replyChannelId)} wasMentioned=${wasMentioned} isFromRafe=${isFromRafe} last_author_id=${lastAuthorRow?.last_author_id ?? "null"}`);
+        if (wasMentioned || isFromRafe) {
           chatContextNote = `\n\nYou are in a GROUP CHAT and were directly mentioned/addressed. You MUST respond to this message — the user is expecting your input.`;
         } else {
           chatContextNote = `\n\nYou are in a GROUP CHAT. Responding is OPTIONAL. If you choose not to respond, your ENTIRE message must be exactly the text NO_REPLY — nothing else. Do NOT say "noted", "acknowledged", "not my domain", "staying quiet", or any other filler. Those get sent as real messages. Only NO_REPLY (alone, as the complete response) gets suppressed. Respond only when directly mentioned, explicitly addressed by name, or when you have genuinely new information to contribute.`;
@@ -1160,21 +1183,32 @@ export class MainAgent {
       //     The Anthropic API requires strictly alternating user/assistant roles.
       messages = this.mergeConsecutiveRoles(messages);
 
-      // 4. Add queued messages for this channel
+      // 3c. Pop the last user message off before compaction so it can't be
+      //     summarized away. It's the current inbound message — it must always
+      //     be the final thing the model sees, never compacted into a summary.
+      let lastUserMessage: LLMMessage | null = null;
+      if (messages.length > 0 && messages[messages.length - 1].role === "user") {
+        lastUserMessage = messages.pop()!;
+      }
+
+      // 4. Drain queued messages — but don't append yet. Compaction runs next,
+      //    and if we append first the new messages can get summarized away.
       const queueBefore = this.channelQueues.get(replyChannelId);
       const oldestQueuedTs = queueBefore && queueBefore.length > 0 ? queueBefore[0].timestamp : null;
       const queuedText = this.drainQueue(replyChannelId);
+
+      // Build the queued message blocks (to be appended AFTER compaction)
+      const queuedMessages: Array<{ role: "user" | "assistant"; content: string }> = [];
       if (queuedText) {
-        // Inject a context bridge when queued messages waited more than 2 minutes
         const waitMs = oldestQueuedTs ? Date.now() - oldestQueuedTs : 0;
         if (waitMs > 2 * 60 * 1000) {
           const waitMins = Math.round(waitMs / 60000);
-          messages.push({
+          queuedMessages.push({
             role: "user",
             content: `[System] The following messages arrived while you were busy processing another request (waited ~${waitMins}m). They may refer to the previous conversation topic.`,
           });
         }
-        messages.push({
+        queuedMessages.push({
           role: "user",
           content: `[Queued messages while agent was busy]\n\n${queuedText}`,
         });
@@ -1182,6 +1216,16 @@ export class MainAgent {
 
       // 5. Compact if needed (pass channelId to persist compaction to DB)
       messages = await this.compactIfNeeded(messages, replyChannelId);
+
+      // 5b. Re-append the current inbound message and any queued messages AFTER
+      //     compaction so they are never summarized away. New messages must
+      //     always be the last thing the model sees.
+      if (lastUserMessage) {
+        messages.push(lastUserMessage);
+      }
+      if (queuedMessages.length > 0) {
+        messages.push(...queuedMessages);
+      }
 
       // Check for per-channel model override
       const sessionRow = this.db.prepare(
@@ -1536,22 +1580,23 @@ export class MainAgent {
 
       let textResponse = result.output ?? "";
       const isDirectChat = channelChatType !== "group";
-      // NO_REPLY means the agent chose not to respond.  Only treat the
-      // response as NO_REPLY when it's the *entire* message (with optional
-      // whitespace).  A real reply that happens to mention "NO_REPLY" (e.g.
-      // quoting the system prompt) should still be delivered.
+      // NO_REPLY means the agent chose not to respond. Only treat the response
+      // as NO_REPLY when it's the *entire* trimmed message. A real reply that
+      // happens to mention "NO_REPLY" (e.g. explaining the concept, quoting the
+      // system prompt, or onboarding another agent) must still be delivered.
+      // NO_REPLY only applies in group chats — in direct chats the model is
+      // explicitly told never to use it.
       const trimmedForCheck = textResponse.trim();
-      // If NO_REPLY appears anywhere in the response, suppress entirely.
-      // The model is signaling "don't send this" — even if there's real content
-      // alongside it, the intent is silence.
       // Also suppress group-chat meta-explanations ("I'll let Briggs...", etc.).
       const firstLine = trimmedForCheck.split("\n")[0].trim();
-      // NO_REPLY only applies in group chats. In direct chats the model is
-      // explicitly told never to use it, so even if the text contains the
-      // token (e.g. quoting the system prompt), we treat it as a real reply.
+      // NO_REPLY anywhere as a standalone token (on its own line, or the whole response)
+      // means suppress — the model is signaling silence even if it wrote reasoning above it.
+      // Match NO_REPLY as a standalone token in any form the model might emit:
+      // bare, in backticks, in a code block, or with surrounding whitespace/newlines.
+      const hasNoReplyToken = /(?:^|\n)\s*`{0,3}\s*NO_REPLY\s*`{0,3}\s*(?:\n|$)/.test(trimmedForCheck) || /^`{0,3}\s*NO_REPLY\s*`{0,3}$/.test(trimmedForCheck);
       const isNoReply =
         !isDirectChat &&
-        (/\bNO_REPLY\b/.test(trimmedForCheck) ||
+        (hasNoReplyToken ||
           (channelChatType === "group" &&
             !(this.channelMentioned.get(replyChannelId) ?? false) &&
             /^(I['']ll let|that'?s directed at|not my domain|staying quiet|I should (stay|remain|let)|this (is|isn'?t) (directed|for) (me|@?\w)|deferring to|leaving this (to|for))/i.test(firstLine)));
@@ -1563,7 +1608,14 @@ export class MainAgent {
         `hasOnReply=${!!this.onReply} chatType=${channelChatType} output_preview="${(textResponse || "").slice(0, 80)}"`,
       );
 
-      if (textResponse && !isRoutineHeartbeat && !(isNoReply && !isDirectChat)) {
+      // Hard filter: strip NO_REPLY tokens in any form (bare, backtick-wrapped,
+      // code-fenced) before saving or sending. This is a last-resort safety net
+      // independent of the isNoReply flag — the model should never leak this token.
+      const cleanedResponse = textResponse
+        .replace(/(?:^|\n)[^\S\n]*`{0,3}[^\S\n]*NO_REPLY[^\S\n]*`{0,3}[^\S\n]*(?=\n|$)/g, "")
+        .trim();
+
+      if (cleanedResponse && !isRoutineHeartbeat && !(isNoReply && !isDirectChat)) {
         this.db
           .prepare(
             `INSERT INTO main_agent_messages
@@ -1572,18 +1624,18 @@ export class MainAgent {
           )
           .run(
             randomUUID(),
-            textResponse,
+            cleanedResponse,
             replyChannelId,
-            Math.ceil(textResponse.length / 4),
+            Math.ceil(cleanedResponse.length / 4),
           );
         this.noteChannelProgress(replyChannelId);
 
         // Deliver to Discord — isolated so a send failure can't prevent the
         // assistant_reply / done events from firing (response is already in DB).
         if (this.onReply) {
-          console.log(`[main-agent.loop] calling emitReply channel=${replyChannelId.slice(0, 20)} len=${textResponse.length}`);
+          console.log(`[main-agent.loop] calling emitReply channel=${replyChannelId.slice(0, 20)} len=${cleanedResponse.length}`);
           try {
-            await this.emitReply(replyChannelId, textResponse);
+            await this.emitReply(replyChannelId, cleanedResponse);
           } catch (replyErr) {
             // Do NOT retry — Discord sometimes throws after successfully delivering
             // the message (rate limits, timeouts), so a retry causes duplicates.
@@ -2033,6 +2085,7 @@ export class MainAgent {
       const postCompactionCount = reconstructed.length;
       const isStale = postCompactionCount > POST_COMPACTION_STALE_THRESHOLD;
 
+      const POST_COMPACTION_DROP_THRESHOLD = 60; // beyond this, drop the stale summary entirely
       const summaryHeader = isStale
         ? `[Old conversation context — ${postCompactionCount} messages have occurred since this summary. It may not be relevant to the current topic.]`
         : `[Conversation summary — earlier messages compacted]`;
@@ -2041,6 +2094,18 @@ export class MainAgent {
         console.log(
           `[main-agent] Compaction summary is stale (${postCompactionCount} post-compaction messages), labelling as old context`,
         );
+      }
+
+      // If the summary is extremely stale (60+ messages since compaction), drop it
+      // entirely. A stale summary prepended to 60+ messages creates a context so
+      // large that models respond to old content instead of the latest message.
+      // Better to give the model a clean slice of recent messages.
+      if (isStale && postCompactionCount >= POST_COMPACTION_DROP_THRESHOLD) {
+        console.log(
+          `[main-agent] Compaction summary too stale (${postCompactionCount} messages), dropping summary and using recent messages only`,
+        );
+        // Keep only the last 40 messages so we have tight, salient context
+        return reconstructed.slice(-40);
       }
 
       const summaryMessages: Array<{

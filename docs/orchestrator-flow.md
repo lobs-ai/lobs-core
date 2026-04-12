@@ -1,6 +1,6 @@
 # Orchestrator Control Loop — Architecture Reference
 
-**Source:** `~/lobs-plugin-lobs/src/orchestrator/`
+**Source:** `~/lobs/lobs-core/src/orchestrator/`
 **Last Updated:** 2026-03-24
 
 ---

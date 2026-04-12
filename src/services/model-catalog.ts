@@ -43,6 +43,16 @@ const AVAILABLE_PROVIDER_MODELS: Record<string, string[]> = {
     "anthropic/claude-sonnet-4-6",
     "anthropic/claude-opus-4-6",
   ],
+  "opencode-go": [
+    "opencode-go/minimax-m2.5",
+    "opencode-go/minimax-m2.7",
+    "opencode-go/glm-5",
+    "opencode-go/kimi-k2.5",
+  ],
+  minimax: [
+    "minimax/minimax-m2.5",
+    "minimax/minimax-m2.7",
+  ],
 };
 
 function ensureProviderPrefix(model: string): string {

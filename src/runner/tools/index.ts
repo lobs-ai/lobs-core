@@ -22,6 +22,7 @@ import { humanizeToolDefinition, humanizeTool } from "./humanize.js";
 import { imagineToolDefinition, imagineTool } from "./imagine.js";
 import { htmlToPdfToolDefinition, htmlToPdfTool } from "./html-to-pdf.js";
 import { dispatchAgentToolDefinition, dispatchAgentTool } from "./dispatch.js";
+import { librarianAskToolDefinition, librarianAskTool, librarianReindexToolDefinition, reindexKnowledgeBaseTool } from "./librarian.js";
 import { toolManageDefinition, toolManageTool } from "./tool-manage.js";
 import { getDynamicToolLoader } from "./dynamic-tools.js";
 import { getToolManager } from "./tool-manager.js";
@@ -211,6 +212,14 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
   tool_manage: {
     definition: toolManageDefinition,
     execute: toolManageTool,
+  },
+  librarian_ask: {
+    definition: librarianAskToolDefinition,
+    execute: (params, cwd) => librarianAskTool(params, cwd),
+  },
+  librarian_reindex_knowledge_base: {
+    definition: librarianReindexToolDefinition,
+    execute: (params, cwd) => reindexKnowledgeBaseTool(params, cwd),
   },
 };
 

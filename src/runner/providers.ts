@@ -22,6 +22,7 @@ import type { ToolDefinition, TokenUsage } from "./types.js";
 import type { TaskCategory } from "../services/model-router.js";
 import { getKeyPool } from "../services/key-pool.js";
 import { getCodexAuth } from "../services/codex-auth.js";
+import { getMinimaxAuth } from "../services/minimax-auth.js";
 import { randomUUID } from "node:crypto";
 import {
   fromClaudeCodeToolName,
@@ -2005,6 +2006,18 @@ export function createClient(config: ProviderConfig, sessionId?: string): LLMCli
   if (config.provider === "openrouter") {
     extraHeaders["HTTP-Referer"] = "https://lobs.ai";
     extraHeaders["X-Title"] = "Lobs Agent Runner";
+  }
+
+  // MiniMax: inject OAuth Bearer token if available (falls back to MINIMAX_API_KEY env var)
+  if (config.provider === "minimax") {
+    const minimaxAuth = getMinimaxAuth();
+    const cachedToken = minimaxAuth.getCachedAccessToken();
+    if (cachedToken) {
+      extraHeaders["Authorization"] = `Bearer ${cachedToken}`;
+      // If we have an OAuth token, we don't need the env var key at all
+      // (OAuth tokens are per-user, not per-key-pool)
+      apiKey = "";
+    }
   }
 
   return new OpenAICompatibleClient(baseUrl, apiKey, config.provider, sessionId, extraHeaders, keyIndex, keyLabel);

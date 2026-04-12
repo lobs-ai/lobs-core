@@ -57,7 +57,7 @@ class DiscordService {
   private messageHandler: ((message: {
     messageId: string; content: string; channelId: string;
     authorId: string; authorTag: string; displayName: string; isDm: boolean;
-    isMentioned: boolean; guildId?: string;
+    isMentioned: boolean; chatType?: "dm" | "group" | "nexus" | "system"; guildId?: string;
     images?: Array<{ data: string; mediaType: string; filename?: string }>;
   }) => void) | null = null;
   private healthCheckTimer: ReturnType<typeof setInterval> | null = null;
@@ -522,7 +522,7 @@ class DiscordService {
   onMessage(handler: (message: {
     messageId: string; content: string; channelId: string;
     authorId: string; authorTag: string; displayName: string; isDm: boolean;
-    isMentioned: boolean; guildId?: string;
+    isMentioned: boolean; chatType?: "dm" | "group" | "nexus" | "system"; guildId?: string;
     images?: Array<{ data: string; mediaType: string; filename?: string }>;
   }) => void): void {
     if (!this.client || !this.config) return;
@@ -534,7 +534,7 @@ class DiscordService {
   private setupMessageListener(handler: (message: {
     messageId: string; content: string; channelId: string;
     authorId: string; authorTag: string; displayName: string; isDm: boolean;
-    isMentioned: boolean; guildId?: string;
+    isMentioned: boolean; chatType?: "dm" | "group" | "nexus" | "system"; guildId?: string;
     images?: Array<{ data: string; mediaType: string; filename?: string }>;
   }) => void): void {
     if (!this.client || !this.config) return;
@@ -572,13 +572,11 @@ class DiscordService {
 
       }
 
-      // Detect DMs: guildId alone is unreliable — Discord can send DMs with a
-      // guildId when the bot shares a server with the user.  Fall back to the
-      // dmAllowFrom list as the authoritative signal: if the author is in that
-      // list AND doesn't match a channel-specific policy, treat it as a DM.
+      // Detect DMs: a message is a DM only if there is no guildId.
+      // dmAllowFrom controls *who* can message the bot, not whether the channel
+      // is a DM — guild channels are always group chat regardless of author.
       const hasChannelPolicy = !!this.config!.channelPolicies[msg.channelId];
-      const isDm = !msg.guildId
-        || (this.config!.dmAllowFrom.includes(msg.author.id) && !hasChannelPolicy);
+      const isDm = !msg.guildId;
       const isMentioned = msg.mentions.has(this.client!.user!)
         || getAgentMentionNames().some(name => msg.content.toLowerCase().includes(name));
 
@@ -621,6 +619,7 @@ class DiscordService {
         displayName,
         isDm,
         isMentioned,
+        chatType: isDm ? "dm" : "group",
         guildId: msg.guildId ?? undefined,
         images: images?.length ? images : undefined,
       });

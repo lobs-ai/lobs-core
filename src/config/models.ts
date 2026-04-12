@@ -74,6 +74,9 @@ export interface ModelConfig {
     /** Default model tier for all Discord channels (overridden per-channel) */
     defaultTier?: "micro" | "small" | "medium" | "standard" | "strong";
   };
+
+  /** Tier-level fallback chains. Tried in order if primary fails. */
+  tierFallbacks?: Record<string, string[]>;
 }
 
 export interface ModelChain {

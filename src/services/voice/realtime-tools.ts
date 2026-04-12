@@ -52,7 +52,7 @@ export function queueBackgroundVoiceTool(
 // ---------------------------------------------------------------------------
 // Tool: get_datetime
 // ---------------------------------------------------------------------------
-export const getDatetimeTool = tool<z.ZodObject<{}>, RealtimeVoiceToolContext>({
+export const getDatetimeTool = tool<z.ZodObject<Record<never, never>>, RealtimeVoiceToolContext>({
   name: "get_datetime",
   description:
     "Get the current date, time, and day of the week. Use this for time-sensitive questions instead of guessing.",

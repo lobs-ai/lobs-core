@@ -51,6 +51,7 @@ import { loadKeyConfig, getEnvKeyForProvider } from "../config/keys.js";
 import { getLobsRoot } from "../config/lobs.js";
 import { runLmStudioDiagnostic, formatDiagnosticReport } from "../diagnostics/lmstudio.js";
 import { cmdCodexAuth } from "./codex-auth.js";
+import { cmdMinimaxAuth } from "./minimax-auth.js";
 
 const LOBS_PORT = parseInt(process.env.LOBS_PORT ?? "9420", 10);
 const API_BASE = `http://localhost:${LOBS_PORT}/api`;
@@ -1663,9 +1664,10 @@ async function cmdCron(subCmd?: string, extraArgs: string[] = []) {
 // ── Memory Commands ───────────────────────────────────────────────────────────
 
 async function handleMemoryCommand(subCmd?: string, extraArgs: string[] = []): Promise<void> {
-  // Lazy-load getMemoryDb only when a memory command runs.
-  const { getMemoryDb } = await import("../memory/db.js");
-  const db = getMemoryDb();
+  // Lazy-load memory DB only for subcommands that need it (list, status).
+  // index subcommand talks directly to lobs-memory server via HTTP.
+  const needDb = !subCmd || subCmd === "list" || subCmd === "status";
+  const db = needDb ? (() => { const { getMemoryDb } = require("../memory/db.js"); return getMemoryDb(); })() : null;
 
   // ── lobs memory list ──────────────────────────────────────────────────────
   if (!subCmd || subCmd === "list") {
@@ -1972,9 +1974,66 @@ async function handleMemoryCommand(subCmd?: string, extraArgs: string[] = []): P
     return;
   }
 
+  // ── lobs memory index ────────────────────────────────────────────────────
+  if (subCmd === "index") {
+    const MEMORY_URL = "http://localhost:7420";
+    const dryRun = extraArgs.includes("--dry-run");
+    const watch = extraArgs.includes("--watch");
+
+    if (dryRun) {
+      try {
+        const res = await fetch(`${MEMORY_URL}/status`);
+        const data = await res.json();
+        console.log(colorize("[dry-run] Would trigger re-index via POST /index", "yellow"));
+        console.log(`  Current: ${data.index?.documents ?? "?"} docs / ${data.index?.chunks ?? "?"} chunks`);
+        console.log(`  Collections: ${(data.index?.collections ?? []).join(", ")}`);
+      } catch (err) {
+        console.log(`  (Could not fetch status: ${err})`);
+      }
+      return;
+    }
+
+    console.log(colorize("Triggering lobs-memory re-index…", "cyan"));
+    try {
+      const triggerRes = await fetch(`${MEMORY_URL}/index`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const triggerData = await triggerRes.json();
+      if (!triggerRes.ok || !triggerData.ok) {
+        console.error(colorize(`✗ Re-index failed: ${JSON.stringify(triggerData)}`, "red"));
+        return;
+      }
+      console.log(colorize(`✓ ${triggerData.message ?? "Re-indexing started in background"}`, "green"));
+
+      if (watch) {
+        console.log("Polling /status until complete…");
+        let stable = 0;
+        while (stable < 3) {
+          await new Promise((r) => setTimeout(r, 3000));
+          try {
+            const statusRes = await fetch(`${MEMORY_URL}/status`);
+            const statusData = await statusRes.json();
+            if (statusData.indexer?.isIndexing) { stable = 0; continue; }
+            stable++;
+          } catch { /* keep polling */ }
+        }
+        const finalStatus = await fetch(`${MEMORY_URL}/status`);
+        const finalData = await finalStatus.json();
+        console.log(colorize("✓ Re-index complete", "green"));
+        console.log(`  Documents: ${finalData.index?.documents ?? "?"}  Chunks: ${finalData.index?.chunks ?? "?"}`);
+      }
+    } catch (err) {
+      console.error(colorize(`✗ Cannot reach lobs-memory at ${MEMORY_URL}: ${String(err)}`, "red"));
+      process.exit(1);
+    }
+    return;
+  }
+
   // ── Unknown subcommand ────────────────────────────────────────────────────
   console.log(colorize("Usage: lobs memory <subcommand> [options]\n", "yellow"));
   console.log("  list [--type <type>] [--limit N]   List recent active memories");
+  console.log("  index [--watch] [--dry-run]        Trigger lobs-memory re-index");
   console.log("  show <id>                          Show full memory details");
   console.log("  conflicts                          List unresolved conflicts");
   console.log("  resolve <conflict-id> <a|b|dismiss> Manually resolve a conflict");
@@ -2071,6 +2130,9 @@ const subcommand = args[1];
     case "codex-auth":
       await cmdCodexAuth(subcommand);
       break;
+    case "minimax-auth":
+      await cmdMinimaxAuth(subcommand, args.slice(2));
+      break;
 
     case "init":
       cmdInit();
@@ -2141,6 +2203,11 @@ const subcommand = args[1];
       console.log("  lobs codex-auth login    OAuth login for openai-codex provider");
       console.log("  lobs codex-auth status   Show token status and expiry");
       console.log("  lobs codex-auth refresh  Refresh the access token");
+      console.log("");
+      console.log(colorize("MiniMax Auth:", "cyan"));
+      console.log("  lobs minimax-auth login [--region cn|global]  OAuth login for minimax provider");
+      console.log("  lobs minimax-auth status   Show token status and expiry");
+      console.log("  lobs minimax-auth refresh  Refresh the access token");
       console.log("");
       console.log(colorize("Logs:", "cyan"));
       console.log("  lobs logs [--tail N]     Show recent log output");
