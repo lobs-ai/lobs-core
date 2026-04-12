@@ -86,15 +86,6 @@ export async function registerSlashCommands(client: Client, config: DiscordConfi
     new SlashCommandBuilder()
       .setName('help')
       .setDescription('Show available commands'),
-
-    new SlashCommandBuilder()
-      .setName('ask')
-      .setDescription('Ask the GSI assistant a question about course material')
-      .addStringOption(opt =>
-        opt.setName('question')
-          .setDescription('Your question')
-          .setRequired(true)
-      ),
     
     new SlashCommandBuilder()
       .setName('voice')
@@ -142,15 +133,6 @@ export async function registerSlashCommands(client: Client, config: DiscordConfi
             { name: 'compact — show tool names only', value: 'compact' },
             { name: 'off — hide all tool steps', value: 'off' },
           )
-      ),
-
-    new SlashCommandBuilder()
-      .setName('ask')
-      .setDescription('Ask a course question — answered from course materials by the GSI assistant')
-      .addStringOption(opt =>
-        opt.setName('question')
-          .setDescription('Your question about the course')
-          .setRequired(true)
       ),
   ];
 
@@ -472,7 +454,6 @@ async function handleHelpCommand(interaction: ChatInputCommandInteraction): Prom
       { name: '/voice leave', value: 'Leave the voice channel', inline: false },
       { name: '/voice status', value: 'Show voice session status', inline: false },
       { name: '/voice trigger <mode>', value: 'Set voice response trigger (keyword/always)', inline: false },
-      { name: '/ask question:<your question>', value: 'Ask a course question — GSI assistant answers from course materials, escalates to TA if unsure', inline: false },
       { name: '/clear', value: 'Clear conversation history', inline: false },
       { name: '/help', value: 'Show this help message', inline: false },
     )
@@ -637,6 +618,85 @@ async function handleVoiceCommand(interaction: ChatInputCommandInteraction): Pro
 
 // ── /ask — GSI Office Hours Assistant ────────────────────────────────────────
 
+/**
+ * /ask question:<text>
+ *
+ * Searches course materials in lobs-memory, generates an answer with citations,
+ * and escalates to the human TA if confidence is below the configured threshold.
+ */
+async function handleAskCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const question = interaction.options.getString('question', true).trim();
+  const guildId = interaction.guildId;
+  const channelId = interaction.channelId;
+
+  if (!guildId) {
+    await interaction.reply({
+      content: '❌ `/ask` only works in a server channel, not in DMs.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const course = getCourseForChannel(guildId, channelId);
+  if (!course) {
+    await interaction.reply({
+      content: '❌ No course is configured for this channel. Ask your instructor to set up the GSI assistant.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  await interaction.deferReply();
+
+  try {
+    const answer = await answerStudentQuestion(question, course);
+
+    if (answer.shouldEscalate) {
+      const channelReply = formatEscalationChannelReply(
+        interaction.user.toString(),
+        course.courseName
+      );
+      await interaction.editReply(channelReply);
+
+      // DM human TAs
+      const taUserIds = course.dmEscalations ? course.escalationUserIds : [];
+      for (const userId of taUserIds) {
+        try {
+          const user = await interaction.client.users.fetch(userId);
+          const escalationMsg = formatEscalationDM({
+            question,
+            draftAnswer: answer.answer,
+            confidence: answer.confidence,
+            reason: `Confidence ${Math.round(answer.confidence * 100)}% below ${Math.round(course.confidenceThreshold * 100)}% threshold`,
+            channelId,
+            askedBy: `<@${interaction.user.id}>`,
+          });
+          await user.send(escalationMsg);
+        } catch (dmErr) {
+          console.warn(`[gsi] Could not DM escalation to user ${userId}:`, dmErr);
+        }
+      }
+    } else {
+      const reply = formatAnswerForDiscord(answer, course.courseName);
+      await interaction.editReply(reply);
+    }
+
+    // Log to log channel if configured
+    if (course.logChannelId) {
+      try {
+        const logChannel = await interaction.client.channels.fetch(course.logChannelId);
+        if (logChannel?.isTextBased()) {
+          const logMsg = [
+            `📝 **Q&A Log** — ${course.courseName}`,
+            `**User:** <@${interaction.user.id}>  **Channel:** <#${channelId}>`,
+            `**Q:** ${question}`,
+            `**Confidence:** ${Math.round(answer.confidence * 100)}%  **Escalated:** ${answer.shouldEscalate}`,
+          ].join('\n');
+          await (logChannel as import('discord.js').TextChannel).send(logMsg);
+        }
+      } catch (logErr) {
+        console.warn('[gsi] Could not post to log channel:', logErr);
+      }
     }
   } catch (err) {
     console.error('[gsi] Error in /ask handler:', err);
