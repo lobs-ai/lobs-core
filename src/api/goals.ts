@@ -107,6 +107,7 @@ export async function handleGoalsRequest(
         title: tasks.title,
         status: tasks.status,
         notes: tasks.notes,
+        agent: tasks.agent,
         updatedAt: tasks.updatedAt,
         createdAt: tasks.createdAt,
       })
@@ -115,15 +116,64 @@ export async function handleGoalsRequest(
       .orderBy(desc(tasks.updatedAt))
       .all();
 
-    // Group by goalId, keep top 5 per goal
-    const recentByGoal = new Map<string, typeof recentTaskRows>();
+    // Separate agent sessions from manual tasks, group by goalId
+    const recentSessionsByGoal = new Map<string, Array<{
+      id: string;
+      status: string;
+      notes: string | null;
+      updatedAt: string | null;
+      isActive: boolean;
+    }>>();
+    const recentManualByGoal = new Map<string, Array<{
+      id: string;
+      title: string;
+      status: string;
+      updatedAt: string | null;
+    }>>();
+
     for (const row of recentTaskRows) {
       if (!row.goalId) continue;
-      const existing = recentByGoal.get(row.goalId) ?? [];
-      if (existing.length < 5) {
-        existing.push(row);
-        recentByGoal.set(row.goalId, existing);
+
+      // Agent session tracking tasks: agent='programmer' + notes starts with "Agent session"
+      // or legacy format "[goals-worker]" title
+      const isAgentSession =
+        row.agent === "programmer" &&
+        (row.notes?.startsWith("Agent session") || row.title === row.title); // all programmer tasks
+
+      if (isAgentSession && row.agent === "programmer") {
+        const existing = recentSessionsByGoal.get(row.goalId) ?? [];
+        if (existing.length < 5) {
+          // Extract a clean summary from notes
+          const rawNotes = row.notes ?? "";
+          const isActive = row.status === "active";
+          existing.push({
+            id: row.id,
+            status: row.status,
+            notes: rawNotes.startsWith("Agent session in progress") ? null : rawNotes.slice(0, 400),
+            updatedAt: row.updatedAt,
+            isActive,
+          });
+          recentSessionsByGoal.set(row.goalId, existing);
+        }
+      } else {
+        // Manual tasks (inbox, active, completed — not agent-generated)
+        const existing = recentManualByGoal.get(row.goalId) ?? [];
+        if (existing.length < 5) {
+          existing.push({
+            id: row.id,
+            title: row.title,
+            status: row.status,
+            updatedAt: row.updatedAt,
+          });
+          recentManualByGoal.set(row.goalId, existing);
+        }
       }
+    }
+
+    // Count active sessions per goal (for the "in flight" indicator)
+    const activeSessionByGoal = new Map<string, boolean>();
+    for (const [goalId, sessions] of recentSessionsByGoal) {
+      activeSessionByGoal.set(goalId, sessions.some(s => s.isActive));
     }
 
     const result = activeGoals.map(g => ({
@@ -141,7 +191,12 @@ export async function handleGoalsRequest(
       updatedAt: g.updatedAt,
       openTaskCount: openCountByGoal.get(g.id) ?? 0,
       completedTaskCount: completedCountByGoal.get(g.id) ?? 0,
-      recentTasks: recentByGoal.get(g.id) ?? [],
+      // Agent sessions — what the system has done autonomously
+      recentSessions: recentSessionsByGoal.get(g.id) ?? [],
+      // Manual tasks — created by agents or Rafe (non-programmer-agent tracking tasks)
+      recentTasks: recentManualByGoal.get(g.id) ?? [],
+      // Whether an agent session is currently running for this goal
+      sessionActive: activeSessionByGoal.get(g.id) ?? false,
     }));
 
     return json(res, { goals: result });

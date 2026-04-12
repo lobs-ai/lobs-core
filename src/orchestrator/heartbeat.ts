@@ -191,7 +191,7 @@ async function checkInboxHealth(): Promise<InboxHealthResult> {
   // Exclude intel_insight — those are batch-generated feed items, not actionable inbox items
   // NULL action_status means the item was inserted before the action_status column existed — treat as pending
   // 5-minute grace period: exclude freshly-inserted items to avoid alerting during bulk inserts (race condition with inbox writer)
-  const result = db.prepare("SELECT COUNT(*) as count FROM inbox_items WHERE is_read = 0 AND type != 'intel_insight' AND (action_status = 'pending' OR action_status IS NULL) AND modified_at < datetime('now', '-5 minutes')").get() as { count: number };
+  const result = db.prepare("SELECT COUNT(*) as count FROM inbox_items WHERE is_read = 0 AND type != 'intel_insight' AND (action_status = 'pending' OR action_status IS NULL) AND (modified_at IS NULL OR modified_at < datetime('now', '-5 minutes'))").get() as { count: number };
   const unreadItems = result.count;
   
   let status: "ok" | "warning" | "error" = "ok";

@@ -188,7 +188,7 @@ export class GoalsWorker extends BaseWorker {
               .update(tasks)
               .set({
                 status: result.succeeded ? "completed" : "rejected",
-                notes: result.output?.slice(0, 500) ?? result.error ?? "No output",
+                notes: result.output?.slice(0, 2000) ?? result.error ?? "No output",
                 updatedAt: new Date().toISOString(),
               })
               .where(eq(tasks.id, trackingTaskId));
@@ -279,7 +279,7 @@ function buildGoalSessionPrompt(
       ? recentCompleted
           .map(
             (t) =>
-              `- ${t.title}${t.notes ? `: ${t.notes.slice(0, 120)}` : ""}`,
+              `- ${t.title}${t.notes ? `: ${t.notes.slice(0, 300)}` : ""}`,
           )
           .join("\n")
       : "none yet — this is fresh territory";
@@ -315,7 +315,7 @@ Start by looking around: check the relevant repos, read recent code or docs, und
 
 **Bias toward action over planning.** If you find something broken, fix it. If you find something missing, build it. If you find something that needs research, do the research and write up the findings. Leave the codebase, docs, or task list in a better state than you found it.
 
-**When you're done:** Use the task_create tool to log what you accomplished as a completed task linked to goal_id \`${goal.id}\`. If you found important next steps, create them as inbox tasks with goal_id \`${goal.id}\` so they're tracked.
+**When you're done:** Use the task_create tool to log what you accomplished as a completed task (status: "completed") linked to goal_id \`${goal.id}\`. If you found important next steps, create them as inbox tasks (status: "inbox") with goal_id \`${goal.id}\` so they get picked up next session. If the goal's description is outdated or needs updating based on what you discovered, use goal_update to refine it.
 
 The lobs-core repo is at ~/lobs/lobs-core/. Other relevant repos may be in ~/lobs/ or ~/paw/. Use your judgment on where to look.`;
 }

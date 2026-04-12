@@ -319,9 +319,9 @@ Please answer the student's question using the course materials above. Remember 
   }
 }
 
-function parseAnswerWithConfidence(rawText: string): LLMAnswerResult {
+export function parseAnswerWithConfidence(rawText: string): LLMAnswerResult {
   // Extract the JSON confidence block from end of response
-  const jsonMatch = rawText.match(/\{"\s*confidence"\s*:\s*([0-9.]+)\s*,\s*"reason"\s*:\s*"([^"]+)"\s*\}/);
+  const jsonMatch = rawText.match(/\{\s*"confidence"\s*:\s*([0-9.]+)\s*,\s*"reason"\s*:\s*"([^"]+)"\s*\}/);
 
   let confidence = 0.5;
   let confidenceReason = "unknown";
@@ -339,7 +339,7 @@ function parseAnswerWithConfidence(rawText: string): LLMAnswerResult {
 
 // ── Citation Extraction ───────────────────────────────────────────────────────
 
-function extractCitations(answerText: string, results: GsiSearchResult[]): string[] {
+export function extractCitations(answerText: string, results: GsiSearchResult[]): string[] {
   const citations = new Set<string>();
 
   // Extract inline citations from answer text [Source: ...]
@@ -363,7 +363,7 @@ function extractCitations(answerText: string, results: GsiSearchResult[]): strin
  * If we have high-scoring chunks, we can trust the answer more.
  * If we have no chunks, we should be very skeptical.
  */
-function blendConfidence(llmConfidence: number, results: GsiSearchResult[]): number {
+export function blendConfidence(llmConfidence: number, results: GsiSearchResult[]): number {
   if (results.length === 0) return Math.min(llmConfidence, 0.3);
 
   const topScore = results[0].score;

@@ -72,7 +72,7 @@ function buildStructuredSubagentEvent(params: {
 
 // Default tools each agent type gets
 const AGENT_DEFAULT_TOOLS: Record<string, ToolName[]> = {
-  programmer: ["exec", "read", "write", "edit", "memory_search", "memory_read", "memory_write", "librarian_ask", "librarian_audit", "librarian_status"],
+  programmer: ["exec", "read", "write", "edit", "memory_search", "memory_read", "memory_write", "librarian_ask", "librarian_audit", "librarian_status", "task_create", "task_update", "task_list", "task_view", "goal_update", "goal_list", "goal_view"],
   reviewer: ["exec", "read", "memory_search", "memory_read", "memory_write", "librarian_ask", "librarian_status"],
   researcher: ["exec", "read", "write", "web_search", "web_fetch", "memory_search", "memory_read", "memory_write", "librarian_ask", "librarian_status"],
   writer: ["read", "write", "edit", "memory_search", "memory_read", "memory_write", "librarian_ask", "librarian_status"],
