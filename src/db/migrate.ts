@@ -1568,6 +1568,50 @@ export function runMigrations(db: PawDB): void {
   db.run(sql`CREATE INDEX IF NOT EXISTS training_data_task_type_idx ON training_data(task_type)`);
   db.run(sql`CREATE INDEX IF NOT EXISTS training_data_review_status_idx ON training_data(review_status)`);
 
+  // ── Agent execution traces ────────────────────────────────────────────────
+  // Added: 2026-04-12 — OpenTelemetry-compatible agent run traces.
+  // agent_traces: one row per agent run (root span metadata + aggregates).
+  // trace_spans: one row per event within a run (LLM turns, tool calls, etc.).
+  db.run(sql`CREATE TABLE IF NOT EXISTS agent_traces (
+    trace_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    agent_type TEXT NOT NULL,
+    task_id TEXT,
+    task_summary TEXT,
+    model TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    start_time_ms INTEGER NOT NULL,
+    end_time_ms INTEGER,
+    duration_ms INTEGER,
+    total_turns INTEGER NOT NULL DEFAULT 0,
+    total_tool_calls INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL,
+    stop_reason TEXT,
+    error_message TEXT,
+    span_count INTEGER NOT NULL DEFAULT 0
+  )`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS agent_traces_run_id_idx ON agent_traces(run_id)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS agent_traces_status_idx ON agent_traces(status)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS agent_traces_start_time_idx ON agent_traces(start_time_ms DESC)`);
+
+  db.run(sql`CREATE TABLE IF NOT EXISTS trace_spans (
+    span_id TEXT PRIMARY KEY,
+    trace_id TEXT NOT NULL,
+    parent_span_id TEXT,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'agent',
+    start_time_ms INTEGER NOT NULL,
+    end_time_ms INTEGER,
+    duration_ms INTEGER,
+    status TEXT NOT NULL DEFAULT 'running',
+    attributes_json TEXT NOT NULL DEFAULT '{}',
+    events_json TEXT NOT NULL DEFAULT '[]'
+  )`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS trace_spans_trace_id_idx ON trace_spans(trace_id)`);
+  db.run(sql`CREATE INDEX IF NOT EXISTS trace_spans_kind_idx ON trace_spans(kind)`);
+
   // ── Per-session disabled tools (idempotent) ───────────────────────────────
   // Added: 2026-03-15 — JSON array of tool names to disable for a nexus session,
   // e.g. '["exec","write"]'. null = no overrides (all tools enabled).
