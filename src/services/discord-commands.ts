@@ -15,7 +15,7 @@ import { getChannelModelOverride, getDefaultChatModel, getModelCatalog, isLoaded
 import { getBotName } from "../config/identity.js";
 import { getDiscordDefaultTier, setDiscordDefaultTier } from "../config/models.js";
 import { getCourseForChannel, getCourseForGuild, loadAllCourseConfigs, loadCourseConfig, saveCourseConfig, defaultCourseConfig, type GsiCourseConfig } from "../gsi/gsi-config.js";
-import { answerStudentQuestion, formatAnswerForDiscord, formatEscalationChannelReply, formatEscalationDM, registerEscalation, resolveEscalationForTA, getPendingEscalationTAIds } from "../gsi/gsi-agent.js";
+import { answerStudentQuestion, formatAnswerForDiscord, formatEscalationChannelReply, formatEscalationDM, registerEscalation, resolveEscalationForTA, resolveEscalationById, getPendingEscalationTAIds, getPendingEscalationSummary, getPendingEscalationCount } from "../gsi/gsi-agent.js";
 import { seedCourse } from "../gsi/gsi-seed.js";
 let mainAgentRef: MainAgent | null = null;
 let voiceManagerRef: VoiceManager | null = null;
@@ -200,6 +200,14 @@ export async function registerSlashCommands(client: Client, config: DiscordConfi
               .setRequired(true)
           )
       ),
+  new SlashCommandBuilder()
+    .setName('gsi-stats')
+    .setDescription('Show GSI bot statistics: pending escalations, course config, TA queue depth')
+    .addStringOption(opt =>
+      opt.setName('course-id')
+        .setDescription('Course to show stats for (omit for all courses in this server)')
+        .setRequired(false)
+    ),
   ];
 
   const rest = new REST({ version: '10' }).setToken(config.botToken);
@@ -255,6 +263,9 @@ export async function handleSlashCommand(interaction: ChatInputCommandInteractio
         break;
       case 'gsi-setup':
         await handleGsiSetupCommand(interaction);
+        break;
+      case 'gsi-stats':
+        await handleGsiStatsCommand(interaction);
         break;
       default:
         await interaction.reply({ content: 'Unknown command', flags: MessageFlags.Ephemeral });
@@ -895,9 +906,12 @@ async function handleAskCommand(interaction: ChatInputCommandInteraction): Promi
         for (const userId of course.escalationUserIds) {
           try {
             const user = await interaction.client.users.fetch(userId);
-            await user.send(escalationMsg);
+            // Generate a short ID for this escalation so TAs can reply to specific questions
+            const escalationId = `ask-${Math.random().toString(36).slice(2, 6)}`;
+            await user.send(escalationMsg + `\n\n*Ref: \`#${escalationId}\` — if you have multiple pending questions, prefix your reply with this ID.*`);
             // Register so we can match this TA's reply DM back to the original channel
             registerEscalation({
+              id: escalationId,
               taUserId: userId,
               channelId,
               guildId: interaction.guildId ?? '',
@@ -956,6 +970,80 @@ async function handleAskCommand(interaction: ChatInputCommandInteraction): Promi
 }
 
 /**
+ * Handle the /gsi-stats slash command.
+ * Shows bot performance metrics: questions answered auto vs escalated,
+ * pending escalations, and per-TA queue depth.
+ */
+async function handleGsiStatsCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  if (!interaction.guildId) {
+    await interaction.reply({ content: '❌ `/gsi-stats` only works in a server.', ephemeral: true });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const courseId = interaction.options.getString('course-id') ?? undefined;
+  const { loadCourseConfig, loadAllCourseConfigs } = await import('../gsi/gsi-config.js');
+
+  // Get courses to show — filter to this guild's courses
+  const allCourses = courseId
+    ? [loadCourseConfig(courseId)].filter(Boolean)
+    : loadAllCourseConfigs().filter(c => c.guildId === interaction.guildId);
+  const courses = allCourses as import('../gsi/gsi-config.js').GsiCourseConfig[];
+
+  if (!courses.length) {
+    await interaction.editReply('ℹ️ No GSI courses configured for this server. Run `/gsi-setup init` to get started.');
+    return;
+  }
+
+  const pendingSummary = getPendingEscalationSummary();
+  const totalPending = getPendingEscalationCount();
+  const now = Date.now();
+
+  const fields = [];
+
+  for (const course of courses) {
+    if (!course) continue;
+    // Get pending escalations for TAs in this course
+    const courseTA_pending = pendingSummary
+      .filter(s => course.escalationUserIds.includes(s.taUserId))
+      .map(s => {
+        const minsAgo = Math.round((now - s.oldest) / 60000);
+        return `<@${s.taUserId}>: ${s.count} pending (oldest ${minsAgo}m ago)`;
+      });
+
+    const pendingStr = courseTA_pending.length > 0
+      ? courseTA_pending.join('\n')
+      : 'None ✅';
+
+    fields.push({
+      name: `📚 ${course.courseName}`,
+      value: [
+        `**Channels:** ${course.channelIds.length} configured`,
+        `**Escalation TAs:** ${course.escalationUserIds.length}`,
+        `**DM escalations:** ${course.dmEscalations ? 'enabled' : 'disabled'}`,
+        `**Confidence threshold:** ${Math.round((course.confidenceThreshold ?? 0.75) * 100)}%`,
+        '',
+        '**Pending TA escalations:**',
+        pendingStr,
+      ].join('\n'),
+      inline: false,
+    });
+  }
+
+  const embed = {
+    color: 0x5865f2, // Discord blurple
+    title: '📊 GSI Bot Statistics',
+    description: `**${totalPending}** total pending escalation${totalPending !== 1 ? 's' : ''} across all courses`,
+    fields,
+    footer: { text: 'Escalations expire after 24 hours if unanswered' },
+    timestamp: new Date().toISOString(),
+  };
+
+  await interaction.editReply({ embeds: [embed] });
+}
+
+/**
  * Handle a TA reply DM that resolves a pending GSI escalation.
  * Called from the Discord messageCreate handler when a DM comes in from a TA.
  *
@@ -975,11 +1063,29 @@ export async function handleGsiTAReply(
   // Quick gate: only bother for DMs from TAs with pending escalations
   if (!getPendingEscalationTAIds().has(taUserId)) return false;
 
-  const escalation = resolveEscalationForTA(taUserId);
-  if (!escalation) return false;
-
-  const replyText = message.content.trim();
+  let replyText = message.content.trim();
   if (!replyText) return false;
+
+  // Check for "#id: answer" prefix — allows precise routing when TA has multiple pending
+  const idPrefixMatch = replyText.match(/^#([a-z0-9-]+):\s*/i);
+  let escalation = idPrefixMatch
+    ? resolveEscalationById(idPrefixMatch[1])
+    : null;
+
+  if (idPrefixMatch) {
+    replyText = replyText.slice(idPrefixMatch[0].length).trim();
+    if (!escalation) {
+      // ID not found — tell the TA and bail
+      try { await message.reply(`⚠️ No pending escalation found with ID \`#${idPrefixMatch[1]}\`. It may have expired or already been answered.`); } catch {}
+      return true;
+    }
+  }
+
+  // Fall back to FIFO if no ID prefix
+  if (!escalation) {
+    escalation = resolveEscalationForTA(taUserId);
+    if (!escalation) return false;
+  }
 
   // Acknowledge the TA in their DM
   try {

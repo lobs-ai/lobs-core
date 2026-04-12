@@ -62,6 +62,8 @@ export interface GsiEscalation {
 
 /** A pending escalation waiting for a TA reply */
 export interface PendingEscalation {
+  /** Short unique ID for this escalation (e.g. "ask-a3f") */
+  id: string;
   /** Discord user ID of the TA who was notified */
   taUserId: string;
   /** Channel ID where the question was asked */
@@ -131,6 +133,24 @@ export function resolveEscalationForTA(taUserId: string): PendingEscalation | nu
 }
 
 /**
+ * Retrieve and remove a specific pending escalation by its ID.
+ * Used when a TA prefixes their reply with "#<id>: answer" to route precisely.
+ * Returns null if not found or expired.
+ */
+export function resolveEscalationById(id: string): PendingEscalation | null {
+  const now = Date.now();
+  for (const [taId, queue] of pendingEscalations) {
+    const idx = queue.findIndex(e => e.id === id && now - e.createdAt < ESCALATION_TTL_MS);
+    if (idx >= 0) {
+      const [resolved] = queue.splice(idx, 1);
+      if (queue.length === 0) pendingEscalations.delete(taId);
+      return resolved;
+    }
+  }
+  return null;
+}
+
+/**
  * Get all TA user IDs that currently have pending escalations.
  * Used by the DM intercept to quickly check if an incoming DM is a TA reply.
  */
@@ -155,6 +175,22 @@ export function getPendingEscalationCount(): number {
     total += queue.filter(e => now - e.createdAt < ESCALATION_TTL_MS).length;
   }
   return total;
+}
+
+/**
+ * Get a summary of pending escalations for /gsi-stats display.
+ */
+export function getPendingEscalationSummary(): { taUserId: string; count: number; oldest: number }[] {
+  const now = Date.now();
+  const summary: { taUserId: string; count: number; oldest: number }[] = [];
+  for (const [taId, queue] of pendingEscalations) {
+    const fresh = queue.filter(e => now - e.createdAt < ESCALATION_TTL_MS);
+    if (fresh.length > 0) {
+      const oldest = Math.min(...fresh.map(e => e.createdAt));
+      summary.push({ taUserId: taId, count: fresh.length, oldest });
+    }
+  }
+  return summary;
 }
 
 // ── Vector Search ─────────────────────────────────────────────────────────────
