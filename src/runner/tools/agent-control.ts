@@ -72,12 +72,12 @@ function buildStructuredSubagentEvent(params: {
 
 // Default tools each agent type gets
 const AGENT_DEFAULT_TOOLS: Record<string, ToolName[]> = {
-  programmer: ["exec", "read", "write", "edit", "memory_search", "memory_read", "memory_write", "librarian_ask"],
-  reviewer: ["exec", "read", "memory_search", "memory_read", "memory_write", "librarian_ask"],
-  researcher: ["exec", "read", "write", "web_search", "web_fetch", "memory_search", "memory_read", "memory_write", "librarian_ask"],
-  writer: ["read", "write", "edit", "memory_search", "memory_read", "memory_write", "librarian_ask"],
-  architect: ["read", "write", "memory_search", "memory_read", "memory_write", "librarian_ask"],
-  librarian: ["memory_search", "memory_read", "read", "grep", "glob", "find_files", "code_search"],
+  programmer: ["exec", "read", "write", "edit", "memory_search", "memory_read", "memory_write", "librarian_ask", "librarian_audit", "librarian_status"],
+  reviewer: ["exec", "read", "memory_search", "memory_read", "memory_write", "librarian_ask", "librarian_status"],
+  researcher: ["exec", "read", "write", "web_search", "web_fetch", "memory_search", "memory_read", "memory_write", "librarian_ask", "librarian_status"],
+  writer: ["read", "write", "edit", "memory_search", "memory_read", "memory_write", "librarian_ask", "librarian_status"],
+  architect: ["read", "write", "memory_search", "memory_read", "memory_write", "librarian_ask", "librarian_audit", "librarian_status"],
+  librarian: ["memory_search", "memory_read", "memory_write", "read", "write", "edit", "grep", "glob", "find_files", "code_search", "librarian_ask", "librarian_reindex_knowledge_base", "librarian_audit", "librarian_status"],
 };
 
 export const AGENT_CONTROL_TOOLS: ToolDefinition[] = [

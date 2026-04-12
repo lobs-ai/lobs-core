@@ -129,7 +129,7 @@ export type AgentPhase =
   | { phase: 'between_turns'; turn: number; startedAt: number }
   | { phase: 'compacting'; turn: number; startedAt: number };
 
-export type ToolName = "exec" | "read" | "write" | "edit" | "ls" | "grep" | "glob" | "find_files" | "code_search" | "web_search" | "web_fetch" | "memory_search" | "memory_read" | "memory_write" | "spawn_agent" | "run_pipeline" | "list_agents" | "check_agents" | "message_agent" | "stop_agent" | "cron" | "discord" | "process" | "humanize" | "imagine" | "html_to_pdf" | "dispatch_agent" | "tool_manage" | "librarian_ask" | "librarian_reindex_knowledge_base" | "task_create" | "task_update" | "task_delete" | "task_list" | "task_view" | "goal_create" | "goal_update" | "goal_list" | "goal_view";
+export type ToolName = "exec" | "read" | "write" | "edit" | "ls" | "grep" | "glob" | "find_files" | "code_search" | "web_search" | "web_fetch" | "memory_search" | "memory_read" | "memory_write" | "spawn_agent" | "run_pipeline" | "list_agents" | "check_agents" | "message_agent" | "stop_agent" | "cron" | "discord" | "process" | "humanize" | "imagine" | "html_to_pdf" | "dispatch_agent" | "tool_manage" | "librarian_ask" | "librarian_reindex_knowledge_base" | "librarian_audit" | "librarian_status" | "task_create" | "task_update" | "task_delete" | "task_list" | "task_view" | "goal_create" | "goal_update" | "goal_list" | "goal_view";
 
 export interface AgentContext {
   taskId?: string;
