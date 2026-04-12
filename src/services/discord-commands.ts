@@ -14,8 +14,9 @@ import { getModelForTier } from "../config/models.js";
 import { getChannelModelOverride, getDefaultChatModel, getModelCatalog, isLoadedLocalModel, normalizeModelSelection, setChannelModelOverride } from "./model-catalog.js";
 import { getBotName } from "../config/identity.js";
 import { getDiscordDefaultTier, setDiscordDefaultTier } from "../config/models.js";
-import { getCourseForChannel } from "../gsi/gsi-config.js";
+import { getCourseForChannel, getCourseForGuild, loadAllCourseConfigs, loadCourseConfig, saveCourseConfig, defaultCourseConfig, type GsiCourseConfig } from "../gsi/gsi-config.js";
 import { answerStudentQuestion, formatAnswerForDiscord, formatEscalationChannelReply, formatEscalationDM } from "../gsi/gsi-agent.js";
+import { seedCourse } from "../gsi/gsi-seed.js";
 let mainAgentRef: MainAgent | null = null;
 let voiceManagerRef: VoiceManager | null = null;
 
@@ -135,6 +136,70 @@ export async function registerSlashCommands(client: Client, config: DiscordConfi
             { name: 'off — hide all tool steps', value: 'off' },
           )
       ),
+
+    new SlashCommandBuilder()
+      .setName('ask')
+      .setDescription('Ask a question about course material — answered by the GSI AI assistant')
+      .addStringOption(opt =>
+        opt.setName('question')
+          .setDescription('Your question about the course')
+          .setRequired(true)
+      ),
+
+    new SlashCommandBuilder()
+      .setName('gsi-setup')
+      .setDescription('Configure the GSI Office Hours bot for this server (admin only)')
+      .setDefaultMemberPermissions('8') // ADMINISTRATOR
+      .addSubcommand(sub =>
+        sub.setName('init')
+          .setDescription('Initialize GSI bot for a course in this server')
+          .addStringOption(opt =>
+            opt.setName('course-id')
+              .setDescription('Course identifier, e.g. eecs281')
+              .setRequired(true)
+          )
+          .addStringOption(opt =>
+            opt.setName('course-name')
+              .setDescription('Full course name, e.g. "EECS 281: Data Structures"')
+              .setRequired(true)
+          )
+          .addStringOption(opt =>
+            opt.setName('escalation-users')
+              .setDescription('Comma-separated Discord user IDs to DM when confidence is low')
+              .setRequired(false)
+          )
+      )
+      .addSubcommand(sub =>
+        sub.setName('channel')
+          .setDescription('Add or remove this channel from GSI monitoring')
+          .addStringOption(opt =>
+            opt.setName('action')
+              .setDescription('Add or remove this channel')
+              .setRequired(true)
+              .addChoices(
+                { name: 'add — monitor this channel for /ask commands', value: 'add' },
+                { name: 'remove — stop monitoring this channel', value: 'remove' },
+              )
+          )
+          .addStringOption(opt =>
+            opt.setName('course-id')
+              .setDescription('Course ID to associate this channel with')
+              .setRequired(false)
+          )
+      )
+      .addSubcommand(sub =>
+        sub.setName('status')
+          .setDescription('Show GSI configuration for this server')
+      )
+      .addSubcommand(sub =>
+        sub.setName('seed')
+          .setDescription('Re-seed the knowledge base from built-in FAQ data')
+          .addStringOption(opt =>
+            opt.setName('course-id')
+              .setDescription('Course ID to re-seed')
+              .setRequired(true)
+          )
+      ),
   ];
 
   const rest = new REST({ version: '10' }).setToken(config.botToken);
@@ -187,6 +252,9 @@ export async function handleSlashCommand(interaction: ChatInputCommandInteractio
         break;
       case 'ask':
         await handleAskCommand(interaction);
+        break;
+      case 'gsi-setup':
+        await handleGsiSetupCommand(interaction);
         break;
       default:
         await interaction.reply({ content: 'Unknown command', flags: MessageFlags.Ephemeral });
@@ -625,6 +693,159 @@ async function handleVoiceCommand(interaction: ChatInputCommandInteraction): Pro
  * Searches course materials in lobs-memory, generates an answer with citations,
  * and escalates to the human TA if confidence is below the configured threshold.
  */
+async function handleGsiSetupCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const subcommand = interaction.options.getSubcommand(true);
+  const guildId = interaction.guildId;
+
+  if (!guildId) {
+    await interaction.reply({ content: '❌ `/gsi-setup` only works in a server, not in DMs.', ephemeral: true });
+    return;
+  }
+
+  switch (subcommand) {
+    case 'init': {
+      const courseId = interaction.options.getString('course-id', true).trim().toLowerCase();
+      const courseName = interaction.options.getString('course-name', true).trim();
+      const escalationStr = interaction.options.getString('escalation-users', false) ?? '';
+      const escalationUserIds = escalationStr
+        ? escalationStr.split(',').map(s => s.trim()).filter(Boolean)
+        : [];
+
+      const existing = loadCourseConfig(courseId);
+      const config: GsiCourseConfig = {
+        ...(existing ?? defaultCourseConfig(courseId)),
+        courseId,
+        courseName,
+        guildId,
+        escalationUserIds,
+        enabled: true,
+      };
+      saveCourseConfig(config);
+
+      await interaction.reply({
+        content: [
+          `✅ **GSI bot initialized** for **${courseName}** (\`${courseId}\`)`,
+          `Guild: \`${guildId}\``,
+          escalationUserIds.length > 0
+            ? `Escalation users: ${escalationUserIds.map(id => `<@${id}>`).join(', ')}`
+            : '⚠️ No escalation users set — low-confidence answers will be posted with a warning.',
+          ``,
+          `Next steps:`,
+          `• Run \`/gsi-setup channel add course-id:${courseId}\` in each channel where students should use \`/ask\``,
+          `• Add course materials to the \`${courseId}-course\` memory collection`,
+          `• Run \`/gsi-setup seed course-id:${courseId}\` to seed built-in FAQ data`,
+        ].join('\n'),
+        ephemeral: true,
+      });
+      break;
+    }
+
+    case 'channel': {
+      const action = interaction.options.getString('action', true) as 'add' | 'remove';
+      const channelId = interaction.channelId;
+      const courseId = interaction.options.getString('course-id', false)?.trim().toLowerCase();
+
+      // Find the course for this guild
+      let course: GsiCourseConfig | null = null;
+      if (courseId) {
+        course = loadCourseConfig(courseId);
+        if (course && course.guildId !== guildId) course = null;
+      } else {
+        course = getCourseForGuild(guildId);
+      }
+
+      if (!course) {
+        await interaction.reply({
+          content: courseId
+            ? `❌ No GSI course found with ID \`${courseId}\` for this server. Run \`/gsi-setup init\` first.`
+            : `❌ No GSI course configured for this server. Run \`/gsi-setup init\` first.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const channelIds = course.channelIds ?? [];
+      if (action === 'add') {
+        if (!channelIds.includes(channelId)) {
+          course.channelIds = [...channelIds, channelId];
+          saveCourseConfig(course);
+          await interaction.reply({
+            content: `✅ <#${channelId}> is now monitored for \`/ask\` commands (course: **${course.courseName}**).`,
+            ephemeral: true,
+          });
+        } else {
+          await interaction.reply({ content: `ℹ️ This channel is already monitored for **${course.courseName}**.`, ephemeral: true });
+        }
+      } else {
+        if (channelIds.includes(channelId)) {
+          course.channelIds = channelIds.filter(id => id !== channelId);
+          saveCourseConfig(course);
+          await interaction.reply({
+            content: `✅ <#${channelId}> removed from GSI monitoring for **${course.courseName}**.`,
+            ephemeral: true,
+          });
+        } else {
+          await interaction.reply({ content: `ℹ️ This channel wasn't being monitored for **${course.courseName}**.`, ephemeral: true });
+        }
+      }
+      break;
+    }
+
+    case 'status': {
+      const allCourses = loadAllCourseConfigs().filter(c => c.guildId === guildId);
+
+      if (allCourses.length === 0) {
+        await interaction.reply({
+          content: `ℹ️ No GSI courses configured for this server. Run \`/gsi-setup init\` to get started.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const lines = allCourses.flatMap(c => [
+        `**${c.courseName}** (\`${c.courseId}\`)`,
+        `  • Status: ${c.enabled ? '🟢 enabled' : '🔴 disabled'}`,
+        `  • Channels: ${c.channelIds.length > 0 ? c.channelIds.map(id => `<#${id}>`).join(', ') : 'all channels'}`,
+        `  • Confidence threshold: ${Math.round(c.confidenceThreshold * 100)}%`,
+        `  • Escalation: ${c.escalationUserIds.length > 0 ? c.escalationUserIds.map(id => `<@${id}>`).join(', ') : 'none'}`,
+        `  • Memory collections: ${c.memoryCollections.join(', ')}`,
+        `  • Log channel: ${c.logChannelId ? `<#${c.logChannelId}>` : 'none'}`,
+        '',
+      ]);
+
+      await interaction.reply({ content: `**GSI Status for this server:**\n\n${lines.join('\n')}`.slice(0, 2000), ephemeral: true });
+      break;
+    }
+
+    case 'seed': {
+      const courseId = interaction.options.getString('course-id', true).trim().toLowerCase();
+      const course = loadCourseConfig(courseId);
+
+      if (!course || course.guildId !== guildId) {
+        await interaction.reply({ content: `❌ Course \`${courseId}\` not found for this server.`, ephemeral: true });
+        return;
+      }
+
+      await interaction.deferReply({ ephemeral: true });
+
+      try {
+        const result = await seedCourse(courseId, true);
+        await interaction.editReply(
+          result.errors.length === 0
+            ? `✅ Seeded **${course.courseName}**: ${result.totalChunks} chunks indexed.`
+            : `❌ Seed failed for **${course.courseName}**: ${result.errors[0]}`
+        );
+      } catch (err) {
+        await interaction.editReply(`❌ Seed error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      break;
+    }
+
+    default:
+      await interaction.reply({ content: `Unknown subcommand: \`${subcommand}\``, ephemeral: true });
+  }
+}
+
 async function handleAskCommand(interaction: ChatInputCommandInteraction): Promise<void> {
   const question = interaction.options.getString('question', true).trim();
   const guildId = interaction.guildId;
@@ -659,23 +880,41 @@ async function handleAskCommand(interaction: ChatInputCommandInteraction): Promi
       );
       await interaction.editReply(channelReply);
 
-      // DM human TAs
-      const taUserIds = course.dmEscalations ? course.escalationUserIds : [];
-      for (const userId of taUserIds) {
-        try {
-          const user = await interaction.client.users.fetch(userId);
-          const escalationMsg = formatEscalationDM({
-            question,
-            draftAnswer: answer.answer,
-            confidence: answer.confidence,
-            reason: `Confidence ${Math.round(answer.confidence * 100)}% below ${Math.round(course.confidenceThreshold * 100)}% threshold`,
-            channelId,
-            askedBy: `<@${interaction.user.id}>`,
-          });
-          await user.send(escalationMsg);
-        } catch (dmErr) {
-          console.warn(`[gsi] Could not DM escalation to user ${userId}:`, dmErr);
+      // Notify human TAs of the escalation
+      const escalationMsg = formatEscalationDM({
+        question,
+        draftAnswer: answer.answer,
+        confidence: answer.confidence,
+        reason: `Confidence ${Math.round(answer.confidence * 100)}% below ${Math.round(course.confidenceThreshold * 100)}% threshold`,
+        channelId,
+        askedBy: `<@${interaction.user.id}>`,
+      });
+
+      if (course.dmEscalations) {
+        // DM each TA privately
+        for (const userId of course.escalationUserIds) {
+          try {
+            const user = await interaction.client.users.fetch(userId);
+            await user.send(escalationMsg);
+          } catch (dmErr) {
+            console.warn(`[gsi] Could not DM escalation to user ${userId}:`, dmErr);
+          }
         }
+      } else if (course.logChannelId) {
+        // Post escalation alert to the log channel so TAs see it
+        try {
+          const logChannel = await interaction.client.channels.fetch(course.logChannelId);
+          if (logChannel?.isTextBased()) {
+            const mentions = course.escalationUserIds.map(id => `<@${id}>`).join(' ');
+            const header = mentions ? `${mentions} ⚠️ **Escalation needed**\n` : '⚠️ **Escalation needed**\n';
+            await (logChannel as import('discord.js').TextChannel).send(header + escalationMsg);
+          }
+        } catch (logErr) {
+          console.warn('[gsi] Could not post escalation to log channel:', logErr);
+        }
+      } else {
+        // Fallback: log to console so it's not silently dropped
+        console.warn('[gsi] Escalation for low-confidence answer — no log channel or DM configured. TAs:', course.escalationUserIds);
       }
     } else {
       const reply = formatAnswerForDiscord(answer, course.courseName);
@@ -704,3 +943,4 @@ async function handleAskCommand(interaction: ChatInputCommandInteraction): Promi
     await interaction.editReply('❌ Something went wrong processing your question. Please try again or ask your TA directly.');
   }
 }
+

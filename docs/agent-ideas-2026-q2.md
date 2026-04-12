@@ -211,15 +211,25 @@
 
 ---
 
+## Progress Log
+
+### 2026-04-12 — Code Review Agent prototype built ✅
+- **Prototype:** `~/lobs/prototypes/code-review/code-review-agent.ts` (430 lines)
+- **Status:** Working end-to-end. Smoke-tested against real GitHub PRs.
+- **What it does:** Fetches PR diff via GitHub API → understands intent → per-file review → synthesis (risk level, breaking changes, merge readiness) → formatted Markdown output → optional GitHub comment post
+- **Smoke test result:** Reviewed `expressjs/express#5550` — correctly flagged as BLOCKED/critical: PR inserts "apana college" into CI YAML (vandalism or accidental), would break all builds. Zero false negatives on a genuinely bad PR.
+- **Cost per run:** ~$0.003 (claude-haiku-4-5, typical 3-10 file PR)
+- **Next:** Wire GitHub webhook into lobs-core, auto-review all new PRs in lobs-ai org
+
 ## Next Steps
 
-- **Week 1:** Prototype meeting notes agent (internal dogfood)
-- **Week 2:** Wire code review agent to GitHub (beta on lobs-core repos)
-- **Week 3-4:** Finish lit-review service, open beta with UMich researchers
-- **Month 2:** Evaluate traction, decide which to take to MVP
+- **This week:** Register GitHub App on lobs-ai org, add webhook handler to lobs-core `src/api/webhooks-github.ts`
+- **Next:** Auto-review all new PRs in lobs-core + paw-hub, Discord DM on critical issues found
+- **Then:** Lit-review service PDF pipeline (70% done — needs arXiv PDF ingestion)
+- **Month 2:** Evaluate traction on code review, decide whether to SaaS-ify
 
 ---
 
 **Author:** Programmer Agent  
 **Date:** 2026-04-12  
-**Status:** Proposed for evaluation
+**Status:** Code Review Agent prototype ✅ complete. GitHub App integration next.

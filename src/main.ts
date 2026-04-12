@@ -9,6 +9,7 @@
 import { initDb, closeDb, getDb, getRawDb } from "./db/connection.js";
 import { runMigrations } from "./db/migrate.js";
 import { seedDefaultWorkflows } from "./workflow/seeds.js";
+import { seedAllCourses } from "./gsi/gsi-seed.js";
 import { startControlLoop, stopControlLoop, flushWorkerCheckpoints } from "./orchestrator/control-loop.js";
 import { startServer } from "./server.js";
 import { purgeOldArchivedSessions } from "./api/chat.js";
@@ -333,6 +334,9 @@ async function main() {
     console.warn(`Workflow seed warning: ${err}`);
   }
 
+  // Seed GSI course knowledge bases (no-op if already seeded)
+  seedAllCourses().catch(err => console.warn(`GSI seed warning: ${err}`));
+
   // Initialize hook system and tool gating
   console.log("Initializing hook system...");
   initToolGate();
@@ -343,7 +347,7 @@ async function main() {
   // initMemoryDb() and initToolGate().
   registerEventRecorderHook(null as never);  // _api param is unused
   registerReflectionTriggerHook();
-  registerTracerHook(getDb());
+  registerTracerHook(getRawDb());
 
 
   initDynamicToolLoader();
