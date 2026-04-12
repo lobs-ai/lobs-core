@@ -168,9 +168,11 @@ async function callLocalModel(
         model,
         messages: [
           ...baseMessages,
-          // Prefill with empty think block to skip Qwen3.5's reasoning tokens.
-          // This forces the model to jump straight to the answer.
-          { role: "assistant", content: "<think>\n\n</think>\n\n" },
+          // Prefill to skip reasoning tokens — only for Qwen3 thinking models.
+          // qwen2.5 and others don't support this and produce garbage output.
+          ...(model.toLowerCase().includes("qwen3")
+            ? [{ role: "assistant", content: "<think>\n\n</think>\n\n" }]
+            : []),
         ],
         max_tokens: maxTokens,
         temperature,
