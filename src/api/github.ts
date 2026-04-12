@@ -1,8 +1,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { exec } from "node:child_process";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { json, error, parseQuery, parseBody } from "./index.js";
-import { runCodeReview, postReviewComment, formatReviewAsComment, type PrReview } from "../services/code-review.js";
+import { json, error, parseQuery, readRawBody } from "./index.js";
+import { runCodeReview } from "../services/code-review.js";
 import { discordService } from "../services/discord.js";
 
 /**
@@ -280,5 +280,146 @@ export async function handleGitHubRequest(
     }
   }
 
+  // ── POST /api/github/webhook ──────────────────────────────────────────────
+  if (req.method === "POST" && sub === "webhook") {
+    return handleGitHubWebhook(req, res);
+  }
+
   return error(res, "Not found", 404);
 }
+
+// ── GitHub Webhook ─────────────────────────────────────────────────────────────
+
+const WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET;
+// Discord channel to notify on new PR reviews (Lobs Lab #alerts or similar)
+const DISCORD_ALERTS_CHANNEL = process.env.DISCORD_ALERTS_CHANNEL ?? "1466921249421660415";
+
+function verifyWebhookSignature(rawBody: Buffer, signature: string | undefined): boolean {
+  if (!WEBHOOK_SECRET) {
+    // If no secret configured, skip verification (dev mode)
+    console.warn("[github-webhook] No GITHUB_WEBHOOK_SECRET configured — skipping signature verification");
+    return true;
+  }
+  if (!signature) return false;
+
+  const expected = `sha256=${createHmac("sha256", WEBHOOK_SECRET).update(rawBody).digest("hex")}`;
+  try {
+    return timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+  } catch {
+    return false;
+  }
+}
+
+type PrAction = "opened" | "synchronize" | "reopened" | "closed" | "edited" | string;
+
+interface GitHubPrPayload {
+  action: PrAction;
+  number: number;
+  pull_request: {
+    title: string;
+    html_url: string;
+    draft: boolean;
+    user: { login: string };
+    head: { sha: string };
+    state: string;
+  };
+  repository: {
+    name: string;
+    full_name: string;
+    owner: { login: string };
+  };
+  sender: { login: string };
+}
+
+async function handleGitHubWebhook(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const rawBody = await readRawBody(req);
+  const signature = req.headers["x-hub-signature-256"] as string | undefined;
+  const event = req.headers["x-github-event"] as string | undefined;
+
+  // Verify signature
+  if (!verifyWebhookSignature(rawBody, signature)) {
+    console.warn("[github-webhook] Signature verification failed");
+    return error(res, "Invalid webhook signature", 401);
+  }
+
+  // Parse body
+  let payload: GitHubPrPayload;
+  try {
+    payload = JSON.parse(rawBody.toString("utf-8")) as GitHubPrPayload;
+  } catch {
+    return error(res, "Invalid JSON payload", 400);
+  }
+
+  // Only handle pull_request events for opened/synchronize actions
+  if (event !== "pull_request") {
+    return json(res, { ok: true, message: `Ignored event: ${event}` });
+  }
+
+  const { action, number: prNumber, pull_request: pr, repository: repo } = payload;
+
+  if (!["opened", "synchronize", "reopened"].includes(action)) {
+    return json(res, { ok: true, message: `Ignored PR action: ${action}` });
+  }
+
+  // Skip draft PRs
+  if (pr.draft) {
+    return json(res, { ok: true, message: "Skipped draft PR" });
+  }
+
+  const owner = repo.owner.login;
+  const repoName = repo.name;
+
+  console.log(`[github-webhook] PR #${prNumber} ${action} in ${owner}/${repoName}: "${pr.title}"`);
+
+  // Acknowledge immediately — review runs async
+  json(res, { ok: true, message: `Review queued for PR #${prNumber}` });
+
+  // Run review async
+  void runWebhookReview(owner, repoName, prNumber, pr.title, pr.html_url);
+}
+
+async function runWebhookReview(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  prTitle: string,
+  prUrl: string,
+): Promise<void> {
+  const startedAt = Date.now();
+  try {
+    console.log(`[github-webhook] Starting review for ${owner}/${repo}#${prNumber}`);
+
+    const review = await runCodeReview(owner, repo, prNumber, { postReview: true });
+
+    const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+    const riskEmoji = { low: "🟢", medium: "🟡", high: "🟠", critical: "🔴" }[review.riskLevel];
+    const mergeEmoji = { ready: "✅", "needs-changes": "⚠️", blocked: "🚫" }[review.mergeReadiness];
+    const issueCount = review.overallIssues.length + review.fileReviews.reduce((n, fr) => n + fr.issues.length, 0);
+
+    const discordMsg = [
+      `## 🤖 Code Review: \`${owner}/${repo}#${prNumber}\``,
+      `**${prTitle}**`,
+      `${prUrl}`,
+      ``,
+      `${mergeEmoji} **${review.mergeReadiness.toUpperCase()}** · ${riskEmoji} Risk: ${review.riskLevel} · ${issueCount} issue(s) · ${elapsed}s`,
+      ``,
+      review.summary,
+    ].join("\n");
+
+    await discordService.send(DISCORD_ALERTS_CHANNEL, discordMsg);
+    console.log(`[github-webhook] Review posted for ${owner}/${repo}#${prNumber} in ${elapsed}s`);
+  } catch (err) {
+    console.error(`[github-webhook] Review failed for ${owner}/${repo}#${prNumber}:`, err);
+
+    // Notify Discord on failure too
+    try {
+      await discordService.send(
+        DISCORD_ALERTS_CHANNEL,
+        `⚠️ Code review failed for **${owner}/${repo}#${prNumber}** (${prTitle})\nError: ${String(err)}\n${prUrl}`,
+      );
+    } catch {
+      // ignore discord error
+    }
+  }
+}
+

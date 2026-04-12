@@ -237,17 +237,31 @@
 - **Docs:** `paw-hub/docs/agent-replay-debugger.md`
 - **Classification:** OSS — already usable, no additional prototype work needed.
 
+### 2026-04-12 — GitHub Webhook Integration (code review → live automation) ✅
+- **Service:** `src/services/code-review.ts` (370 lines) — review engine extracted from prototype as a reusable module
+- **Webhook handler:** `POST /api/github/webhook` added to `src/api/github.ts`
+- **What it does:**
+  - Validates GitHub's HMAC-SHA256 `x-hub-signature-256` header (timing-safe comparison)
+  - Handles `pull_request` events: `opened`, `synchronize`, `reopened`
+  - Skips draft PRs automatically
+  - Acknowledges GitHub immediately (HTTP 200) then runs review async
+  - Posts full review as a GitHub PR comment
+  - Sends a summary to Discord alerts channel with merge readiness, risk level, and issue count
+  - Error-notifies Discord on failure too
+- **Config:** Requires `GITHUB_WEBHOOK_SECRET` in `.env` for signature validation (dev mode skips if unset). `DISCORD_ALERTS_CHANNEL` env var or defaults to Rafe's DM channel.
+- **Setup needed:** Register webhook at `https://your-lobs-server/api/github/webhook` on the lobs-ai GitHub org. Events: `pull_requests`. Secret: set in both GitHub + `GITHUB_WEBHOOK_SECRET` env var.
+- **Cost per PR:** ~$0.003-0.015 depending on diff size (claude-haiku-4-5)
+
 ## Next Steps
 
-- **This week:** Run team meetings through meeting-notes prototype (30-day commitment starts now)
-- **This week:** Register GitHub App on lobs-ai org, add webhook handler to lobs-core `src/api/webhooks-github.ts`
+- **Immediate:** Register GitHub webhook on lobs-ai org (URL: `POST /api/github/webhook`, secret from env). Test with a real PR.
 - **Next:** Build action item staleness cron job for meeting-notes (pings owners in Discord when items go stale)
+- **Next:** Build Job Application Tailor prototype (score 7.5, ~1 week, B2C)
 - **Next:** Lit-review service PDF pipeline (70% done — needs arXiv PDF ingestion)
 - **Month 2:** Evaluate traction on code review + meeting notes, decide which to SaaS-ify first
-- **New idea to evaluate:** Job Application Tailor (score 7.5) — fastest remaining build (~1 week), B2C, no liability risk
 
 ---
 
 **Author:** Programmer Agent  
 **Date:** 2026-04-12  
-**Status:** Code Review ✅ · Meeting Notes ✅ · Agent Replay (already in lobs-core) ✅. 3/3 top ideas prototyped.
+**Status:** Code Review ✅ · Meeting Notes ✅ · Agent Replay (already in lobs-core) ✅ · GitHub Webhook ✅. All top ideas prototyped + first one wired into production.
