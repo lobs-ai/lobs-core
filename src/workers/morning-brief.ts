@@ -10,7 +10,7 @@
 
 import { eq, and, gte, inArray, desc, sql } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
-import { tasks, goals, workerRuns } from "../db/schema.js";
+import { tasks, goals, workerRuns, inboxItems } from "../db/schema.js";
 import { discordService } from "../services/discord.js";
 import { log } from "../util/logger.js";
 import {
@@ -242,6 +242,21 @@ async function buildBriefMessage(): Promise<string> {
     .sort(([, a], [, b]) => b - a)
     .slice(0, 4);
 
+  // ── Urgent Inbox Items ────────────────────────────────────────────────
+  const urgentInbox = db
+    .select({ title: inboxItems.title, type: inboxItems.type, actionStatus: inboxItems.actionStatus })
+    .from(inboxItems)
+    .where(
+      and(
+        eq(inboxItems.isRead, false),
+        eq(inboxItems.requiresAction, true),
+      ),
+    )
+    .orderBy(desc(inboxItems.modifiedAt))
+    .limit(5)
+    .all();
+
+
   // ── Format Message ───────────────────────────────────────────────────────
 
   const dayLabel = now.toLocaleDateString("en-US", {
@@ -315,6 +330,15 @@ async function buildBriefMessage(): Promise<string> {
     }
     if (highPriority.length > 2) {
       lines.push(`  _…and ${highPriority.length - 2} more_`);
+    }
+  }
+
+  // Urgent inbox items requiring action
+  if (urgentInbox.length > 0) {
+    lines.push("");
+    lines.push(`**📬 Inbox (${urgentInbox.length} need action)**`);
+    for (const item of urgentInbox) {
+      lines.push(`  • [${item.type}] ${truncate(item.title, 80)}`);
     }
   }
 
