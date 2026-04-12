@@ -10,6 +10,7 @@ import { initDb, closeDb, getDb, getRawDb } from "./db/connection.js";
 import { runMigrations } from "./db/migrate.js";
 import { seedDefaultWorkflows } from "./workflow/seeds.js";
 import { seedAllCourses } from "./gsi/gsi-seed.js";
+import { initGsiStore } from "./gsi/gsi-store.js";
 import { startControlLoop, stopControlLoop, flushWorkerCheckpoints } from "./orchestrator/control-loop.js";
 import { startServer } from "./server.js";
 import { purgeOldArchivedSessions } from "./api/chat.js";
@@ -332,6 +333,14 @@ async function main() {
     seedDefaultWorkflows();
   } catch (err) {
     console.warn(`Workflow seed warning: ${err}`);
+  }
+
+  // Initialize GSI Office Hours DB tables (idempotent)
+  try {
+    initGsiStore();
+    console.log("GSI store initialized");
+  } catch (err) {
+    console.warn(`GSI store init warning: ${err}`);
   }
 
   // Seed GSI course knowledge bases (no-op if already seeded)
