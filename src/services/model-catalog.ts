@@ -49,10 +49,6 @@ const AVAILABLE_PROVIDER_MODELS: Record<string, string[]> = {
     "opencode-go/glm-5",
     "opencode-go/kimi-k2.5",
   ],
-  minimax: [
-    "minimax/minimax-m2.5",
-    "minimax/minimax-m2.7",
-  ],
 };
 
 function ensureProviderPrefix(model: string): string {
