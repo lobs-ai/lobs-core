@@ -17,9 +17,10 @@ import { getDiscordDefaultTier, setDiscordDefaultTier } from "../config/models.j
 import { getCourseForChannel, getCourseForGuild, loadAllCourseConfigs, loadCourseConfig, saveCourseConfig, defaultCourseConfig, type GsiCourseConfig } from "../gsi/gsi-config.js";
 import { answerStudentQuestion, formatAnswerForDiscord, formatEscalationChannelReply, formatEscalationDM, registerEscalation, resolveEscalationForTA, resolveEscalationById, getPendingEscalationTAIds, getPendingEscalationSummary, getPendingEscalationCount } from "../gsi/gsi-agent.js";
 import { seedCourse } from "../gsi/gsi-seed.js";
-import { logQaEvent, getCourseStats, getAllCoursesStats } from "../gsi/gsi-store.js";
+import { logQaEvent } from "../gsi/gsi-store.js";
 import { chaseCitations } from "./citation-chaser.js";
 import { analyzeCoverage, fetchPrFilesForCoverage, makeStubReview } from "./test-coverage.js";
+import { createRubric, getRubric, listRubrics, gradeSubmission, getCourseGradingStats, type RubricCriterion, type GradeResult } from "./grading-assistant.js";
 let mainAgentRef: MainAgent | null = null;
 let voiceManagerRef: VoiceManager | null = null;
 
@@ -226,6 +227,43 @@ export async function registerSlashCommands(client: Client, config: DiscordConfi
         .setRequired(false)
     ),
 
+  new SlashCommandBuilder()
+    .setName('grade-setup')
+    .setDescription('Set up a grading rubric for an assignment')
+    .addStringOption(opt =>
+      opt.setName('course-id')
+        .setDescription('Course identifier (e.g. cs101)')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('assignment')
+        .setDescription('Assignment name (e.g. Problem Set 3)')
+        .setRequired(true)
+    )
+    .addIntegerOption(opt =>
+      opt.setName('total-points')
+        .setDescription('Total points possible')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('grade')
+    .setDescription('Grade a student submission against a rubric')
+    .addStringOption(opt =>
+      opt.setName('rubric-id')
+        .setDescription('Rubric ID from /grade-setup')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('grade-stats')
+    .setDescription('Show grading statistics for a course')
+    .addStringOption(opt =>
+      opt.setName('course-id')
+        .setDescription('Course identifier')
+        .setRequired(true)
+    ),
+
     new SlashCommandBuilder()
     .setName('test-stubs')
     .setDescription('Generate test stubs for a GitHub PR')
@@ -300,6 +338,15 @@ export async function handleSlashCommand(interaction: ChatInputCommandInteractio
         break;
       case 'cite':
         await handleCiteCommand(interaction);
+        break;
+      case 'grade-setup':
+        await handleGradeSetupCommand(interaction);
+        break;
+      case 'grade':
+        await handleGradeCommand(interaction);
+        break;
+      case 'grade-stats':
+        await handleGradeStatsCommand(interaction);
         break;
       case 'test-stubs':
         await handleTestStubsCommand(interaction);
@@ -1236,6 +1283,233 @@ async function handleTestStubsCommand(interaction: ChatInputCommandInteraction):
     console.error('[discord-commands] /test-stubs error:', err);
     await interaction.editReply({ content: `❌ Coverage analysis failed: ${(err as Error).message}` });
   }
+}
+
+// ── Grading Assistant ──────────────────────────────────────────────────────
+
+/** Pending grading state per user (channel+user key) */
+interface PendingGradeState {
+  type: 'await-criteria' | 'await-submission';
+  courseId?: string;
+  assignmentName?: string;
+  rubricId?: string;
+  channelId: string;
+}
+
+const pendingGradeStates = new Map<string, PendingGradeState>();
+
+/** Handle a plain message that may be a grading follow-up. Returns true if consumed. */
+export async function handleGradingFollowUp(
+  msg: import("discord.js").Message,
+): Promise<boolean> {
+  const key = `${msg.channelId}:${msg.author.id}`;
+  const state = pendingGradeStates.get(key);
+  if (!state) return false;
+  pendingGradeStates.delete(key);
+
+  if (state.type === 'await-criteria') {
+    // Parse criteria: "Name | maxPoints | description of full marks" per line
+    const lines = msg.content.split('\n').map(l => l.trim()).filter(Boolean);
+    const criteria: RubricCriterion[] = [];
+    const errors: string[] = [];
+
+    for (const line of lines) {
+      const parts = line.split('|').map(p => p.trim());
+      if (parts.length < 3) {
+        errors.push(`⚠️ Skipped (bad format): \`${line.slice(0, 80)}\``);
+        continue;
+      }
+      const [name, pointsStr, ...descParts] = parts;
+      const maxPoints = parseInt(pointsStr, 10);
+      if (isNaN(maxPoints) || maxPoints <= 0) {
+        errors.push(`⚠️ Skipped (invalid points): \`${line.slice(0, 80)}\``);
+        continue;
+      }
+      criteria.push({ name: name ?? '', maxPoints, description: descParts.join(' | ').trim() });
+    }
+
+    if (criteria.length === 0) {
+      await msg.reply('❌ No valid criteria found. Format: `Name | maxPoints | description of full marks` (one per line). Try again with `/grade-setup`.');
+      return true;
+    }
+
+    try {
+      const rubric = createRubric(
+        state.courseId!,
+        state.assignmentName!,
+        criteria,
+      );
+      const total = criteria.reduce((s, c) => s + c.maxPoints, 0);
+      const criteriaList = criteria
+        .map(c => `  • **${c.name}** (${c.maxPoints} pts): ${c.description.slice(0, 80)}`)
+        .join('\n');
+      const reply = [
+        `✅ **Rubric created!**`,
+        `**ID:** \`${rubric.id}\``,
+        `**Assignment:** ${rubric.assignmentName}`,
+        `**Course:** ${rubric.courseId}`,
+        `**Total:** ${total} pts`,
+        `**Criteria (${criteria.length}):**`,
+        criteriaList,
+        errors.length > 0 ? `\n${errors.join('\n')}` : '',
+        ``,
+        `Use \`/grade rubric-id:${rubric.id}\` to grade a submission.`,
+      ].filter(Boolean).join('\n');
+
+      // Discord 2000 char limit
+      const safeReply = reply.length > 1900 ? reply.slice(0, 1900) + '\n…*(truncated)*' : reply;
+      await msg.reply(safeReply);
+    } catch (err) {
+      await msg.reply(`❌ Failed to create rubric: ${(err as Error).message}`);
+    }
+    return true;
+  }
+
+  if (state.type === 'await-submission') {
+    const submissionText = msg.content.trim();
+    if (!submissionText) {
+      await msg.reply('❌ Empty submission. Try `/grade` again.');
+      return true;
+    }
+
+    await msg.reply('⏳ Grading submission… (this may take 30–60 seconds)');
+
+    try {
+      const result: GradeResult = await gradeSubmission(state.rubricId!, submissionText);
+
+      const lines: string[] = [
+        `📝 **Draft Grade** — \`${result.id}\``,
+        `**Total: ${result.totalScore}/${result.totalPossible}** (${Math.round((result.totalScore / result.totalPossible) * 100)}%)`,
+        ``,
+        `**Per-criterion scores:**`,
+      ];
+
+      for (const s of result.criteriaScores) {
+        lines.push(`• **${s.criterion}:** ${s.score}/${s.maxPoints} — ${s.feedback}`);
+      }
+
+      lines.push(``, `**Overall feedback:**`, result.overallFeedback);
+      lines.push(``, `> ✅ **Approve:** reply \`approve ${result.id}\` to mark as approved`);
+      lines.push(`> ✏️ **Edit:** copy the feedback above and edit as needed before sending to student`);
+
+      const full = lines.join('\n');
+      const safe = full.length > 1900 ? full.slice(0, 1900) + '\n…*(truncated)*' : full;
+      await msg.reply(safe);
+    } catch (err) {
+      await msg.reply(`❌ Grading failed: ${(err as Error).message}`);
+    }
+    return true;
+  }
+
+  return false;
+}
+
+async function handleGradeSetupCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const courseId = interaction.options.getString('course-id', true).trim();
+  const assignmentName = interaction.options.getString('assignment', true).trim();
+
+  // Register pending state — wait for next message in this channel from this user
+  const key = `${interaction.channelId}:${interaction.user.id}`;
+  pendingGradeStates.set(key, {
+    type: 'await-criteria',
+    courseId,
+    assignmentName,
+    channelId: interaction.channelId,
+  });
+
+  await interaction.reply({
+    content: [
+      `📋 Creating rubric for **${assignmentName}** (course: \`${courseId}\`)`,
+      ``,
+      `Now send me the rubric criteria, **one per line**, in this format:`,
+      `\`\`\``,
+      `Name | maxPoints | description of full marks`,
+      `Name | maxPoints | description of full marks`,
+      `\`\`\``,
+      `Example:`,
+      `\`\`\``,
+      `Correctness | 40 | All test cases pass and output matches expected for all inputs`,
+      `Code Quality | 30 | Clean, readable code with meaningful variable names and no redundancy`,
+      `Documentation | 20 | All functions have docstrings and inline comments explain non-obvious logic`,
+      `Edge Cases | 10 | Handles empty input, nulls, and boundary values without crashing`,
+      `\`\`\``,
+    ].join('\n'),
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function handleGradeCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const rubricId = interaction.options.getString('rubric-id', true).trim();
+
+  const rubric = getRubric(rubricId);
+  if (!rubric) {
+    await interaction.reply({
+      content: `❌ Rubric \`${rubricId}\` not found. Use \`/grade-setup\` to create one, or check the ID.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  // Register pending state
+  const key = `${interaction.channelId}:${interaction.user.id}`;
+  pendingGradeStates.set(key, {
+    type: 'await-submission',
+    rubricId,
+    channelId: interaction.channelId,
+  });
+
+  const criteriaList = rubric.criteria
+    .map(c => `  • ${c.name} (${c.maxPoints} pts)`)
+    .join('\n');
+
+  await interaction.reply({
+    content: [
+      `📝 Ready to grade **${rubric.assignmentName}** (\`${rubric.courseId}\`)`,
+      `**Rubric:** ${rubric.totalPoints} pts total`,
+      criteriaList,
+      ``,
+      `**Paste the student submission in your next message.** (FERPA: text is not stored.)`,
+    ].join('\n'),
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function handleGradeStatsCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const courseId = interaction.options.getString('course-id', true).trim();
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const rubrics = listRubrics(courseId);
+  if (rubrics.length === 0) {
+    await interaction.editReply(`No rubrics found for course \`${courseId}\`. Create one with \`/grade-setup\`.`);
+    return;
+  }
+
+  const stats = getCourseGradingStats(courseId);
+
+  const lines: string[] = [
+    `📊 **Grading Stats — ${courseId}**`,
+    ``,
+  ];
+
+  for (const s of stats) {
+    if (s.count === 0) {
+      lines.push(`**${s.assignmentName}** — no submissions yet (rubric: \`${s.rubricId.slice(0, 8)}…\`)`);
+    } else {
+      const pct = (n: number) => Math.round((n / s.totalPossible) * 100);
+      lines.push(
+        `**${s.assignmentName}** (${s.count} submission${s.count === 1 ? '' : 's'})`,
+        `  • Scores: ${s.minScore}–${s.maxScore} / ${s.totalPossible}  avg ${s.avgScore} (${pct(s.avgScore)}%)`,
+        `  • Approval rate: ${Math.round(s.approvalRate * 100)}%`,
+        `  • Rubric ID: \`${s.rubricId.slice(0, 8)}…\``,
+        ``,
+      );
+    }
+  }
+
+  const full = lines.join('\n');
+  const safe = full.length > 1900 ? full.slice(0, 1900) + '\n…*(truncated)*' : full;
+  await interaction.editReply(safe);
 }
 
 async function handleCiteCommand(interaction: ChatInputCommandInteraction): Promise<void> {

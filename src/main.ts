@@ -11,6 +11,7 @@ import { runMigrations } from "./db/migrate.js";
 import { seedDefaultWorkflows } from "./workflow/seeds.js";
 import { seedAllCourses } from "./gsi/gsi-seed.js";
 import { initGsiStore } from "./gsi/gsi-store.js";
+import { initGradingStore } from "./services/grading-store.js";
 import { startControlLoop, stopControlLoop, flushWorkerCheckpoints } from "./orchestrator/control-loop.js";
 import { startServer } from "./server.js";
 import { purgeOldArchivedSessions } from "./api/chat.js";
@@ -344,6 +345,14 @@ async function main() {
     console.log("GSI store initialized");
   } catch (err) {
     console.warn(`GSI store init warning: ${err}`);
+  }
+
+  // Initialize Grading Assistant DB tables (idempotent)
+  try {
+    initGradingStore();
+    console.log("Grading store initialized");
+  } catch (err) {
+    console.warn(`Grading store init warning: ${err}`);
   }
 
   // Seed GSI course knowledge bases (no-op if already seeded)

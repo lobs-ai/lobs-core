@@ -4,7 +4,7 @@ import {
   type GuildChannelCreateOptions, type GuildChannelEditOptions,
   type PermissionOverwriteOptions,
 } from "discord.js";
-import { registerSlashCommands, handleSlashCommand, handleAutocompleteInteraction, handleGsiTAReply } from "./discord-commands.js";
+import { registerSlashCommands, handleSlashCommand, handleAutocompleteInteraction, handleGsiTAReply, handleGradingFollowUp } from "./discord-commands.js";
 import { getAgentMentionNames } from "../config/lobs.js";
 
 export interface DiscordConfig {
@@ -553,6 +553,10 @@ class DiscordService {
         // TAs are real users who won't be in dmAllowFrom, so we intercept them here.
         if (await handleGsiTAReply(msg)) {
           console.debug(`[discord] Handled GSI TA reply DM from ${msg.author.tag} (${msg.author.id})`);
+          return;
+        }
+        if (await handleGradingFollowUp(msg)) {
+          console.debug(`[discord] Handled grading follow-up from ${msg.author.tag} (${msg.author.id})`);
           return;
         }
         if (!this.config!.dmAllowFrom.includes(msg.author.id)) {
