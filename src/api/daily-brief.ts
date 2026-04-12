@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { eq, and, gte, inArray, desc, sql } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
-import { tasks, projects, goals } from "../db/schema.js";
+import { tasks, projects, goals, workerRuns } from "../db/schema.js";
 import { json, error } from "./index.js";
 import { getCachedBrief, getCachedHealth, generateDailyBriefSummary } from "../services/system-sentinel.js";
 
@@ -24,6 +24,19 @@ interface DailyBriefResponse {
   completedToday: Array<{ id: string; title: string; completedAt: string }>;
   blockedTasks: Array<{ id: string; title: string; blockedBy: string | null }>;
   goals: Array<{ id: string; title: string; priority: number; openTaskCount: number; completedToday: number }>;
+  recentAgentWork: Array<{
+    id: number;
+    agentType: string;
+    startedAt: string;
+    summary: string;
+    succeeded: boolean;
+    commitShas: string | null;
+    githubCompareUrl: string | null;
+    totalCostUsd: number | null;
+  }>;
+  agentStats: {
+    last24h: { total: number; succeeded: number; failed: number; totalCostUsd: number };
+  };
   calendar: any[]; // Populated by calendar sentinel when available
   highlights: string[];
   aiSummary: {
@@ -180,6 +193,52 @@ export async function handleDailyBriefRequest(
         .all()
         .filter(t => t.dueDate && t.dueDate < now);
 
+      // Recent agent work (last 24h)
+      const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const recentRunRows = db
+        .select({
+          id: workerRuns.id,
+          agentType: workerRuns.agentType,
+          startedAt: workerRuns.startedAt,
+          summary: workerRuns.summary,
+          succeeded: workerRuns.succeeded,
+          commitShas: workerRuns.commitShas,
+          githubCompareUrl: workerRuns.githubCompareUrl,
+          totalCostUsd: workerRuns.totalCostUsd,
+          failureType: workerRuns.failureType,
+        })
+        .from(workerRuns)
+        .where(gte(workerRuns.startedAt, since24h))
+        .orderBy(desc(workerRuns.startedAt))
+        .limit(50)
+        .all();
+
+      const recentAgentWork = recentRunRows
+        .filter(r => r.succeeded && r.summary)
+        .map(r => ({
+          id: r.id,
+          agentType: r.agentType ?? "worker",
+          startedAt: r.startedAt ?? "",
+          summary: r.summary ?? "",
+          succeeded: !!r.succeeded,
+          commitShas: typeof r.commitShas === "string" ? r.commitShas : (r.commitShas ? JSON.stringify(r.commitShas) : null),
+          githubCompareUrl: r.githubCompareUrl ?? null,
+          totalCostUsd: r.totalCostUsd ?? null,
+        }));
+
+      const totalRuns = recentRunRows.length;
+      const succeededRuns = recentRunRows.filter(r => r.succeeded).length;
+      const failedRuns = totalRuns - succeededRuns;
+      const totalCost = recentRunRows.reduce((sum, r) => sum + (r.totalCostUsd ?? 0), 0);
+      const agentStats = {
+        last24h: {
+          total: totalRuns,
+          succeeded: succeededRuns,
+          failed: failedRuns,
+          totalCostUsd: Math.round(totalCost * 10000) / 10000,
+        },
+      };
+
       // Generate highlights
       const highlights: string[] = [];
       
@@ -219,6 +278,8 @@ export async function handleDailyBriefRequest(
         completedToday,
         blockedTasks,
         goals: goalSummaries,
+        recentAgentWork,
+        agentStats,
         calendar: [], // Populated when Google Calendar sentinel is running
         highlights,
         aiSummary: aiSummary ? {
