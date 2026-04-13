@@ -224,11 +224,30 @@ async function buildBriefMessage(): Promise<string> {
   const failedRuns = totalRuns - succeededRuns;
   const totalCost = recentRunRows.reduce((sum, r) => sum + (r.totalCostUsd ?? 0), 0);
 
-  // Pick up to 2 highlights from recent successful agent work
-  const highlights = recentRunRows
-    .filter(r => r.succeeded && r.summary && r.agentType === "programmer")
-    .slice(0, 2)
-    .map(r => `  • ${truncate(r.summary ?? "", 80)}`);
+  // Pick up to 4 highlights from recent successful agent work (all types)
+  // Priority order: programmer > researcher > goals-worker > others
+  const AGENT_PRIORITY: Record<string, number> = {
+    programmer: 0,
+    researcher: 1,
+    "goals-worker": 2,
+    "stall-recovery": 3,
+    "priority-advisor": 4,
+  };
+  const highlights = [...recentRunRows]
+    .filter(r => r.succeeded && r.summary && r.summary.length > 10)
+    .sort((a, b) => {
+      const pa = AGENT_PRIORITY[a.agentType ?? ""] ?? 9;
+      const pb = AGENT_PRIORITY[b.agentType ?? ""] ?? 9;
+      return pa - pb;
+    })
+    .slice(0, 4)
+    .map(r => {
+      // Extract first meaningful sentence (up to 120 chars) from the summary
+      const summaryText = (r.summary ?? "").replace(/\n+/g, " ").trim();
+      const firstSentence = summaryText.split(/[.!?]\s/)[0] ?? summaryText;
+      const label = agentEmoji(r.agentType ?? "");
+      return `  ${label} ${truncate(firstSentence, 120)}`;
+    });
 
   // Identify repeatedly-failing workers (3+ failures in last 24h)
   const failedRows = recentRunRows.filter(r => !r.succeeded);
@@ -363,6 +382,21 @@ function resolveBlockedBy(value: unknown): string {
 
 function truncate(s: string, max: number): string {
   return s.length <= max ? s : s.slice(0, max - 1) + "…";
+}
+
+function agentEmoji(agentType: string): string {
+  const map: Record<string, string> = {
+    programmer: "💻",
+    researcher: "🔬",
+    "goals-worker": "🎯",
+    "stall-recovery": "🔧",
+    "priority-advisor": "📊",
+    "deadline-sentinel": "📅",
+    "morning-brief": "📋",
+    "weekly-digest": "📰",
+    "citation-chaser": "📚",
+  };
+  return map[agentType] ?? "🤖";
 }
 
 async function sendBrief(message: string): Promise<void> {
