@@ -1659,28 +1659,6 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
     }
   }
 
-  // ── Failure threshold / researcher escalation guard ──────────────────────
-  // Runs in the native-runner path before expensive context assembly.
-  // At ≥RESEARCHER_AUDIT_THRESHOLD effective failures, stop the retry loop and
-  // route to a researcher audit instead of burning more compute.
-  if (taskId) {
-    const guardResult = incrementAndCheckSpawnCount(taskId);
-    if (guardResult === "researcher") {
-      log().warn(
-        `[NATIVE_RUNNER] Task ${taskId.slice(0, 8)} hit failure threshold — escalated to researcher audit, aborting dispatch`
-      );
-      decrementPendingSpawns(projectId, req.agentType);
-      return;
-    }
-    if (guardResult === "blocked") {
-      log().warn(
-        `[NATIVE_RUNNER] Task ${taskId.slice(0, 8)} already escalated/blocked — refusing re-dispatch`
-      );
-      decrementPendingSpawns(projectId, req.agentType);
-      return;
-    }
-  }
-
   // ── LM Studio model availability preflight ──────────────────────────────
   // Check that the chosen model (and its fallbacks) are actually loaded in
   // LM Studio before we invest in context assembly or agent execution.
@@ -1751,6 +1729,29 @@ async function processSpawnWithRunner(req: SpawnRequest): Promise<void> {
   } catch (diagErr) {
     // Fail-open: diagnostic errors must never block spawning
     log().warn(`[LM_STUDIO_DIAG] Preflight diagnostic failed (fail-open): ${diagErr}`);
+  }
+
+  // ── Failure threshold / researcher escalation guard ──────────────────────
+  // Placed AFTER the LM Studio preflight so model-availability failures don't
+  // count toward the retry budget (those are infra failures, not task failures).
+  // At ≥RESEARCHER_AUDIT_THRESHOLD effective failures, stop the retry loop and
+  // route to a researcher audit instead of burning more compute.
+  if (taskId) {
+    const guardResult = incrementAndCheckSpawnCount(taskId);
+    if (guardResult === "researcher") {
+      log().warn(
+        `[NATIVE_RUNNER] Task ${taskId.slice(0, 8)} hit failure threshold — escalated to researcher audit, aborting dispatch`
+      );
+      decrementPendingSpawns(projectId, req.agentType);
+      return;
+    }
+    if (guardResult === "blocked") {
+      log().warn(
+        `[NATIVE_RUNNER] Task ${taskId.slice(0, 8)} already escalated/blocked — refusing re-dispatch`
+      );
+      decrementPendingSpawns(projectId, req.agentType);
+      return;
+    }
   }
 
   // Assemble intelligent context
@@ -2045,6 +2046,14 @@ function routeToResearcherAudit(
   agentType: string,
   lastFailureReason: string | null | undefined,
 ): void {
+  // Defense layer 2: never escalate an audit task to another audit task.
+  if (taskId.startsWith("audit_") || taskTitle.startsWith("[AUDIT]")) {
+    log().warn(
+      `[ESCALATION] Skipping recursive audit escalation for task ${taskId.slice(0, 16)} — audit tasks cannot be audited`
+    );
+    return;
+  }
+
   const db = getDb();
 
   const auditPrompt = [
@@ -2158,18 +2167,30 @@ function incrementAndCheckSpawnCount(taskId: string): "ok" | "researcher" | "blo
       return "blocked";
     }
 
-    // Researcher audit tasks must NEVER be re-escalated to another researcher audit.
-    // If an audit task itself fails repeatedly, block it — don't spawn audit-of-audit cascade.
-    if (task.agent === "researcher") {
-      log().warn(
-        `[SPAWN_GUARD] Task ${taskId.slice(0, 8)} is a researcher audit task that failed — blocking (no recursive escalation)`
-      );
+    // Researcher AUDIT tasks must NEVER be re-escalated to another researcher audit.
+    // Detected by ID prefix ("audit_") or title prefix ("[AUDIT]").
+    // Regular researcher tasks (non-audit) should proceed through normal retry/escalation logic.
+    const isAuditTask = taskId.startsWith("audit_") || (task.title ?? "").startsWith("[AUDIT]");
+    if (isAuditTask) {
+      // Allow up to RESEARCHER_AUDIT_THRESHOLD attempts before blocking permanently.
+      const newSpawnCount = (task.spawnCount ?? 0) + 1;
       db.update(tasksTable).set({
-        workState: "blocked",
-        failureReason: `Researcher audit task failed after ${(task.spawnCount ?? 0) + 1} attempts — blocked to prevent recursive escalation cascade.`,
+        spawnCount: newSpawnCount,
         updatedAt: new Date().toISOString(),
       }).where(eq(tasksTable.id, taskId)).run();
-      return "blocked";
+      if (newSpawnCount >= RESEARCHER_AUDIT_THRESHOLD) {
+        log().warn(
+          `[SPAWN_GUARD] Audit task ${taskId.slice(0, 8)} failed ${newSpawnCount}x — blocking permanently (no recursive escalation)`
+        );
+        db.update(tasksTable).set({
+          workState: "blocked",
+          failureReason: `Researcher audit task failed after ${newSpawnCount} attempts — blocked to prevent recursive escalation cascade.`,
+          updatedAt: new Date().toISOString(),
+        }).where(eq(tasksTable.id, taskId)).run();
+        return "blocked";
+      }
+      // Under threshold: allow retry but do NOT escalate to another audit
+      return "ok";
     }
 
     const limit = spawnCountLimitForType(task.shape, task.agent);
