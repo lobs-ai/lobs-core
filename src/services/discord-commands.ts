@@ -19,6 +19,7 @@ import { answerStudentQuestion, formatAnswerForDiscord, formatEscalationChannelR
 import { seedCourse } from "../gsi/gsi-seed.js";
 import { logQaEvent } from "../gsi/gsi-store.js";
 import { chaseCitations } from "./citation-chaser.js";
+import { runArchaeology, type ArchaeologyCommit } from "./code-archaeology.js";
 import { analyzeCoverage, fetchPrFilesForCoverage, makeStubReview } from "./test-coverage.js";
 import { createRubric, getRubric, listRubrics, gradeSubmission, getCourseGradingStats, type RubricCriterion, type GradeResult } from "./grading-assistant.js";
 let mainAgentRef: MainAgent | null = null;
@@ -228,6 +229,15 @@ export async function registerSlashCommands(client: Client, config: DiscordConfi
     ),
 
   new SlashCommandBuilder()
+    .setName('why')
+    .setDescription('Trace git history to explain why code exists')
+    .addStringOption(opt =>
+      opt.setName('query')
+        .setDescription('File path, function name, or question (e.g. "src/services/foo.ts" or "gatherStandupData")')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
     .setName('grade-setup')
     .setDescription('Set up a grading rubric for an assignment')
     .addStringOption(opt =>
@@ -347,6 +357,9 @@ export async function handleSlashCommand(interaction: ChatInputCommandInteractio
         break;
       case 'grade-stats':
         await handleGradeStatsCommand(interaction);
+        break;
+      case 'why':
+        await handleWhyCommand(interaction);
         break;
       case 'test-stubs':
         await handleTestStubsCommand(interaction);
@@ -1554,3 +1567,43 @@ async function handleCiteCommand(interaction: ChatInputCommandInteraction): Prom
   }
 }
 
+async function handleWhyCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const query = interaction.options.getString('query', true);
+
+  await interaction.reply({ content: `🔍 Digging through history for: \`${query}\`…` });
+
+  try {
+    const result = await runArchaeology(query);
+
+    const narrative = result.narrative.length > 2000
+      ? result.narrative.slice(0, 1997) + '…'
+      : result.narrative;
+
+    const confidenceEmoji =
+      result.confidence === 'high' ? '🟢' :
+      result.confidence === 'medium' ? '🟡' : '🔴';
+
+    const embed = new EmbedBuilder()
+      .setTitle(`🔍 Code Archaeology: ${query.slice(0, 100)}${query.length > 100 ? '…' : ''}`)
+      .setDescription(narrative)
+      .setColor(0x7c3aed)
+      .setTimestamp();
+
+    const topCommits = result.keyCommits.slice(0, 3);
+    if (topCommits.length > 0) {
+      embed.addFields(
+        topCommits.map((c: ArchaeologyCommit) => ({
+          name: `\`${c.shortHash}\` ${c.message.slice(0, 60)}${c.message.length > 60 ? '…' : ''} — ${c.date}`,
+          value: c.significance.slice(0, 200) || 'Key change',
+        }))
+      );
+    }
+
+    embed.setFooter({ text: `${confidenceEmoji} Confidence: ${result.confidence} | ${result.keyCommits.length} key commits found` });
+
+    await interaction.editReply({ content: '', embeds: [embed] });
+  } catch (err) {
+    console.error('[discord-commands] /why error:', err);
+    await interaction.editReply({ content: `❌ Archaeology failed: ${(err as Error).message}` });
+  }
+}
