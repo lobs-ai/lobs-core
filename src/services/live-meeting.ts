@@ -23,6 +23,8 @@ import { getModelForTier } from "../config/models.js";
 import { createResilientClient, parseModelString } from "../runner/providers.js";
 import { MeetingAnalysisService } from "./meeting-analysis.js";
 import { loadWorkspaceContext } from "./workspace-loader.js";
+import { VoiceSidecar } from "./voice/sidecar.js";
+import { loadVoiceConfig } from "./voice/config.js";
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -485,7 +487,40 @@ export class LiveMeetingService {
 
     sessions.set(session.id, session);
     log().info(`[LIVE_MEETING] Started session ${session.id}: "${session.title}" (context: ${sessionContext.length} chars)`);
+
+    // Ensure whisper STT is running — it may not be if voice mode is "realtime"
+    // (the voice manager only auto-starts the sidecar in sidecar mode).
+    this.ensureSTTRunning().catch(e => {
+      log().warn(`[LIVE_MEETING] STT auto-start failed: ${e}`);
+    });
+
     return { sessionId: session.id, status: session.status };
+  }
+
+  /**
+   * Ensure the whisper STT sidecar is running. Called at session start so the
+   * live meeting feature works regardless of which voice mode is configured.
+   */
+  private async ensureSTTRunning(): Promise<void> {
+    // Quick health check first — if it's already up, do nothing
+    try {
+      const res = await fetch(`${WHISPER_URL.replace("/v1/audio/transcriptions", "/health")}`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      if (res.ok) return; // Already healthy
+    } catch {
+      // Not running — fall through to start it
+    }
+
+    log().info("[LIVE_MEETING] Whisper STT not running — starting sidecar...");
+    const config = loadVoiceConfig();
+    const sidecar = new VoiceSidecar(config);
+    const result = await sidecar.startSTTOnly();
+    if (result.healthy) {
+      log().info("[LIVE_MEETING] Whisper STT started successfully");
+    } else {
+      log().warn(`[LIVE_MEETING] Whisper STT failed to start: ${result.error ?? "unknown"}`);
+    }
   }
 
   /**

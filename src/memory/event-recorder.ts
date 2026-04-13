@@ -9,7 +9,7 @@
  */
 
 import { log } from "../util/logger.js";
-import { getMemoryDb } from "./db.js";
+import { getMemoryDb, isMemoryDbReady } from "./db.js";
 import type {
   MemoryEvent,
   RecordEventParams,
@@ -142,6 +142,7 @@ export class EventRecorder {
    * Errors are logged but never re-thrown.
    */
   recordEvent(params: RecordEventParams): void {
+    if (!isMemoryDbReady()) return;
     try {
       const db = getMemoryDb();
       const stmt = db.prepare(INSERT_EVENT_SQL);
@@ -173,6 +174,7 @@ export class EventRecorder {
    */
   recordEvents(batch: RecordEventParams[]): void {
     if (batch.length === 0) return;
+    if (!isMemoryDbReady()) return;
     try {
       const db = getMemoryDb();
       const stmt = db.prepare(INSERT_EVENT_SQL);
@@ -207,6 +209,7 @@ export class EventRecorder {
    * Returns rows in descending timestamp order (newest first).
    */
   getEvents(filters: EventFilters = {}): MemoryEvent[] {
+    if (!isMemoryDbReady()) return [];
     try {
       const db = getMemoryDb();
       const conditions: string[] = [];
@@ -261,6 +264,7 @@ export class EventRecorder {
    * Return aggregate counts for stored events.
    */
   getStats(): EventStats {
+    if (!isMemoryDbReady()) return { total: 0, byType: {}, highSignal: 0 };
     try {
       const db = getMemoryDb();
 

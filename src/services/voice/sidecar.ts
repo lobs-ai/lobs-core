@@ -269,6 +269,18 @@ export class VoiceSidecar {
     }
   }
 
+  /**
+   * Start only the STT service. Used by the live meeting feature, which doesn't
+   * need TTS and shouldn't wait 120s for Chatterbox to boot.
+   */
+  async startSTTOnly(): Promise<{ healthy: boolean; error?: string }> {
+    if (await checkHealth(this.config.stt.url)) {
+      return { healthy: true };
+    }
+    const result = await this.startSTT();
+    return { healthy: result.healthy, error: result.error };
+  }
+
   /** Check health of both services (one-shot) */
   async checkHealth(): Promise<{ stt: boolean; tts: boolean }> {
     const [stt, tts] = await Promise.all([

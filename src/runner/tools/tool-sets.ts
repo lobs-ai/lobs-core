@@ -30,7 +30,6 @@ const NEXUS_TOOLS: ToolName[] = [
   "stop_agent",
   "process",
   "humanize",
-  "imagine",
   "html_to_pdf",
   "tool_manage",
   "discord",

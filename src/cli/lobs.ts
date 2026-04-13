@@ -40,7 +40,7 @@
  *   lobs logs [follow] [--tail N]  Show recent log output or follow logs
  */
 
-import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, openSync, closeSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
@@ -360,6 +360,15 @@ function isServerReachable(): Promise<boolean> {
     .catch(() => false);
 }
 
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function unloadLaunchdService(): void {
   if (!existsSync(LAUNCHD_PLIST)) return;
   try {
@@ -433,12 +442,21 @@ async function cmdStart(opts: { useLaunchd?: boolean } = {}) {
     console.log(colorize("launchd plist exists but was left disabled; use `lobs start --launchd` to opt in", "dim"));
   }
 
+  let logFd: number | null = null;
+  try {
+    mkdirSync(dirname(LOG_FILE), { recursive: true });
+    logFd = openSync(LOG_FILE, "a");
+  } catch {
+    // Best-effort only. In restricted environments (like sandboxes), we may not
+    // be allowed to open ~/.lobs/lobs.log for stdio redirection.
+  }
   const child = spawn("node", [mainJs], {
     cwd: LOBS_CORE_DIR,
     detached: true,
-    stdio: "ignore",
+    stdio: logFd === null ? "ignore" : ["ignore", logFd, logFd],
     env: { ...process.env, LOBS_PORT: String(LOBS_PORT), LOBS_LOG_TO_FILE: "1" },
   });
+  if (logFd !== null) closeSync(logFd);
 
   child.unref();
   const childPid = child.pid;
@@ -450,17 +468,28 @@ async function cmdStart(opts: { useLaunchd?: boolean } = {}) {
 
   // Wait up to 5 seconds for server to become reachable
   let started = false;
+  let exitedEarly = false;
   for (let i = 0; i < 10; i++) {
     await new Promise(r => setTimeout(r, 500));
     if (await isServerReachable()) {
       started = true;
       break;
     }
+    if (!isPidAlive(childPid)) {
+      exitedEarly = true;
+      break;
+    }
   }
+
+  const writtenPid = getRunningPid();
+  const startupFailed = !started && (!writtenPid || writtenPid !== childPid);
 
   if (started) {
     console.log(colorize(`✓ lobs-core started (PID ${childPid}, port ${LOBS_PORT})`, "green"));
     console.log(colorize(`  Logs: ${LOG_FILE}`, "dim"));
+  } else if (exitedEarly || startupFailed) {
+    console.error(colorize(`✗ lobs-core exited during startup (PID ${childPid})`, "red"));
+    console.log(colorize(`  Check logs: tail -n 80 ${LOG_FILE}`, "dim"));
   } else {
     console.log(colorize(`lobs-core spawned (PID ${childPid}) but not yet responding`, "yellow"));
     console.log(colorize(`  Check logs: tail -f ${LOG_FILE}`, "dim"));
@@ -518,10 +547,50 @@ async function cmdStop() {
   }
 }
 
+function ensureDependenciesInstalled(projectDir: string, label: string): boolean {
+  const packageJson = resolve(projectDir, "package.json");
+  if (!existsSync(packageJson)) return true;
+
+  try {
+    execSync("npm ls --depth=0", {
+      cwd: projectDir,
+      encoding: "utf-8",
+      stdio: "pipe",
+      timeout: 20_000,
+    });
+    return true;
+  } catch (err: any) {
+    const stderr = err.stderr?.toString() || err.stdout?.toString() || err.message || "";
+    console.log(colorize(`${label}: missing or invalid dependencies detected, running npm install...`, "yellow"));
+    if (stderr.trim()) {
+      console.log(colorize(stderr.slice(-300), "dim"));
+    }
+  }
+
+  try {
+    execSync("npm install", {
+      cwd: projectDir,
+      encoding: "utf-8",
+      stdio: ["inherit", "pipe", "pipe"],
+      timeout: 180_000,
+    });
+    console.log(colorize(`✓ ${label} dependencies installed`, "green"));
+    return true;
+  } catch (err: any) {
+    const stderr = err.stderr?.toString() || err.stdout?.toString() || err.message;
+    console.error(colorize(`✗ ${label} dependency install failed:`, "red"));
+    console.error(colorize(stderr.slice(-500), "dim"));
+    return false;
+  }
+}
+
 async function cmdBuild(): Promise<boolean> {
   // Build Nexus (frontend dashboard) first
   const nexusDir = resolve(LOBS_CORE_DIR, "nexus");
   if (existsSync(resolve(nexusDir, "package.json"))) {
+    if (!ensureDependenciesInstalled(nexusDir, "Nexus")) {
+      console.error(colorize("✗ Skipping Nexus build because dependency install failed", "yellow"));
+    } else {
     console.log(colorize("Building nexus...", "cyan"));
     try {
       execSync("npm run build", {
@@ -536,9 +605,13 @@ async function cmdBuild(): Promise<boolean> {
       console.error(colorize("✗ Nexus build failed (non-fatal):", "yellow"));
       console.error(colorize(stderr.slice(-300), "dim"));
     }
+    }
   }
 
   // Build lobs-core
+  if (!ensureDependenciesInstalled(LOBS_CORE_DIR, "lobs-core")) {
+    return false;
+  }
   console.log(colorize("Building lobs-core...", "cyan"));
   try {
     execSync("npm run build", {

@@ -56,6 +56,7 @@ import { MorningBriefWorker } from "./workers/morning-brief.js";
 import { DeadlineSentinelWorker } from "./workers/deadline-sentinel-worker.js";
 import { PriorityAdvisorWorker } from "./workers/priority-advisor.js";
 import { WeeklyDigestWorker } from "./workers/weekly-digest-worker.js";
+import { StallRecoveryWorker } from "./workers/stall-recovery-worker.js";
 import { initResearchQueueService } from "./services/research-queue.js";
 import { initIntelSweepService } from "./services/intel-sweep.js";
 import { initResearchRadarService } from "./services/research-radar.js";
@@ -401,6 +402,7 @@ async function main() {
   workerRegistry.register(new DeadlineSentinelWorker());
   workerRegistry.register(new PriorityAdvisorWorker());
   workerRegistry.register(new WeeklyDigestWorker());
+  workerRegistry.register(new StallRecoveryWorker());
 
   // Register system jobs (code handlers, not DB-backed)
   cronService.registerSystemJob({
