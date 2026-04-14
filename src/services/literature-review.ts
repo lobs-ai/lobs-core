@@ -957,10 +957,8 @@ export async function runLiteratureReview(req: LitReviewRequest): Promise<Litera
 
         let related: PaperSummary[] = [];
 
-        // Try Semantic Scholar references first (higher quality)
-        if (ssApiKey || true) { // Always try SS
-          related = await fetchRelatedPapersFromSS(paper.paperId, relatedPerPaper, ssApiKey);
-        }
+        // Try Semantic Scholar references first (higher quality) — always try SS
+        related = await fetchRelatedPapersFromSS(paper.paperId, relatedPerPaper, ssApiKey);
 
         // Fall back to arXiv keyword search if SS gave nothing
         if (related.length === 0) {
