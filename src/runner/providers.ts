@@ -1201,8 +1201,8 @@ const PROVIDER_DEFAULTS: Record<Provider, { baseUrl: string; envKey: string }> =
   "opencode-zen": { baseUrl: "https://opencode.ai/zen", envKey: "OPENCODE_API_KEY" },
   "opencode-go": { baseUrl: "https://opencode.ai/zen/go", envKey: "OPENCODE_API_KEY" },
   "z-ai": { baseUrl: "https://open.z.ai/api/paas/v4", envKey: "ZAI_API_KEY" },
-  minimax: { baseUrl: "https://api.minimax.io/v1", envKey: "MINIMAX_API_KEY" },
-  kimi: { baseUrl: "https://api.moonshot.cn/v1", envKey: "KIMI_API_KEY" },
+  minimax: { baseUrl: "https://api.minimax.io", envKey: "MINIMAX_API_KEY" },
+  kimi: { baseUrl: "https://api.moonshot.cn", envKey: "KIMI_API_KEY" },
 };
 
 // ── Resilient Client Wrapper ─────────────────────────────────────────────────
