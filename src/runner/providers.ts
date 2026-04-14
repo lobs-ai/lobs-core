@@ -569,11 +569,11 @@ class AnthropicClient implements LLMClient {
       const response = await awaitAnthropicFinalMessageWithInactivityTimeout(stream, this.sessionId);
 
       const usage: TokenUsage = {
-        inputTokens: response.usage.input_tokens,
-        outputTokens: response.usage.output_tokens,
-        cacheReadTokens: (response.usage as any).cache_read_input_tokens ?? 0,
-        cacheWriteTokens: (response.usage as any).cache_creation_input_tokens ?? 0,
-        thinkingTokens: (response.usage as any).thinking_tokens,
+        inputTokens: response.usage?.input_tokens ?? 0,
+        outputTokens: response.usage?.output_tokens ?? 0,
+        cacheReadTokens: (response.usage as any)?.cache_read_input_tokens ?? 0,
+        cacheWriteTokens: (response.usage as any)?.cache_creation_input_tokens ?? 0,
+        thinkingTokens: (response.usage as any)?.thinking_tokens,
       };
 
       // Extract thinking content if present
