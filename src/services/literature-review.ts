@@ -643,7 +643,7 @@ Return JSON with ALL of these fields:
 
 // ─── Markdown Output ──────────────────────────────────────────────────────────
 
-function buildMarkdown(
+export function buildMarkdown(
   question: string,
   papers: PaperSummary[],
   analyses: PaperAnalysis[],
@@ -781,16 +781,23 @@ function buildMarkdown(
 
 // ─── LaTeX Output ─────────────────────────────────────────────────────────────
 
-function escapeLatex(s: string): string {
+export function escapeLatex(s: string): string {
+  // Use a placeholder to avoid chain-reacting on the backslash we insert.
+  // Order: (1) replace \ with marker, (2) escape all special chars, (3) swap marker.
+  // NOTE: ~ and ^ need \textasciitilde / \textasciicircum (not \< or \^) to work in text mode.
+  // < > | use \textless / \textgreater / \textbar for the same reason.
   return s
-    .replace(/\\/g, "\\textbackslash{}")
-    .replace(/[&%$#_{}~^]/g, c => `\\${c}`)
+    .replace(/\\/g, "\u0000BS\u0000")
+    .replace(/[&%$#{}_]/g, c => `\\${c}`)
+    .replace(/~/g, "\\textasciitilde{}")
+    .replace(/\^/g, "\\textasciicircum{}")
     .replace(/</g, "\\textless{}")
     .replace(/>/g, "\\textgreater{}")
-    .replace(/\|/g, "\\textbar{}");
+    .replace(/\|/g, "\\textbar{}")
+    .replace(/\u0000BS\u0000/g, "\\textbackslash{}");
 }
 
-function buildLatex(
+export function buildLatex(
   question: string,
   papers: PaperSummary[],
   analyses: PaperAnalysis[],

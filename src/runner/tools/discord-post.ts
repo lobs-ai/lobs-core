@@ -37,13 +37,13 @@ export const discordPostToolDefinition: ToolDefinition = {
 // ── Implementation ───────────────────────────────────────────────────────────
 
 function readBotToken(): string {
-  const configPath = join(homedir(), ".lobs", "discord.json");
+  const configPath = join(homedir(), ".lobs", "config", "secrets", "discord-token.json");
   try {
     const raw = readFileSync(configPath, "utf-8");
     const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const token = parsed.token;
+    const token = parsed.botToken;
     if (typeof token !== "string" || !token) {
-      throw new Error("discord.json missing 'token' field");
+      throw new Error("discord-token.json missing 'botToken' field");
     }
     return token;
   } catch (err) {

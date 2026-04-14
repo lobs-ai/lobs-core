@@ -61,7 +61,7 @@ export async function dispatchAgentTool(
       cwd: agentCwd,
       tools: [...readOnlyTools],
       maxTurns: 15,
-      timeout: 120,
+      timeout: 300, // 5 min — outer limit for slow providers (OpenCode, MiniMax). Per-turn LLM timeout is 12 min in main-agent.ts.
       disableTranscript: true,
     });
 

@@ -1392,9 +1392,9 @@ function autoCloseSucceededTasks(): void {
     VALUES (lower(hex(randomblob(16))), 'auto_close_succeeded', 'processed', json(?), ?)
   `);
 
-  // Dedup: only insert inbox notice if no pending item exists with the same title
+  // Dedup: only insert inbox notice if no item exists with the same title that isn't done
   const inboxDedupCheck = db.prepare(
-    `SELECT COUNT(*) as cnt FROM inbox_items WHERE title = ? AND action_status = 'pending'`
+    `SELECT COUNT(*) as cnt FROM inbox_items WHERE title = ? AND action_status != 'done'`
   );
   const inboxInsertRaw = db.prepare(`
     INSERT INTO inbox_items (id, title, content, type, requires_action, action_status, source_agent)

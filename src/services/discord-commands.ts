@@ -21,6 +21,7 @@ import { logQaEvent } from "../gsi/gsi-store.js";
 import { chaseCitations } from "./citation-chaser.js";
 import { cancelSubscription, getMonthlyReviewCount, getOrCreateSubscription, getUserLimits, hasActiveTier, recordReviewUsage, upgradeSubscription, TIER_LIMITS, type SubscriptionTier } from "./subscription-manager.js";
 import { runLiteratureReview } from "./literature-review.js";
+import { findAndPopulateGaps } from "./research-gap-finder.js";
 import { runArchaeology, type ArchaeologyCommit } from "./code-archaeology.js";
 import { analyzeCoverage, fetchPrFilesForCoverage, makeStubReview } from "./test-coverage.js";
 import { createRubric, getRubric, listRubrics, gradeSubmission, getCourseGradingStats, type RubricCriterion, type GradeResult } from "./grading-assistant.js";
@@ -1603,6 +1604,11 @@ async function handleLitReviewCommand(interaction: ChatInputCommandInteraction):
     });
 
     recordReviewUsage(userId);
+
+    // Fire-and-forget: auto-populate Research Radar with gaps from this review
+    findAndPopulateGaps(review).catch((err) => {
+      console.error("[discord-commands] gap-finder error:", err);
+    });
 
     const tierLabel = sub.tier.toUpperCase();
     const embed = new EmbedBuilder()
