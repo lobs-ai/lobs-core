@@ -25,6 +25,23 @@ import { dispatchAgentToolDefinition, dispatchAgentTool } from "./dispatch.js";
 import { librarianAskToolDefinition, librarianAskTool, librarianReindexToolDefinition, reindexKnowledgeBaseTool, librarianAuditToolDefinition, librarianAuditTool, librarianStatusToolDefinition, librarianStatusTool, librarianAddDocumentToolDefinition, librarianAddDocumentTool } from "./librarian.js";
 import { toolManageDefinition, toolManageTool } from "./tool-manage.js";
 import { TASK_TOOL_DEFINITIONS, TASK_TOOL_EXECUTORS } from "./tasks.js";
+import {
+  lobsStatusToolDefinition, lobsStatusTool,
+  lobsHealthToolDefinition, lobsHealthTool,
+  lobsBuildToolDefinition, lobsBuildTool,
+  lobsStopToolDefinition, lobsStopTool,
+  lobsWorkersToolDefinition, lobsWorkersTool,
+  lobsPreflightToolDefinition, lobsPreflightTool,
+  lobsConfigCheckToolDefinition, lobsConfigCheckTool,
+  lobsStartToolDefinition, lobsStartTool,
+  lobsRestartToolDefinition, lobsRestartTool,
+  lobsLogsToolDefinition, lobsLogsTool,
+  lobsCronToolDefinition, lobsCronTool,
+  lobsModelsToolDefinition, lobsModelsTool,
+  lobsTasksToolDefinition, lobsTasksTool,
+  lobsCodexAuthToolDefinition, lobsCodexAuthTool,
+} from "./lobs-cli.js";
+import { discordPostToolDefinition, discordPostTool } from "./discord-post.js";
 import { getDynamicToolLoader } from "./dynamic-tools.js";
 import { getToolManager } from "./tool-manager.js";
 import {
@@ -234,6 +251,22 @@ const TOOL_REGISTRY: Record<ToolName, ToolEntry> = {
     definition: librarianAddDocumentToolDefinition,
     execute: (params, cwd) => librarianAddDocumentTool(params, cwd),
   },
+  // Lobs CLI built-in tools
+  "lobs-status":       { definition: lobsStatusToolDefinition,      execute: (params) => lobsStatusTool(params) },
+  "lobs-health":       { definition: lobsHealthToolDefinition,      execute: (params) => lobsHealthTool(params) },
+  "lobs-build":        { definition: lobsBuildToolDefinition,       execute: (params) => lobsBuildTool(params) },
+  "lobs-stop":         { definition: lobsStopToolDefinition,        execute: (params) => lobsStopTool(params) },
+  "lobs-workers":      { definition: lobsWorkersToolDefinition,     execute: (params) => lobsWorkersTool(params) },
+  "lobs-preflight":    { definition: lobsPreflightToolDefinition,   execute: (params) => lobsPreflightTool(params) },
+  "lobs-config-check": { definition: lobsConfigCheckToolDefinition, execute: (params) => lobsConfigCheckTool(params) },
+  "lobs-start":        { definition: lobsStartToolDefinition,       execute: (params) => lobsStartTool(params) },
+  "lobs-restart":      { definition: lobsRestartToolDefinition,     execute: (params) => lobsRestartTool(params) },
+  "lobs-logs":         { definition: lobsLogsToolDefinition,        execute: (params) => lobsLogsTool(params) },
+  "lobs-cron":         { definition: lobsCronToolDefinition,        execute: (params) => lobsCronTool(params) },
+  "lobs-models":       { definition: lobsModelsToolDefinition,      execute: (params) => lobsModelsTool(params) },
+  "lobs-tasks":        { definition: lobsTasksToolDefinition,       execute: (params) => lobsTasksTool(params) },
+  "lobs-codex-auth":   { definition: lobsCodexAuthToolDefinition,   execute: (params) => lobsCodexAuthTool(params) },
+  "discord-post":      { definition: discordPostToolDefinition,     execute: (params) => discordPostTool(params) },
   // Task and goal management tools
   task_create: { definition: TASK_TOOL_DEFINITIONS[0], execute: TASK_TOOL_EXECUTORS.task_create },
   task_update: { definition: TASK_TOOL_DEFINITIONS[1], execute: TASK_TOOL_EXECUTORS.task_update },
