@@ -255,6 +255,39 @@ export async function hasActiveTier(
 }
 
 /**
+ * Count how many reviews a user has run this month.
+ */
+export function getMonthlyReviewCount(userId: string): number {
+  const db = getRawDb();
+  const startOfMonth = new Date();
+  startOfMonth.setDate(1);
+  startOfMonth.setHours(0, 0, 0, 0);
+  const result = db.prepare(`
+    SELECT COUNT(*) as count FROM lit_review_usage
+    WHERE user_id = ? AND created_at >= ?
+  `).get(userId, startOfMonth.toISOString()) as { count: number } | undefined;
+  return result?.count ?? 0;
+}
+
+/**
+ * Record that a user ran a literature review (for monthly limit tracking).
+ */
+export function recordReviewUsage(userId: string): void {
+  const db = getRawDb();
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS lit_review_usage (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  db.prepare(`INSERT INTO lit_review_usage (id, user_id) VALUES (?, ?)`).run(
+    `usage_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    userId,
+  );
+}
+
+/**
  * Stripe webhook handler stub.
  * In production, integrate with Stripe webhook events:
  * - customer.subscription.created

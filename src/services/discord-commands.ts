@@ -19,7 +19,8 @@ import { answerStudentQuestion, formatAnswerForDiscord, formatEscalationChannelR
 import { seedCourse } from "../gsi/gsi-seed.js";
 import { logQaEvent } from "../gsi/gsi-store.js";
 import { chaseCitations } from "./citation-chaser.js";
-import { cancelSubscription, getOrCreateSubscription, getUserLimits, hasActiveTier, upgradeSubscription, TIER_LIMITS, type SubscriptionTier } from "./subscription-manager.js";
+import { cancelSubscription, getMonthlyReviewCount, getOrCreateSubscription, getUserLimits, hasActiveTier, recordReviewUsage, upgradeSubscription, TIER_LIMITS, type SubscriptionTier } from "./subscription-manager.js";
+import { runLiteratureReview } from "./literature-review.js";
 import { runArchaeology, type ArchaeologyCommit } from "./code-archaeology.js";
 import { analyzeCoverage, fetchPrFilesForCoverage, makeStubReview } from "./test-coverage.js";
 import { createRubric, getRubric, listRubrics, gradeSubmission, getCourseGradingStats, type RubricCriterion, type GradeResult } from "./grading-assistant.js";
@@ -367,6 +368,9 @@ export async function handleSlashCommand(interaction: ChatInputCommandInteractio
         break;
       case 'gsi-stats':
         await handleGsiStatsCommand(interaction);
+        break;
+      case 'lit-review':
+        await handleLitReviewCommand(interaction);
         break;
       case 'cite':
         await handleCiteCommand(interaction);
@@ -1554,6 +1558,102 @@ async function handleGradeStatsCommand(interaction: ChatInputCommandInteraction)
   const full = lines.join('\n');
   const safe = full.length > 1900 ? full.slice(0, 1900) + '\n…*(truncated)*' : full;
   await interaction.editReply(safe);
+}
+
+async function handleLitReviewCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const userId = interaction.user.id;
+  const topic = interaction.options.getString('topic', true).trim();
+  const wantLatex = interaction.options.getBoolean('latex') ?? false;
+
+  await interaction.deferReply();
+
+  try {
+    const sub = await getOrCreateSubscription(userId);
+    const limits = TIER_LIMITS[sub.tier as SubscriptionTier];
+
+    // Monthly quota check (-1 = unlimited)
+    if (limits.monthlyReviews !== -1) {
+      const usedThisMonth = getMonthlyReviewCount(userId);
+      if (usedThisMonth >= limits.monthlyReviews) {
+        await interaction.editReply(
+          `🚫 You've used all **${limits.monthlyReviews}** literature reviews this month. ` +
+          `Run \`/subscribe pro\` to upgrade or wait until next month.`
+        );
+        return;
+      }
+    }
+
+    const isPro = sub.tier === 'pro' || sub.tier === 'enterprise';
+    const outputFormat: 'markdown' | 'latex' | 'both' = wantLatex && isPro ? 'both' : 'markdown';
+
+    if (wantLatex && !isPro) {
+      await interaction.followUp({
+        content: '⚠️ LaTeX export requires Pro or Enterprise. Running without LaTeX.',
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+
+    const review = await runLiteratureReview({
+      question: topic,
+      expansionDepth: limits.expansionDepth,
+      relatedPerPaper: limits.relatedPerPaper,
+      maxPapers: limits.maxPapersPerReview,
+      outputFormat,
+      tier: 'small',
+    });
+
+    recordReviewUsage(userId);
+
+    const tierLabel = sub.tier.toUpperCase();
+    const embed = new EmbedBuilder()
+      .setTitle(`📚 Literature Review: ${topic.slice(0, 80)}${topic.length > 80 ? '…' : ''}`)
+      .setColor(0x4f46e5)
+      .setTimestamp()
+      .setFooter({ text: `${review.topPapers.length} papers · ${tierLabel} tier · depth ${limits.expansionDepth}` });
+
+    if (review.themes?.length) {
+      const themeLines = review.themes.slice(0, 5).map(t =>
+        `**${t.name}** (${t.consensus}) — ${t.description.slice(0, 150)}`
+      ).join('\n\n').slice(0, 1024);
+      embed.addFields({ name: '🔑 Key Themes', value: themeLines });
+    }
+
+    if (review.contradictions?.length) {
+      const cLines = review.contradictions.slice(0, 3).map(c =>
+        `**${c.claim}** — ${c.supportedBy.length} supporting, ${c.contradictedBy.length} contradicting`
+      ).join('\n').slice(0, 1024);
+      embed.addFields({ name: `⚡ Contradictions (${review.contradictions.length})`, value: cLines });
+    }
+
+    if (review.gaps?.length) {
+      embed.addFields({
+        name: '🔭 Research Gaps',
+        value: review.gaps.slice(0, 5).map(g => `• ${g}`).join('\n').slice(0, 1024),
+      });
+    }
+
+    const topPapers = review.topPapers.slice(0, 4);
+    if (topPapers.length) {
+      const pLines = topPapers.map(p =>
+        `• [${p.title}](${p.url}) (${p.year ?? '?'}, cited ${p.citationCount ?? 0}×)`
+      ).join('\n').slice(0, 1024);
+      embed.addFields({ name: `📄 Top Papers (${review.topPapers.length} total)`, value: pLines });
+    }
+
+    await interaction.editReply({ embeds: [embed] });
+
+    if (review.latex) {
+      const slug = topic.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40);
+      await interaction.followUp({
+        content: '📎 LaTeX source for your review:',
+        files: [{ attachment: Buffer.from(review.latex, 'utf-8'), name: `lit-review-${slug}.tex` }],
+      });
+    }
+
+  } catch (err) {
+    console.error('[discord-commands] /lit-review error:', err);
+    await interaction.editReply(`❌ Literature review failed: ${(err as Error).message}`);
+  }
 }
 
 async function handleCiteCommand(interaction: ChatInputCommandInteraction): Promise<void> {
