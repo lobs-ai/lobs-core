@@ -19,6 +19,7 @@ import { answerStudentQuestion, formatAnswerForDiscord, formatEscalationChannelR
 import { seedCourse } from "../gsi/gsi-seed.js";
 import { logQaEvent } from "../gsi/gsi-store.js";
 import { chaseCitations } from "./citation-chaser.js";
+import { cancelSubscription, getOrCreateSubscription, getUserLimits, hasActiveTier, upgradeSubscription, TIER_LIMITS, type SubscriptionTier } from "./subscription-manager.js";
 import { runArchaeology, type ArchaeologyCommit } from "./code-archaeology.js";
 import { analyzeCoverage, fetchPrFilesForCoverage, makeStubReview } from "./test-coverage.js";
 import { createRubric, getRubric, listRubrics, gradeSubmission, getCourseGradingStats, type RubricCriterion, type GradeResult } from "./grading-assistant.js";
@@ -287,7 +288,28 @@ export async function registerSlashCommands(client: Client, config: DiscordConfi
         .setDescription('PR number')
         .setRequired(true)
     ),
-  ];
+
+  new SlashCommandBuilder()
+    .setName('subscribe')
+    .setDescription('Subscribe to Lobs Pro tier for advanced literature review features')
+    .addStringOption(opt =>
+      opt.setName('tier')
+        .setDescription('Subscription tier')
+        .setRequired(true)
+        .addChoices(
+          { name: 'Pro — $9.99/month', value: 'pro' },
+          { name: 'Enterprise — $29.99/month', value: 'enterprise' },
+        )
+    ),
+
+  new SlashCommandBuilder()
+    .setName('subscription')
+    .setDescription('View or manage your current subscription'),
+
+  new SlashCommandBuilder()
+    .setName('unsubscribe')
+    .setDescription('Cancel your current Lobs subscription'),
+];
 
   const rest = new REST({ version: '10' }).setToken(config.botToken);
   const commandData = commands.map(c => c.toJSON());
@@ -363,6 +385,15 @@ export async function handleSlashCommand(interaction: ChatInputCommandInteractio
         break;
       case 'test-stubs':
         await handleTestStubsCommand(interaction);
+        break;
+      case 'subscribe':
+        await handleSubscribeCommand(interaction);
+        break;
+      case 'subscription':
+        await handleSubscriptionCommand(interaction);
+        break;
+      case 'unsubscribe':
+        await handleUnsubscribeCommand(interaction);
         break;
       default:
         await interaction.reply({ content: 'Unknown command', flags: MessageFlags.Ephemeral });
@@ -1605,5 +1636,169 @@ async function handleWhyCommand(interaction: ChatInputCommandInteraction): Promi
   } catch (err) {
     console.error('[discord-commands] /why error:', err);
     await interaction.editReply({ content: `❌ Archaeology failed: ${(err as Error).message}` });
+  }
+}
+
+// ─── Subscription Commands ──────────────────────────────────────────
+
+async function handleSubscribeCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const userId = interaction.user.id;
+  const tier = interaction.options.getString('tier', true) as 'pro' | 'enterprise';
+
+  await interaction.reply({
+    content: `🔄 Setting up your ${tier.toUpperCase()} subscription…`,
+    flags: MessageFlags.Ephemeral,
+  });
+
+  try {
+    // In production: redirect to Stripe Checkout
+    // For now: directly upgrade via subscription manager
+    const stripeCustomerId = `cus_demo_${userId}`; // Placeholder for demo
+    const stripeSubscriptionId = `sub_demo_${userId}`; // Placeholder for demo
+
+    const sub = await upgradeSubscription(
+      userId,
+      tier,
+      stripeCustomerId,
+      stripeSubscriptionId,
+    );
+
+    const price = tier === 'enterprise' ? '$29.99' : '$9.99';
+    const embed = new EmbedBuilder()
+      .setTitle(`🎉 ${tier.toUpperCase()} Subscription Activated`)
+      .setDescription(`You're now subscribed to Lobs ${tier.charAt(0).toUpperCase() + tier.slice(1)} tier!`)
+      .setColor(0x10b981)
+      .addFields(
+        { name: 'Tier', value: tier.toUpperCase(), inline: true },
+        { name: 'Price', value: `${price}/month`, inline: true },
+        { name: 'Status', value: sub.status.toUpperCase(), inline: true },
+        {
+          name: 'Your Limits',
+          value: [
+            `• Expansion depth: ${TIER_LIMITS[tier].expansionDepth}`,
+            `• Related papers: ${TIER_LIMITS[tier].relatedPerPaper}`,
+            `• Max papers/review: ${TIER_LIMITS[tier].maxPapersPerReview}`,
+            `• Monthly reviews: ${TIER_LIMITS[tier].monthlyReviews === -1 ? 'Unlimited' : TIER_LIMITS[tier].monthlyReviews}`,
+          ].join('\n'),
+        },
+      )
+      .setTimestamp();
+
+    await interaction.editReply({ content: '', embeds: [embed] });
+
+    // Notify in a public channel about new subscriber (optional)
+    if (interaction.guild) {
+      const channel = await interaction.guild?.channels.fetch(interaction.channelId);
+      // Don't spam — just log it
+      console.log(`[subscription] User ${userId} subscribed to ${tier}`);
+    }
+  } catch (err) {
+    console.error('[discord-commands] /subscribe error:', err);
+    await interaction.editReply({
+      content: `❌ Subscription setup failed: ${(err as Error).message}`,
+    });
+  }
+}
+
+async function handleSubscriptionCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const userId = interaction.user.id;
+
+  await interaction.reply({
+    content: `🔄 Checking your subscription…`,
+    flags: MessageFlags.Ephemeral,
+  });
+
+  try {
+    const sub = await getOrCreateSubscription(userId);
+    const limits = TIER_LIMITS[sub.tier as keyof typeof TIER_LIMITS];
+
+    const embed = new EmbedBuilder()
+      .setTitle(`📋 Your Lobs Subscription`)
+      .setColor(sub.status === 'active' ? 0x10b981 : 0xef4444)
+      .addFields(
+        { name: 'Current Tier', value: sub.tier.toUpperCase(), inline: true },
+        { name: 'Status', value: sub.status.toUpperCase(), inline: true },
+        { name: 'Price', value: sub.tier === 'free' ? 'Free' : sub.tier === 'pro' ? '$9.99/mo' : '$29.99/mo', inline: true },
+        {
+          name: 'Your Feature Limits',
+          value: [
+            `• Expansion depth: ${limits.expansionDepth}`,
+            `• Related papers: ${limits.relatedPerPaper}`,
+            `• Max papers/review: ${limits.maxPapersPerReview}`,
+            `• Monthly reviews: ${limits.monthlyReviews === -1 ? 'Unlimited' : limits.monthlyReviews}`,
+          ].join('\n'),
+        },
+      )
+      .setTimestamp();
+
+    if (sub.currentPeriodEnd) {
+      embed.addFields({
+        name: 'Next Billing',
+        value: new Date(sub.currentPeriodEnd).toLocaleDateString(),
+        inline: true,
+      });
+    }
+
+    // Upgrade prompt for free users
+    if (sub.tier === 'free') {
+      embed.setDescription('💡 Run `/subscribe pro` to unlock multi-hop literature reviews, more papers, and unlimited queries!');
+    }
+
+    await interaction.editReply({ content: '', embeds: [embed] });
+  } catch (err) {
+    console.error('[discord-commands] /subscription error:', err);
+    await interaction.editReply({
+      content: `❌ Failed to fetch subscription: ${(err as Error).message}`,
+    });
+  }
+}
+
+async function handleUnsubscribeCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const userId = interaction.user.id;
+
+  await interaction.reply({
+    content: `🔄 Cancelling your subscription…`,
+    flags: MessageFlags.Ephemeral,
+  });
+
+  try {
+    const sub = await getOrCreateSubscription(userId);
+
+    if (sub.tier === 'free') {
+      await interaction.editReply({
+        content: 'ℹ️ You don\'t have an active subscription to cancel.',
+      });
+      return;
+    }
+
+    const cancelled = await cancelSubscription(userId);
+
+    const embed = new EmbedBuilder()
+      .setTitle('✅ Subscription Cancelled')
+      .setDescription('Your subscription has been cancelled. You\'ll retain access until the end of your billing period.')
+      .setColor(0xf59e0b)
+      .addFields(
+        { name: 'Tier', value: cancelled.tier.toUpperCase(), inline: true },
+        { name: 'Status', value: 'CANCELLED', inline: true },
+        { name: 'Downgraded To', value: 'FREE', inline: true },
+      )
+      .setTimestamp();
+
+    if (cancelled.currentPeriodEnd) {
+      embed.addFields({
+        name: 'Access Expires',
+        value: new Date(cancelled.currentPeriodEnd).toLocaleDateString(),
+        inline: true,
+      });
+    }
+
+    embed.setFooter({ text: 'You can resubscribe anytime with /subscribe' });
+
+    await interaction.editReply({ content: '', embeds: [embed] });
+  } catch (err) {
+    console.error('[discord-commands] /unsubscribe error:', err);
+    await interaction.editReply({
+      content: `❌ Cancellation failed: ${(err as Error).message}`,
+    });
   }
 }

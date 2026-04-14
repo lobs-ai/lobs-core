@@ -200,8 +200,8 @@ export function analyzeWorkerOutcomeFromDb(options: {
 
   const HOME = process.env.HOME ?? "";
   let sessionMtimeMs: number | null = null;
-  let transcriptTurns = 0;
-  let hasResponse = false;
+  const transcriptTurns = 0;
+  const hasResponse = false;
 
   // Try to stat session file
   try {

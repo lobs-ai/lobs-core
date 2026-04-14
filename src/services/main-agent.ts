@@ -1619,7 +1619,7 @@ export class MainAgent {
         throw new Error(result.error ?? `Agent stopped with ${result.stopReason}`);
       }
 
-      let textResponse = result.output ?? "";
+      const textResponse = result.output ?? "";
       const isDirectChat = channelChatType !== "group";
       // NO_REPLY means the agent chose not to respond. Only treat the response
       // as NO_REPLY when it's the *entire* trimmed message. A real reply that
