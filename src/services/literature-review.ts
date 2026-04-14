@@ -477,6 +477,20 @@ ${content}`,
     },
   );
 
+  // Guard against callApiModelJSON returning undefined (model returned no parseable JSON)
+  if (!data || typeof data !== "object") {
+    console.warn(`[lit-review] analyzePaper: LLM returned no JSON for "${paper.title.slice(0, 50)}"`);
+    return {
+      paperId: paper.paperId,
+      title: paper.title,
+      year: paper.year,
+      keyFindings: [],
+      methodology: "",
+      limitations: [],
+      claims: [],
+    };
+  }
+
   return {
     paperId: paper.paperId,
     title: paper.title,
@@ -555,6 +569,19 @@ Return JSON with ALL of these fields:
       systemPrompt: "Synthesize academic literature. Identify real contradictions and gaps. Return only valid JSON.",
     },
   );
+
+  if (!data || typeof data !== "object") {
+    console.warn(`[lit-review] synthesizeReview: LLM returned no JSON for question "${question}". Analyses available: ${analyses.length}`);
+    return {
+      themes: [],
+      gaps: [],
+      contradictions: [],
+      executiveSummary: "",
+      futureDirections: [],
+      practitionerTakeaways: [],
+      tokensUsed,
+    };
+  }
 
   return {
     themes: data.themes ?? [],
