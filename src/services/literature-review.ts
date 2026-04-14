@@ -359,12 +359,58 @@ function ssPaperToSummary(p: SsApiPaper, discoveryPath: string): PaperSummary {
 // ─── PDF / Full Text Fetching ─────────────────────────────────────────────────
 
 /**
- * Attempt to fetch a truncated text excerpt from an open-access PDF.
- * Uses the arXiv HTML abstract page as a lightweight proxy for papers
- * that don't have easy plain-text access. Returns null on failure.
+ * Attempt to fetch paper body text for analysis.
+ * Strategy (in order):
+ *   1. ar5iv.org HTML — full semantic HTML rendering of the arXiv paper (no PDF parsing needed)
+ *   2. arXiv abstract page — HTML abstract (better than API abstract, includes subject class)
+ *   3. Stored abstract fallback — minimum viable content
+ *
+ * ar5iv strips LaTeX, math, and figures but preserves the full semantic text of the paper,
+ * which is substantially more useful for LLM analysis than just the abstract.
+ * Returns null on failure (never throws).
  */
-async function fetchPaperText(paper: PaperSummary, maxChars = 4000): Promise<string | null> {
-  // Try arXiv HTML abstract first (always available, no PDF parsing needed)
+async function fetchPaperText(paper: PaperSummary, maxChars = 8000): Promise<string | null> {
+  // ── 1. ar5iv HTML (full paper body) ──────────────────────────────────────────
+  if (paper.externalIds?.arXiv || paper.source === "arxiv") {
+    const arxivId = paper.externalIds?.arXiv ?? paper.paperId;
+
+    try {
+      const res = await fetch(`https://ar5iv.org/html/${arxivId}`, {
+        headers: { "User-Agent": "LobsResearchAgent/1.0 (academic research)" },
+        signal: AbortSignal.timeout(15000),
+      });
+
+      if (res.ok) {
+        const html = await res.text();
+        // ar5iv wraps content in <div class="ltx_page_content"> or <main>
+        // Extract paragraph text by stripping all tags inside the body
+        let bodyMatch: RegExpExecArray | null = /<main[^>]*>([\s\S]*?)<\/main>/i.exec(html);
+        if (!bodyMatch) {
+          bodyMatch = /<div class="ltx_page_content">([\s\S]*?)<\/div>/i.exec(html);
+        }
+        if (!bodyMatch) {
+          // Fallback: strip all tags and get remaining text
+          const fallback = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+          bodyMatch = [0, fallback] as unknown as RegExpExecArray;
+        }
+
+        const rawText = bodyMatch![1]
+          .replace(/<[^>]+>/g, " ")   // strip remaining tags
+          .replace(/\s+/g, " ")
+          .replace(/doi:[^\s]+/gi, "") // drop bare DOIs
+          .trim();
+
+        // Only use if it's meaningfully longer than the abstract
+        if (rawText.length > paper.abstract.length + 300) {
+          return rawText.slice(0, maxChars);
+        }
+      }
+    } catch {
+      // ar5iv failed — fall through to abstract
+    }
+  }
+
+  // ── 2. arXiv abstract page ───────────────────────────────────────────────────
   if (paper.externalIds?.arXiv || paper.source === "arxiv") {
     const arxivId = paper.externalIds?.arXiv ?? paper.paperId;
     try {
@@ -374,14 +420,12 @@ async function fetchPaperText(paper: PaperSummary, maxChars = 4000): Promise<str
       });
       if (res.ok) {
         const html = await res.text();
-        // Extract the abstract from the HTML (more complete than API sometimes)
         const abstractMatch = /<blockquote[^>]*class="abstract[^"]*"[^>]*>([\s\S]*?)<\/blockquote>/i.exec(html);
         if (abstractMatch) {
           const text = abstractMatch[1]
             .replace(/<[^>]+>/g, " ")
             .replace(/\s+/g, " ")
             .trim();
-          // Also try to grab any HTML paper body (ar5iv style)
           return text.slice(0, maxChars);
         }
       }
@@ -390,7 +434,7 @@ async function fetchPaperText(paper: PaperSummary, maxChars = 4000): Promise<str
     }
   }
 
-  // Fall back to stored abstract
+  // ── 3. Stored abstract fallback ─────────────────────────────────────────────
   return paper.abstract.length > 100 ? paper.abstract.slice(0, maxChars) : null;
 }
 
