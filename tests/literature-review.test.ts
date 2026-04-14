@@ -95,6 +95,12 @@ describe("LiteratureReviewService – search functions", () => {
   });
 
   it("searchSemanticScholar returns PaperSummary array with required fields", async () => {
+    // S2 API is rate-limited; the test needs a longer timeout to accommodate
+    // retry-with-backoff (2s + 4s minimum for 429 responses before giving up).
+    // Skip entirely if no API key is configured — it's a live integration test.
+    if (!process.env.S2_API_KEY) {
+      return;
+    }
     const results = await searchSemanticScholar(
       "language models knowledge base",
       5,
@@ -109,7 +115,7 @@ describe("LiteratureReviewService – search functions", () => {
       expect(first).toHaveProperty("source", "semantic-scholar");
       expect(first).toHaveProperty("url");
     }
-  });
+  }, 30_000);
 });
 
 describe("LiteratureReviewService – PaperSummary type", () => {
