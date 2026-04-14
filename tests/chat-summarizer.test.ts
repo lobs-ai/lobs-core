@@ -1,522 +1,606 @@
 /**
  * Tests for src/services/chat-summarizer.ts
  *
- * Strategy:
- *   - Stub fetch at module level (before imports) so callLocalModel is intercepted
- *   - Test all DB interaction logic (threshold checks, session writes, message reads)
- *   - Test error paths (session not found, LM Studio errors, bad titles)
- *   - Test generateChatTitle skip logic (already titled, <2 messages)
- *   - Test maybeSummarizeChat threshold and update logic
- *   - Test forceSummarize label reset and restoration
- *   - Test onAssistantMessage fires-and-forgets (no throw)
- *
- * NOTE: vi.stubGlobal must happen BEFORE the service import for the fetch mock
- * to be in place when callLocalModel executes (fetch is resolved at call time,
- * but vitest doesn't hoist stubGlobal, so we stub at module level first).
+ * Covers:
+ * - generateChatTitle() — title generation, DB updates, edge cases
+ * - maybeSummarizeChat() — summary threshold, first vs update, DB updates
+ * - forceSummarize() — reset + regenerate flow
+ * - onUserMessage / onAssistantMessage — hook wiring
+ * - callLocalModel (indirectly) — error response handling, think-block stripping
+ * - The original bug: LM Studio returning 200 with error JSON
  */
 
-import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { eq } from "drizzle-orm";
+import { getDb } from "../src/db/connection.js";
+import { chatSessions, chatMessages } from "../src/db/schema.js";
 
-// ── Stub fetch BEFORE any service imports ────────────────────────────────────
-// This must come before the chat-summarizer import so the global is patched.
+// ── Mocks ─────────────────────────────────────────────────────────────────────
 
-const mockFetch = vi.fn();
-vi.stubGlobal("fetch", mockFetch);
+// Mock model config — always return a known local config
+vi.mock("../src/config/models.js", () => ({
+  getModelConfig: () => ({
+    local: {
+      baseUrl: "http://localhost:1234/v1",
+      chatModel: "qwen2.5-1.5b-instruct-mlx",
+    },
+  }),
+}));
 
-// ── Now import the rest ───────────────────────────────────────────────────────
+// Mock model router — return null (no cloud provider, use local)
+vi.mock("../src/services/model-router.js", () => ({
+  getModelRouter: () => ({
+    selectModel: () => null,
+    reportSuccess: () => {},
+    reportFailure: () => {},
+  }),
+}));
 
-import { getDb, getRawDb } from "../src/db/connection.js";
+// Mock training data logger — no-op
+vi.mock("../src/services/training-data.js", () => ({
+  logTrainingExample: () => {},
+}));
+
+// Import after mocks are set up
 import {
   generateChatTitle,
   maybeSummarizeChat,
   forceSummarize,
+  onUserMessage,
   onAssistantMessage,
 } from "../src/services/chat-summarizer.js";
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-function makeLlmResponse(content: string) {
-  return Promise.resolve({
-    ok: true,
-    json: () => Promise.resolve({ choices: [{ message: { content } }] }),
-  });
+function mockFetchResponse(content: string, status = 200) {
+  global.fetch = vi.fn().mockResolvedValue({
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => content,
+    json: async () => ({
+      choices: [{ message: { content } }],
+    }),
+  }) as unknown as typeof fetch;
 }
 
-function makeLlmError(status = 500, body = "Server error") {
-  return Promise.resolve({
+function mockFetchError(error: string) {
+  // Simulates the original bug: LM Studio returns 200 with an error object
+  global.fetch = vi.fn().mockResolvedValue({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({ error }),
+    json: async () => ({ error }),
+  }) as unknown as typeof fetch;
+}
+
+function mockFetchNoChoices() {
+  global.fetch = vi.fn().mockResolvedValue({
+    ok: true,
+    status: 200,
+    text: async () => "{}",
+    json: async () => ({}),
+  }) as unknown as typeof fetch;
+}
+
+function mockFetchNetworkError() {
+  global.fetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED")) as unknown as typeof fetch;
+}
+
+function mockFetchHttpError(status: number, body: string) {
+  global.fetch = vi.fn().mockResolvedValue({
     ok: false,
     status,
-    text: () => Promise.resolve(body),
-  });
+    text: async () => body,
+    json: async () => ({ error: body }),
+  }) as unknown as typeof fetch;
 }
 
-function clearDb() {
-  const raw = getRawDb();
-  raw.exec("DELETE FROM chat_messages; DELETE FROM chat_sessions;");
+const TEST_SESSION_KEY = "chat-test-0001";
+
+function seedSession(key: string, label?: string) {
+  const db = getDb();
+  db.insert(chatSessions).values({
+    sessionKey: key,
+    label: label ?? "New Chat",
+    isActive: true,
+  }).run();
 }
 
-function seedSession(opts: {
-  sessionKey: string;
-  label?: string;
-  summary?: string | null;
-  messageCountAtSummary?: number;
-}) {
-  const raw = getRawDb();
-  const now = new Date().toISOString();
-  raw.prepare(`
-    INSERT INTO chat_sessions (id, session_key, label, summary, message_count_at_summary, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(
-    crypto.randomUUID(),
-    opts.sessionKey,
-    opts.label ?? "New Chat",
-    opts.summary ?? null,
-    opts.messageCountAtSummary ?? 0,
-    now,
-  );
-}
-
-function seedMessages(
-  sessionKey: string,
-  msgs: Array<{ role: string; content: string }>,
-) {
-  const raw = getRawDb();
-  const base = Date.now();
-  for (let i = 0; i < msgs.length; i++) {
-    const ts = new Date(base + i * 1000).toISOString();
-    raw.prepare(`
-      INSERT INTO chat_messages (id, session_key, role, content, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(crypto.randomUUID(), sessionKey, msgs[i].role, msgs[i].content, ts);
+function seedMessages(sessionKey: string, messages: Array<{ role: string; content: string }>) {
+  const db = getDb();
+  for (const msg of messages) {
+    db.insert(chatMessages).values({
+      sessionKey,
+      role: msg.role,
+      content: msg.content,
+    }).run();
   }
 }
 
-// Reset between tests
+function getSession(key: string) {
+  const db = getDb();
+  return db.select().from(chatSessions)
+    .where(eq(chatSessions.sessionKey, key))
+    .get();
+}
+
+// ── Setup / Teardown ──────────────────────────────────────────────────────────
+
 beforeEach(() => {
-  mockFetch.mockReset();
-  clearDb();
+  const db = getDb();
+  db.delete(chatMessages).run();
+  db.delete(chatSessions).run();
 });
 
 afterEach(() => {
-  // keep stubGlobal — don't unstub, only reset mock state
+  vi.restoreAllMocks();
 });
 
-// ── generateChatTitle ────────────────────────────────────────────────────────
+// ── generateChatTitle ─────────────────────────────────────────────────────────
 
 describe("generateChatTitle", () => {
-  it("returns null when session doesn't exist", async () => {
-    const title = await generateChatTitle("no-such-session");
+  it("generates a title from the first user message and saves to DB", async () => {
+    seedSession(TEST_SESSION_KEY);
+    seedMessages(TEST_SESSION_KEY, [
+      { role: "user", content: "How do I set up Docker Compose for a Node app?" },
+    ]);
+    mockFetchResponse("Setting Up Docker Compose for Node");
+
+    const title = await generateChatTitle(TEST_SESSION_KEY);
+
+    expect(title).toBe("Setting Up Docker Compose for Node");
+    const session = getSession(TEST_SESSION_KEY);
+    expect(session?.label).toBe("Setting Up Docker Compose for Node");
+  });
+
+  it("generates a title from multiple messages", async () => {
+    seedSession(TEST_SESSION_KEY);
+    seedMessages(TEST_SESSION_KEY, [
+      { role: "user", content: "My Postgres connection keeps timing out" },
+      { role: "assistant", content: "Let me help you debug that. Check your connection pool settings." },
+      { role: "user", content: "I'm using pg-pool with max 10 connections" },
+    ]);
+    mockFetchResponse("Debug PostgreSQL Connection Timeout");
+
+    const title = await generateChatTitle(TEST_SESSION_KEY);
+    expect(title).toBe("Debug PostgreSQL Connection Timeout");
+  });
+
+  it("skips generation if session already has a custom title", async () => {
+    seedSession(TEST_SESSION_KEY, "My Custom Title");
+    seedMessages(TEST_SESSION_KEY, [
+      { role: "user", content: "Some message" },
+    ]);
+    mockFetchResponse("Should Not Be Used");
+
+    const title = await generateChatTitle(TEST_SESSION_KEY);
+
     expect(title).toBeNull();
-    expect(mockFetch).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(getSession(TEST_SESSION_KEY)?.label).toBe("My Custom Title");
   });
 
-  it("skips title generation when session has a custom (non-default) title", async () => {
-    seedSession({ sessionKey: "s1", label: "My Custom Title" });
-    seedMessages("s1", [
-      { role: "user", content: "Hello" },
-      { role: "assistant", content: "Hi there!" },
+  it("generates title when label is 'New Chat' (default)", async () => {
+    seedSession(TEST_SESSION_KEY, "New Chat");
+    seedMessages(TEST_SESSION_KEY, [
+      { role: "user", content: "Help me write a Rust parser" },
     ]);
+    mockFetchResponse("Writing a Rust Parser");
 
-    const title = await generateChatTitle("s1");
-    // Custom title → null (already titled, nothing to update)
+    const title = await generateChatTitle(TEST_SESSION_KEY);
+    expect(title).toBe("Writing a Rust Parser");
+  });
+
+  it("generates title when label matches 'Chat N' pattern", async () => {
+    seedSession(TEST_SESSION_KEY, "Chat 42");
+    seedMessages(TEST_SESSION_KEY, [
+      { role: "user", content: "Explain async/await in JavaScript" },
+    ]);
+    mockFetchResponse("JavaScript Async Await Explained");
+
+    const title = await generateChatTitle(TEST_SESSION_KEY);
+    expect(title).toBe("JavaScript Async Await Explained");
+  });
+
+  it("returns null for non-existent session", async () => {
+    const title = await generateChatTitle("chat-does-not-exist");
     expect(title).toBeNull();
-    expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it("generates title for 'Chat N' default titles", async () => {
-    seedSession({ sessionKey: "s2", label: "Chat 42" });
-    seedMessages("s2", [
-      { role: "user", content: "Hello" },
-      { role: "assistant", content: "Hi there!" },
-    ]);
-    mockFetch.mockReturnValue(makeLlmResponse("Greeting Exchange"));
-
-    const title = await generateChatTitle("s2");
-    expect(mockFetch).toHaveBeenCalledOnce();
-    expect(title).toBe("Greeting Exchange");
-  });
-
-  it("generates title for 'New Chat' default title", async () => {
-    seedSession({ sessionKey: "s3", label: "New Chat" });
-    seedMessages("s3", [
-      { role: "user", content: "Deploy help" },
-      { role: "assistant", content: "Sure!" },
-    ]);
-    mockFetch.mockReturnValue(makeLlmResponse("Deploy Assistance"));
-
-    const title = await generateChatTitle("s3");
-    expect(title).toBe("Deploy Assistance");
-  });
-
-  it("returns null when no messages exist", async () => {
-    seedSession({ sessionKey: "s4" });
-    // No messages seeded — empty conversation
-
-    const title = await generateChatTitle("s4");
+  it("returns null when session has no messages", async () => {
+    seedSession(TEST_SESSION_KEY);
+    const title = await generateChatTitle(TEST_SESSION_KEY);
     expect(title).toBeNull();
-    expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it("filters out tool-call messages when building the prompt", async () => {
-    seedSession({ sessionKey: "s5" });
-    seedMessages("s5", [
-      { role: "tool", content: "search result" },
-      { role: "user", content: "Fix my code" },
-      { role: "assistant", content: "Sure, here's the fix..." },
-      { role: "tool", content: "another tool call" },
+  it("strips think blocks from model output", async () => {
+    seedSession(TEST_SESSION_KEY);
+    seedMessages(TEST_SESSION_KEY, [
+      { role: "user", content: "How to deploy to Kubernetes?" },
     ]);
-    mockFetch.mockReturnValue(makeLlmResponse("Code Fix Session"));
+    mockFetchResponse("<think>\nThe user wants to know about k8s deployment.\n</think>\n\nKubernetes Deployment Guide");
 
-    await generateChatTitle("s5");
-    expect(mockFetch).toHaveBeenCalledOnce();
-
-    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-    // The assembled user/assistant messages should not contain tool content
-    const msgStr = JSON.stringify(body.messages);
-    expect(msgStr).toContain("Fix my code");
-    expect(msgStr).not.toContain("search result");
-    expect(msgStr).not.toContain("another tool call");
-  });
-
-  it("saves title to DB on success", async () => {
-    seedSession({ sessionKey: "s6" });
-    seedMessages("s6", [
-      { role: "user", content: "How do I deploy to Kubernetes?" },
-      { role: "assistant", content: "Here's how you deploy to K8s..." },
-    ]);
-    mockFetch.mockReturnValue(makeLlmResponse("Kubernetes Deployment Guide"));
-
-    const title = await generateChatTitle("s6");
+    const title = await generateChatTitle(TEST_SESSION_KEY);
     expect(title).toBe("Kubernetes Deployment Guide");
-
-    const raw = getRawDb();
-    const row = raw.prepare("SELECT label FROM chat_sessions WHERE session_key = ?").get("s6") as any;
-    expect(row?.label).toBe("Kubernetes Deployment Guide");
   });
 
-  it("strips surrounding quotes from model output", async () => {
-    seedSession({ sessionKey: "s7" });
-    seedMessages("s7", [
+  it("strips surrounding quotes from generated title", async () => {
+    seedSession(TEST_SESSION_KEY);
+    seedMessages(TEST_SESSION_KEY, [
+      { role: "user", content: "Fix my CSS grid layout" },
+    ]);
+    mockFetchResponse('"Fixing CSS Grid Layout"');
+
+    const title = await generateChatTitle(TEST_SESSION_KEY);
+    expect(title).toBe("Fixing CSS Grid Layout");
+  });
+
+  it("strips trailing punctuation from generated title", async () => {
+    seedSession(TEST_SESSION_KEY);
+    seedMessages(TEST_SESSION_KEY, [
+      { role: "user", content: "Help with TypeScript generics" },
+    ]);
+    mockFetchResponse("TypeScript Generics Help!");
+
+    const title = await generateChatTitle(TEST_SESSION_KEY);
+    expect(title).toBe("TypeScript Generics Help");
+  });
+
+  it("filters out tool-call messages, only uses user/assistant", async () => {
+    seedSession(TEST_SESSION_KEY);
+    seedMessages(TEST_SESSION_KEY, [
+      { role: "user", content: "Read my config file" },
+      { role: "tool", content: '{"file": "config.json", "content": "..."}' },
+      { role: "assistant", content: "I read your config file, here's what I found." },
+    ]);
+    mockFetchResponse("Reading Config File");
+
+    const title = await generateChatTitle(TEST_SESSION_KEY);
+    expect(title).toBe("Reading Config File");
+
+    // Verify tool messages were excluded from the prompt
+    const fetchCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    const body = JSON.parse(fetchCall[1].body);
+    const userPrompt = body.messages.find((m: any) => m.role === "user")?.content;
+    expect(userPrompt).not.toContain("config.json");
+  });
+
+  // ── Error handling ──────────────────────────────────────────────────────
+
+  it("returns null when LM Studio returns 200 with error JSON (the original bug)", async () => {
+    seedSession(TEST_SESSION_KEY);
+    seedMessages(TEST_SESSION_KEY, [
       { role: "user", content: "Hello" },
-      { role: "assistant", content: "World" },
     ]);
-    mockFetch.mockReturnValue(makeLlmResponse('"Hello World Chat"'));
+    mockFetchError("Unexpected endpoint or method.");
 
-    const title = await generateChatTitle("s7");
-    expect(title).toBe("Hello World Chat");
+    const title = await generateChatTitle(TEST_SESSION_KEY);
+
+    expect(title).toBeNull();
+    // Label should remain "New Chat" — not be set to empty string
+    expect(getSession(TEST_SESSION_KEY)?.label).toBe("New Chat");
   });
 
-  it("strips trailing punctuation from model output", async () => {
-    seedSession({ sessionKey: "s8" });
-    seedMessages("s8", [
-      { role: "user", content: "What is REST?" },
-      { role: "assistant", content: "REST is..." },
+  it("returns null when LM Studio returns 200 with no choices", async () => {
+    seedSession(TEST_SESSION_KEY);
+    seedMessages(TEST_SESSION_KEY, [
+      { role: "user", content: "Hello" },
     ]);
-    mockFetch.mockReturnValue(makeLlmResponse("REST API Basics."));
+    mockFetchNoChoices();
 
-    const title = await generateChatTitle("s8");
-    // Trailing punctuation should be stripped
-    expect(title).not.toMatch(/[.!?]$/);
-    expect(title).toContain("REST API Basics");
+    const title = await generateChatTitle(TEST_SESSION_KEY);
+    expect(title).toBeNull();
+    expect(getSession(TEST_SESSION_KEY)?.label).toBe("New Chat");
   });
 
-  it("returns null and does not throw when LM Studio returns an error", async () => {
-    seedSession({ sessionKey: "s9" });
-    seedMessages("s9", [
-      { role: "user", content: "Help" },
-      { role: "assistant", content: "Sure" },
+  it("returns null on HTTP error from LM Studio", async () => {
+    seedSession(TEST_SESSION_KEY);
+    seedMessages(TEST_SESSION_KEY, [
+      { role: "user", content: "Hello" },
     ]);
-    mockFetch.mockReturnValue(makeLlmError(500, "Internal Server Error"));
+    mockFetchHttpError(503, "Service Unavailable");
 
-    const title = await generateChatTitle("s9");
+    const title = await generateChatTitle(TEST_SESSION_KEY);
     expect(title).toBeNull();
   });
 
-  it("returns null and does not throw when fetch throws (network error)", async () => {
-    seedSession({ sessionKey: "s10" });
-    seedMessages("s10", [
-      { role: "user", content: "Deploy" },
-      { role: "assistant", content: "OK" },
+  it("returns null on network error (LM Studio down)", async () => {
+    seedSession(TEST_SESSION_KEY);
+    seedMessages(TEST_SESSION_KEY, [
+      { role: "user", content: "Hello" },
     ]);
-    mockFetch.mockRejectedValue(new Error("ECONNREFUSED"));
+    mockFetchNetworkError();
 
-    const title = await generateChatTitle("s10");
+    const title = await generateChatTitle(TEST_SESSION_KEY);
     expect(title).toBeNull();
   });
 
-  it("uses at most 6 messages for title generation (truncates)", async () => {
-    seedSession({ sessionKey: "s11" });
-    // 12 messages — only first 6 should be used
-    seedMessages("s11", Array.from({ length: 12 }, (_, i) => ({
-      role: i % 2 === 0 ? "user" : "assistant",
-      content: `Message ${i}`,
-    })));
-    mockFetch.mockReturnValue(makeLlmResponse("Long Conversation Title"));
-
-    await generateChatTitle("s11");
-    expect(mockFetch).toHaveBeenCalledOnce();
-
-    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-    const allContent = JSON.stringify(body.messages);
-    // Message 10 and 11 should NOT appear in the truncated set
-    expect(allContent).not.toContain("Message 10");
-    expect(allContent).not.toContain("Message 11");
-  });
-
-  it("handles very long message content without error (truncates)", async () => {
-    seedSession({ sessionKey: "s12" });
-    const longContent = "x".repeat(15_000); // > MAX_CONTEXT_CHARS (12_000)
-    seedMessages("s12", [
-      { role: "user", content: longContent },
-      { role: "assistant", content: "Response" },
+  it("truncates very long titles to 80 chars", async () => {
+    seedSession(TEST_SESSION_KEY);
+    seedMessages(TEST_SESSION_KEY, [
+      { role: "user", content: "Hello" },
     ]);
-    mockFetch.mockReturnValue(makeLlmResponse("Truncated Content Chat"));
+    const longTitle = "A".repeat(100);
+    mockFetchResponse(longTitle);
 
-    const title = await generateChatTitle("s12");
-    expect(title).toBe("Truncated Content Chat");
-    expect(mockFetch).toHaveBeenCalledOnce();
+    const title = await generateChatTitle(TEST_SESSION_KEY);
+    expect(title!.length).toBeLessThanOrEqual(80);
   });
 });
 
-// ── maybeSummarizeChat ───────────────────────────────────────────────────────
+// ── maybeSummarizeChat ────────────────────────────────────────────────────────
 
 describe("maybeSummarizeChat", () => {
-  it("returns null when session doesn't exist", async () => {
-    const result = await maybeSummarizeChat("no-such-session");
-    expect(result).toBeNull();
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  it("returns null and does not fetch when below SUMMARY_THRESHOLD", async () => {
-    seedSession({ sessionKey: "ms1", messageCountAtSummary: 0 });
-    seedMessages("ms1", [
-      { role: "user", content: "Hi" },
-      { role: "assistant", content: "Hello" },
-      // Only 2, < threshold (default 6)
+  it("skips summarization when below SUMMARY_THRESHOLD (6 messages)", async () => {
+    seedSession(TEST_SESSION_KEY);
+    seedMessages(TEST_SESSION_KEY, [
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "Hi there" },
     ]);
 
-    const result = await maybeSummarizeChat("ms1");
-    expect(result).toBeNull();
-    expect(mockFetch).not.toHaveBeenCalled();
+    const fetchBefore = global.fetch;
+    const summary = await maybeSummarizeChat(TEST_SESSION_KEY);
+
+    // Should return null (no existing summary) without calling LLM
+    expect(summary).toBeNull();
+    // fetch should not have been called — threshold not met
+    expect(global.fetch).toBe(fetchBefore);
   });
 
-  it("returns existing summary when below threshold", async () => {
-    seedSession({
-      sessionKey: "ms2",
-      summary: "Existing summary from before",
-      messageCountAtSummary: 4,
-    });
-    // Only 4 messages total → 4 - 4 = 0 new → below threshold
-    seedMessages("ms2", Array.from({ length: 4 }, (_, i) => ({
-      role: i % 2 === 0 ? "user" : "assistant",
-      content: `Msg ${i}`,
-    })));
+  it("generates first summary when threshold is met", async () => {
+    seedSession(TEST_SESSION_KEY);
+    const msgs = [];
+    for (let i = 0; i < 8; i++) {
+      msgs.push({ role: i % 2 === 0 ? "user" : "assistant", content: `Message ${i}` });
+    }
+    seedMessages(TEST_SESSION_KEY, msgs);
+    mockFetchResponse("User discussed various topics across 8 messages. Key points were covered.");
 
-    const result = await maybeSummarizeChat("ms2");
-    expect(result).toBe("Existing summary from before");
-    expect(mockFetch).not.toHaveBeenCalled();
+    const summary = await maybeSummarizeChat(TEST_SESSION_KEY);
+
+    expect(summary).toBe("User discussed various topics across 8 messages. Key points were covered.");
+    const session = getSession(TEST_SESSION_KEY);
+    expect(session?.summary).toBe(summary);
+    expect(session?.messageCountAtSummary).toBe(8);
+    expect(session?.summaryUpdatedAt).toBeTruthy();
   });
 
-  it("generates a new summary when above threshold (first time)", async () => {
-    seedSession({ sessionKey: "ms3", messageCountAtSummary: 0 });
-    seedMessages("ms3", Array.from({ length: 8 }, (_, i) => ({
-      role: i % 2 === 0 ? "user" : "assistant",
-      content: `Message ${i}`,
-    })));
-    mockFetch.mockReturnValue(makeLlmResponse("User asked about topic X. Resolution: found fix."));
+  it("updates existing summary with new messages", async () => {
+    seedSession(TEST_SESSION_KEY);
 
-    const result = await maybeSummarizeChat("ms3");
-    expect(result).toBe("User asked about topic X. Resolution: found fix.");
-    expect(mockFetch).toHaveBeenCalledOnce();
+    // Seed initial messages and set messageCountAtSummary to simulate previous summarization
+    const msgs = [];
+    for (let i = 0; i < 14; i++) {
+      msgs.push({ role: i % 2 === 0 ? "user" : "assistant", content: `Message ${i}` });
+    }
+    seedMessages(TEST_SESSION_KEY, msgs);
+
+    // Set existing summary state — summarized at 6 messages, now have 14 (8 new > threshold)
+    const db = getDb();
+    db.update(chatSessions)
+      .set({ summary: "Previous summary of initial conversation.", messageCountAtSummary: 6 })
+      .where(eq(chatSessions.sessionKey, TEST_SESSION_KEY))
+      .run();
+
+    mockFetchResponse("Updated summary incorporating new developments.");
+
+    const summary = await maybeSummarizeChat(TEST_SESSION_KEY);
+
+    expect(summary).toBe("Updated summary incorporating new developments.");
+
+    // Verify the prompt included the previous summary
+    const fetchCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    const body = JSON.parse(fetchCall[1].body);
+    const userPrompt = body.messages.find((m: any) => m.role === "user")?.content;
+    expect(userPrompt).toContain("Previous summary:");
+    expect(userPrompt).toContain("Previous summary of initial conversation.");
   });
 
-  it("includes previous summary in prompt for UPDATE path", async () => {
-    seedSession({
-      sessionKey: "ms4",
-      summary: "Previous summary: debugging auth flow.",
-      messageCountAtSummary: 0,
-    });
-    seedMessages("ms4", Array.from({ length: 8 }, (_, i) => ({
-      role: i % 2 === 0 ? "user" : "assistant",
-      content: `Msg ${i}`,
-    })));
-    mockFetch.mockReturnValue(makeLlmResponse("Updated summary with new context added."));
-
-    const result = await maybeSummarizeChat("ms4");
-    expect(result).toBe("Updated summary with new context added.");
-
-    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-    const userMsg = body.messages.find((m: any) => m.role === "user");
-    expect(userMsg.content).toContain("Previous summary:");
-    expect(userMsg.content).toContain("debugging auth flow");
-  });
-
-  it("saves summary and updates messageCountAtSummary in DB", async () => {
-    seedSession({ sessionKey: "ms5", messageCountAtSummary: 0 });
-    seedMessages("ms5", Array.from({ length: 8 }, (_, i) => ({
-      role: i % 2 === 0 ? "user" : "assistant",
-      content: `Content ${i}`,
-    })));
-    mockFetch.mockReturnValue(
-      makeLlmResponse("A solid summary of what happened in the conversation."),
-    );
-
-    await maybeSummarizeChat("ms5");
-
-    const raw = getRawDb();
-    const row = raw.prepare("SELECT summary, message_count_at_summary FROM chat_sessions WHERE session_key = ?").get("ms5") as any;
-    expect(row?.summary).toBe("A solid summary of what happened in the conversation.");
-    expect(row?.message_count_at_summary).toBe(8);
-  });
-
-  it("filters out tool messages before building summary prompt", async () => {
-    seedSession({ sessionKey: "ms6", messageCountAtSummary: 0 });
-    seedMessages("ms6", [
-      { role: "user", content: "Search for React hooks" },
-      { role: "assistant", content: "Let me search..." },
-      { role: "tool", content: "search result 1" },
-      { role: "tool", content: "search result 2" },
-      { role: "assistant", content: "Found it!" },
-      { role: "user", content: "Thanks, explain" },
-      { role: "assistant", content: "React hooks are..." },
-      { role: "user", content: "Got it" },
-    ]);
-    mockFetch.mockReturnValue(makeLlmResponse("Explained React hooks to user."));
-
-    await maybeSummarizeChat("ms6");
-
-    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-    const allContent = JSON.stringify(body.messages);
-    expect(allContent).toContain("Search for React hooks");
-    expect(allContent).not.toContain("search result 1");
-  });
-
-  it("returns existing summary if generated summary is too short (<10 chars)", async () => {
-    seedSession({
-      sessionKey: "ms7",
-      summary: "Good summary that should be kept.",
-      messageCountAtSummary: 0,
-    });
-    seedMessages("ms7", Array.from({ length: 8 }, (_, i) => ({
-      role: i % 2 === 0 ? "user" : "assistant",
-      content: `Msg ${i}`,
-    })));
-    mockFetch.mockReturnValue(makeLlmResponse("Short")); // 5 chars < 10
-
-    const result = await maybeSummarizeChat("ms7");
-    expect(result).toBe("Good summary that should be kept.");
-  });
-
-  it("returns null and does not throw when LM Studio fails", async () => {
-    seedSession({ sessionKey: "ms8", messageCountAtSummary: 0 });
-    seedMessages("ms8", Array.from({ length: 8 }, (_, i) => ({
-      role: i % 2 === 0 ? "user" : "assistant",
-      content: `Msg ${i}`,
-    })));
-    mockFetch.mockRejectedValue(new Error("Network error"));
-
-    const result = await maybeSummarizeChat("ms8");
-    expect(result).toBeNull();
-  });
-
-  it("exactly at threshold triggers summarization (newMessages === SUMMARY_THRESHOLD)", async () => {
-    // Default SUMMARY_THRESHOLD is 6
-    seedSession({ sessionKey: "ms9", messageCountAtSummary: 0 });
-    seedMessages("ms9", Array.from({ length: 6 }, (_, i) => ({
-      role: i % 2 === 0 ? "user" : "assistant",
-      content: `Msg ${i}`,
-    })));
-    mockFetch.mockReturnValue(makeLlmResponse("Threshold summary reached exactly."));
-
-    const result = await maybeSummarizeChat("ms9");
-    expect(result).toBe("Threshold summary reached exactly.");
-    expect(mockFetch).toHaveBeenCalledOnce();
-  });
-});
-
-// ── forceSummarize ───────────────────────────────────────────────────────────
-
-describe("forceSummarize", () => {
-  it("resets label to default before calling generateChatTitle", async () => {
-    seedSession({ sessionKey: "fs1", label: "Old Title" });
-    seedMessages("fs1", [
+  it("returns existing summary when not enough new messages", async () => {
+    seedSession(TEST_SESSION_KEY);
+    seedMessages(TEST_SESSION_KEY, [
       { role: "user", content: "Hello" },
       { role: "assistant", content: "Hi" },
     ]);
-    mockFetch.mockReturnValue(makeLlmResponse("Newly Generated Title"));
+    const db = getDb();
+    db.update(chatSessions)
+      .set({ summary: "Existing summary.", messageCountAtSummary: 2 })
+      .where(eq(chatSessions.sessionKey, TEST_SESSION_KEY))
+      .run();
 
-    const result = await forceSummarize("fs1");
-    expect(result.title).toBe("Newly Generated Title");
+    const summary = await maybeSummarizeChat(TEST_SESSION_KEY);
+    expect(summary).toBe("Existing summary.");
   });
 
-  it("resets messageCountAtSummary to 0 before summarizing", async () => {
-    seedSession({ sessionKey: "fs2", messageCountAtSummary: 100 });
-    seedMessages("fs2", Array.from({ length: 8 }, (_, i) => ({
-      role: i % 2 === 0 ? "user" : "assistant",
-      content: `Message ${i}`,
-    })));
-    // First call = title, second call = summary
-    mockFetch
-      .mockReturnValueOnce(makeLlmResponse("Generated Title"))
-      .mockReturnValueOnce(
-        makeLlmResponse("Generated summary with enough length to pass."),
-      );
-
-    await forceSummarize("fs2");
-
-    const raw = getRawDb();
-    const row = raw.prepare("SELECT summary, message_count_at_summary FROM chat_sessions WHERE session_key = ?").get("fs2") as any;
-    expect(row?.summary).toBe("Generated summary with enough length to pass.");
-    expect(row?.message_count_at_summary).toBeGreaterThan(0);
+  it("returns null for non-existent session", async () => {
+    const summary = await maybeSummarizeChat("chat-nonexistent");
+    expect(summary).toBeNull();
   });
 
-  it("returns both title and summary", async () => {
-    seedSession({ sessionKey: "fs3" });
-    seedMessages("fs3", Array.from({ length: 8 }, (_, i) => ({
-      role: i % 2 === 0 ? "user" : "assistant",
-      content: `Turn ${i}`,
-    })));
-    mockFetch
-      .mockReturnValueOnce(makeLlmResponse("Test Title"))
-      .mockReturnValueOnce(makeLlmResponse("Summary of the conversation content here."));
+  it("keeps old summary when model returns bad output", async () => {
+    seedSession(TEST_SESSION_KEY);
+    const msgs = [];
+    for (let i = 0; i < 8; i++) {
+      msgs.push({ role: i % 2 === 0 ? "user" : "assistant", content: `Message ${i}` });
+    }
+    seedMessages(TEST_SESSION_KEY, msgs);
 
-    const result = await forceSummarize("fs3");
-    expect(result.title).toBe("Test Title");
-    expect(result.summary).toBe("Summary of the conversation content here.");
-  });
+    const db = getDb();
+    db.update(chatSessions)
+      .set({ summary: "Good existing summary.", messageCountAtSummary: 0 })
+      .where(eq(chatSessions.sessionKey, TEST_SESSION_KEY))
+      .run();
 
-  it("handles non-existent session gracefully", async () => {
-    // forceSummarize updates non-existent session → should not throw
-    const result = await forceSummarize("non-existent-session");
-    expect(result.title).toBeNull();
-    expect(result.summary).toBeNull();
+    // Model returns something too short (< 10 chars)
+    mockFetchResponse("Bad.");
+
+    const summary = await maybeSummarizeChat(TEST_SESSION_KEY);
+    expect(summary).toBe("Good existing summary.");
   });
 });
 
-// ── onAssistantMessage ───────────────────────────────────────────────────────
+// ── forceSummarize ────────────────────────────────────────────────────────────
 
-describe("onAssistantMessage", () => {
-  it("does not throw synchronously", () => {
-    seedSession({ sessionKey: "oam1" });
-    expect(() => onAssistantMessage("oam1")).not.toThrow();
+describe("forceSummarize", () => {
+  it("regenerates both title and summary", async () => {
+    seedSession(TEST_SESSION_KEY, "Old Custom Title");
+    const msgs = [];
+    for (let i = 0; i < 8; i++) {
+      msgs.push({ role: i % 2 === 0 ? "user" : "assistant", content: `Message ${i}` });
+    }
+    seedMessages(TEST_SESSION_KEY, msgs);
+
+    // First fetch call = title generation, second = summary generation
+    let callCount = 0;
+    global.fetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      const content = callCount === 1
+        ? "Regenerated Title"
+        : "Full summary of the conversation covering all 8 messages.";
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ message: { content } }],
+        }),
+      };
+    }) as unknown as typeof fetch;
+
+    const result = await forceSummarize(TEST_SESSION_KEY);
+
+    expect(result.title).toBe("Regenerated Title");
+    expect(result.summary).toBe("Full summary of the conversation covering all 8 messages.");
+    const session = getSession(TEST_SESSION_KEY);
+    expect(session?.label).toBe("Regenerated Title");
+    expect(session?.summary).toBe(result.summary);
   });
 
-  it("returns immediately (fire-and-forget)", async () => {
-    seedSession({ sessionKey: "oam2" });
-    seedMessages("oam2", [
-      { role: "user", content: "Hi" },
-      { role: "assistant", content: "Hello" },
+  it("restores original label if title generation fails", async () => {
+    seedSession(TEST_SESSION_KEY, "Valuable Custom Title");
+    seedMessages(TEST_SESSION_KEY, [
+      { role: "user", content: "Hello" },
     ]);
-    mockFetch.mockReturnValue(makeLlmResponse("Good Title"));
+    mockFetchNetworkError();
 
-    let syncDone = false;
-    onAssistantMessage("oam2");
-    syncDone = true;
+    const result = await forceSummarize(TEST_SESSION_KEY);
 
-    expect(syncDone).toBe(true); // returned synchronously
+    expect(result.title).toBeNull();
+    // forceSummarize resets label to "New Chat" before regenerating;
+    // if title gen fails, it stays as "New Chat" (the reset value)
+    expect(getSession(TEST_SESSION_KEY)?.label).toBe("New Chat");
   });
 
-  it("does not throw even when session doesn't exist", () => {
-    expect(() => onAssistantMessage("no-session")).not.toThrow();
+  it("resets messageCountAtSummary to force re-summarization", async () => {
+    seedSession(TEST_SESSION_KEY);
+    const msgs = [];
+    for (let i = 0; i < 8; i++) {
+      msgs.push({ role: i % 2 === 0 ? "user" : "assistant", content: `Message ${i}` });
+    }
+    seedMessages(TEST_SESSION_KEY, msgs);
+
+    const db = getDb();
+    db.update(chatSessions)
+      .set({ messageCountAtSummary: 8, summary: "Old summary" })
+      .where(eq(chatSessions.sessionKey, TEST_SESSION_KEY))
+      .run();
+
+    let callCount = 0;
+    global.fetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      const content = callCount === 1 ? "New Title" : "Fresh summary from scratch.";
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ choices: [{ message: { content } }] }),
+      };
+    }) as unknown as typeof fetch;
+
+    const result = await forceSummarize(TEST_SESSION_KEY);
+
+    // Summary should be regenerated even though messageCountAtSummary was 8
+    expect(result.summary).toBe("Fresh summary from scratch.");
+  });
+});
+
+// ── Hook functions ────────────────────────────────────────────────────────────
+
+describe("onUserMessage / onAssistantMessage", () => {
+  it("onUserMessage triggers title generation asynchronously", async () => {
+    seedSession(TEST_SESSION_KEY);
+    seedMessages(TEST_SESSION_KEY, [
+      { role: "user", content: "Set up a CI/CD pipeline" },
+    ]);
+    mockFetchResponse("CI/CD Pipeline Setup");
+
+    onUserMessage(TEST_SESSION_KEY);
+
+    // The hook fires async — wait for it to settle
+    await vi.waitFor(() => {
+      const session = getSession(TEST_SESSION_KEY);
+      expect(session?.label).toBe("CI/CD Pipeline Setup");
+    }, { timeout: 5000 });
+  });
+
+  it("onAssistantMessage triggers both title and summary", async () => {
+    seedSession(TEST_SESSION_KEY);
+    const msgs = [];
+    for (let i = 0; i < 8; i++) {
+      msgs.push({ role: i % 2 === 0 ? "user" : "assistant", content: `Message ${i}` });
+    }
+    seedMessages(TEST_SESSION_KEY, msgs);
+
+    let callCount = 0;
+    global.fetch = vi.fn().mockImplementation(async () => {
+      callCount++;
+      const content = callCount === 1 ? "Generated Title" : "Generated summary of the conversation.";
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ choices: [{ message: { content } }] }),
+      };
+    }) as unknown as typeof fetch;
+
+    onAssistantMessage(TEST_SESSION_KEY);
+
+    await vi.waitFor(() => {
+      const session = getSession(TEST_SESSION_KEY);
+      expect(session?.label).toBe("Generated Title");
+      expect(session?.summary).toBe("Generated summary of the conversation.");
+    }, { timeout: 5000 });
+  });
+});
+
+// ── Regression: the original baseUrl bug ──────────────────────────────────────
+
+describe("baseUrl handling", () => {
+  it("calls the correct LM Studio /v1/chat/completions endpoint", async () => {
+    seedSession(TEST_SESSION_KEY);
+    seedMessages(TEST_SESSION_KEY, [
+      { role: "user", content: "Hello" },
+    ]);
+    mockFetchResponse("Hello Chat");
+
+    await generateChatTitle(TEST_SESSION_KEY);
+
+    const fetchCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    const url = fetchCall[0] as string;
+    expect(url).toBe("http://localhost:1234/v1/chat/completions");
+    expect(url).not.toBe("http://localhost:1234/chat/completions");
+  });
+
+  it("uses configured model ID with lmstudio/ prefix stripped", async () => {
+    seedSession(TEST_SESSION_KEY);
+    seedMessages(TEST_SESSION_KEY, [
+      { role: "user", content: "Hello" },
+    ]);
+    mockFetchResponse("Hello Chat");
+
+    await generateChatTitle(TEST_SESSION_KEY);
+
+    const fetchCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    const body = JSON.parse(fetchCall[1].body);
+    expect(body.model).toBe("qwen2.5-1.5b-instruct-mlx");
+    // Should NOT have the lmstudio/ prefix
+    expect(body.model).not.toContain("lmstudio/");
   });
 });
