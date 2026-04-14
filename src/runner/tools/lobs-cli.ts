@@ -13,7 +13,7 @@
 import { execFile, spawn } from "node:child_process";
 import type { ToolDefinition } from "../types.js";
 
-const LOBS_BIN = "/Users/lobs/.lobs/bin/lobs";
+const LOBS_BIN = "/opt/homebrew/bin/lobs";
 
 // ── Shared helper ────────────────────────────────────────────────────────────
 
@@ -163,18 +163,33 @@ export const lobsRestartToolDefinition: ToolDefinition = {
 };
 
 export async function lobsRestartTool(params: Record<string, unknown>): Promise<string> {
-  // Restart kills the current process — must run detached and return immediately.
-  const args = ["restart"];
-  if (params.no_build === true) args.push("--no-build");
-  if (params.no_pull === true) args.push("--no-pull");
+  // Restart kills the current process, so we can't just spawn `lobs restart` —
+  // the CLI makes API calls to lobs-core, and when stop kills the server the
+  // CLI process dies too (or hangs). Instead, spawn a standalone bash script
+  // that does stop → optional build → start as completely independent steps.
+  const noBuild = params.no_build === true;
+  const noPull = params.no_pull === true;
 
-  const child = spawn(LOBS_BIN, args, {
+  const steps = [
+    `${LOBS_BIN} stop`,
+    "sleep 3",  // wait for full shutdown (port release, DB flush, etc.)
+  ];
+  if (!noPull) steps.push(`cd ${process.env.HOME}/lobs/lobs-core && git submodule update --remote --merge 2>/dev/null || true`);
+  if (!noBuild) steps.push(`${LOBS_BIN} build`);
+  steps.push(`${LOBS_BIN} start`);
+
+  const script = steps.join(" && ");
+
+  const child = spawn("bash", ["-c", script], {
     detached: true,
     stdio: "ignore",
+    env: { ...process.env },
   });
   child.unref();
 
-  return "Restart initiated. lobs-core will stop, rebuild, and restart in the background. The current connection will drop briefly.";
+  const skipped = [noPull && "pull", noBuild && "build"].filter(Boolean);
+  const skipMsg = skipped.length ? ` (skipping ${skipped.join(", ")})` : "";
+  return `Restart initiated${skipMsg}. lobs-core will stop, rebuild, and restart in the background. The current connection will drop briefly.`;
 }
 
 // ── lobs-logs ────────────────────────────────────────────────────────────────

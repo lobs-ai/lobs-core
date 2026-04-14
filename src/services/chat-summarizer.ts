@@ -120,9 +120,17 @@ async function callLocalModel(
         }
 
         const data = await response.json() as {
+          error?: string;
           choices?: Array<{ message?: { content?: string } }>;
           usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
         };
+
+        if (data.error) {
+          throw new Error(`Cloud provider error: ${data.error}`);
+        }
+        if (!data.choices?.length) {
+          throw new Error(`Cloud provider returned no choices: ${JSON.stringify(data)}`);
+        }
 
         let content = data.choices?.[0]?.message?.content?.trim() ?? "";
         content = content.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
@@ -190,8 +198,18 @@ async function callLocalModel(
     }
 
     const data = await response.json() as {
+      error?: string;
       choices?: Array<{ message?: { content?: string } }>;
     };
+
+    // LM Studio returns 200 even for invalid endpoints — check for error field
+    if (data.error) {
+      throw new Error(`LM Studio API error: ${data.error}`);
+    }
+    if (!data.choices?.length) {
+      throw new Error(`LM Studio returned no choices: ${JSON.stringify(data)}`);
+    }
+
     console.error(`[DEBUG-LLM] raw response: ${JSON.stringify(data.choices?.[0]?.message)}`);
     let content = data.choices?.[0]?.message?.content?.trim() ?? "";
 
