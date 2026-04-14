@@ -55,6 +55,7 @@ import { GoalsWorker } from "./workers/goals-worker.js";
 import { MorningBriefWorker } from "./workers/morning-brief.js";
 import { DeadlineSentinelWorker } from "./workers/deadline-sentinel-worker.js";
 import { PriorityAdvisorWorker } from "./workers/priority-advisor.js";
+import { AutonomousLitReviewWorker } from "./workers/autonomous-lit-review-worker.js";
 import { WeeklyDigestWorker } from "./workers/weekly-digest-worker.js";
 import { StallRecoveryWorker } from "./workers/stall-recovery-worker.js";
 import { initResearchQueueService } from "./services/research-queue.js";
@@ -401,6 +402,7 @@ async function main() {
   workerRegistry.register(new MorningBriefWorker());
   workerRegistry.register(new DeadlineSentinelWorker());
   workerRegistry.register(new PriorityAdvisorWorker());
+  workerRegistry.register(new AutonomousLitReviewWorker());
   workerRegistry.register(new WeeklyDigestWorker());
   workerRegistry.register(new StallRecoveryWorker());
 
@@ -477,6 +479,20 @@ async function main() {
     enabled: true,
     handler: async () => {
       await refreshSchedulerIntelligence();
+    },
+  });
+
+  cronService.registerSystemJob({
+    id: "autonomous-lit-review",
+    name: "Autonomous Literature Review",
+    schedule: "0 10 * * *", // daily at 10am — prime research review time
+    enabled: true,
+    handler: async () => {
+      const { runAutonomousLitReview } = await import("./services/autonomous-lit-review.js");
+      const result = await runAutonomousLitReview();
+      if (result.itemsReviewed > 0) {
+        console.log(`[autonomous-lit-review] Reviewed ${result.itemsReviewed} items, posted Discord: ${result.discordPosted}`);
+      }
     },
   });
 
