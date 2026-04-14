@@ -88,20 +88,20 @@ export interface ModelChain {
 
 export const DEFAULT_CONFIG: ModelConfig = {
   tiers: {
-    micro: "lmstudio/qwen3-4b",
-    small: "anthropic/claude-haiku-4-5",
-    medium: "anthropic/claude-sonnet-4-6",
-    standard: "anthropic/claude-sonnet-4-6",
-    strong: "anthropic/claude-opus-4-6",
+    micro: "local/qwen2.5-1.5b-instruct-mlx",
+    small: "minimax/MiniMax-M2.7",
+    medium: "minimax/MiniMax-M2.7",
+    standard: "minimax/MiniMax-M2.7",
+    strong: "opencode-go/glm-5.1",
   },
 
   agents: {
-    programmer: { primary: "anthropic/claude-sonnet-4-6", fallbacks: ["anthropic/claude-haiku-4-5"] },
-    researcher: { primary: "anthropic/claude-sonnet-4-6", fallbacks: ["anthropic/claude-opus-4-6"] },
-    writer:     { primary: "anthropic/claude-sonnet-4-6", fallbacks: ["anthropic/claude-opus-4-6"] },
-    reviewer:   { primary: "anthropic/claude-sonnet-4-6", fallbacks: ["anthropic/claude-opus-4-6"] },
-    architect:  { primary: "anthropic/claude-opus-4-6",   fallbacks: ["anthropic/claude-sonnet-4-6"] },
-    suggester:  { primary: "anthropic/claude-haiku-4-5",  fallbacks: ["anthropic/claude-sonnet-4-6"] },
+    programmer: { primary: "minimax/MiniMax-M2.7", fallbacks: [] },
+    researcher: { primary: "minimax/MiniMax-M2.7", fallbacks: [] },
+    writer:     { primary: "minimax/MiniMax-M2.7", fallbacks: [] },
+    reviewer:   { primary: "minimax/MiniMax-M2.7", fallbacks: [] },
+    architect:  { primary: "opencode-go/glm-5.1",   fallbacks: ["minimax/MiniMax-M2.7"] },
+    suggester:  { primary: "minimax/MiniMax-M2.7", fallbacks: [] },
   },
 
   local: {
@@ -128,7 +128,8 @@ export const DEFAULT_CONFIG: ModelConfig = {
     "claude-opus-4":     { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
     "claude-haiku-4-5":  { input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1 },
     "gpt-4o":            { input: 2.5, output: 10, cacheRead: 1.25, cacheWrite: 2.5 },
-    "minimax-m2.7":      { input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0 },
+    "MiniMax-M2.7":      { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, // Unlimited subscription
+    "glm-5.1":           { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }, // opencode-go per-token
   },
 
   voice: {
@@ -146,6 +147,8 @@ export const DEFAULT_CONFIG: ModelConfig = {
     "claude-haiku-4-5":  200_000,
     "gpt-4o":            128_000,
     "qwen":              32_000,
+    "MiniMax-M2.7":      204_800,
+    "glm-5.1":           128_000,
   },
 };
 

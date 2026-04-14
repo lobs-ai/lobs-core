@@ -80,7 +80,7 @@ const PRICING: Record<string, Record<string, { input: number; output: number; ca
     "mimo-v2-pro": { input: 0.35, output: 1.50 },
     "mimo-v2-omni": { input: 0.20, output: 0.80 },
     "minimax-m2.5": { input: 0.30, output: 1.20 },
-    "minimax-m2.7": { input: 0.30, output: 1.20 },
+    "MiniMax-M2.7": { input: 0, output: 0 },  // Unlimited subscription
   },
   "z-ai": {
     "glm-4.7-flash": { input: 0, output: 0 },
