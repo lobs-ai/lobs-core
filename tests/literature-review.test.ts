@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   searchArxiv,
   searchSemanticScholar,
@@ -66,7 +66,6 @@ describe("LiteratureReviewService – search functions", () => {
   // They verify parsing / field mapping without a real API key.
 
   it("searchArxiv returns PaperSummary array with required fields", async () => {
-    // Using a query that should return the Vaswani paper
     const results = await searchArxiv("attention is all you need", 5);
 
     if (results.length > 0) {
@@ -130,7 +129,7 @@ describe("LiteratureReviewService – PaperSummary type", () => {
   });
 });
 
-describe("LiteratureReviewService – type shapes", () => {
+describe("LiteratureReviewService – return type contract", () => {
   it("LitReviewRequest accepts all documented fields", () => {
     const req: LitReviewRequest = {
       question: "What are the limitations of transformer models?",
@@ -182,6 +181,23 @@ describe("LiteratureReviewService – type shapes", () => {
       expect(p.paperId).toBeTruthy();
       expect(p.title).toBeTruthy();
       expect(p.source).toBe("semantic-scholar");
+    }
+  });
+
+  it("LitReviewRequest.outputFormat accepts markdown|latex|both", () => {
+    const req1: LitReviewRequest = { question: "test", outputFormat: "markdown" };
+    const req2: LitReviewRequest = { question: "test", outputFormat: "latex" };
+    const req3: LitReviewRequest = { question: "test", outputFormat: "both" };
+    expect(req1.outputFormat).toBe("markdown");
+    expect(req2.outputFormat).toBe("latex");
+    expect(req3.outputFormat).toBe("both");
+  });
+
+  it("LitReviewRequest.tier accepts micro|small|standard|strong", () => {
+    const tiers = ["micro", "small", "standard", "strong"] as const;
+    for (const tier of tiers) {
+      const req: LitReviewRequest = { question: "test", tier };
+      expect(req.tier).toBe(tier);
     }
   });
 });
