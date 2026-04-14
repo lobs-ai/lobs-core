@@ -783,135 +783,9 @@ function resolveOpenRouterAuth(sessionId?: string): { apiKey: string; keyIndex?:
   return undefined;
 }
 
-// ── OpenCode Go Client (Anthropic Messages API) ──────────────────────────────
-
-/**
- * OpenCodeGoClient — routes opencode-go through the Anthropic messages API.
- * OpenCode Go speaks native Anthropic format and supports prompt caching
- * (cache_control ephemeral, cache_read_input_tokens, cache_creation_input_tokens).
- * No OAuth, no key rotation, no Claude Code name mapping needed.
- */
-class OpenCodeGoClient implements LLMClient {
-  private client: Anthropic;
-  private modelId: string;
-  private sessionId?: string;
-
-  constructor(client: Anthropic, modelId: string, sessionId?: string) {
-    this.client = client;
-    this.modelId = modelId;
-    this.sessionId = sessionId;
-  }
-
-  async createMessage(params: {
-    model: string;
-    system: string;
-    messages: LLMMessage[];
-    tools: ToolDefinition[];
-    maxTokens: number;
-    thinking?: {
-      type: "enabled";
-      budgetTokens: number;
-    } | {
-      type: "adaptive";
-    };
-  }): Promise<LLMResponse> {
-    console.log(
-      `[OpenCodeGoClient] request session=${this.sessionId?.slice(0, 40) ?? "none"} model=${params.model} stream=true`,
-    );
-
-    // Build system blocks with cache control
-    const systemBlocks: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> = [];
-    systemBlocks.push({
-      type: "text",
-      text: params.system,
-      cache_control: { type: "ephemeral" },
-    });
-
-    // Convert tools and cache the last one
-    const tools: Anthropic.Tool[] = params.tools.map((t) => ({
-      name: t.name,
-      description: t.description,
-      input_schema: {
-        type: "object" as const,
-        properties: (t.input_schema as any).properties || {},
-        required: (t.input_schema as any).required || [],
-      },
-    }));
-    if (tools.length > 0) {
-      tools[tools.length - 1] = {
-        ...tools[tools.length - 1],
-        cache_control: { type: "ephemeral" },
-      };
-    }
-
-    // Build API params
-    const apiParams: any = {
-      model: params.model,
-      system: systemBlocks,
-      tools,
-      messages: params.messages,
-      stream: true,
-      max_tokens: params.maxTokens,
-    };
-
-    // Thinking mode
-    if (params.thinking) {
-      if (params.thinking.type === "adaptive") {
-        apiParams.thinking = { type: "adaptive" };
-      } else {
-        apiParams.thinking = {
-          type: params.thinking.type,
-          budget_tokens: params.thinking.budgetTokens,
-        };
-      }
-    }
-
-    const stream = this.client.messages.stream(apiParams);
-    const response = await awaitAnthropicFinalMessageWithInactivityTimeout(stream, this.sessionId);
-
-    const usage: TokenUsage = {
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
-      cacheReadTokens: (response.usage as any).cache_read_input_tokens ?? 0,
-      cacheWriteTokens: (response.usage as any).cache_creation_input_tokens ?? 0,
-      thinkingTokens: (response.usage as any).thinking_tokens,
-    };
-
-    console.log(
-      `[OpenCodeGoClient] usage: in=${usage.inputTokens} out=${usage.outputTokens} cacheRead=${usage.cacheReadTokens} cacheWrite=${usage.cacheWriteTokens}`,
-    );
-
-    // Extract thinking content if present
-    let thinkingContent: string | undefined;
-    const thinkingBlocks = (response.content as any[]).filter(
-      (block: any) => block.type === "thinking"
-    );
-    if (thinkingBlocks.length > 0) {
-      thinkingContent = thinkingBlocks
-        .map((block: any) => block.thinking as string)
-        .join("\n\n");
-    }
-
-    // Strip thinking blocks from content before returning — they must not be
-    // included in message history unless thinking is also enabled on the next
-    // request with the same budget. Thinking text is already captured above.
-    const content = (response.content as any[]).filter(
-      (block: any) => block.type !== "thinking"
-    ) as LLMResponse["content"];
-
-    return {
-      content,
-      stopReason: response.stop_reason === "end_turn" ? "end_turn"
-        : response.stop_reason === "tool_use" ? "tool_use"
-        : response.stop_reason === "max_tokens" ? "max_tokens"
-        : "stop",
-      usage,
-      thinkingContent,
-    };
-  }
-}
-
 // ── OpenAI-Compatible Client ─────────────────────────────────────────────────
+// opencode-go uses OpenAI chat-completions format and falls through to
+// OpenAICompatibleClient below like any other OpenAI-compatible provider.
 
 interface OpenAIToolCall {
   id: string;
@@ -1327,7 +1201,7 @@ const PROVIDER_DEFAULTS: Record<Provider, { baseUrl: string; envKey: string }> =
   "opencode-zen": { baseUrl: "https://opencode.ai/zen", envKey: "OPENCODE_API_KEY" },
   "opencode-go": { baseUrl: "https://opencode.ai/zen/go", envKey: "OPENCODE_API_KEY" },
   "z-ai": { baseUrl: "https://open.z.ai/api/paas/v4", envKey: "ZAI_API_KEY" },
-  minimax: { baseUrl: "https://api.minimax.chat/v1", envKey: "MINIMAX_API_KEY" },
+  minimax: { baseUrl: "https://api.minimax.io/v1", envKey: "MINIMAX_API_KEY" },
   kimi: { baseUrl: "https://api.moonshot.cn/v1", envKey: "KIMI_API_KEY" },
 };
 
@@ -1946,58 +1820,6 @@ export async function createClient(config: ProviderConfig, sessionId?: string): 
     }
 
     return new OpenAICodexClient(baseUrl, apiKey, sessionId, extraHeaders);
-  }
-
-  // opencode-go: Uses Anthropic messages API format (supports prompt caching)
-  if (config.provider === "opencode-go") {
-    const defaults = PROVIDER_DEFAULTS["opencode-go"];
-    const baseUrl = config.baseUrl ?? defaults.baseUrl;
-    const apiKey = config.apiKey ?? (defaults.envKey ? process.env[defaults.envKey] ?? "" : "");
-
-    if (!apiKey) {
-      throw new Error("No OpenCode API key found. Set OPENCODE_API_KEY environment variable.");
-    }
-
-    // Pre-flight probe: confirm the API key is actually active
-    try {
-      const probeResponse = await fetch(`${baseUrl}/v1/messages`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({ model: config.modelId, max_tokens: 1, messages: [] }),
-        signal: AbortSignal.timeout(5_000),
-      });
-      if (probeResponse.status >= 500) {
-        throw new Error(`OpenCode Go probe failed with ${probeResponse.status}`);
-      }
-      if (probeResponse.status === 401 || probeResponse.status === 403) {
-        throw new Error("OpenCode Go subscription is inactive or expired");
-      }
-    } catch (err) {
-      if (err instanceof Error && err.message.includes("subscription is inactive")) {
-        throw err;
-      }
-      // Network-level errors (timeout, DNS, etc.) are also surfaced clearly
-      throw new Error(
-        `OpenCode Go subscription is inactive or expired: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-
-    // Create Anthropic SDK client pointed at OpenCode Go endpoint
-    const anthropicClient = new Anthropic({
-      apiKey,
-      baseURL: baseUrl,
-      dangerouslyAllowBrowser: true,
-      defaultHeaders: {
-        "accept": "application/json",
-        "anthropic-dangerous-direct-browser-access": "true",
-      },
-    });
-
-    return new OpenCodeGoClient(anthropicClient, config.modelId, sessionId);
   }
 
   // All other providers use OpenAI-compatible API
