@@ -302,9 +302,12 @@ JSON only:
     const now = new Date().toISOString();
 
     for (const insight of insights) {
-      // Only route actionable/urgent insights, or high-relevance informational ones
-      if (insight.actionability === "informational" && insight.relevanceScore < 0.7) {
-        // Still mark as routed (to "skipped") so we don't re-process
+      // Only route urgent insights, or high-relevance actionable ones (≥0.85).
+      // Generic research links tagged "actionable" with middling scores are noise — skip them.
+      const shouldRoute =
+        insight.actionability === "urgent" ||
+        (insight.actionability === "actionable" && insight.relevanceScore >= 0.85);
+      if (!shouldRoute) {
         this.intelSweep.markInsightRouted(insight.id, "skipped", "");
         continue;
       }
@@ -334,8 +337,8 @@ JSON only:
           summary: insight.insight.slice(0, 200),
           type: "intel_insight",
           isRead: false,
-          requiresAction: insight.actionability !== "informational",
-          actionStatus: (insight.actionability === "urgent" || insight.actionability === "high") ? "pending" : "none",
+          requiresAction: true,
+          actionStatus: "pending",
           modifiedAt: now,
         }).run();
 
