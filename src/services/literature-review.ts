@@ -105,6 +105,52 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/**
+ * Retry with exponential backoff for transient HTTP errors (429, 503, etc.).
+ * Returns the successful response or throws after maxRetries exhausted.
+ */
+async function fetchWithRetry(
+  url: string,
+  opts: RequestInit,
+  options: {
+    maxRetries?: number;
+    baseDelayMs?: number;
+    signal?: AbortSignal;
+  } = {},
+): Promise<Response> {
+  const { maxRetries = 3, baseDelayMs = 1000, signal } = options;
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, { ...opts, signal: signal ?? AbortSignal.timeout(20000) });
+      if (res.ok) return res;
+
+      // Retry on rate-limit and service-unavailable
+      if ((res.status === 429 || res.status === 503) && attempt < maxRetries) {
+        const retryAfter = res.headers.get("Retry-After");
+        const delay = retryAfter
+          ? parseInt(retryAfter, 10) * 1000
+          : baseDelayMs * Math.pow(2, attempt);
+        console.warn(`[lit-review] HTTP ${res.status} — retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+        await sleep(delay);
+        continue;
+      }
+
+      // Non-retryable error
+      return res;
+    } catch (err) {
+      lastError = err as Error;
+      if (attempt < maxRetries) {
+        console.warn(`[lit-review] Fetch error: ${lastError.message} — retrying (${attempt + 1}/${maxRetries})`);
+        await sleep(baseDelayMs * Math.pow(2, attempt));
+      }
+    }
+  }
+
+  throw lastError ?? new Error("fetchWithRetry: all attempts failed");
+}
+
 async function rateLimitedFetch(url: string, opts: RequestInit, lastTime: number, limitMs: number, updateFn: (t: number) => void): Promise<Response> {
   const now = Date.now();
   const elapsed = now - lastTime;
@@ -112,7 +158,8 @@ async function rateLimitedFetch(url: string, opts: RequestInit, lastTime: number
     await sleep(limitMs - elapsed);
   }
   updateFn(Date.now());
-  return fetch(url, { ...opts, signal: AbortSignal.timeout(15000) });
+  // Use retry-enabled fetch for reliability
+  return fetchWithRetry(url, opts, { maxRetries: 2, baseDelayMs: 2000 });
 }
 
 function parseArxivDate(dateStr: string): number | null {
