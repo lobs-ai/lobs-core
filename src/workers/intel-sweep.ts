@@ -335,7 +335,7 @@ JSON only:
           type: "intel_insight",
           isRead: false,
           requiresAction: insight.actionability !== "informational",
-          actionStatus: insight.actionability === "urgent" ? "pending" : "none",
+          actionStatus: (insight.actionability === "urgent" || insight.actionability === "high") ? "pending" : "none",
           modifiedAt: now,
         }).run();
 

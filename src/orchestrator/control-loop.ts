@@ -2125,7 +2125,7 @@ function routeToResearcherAudit(
 
     db.insert(inboxItems).values({
       id: `escalation_alert_${taskId.slice(0, 8)}_${Date.now()}`,
-      title: `🔍 Failure escalation: ${taskTitle.slice(0, 80)}`,
+      title: `🔍 Failure escalation: ${taskTitle.replace(/^(\[AUDIT\]\s*(?:Failure diagnosis|Failure escalation):\s*|🔍\s*Failure escalation:\s*)+/g, '').slice(0, 80)}`,
       content: alertContent,
       summary: `Task ${taskId.slice(0, 8)} escalated after ${effectiveFailCount} failures — researcher audit created`,
       isRead: false,
