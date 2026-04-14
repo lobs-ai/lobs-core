@@ -87,11 +87,20 @@ export async function handleInboxRequest(
 
   if (id) {
     if (sub === "read" && req.method === "POST") {
+      // For task items, read is a no-op
+      const task = db.select().from(tasks).where(eq(tasks.id, id)).get();
+      if (task) return json(res, { ok: true });
       db.update(inboxItems).set({ isRead: true }).where(eq(inboxItems.id, id)).run();
       return json(res, db.select().from(inboxItems).where(eq(inboxItems.id, id)).get());
     }
 
     if (sub === "approve" && req.method === "POST") {
+      // Check if this is a task item
+      const task = db.select().from(tasks).where(eq(tasks.id, id)).get();
+      if (task) {
+        db.update(tasks).set({ status: "active", updatedAt: new Date().toISOString() }).where(eq(tasks.id, id)).run();
+        return json(res, { ok: true, task_id: id });
+      }
       const item = db.select().from(inboxItems).where(eq(inboxItems.id, id)).get();
       if (!item) return error(res, "Not found", 404);
       db.update(inboxItems).set({ actionStatus: "approved", isRead: true }).where(eq(inboxItems.id, id)).run();
@@ -101,6 +110,12 @@ export async function handleInboxRequest(
     }
 
     if (sub === "reject" && req.method === "POST") {
+      // Check if this is a task item
+      const task = db.select().from(tasks).where(eq(tasks.id, id)).get();
+      if (task) {
+        db.update(tasks).set({ status: "rejected", updatedAt: new Date().toISOString() }).where(eq(tasks.id, id)).run();
+        return json(res, { ok: true, task_id: id });
+      }
       const item = db.select().from(inboxItems).where(eq(inboxItems.id, id)).get();
       if (!item) return error(res, "Not found", 404);
       db.update(inboxItems).set({ actionStatus: "rejected", isRead: true }).where(eq(inboxItems.id, id)).run();
@@ -193,7 +208,31 @@ export async function handleInboxRequest(
     return error(res, "Method not allowed", 405);
   }
 
-  if (req.method === "GET") return json(res, db.select().from(inboxItems).orderBy(desc(inboxItems.modifiedAt)).all());
+  if (req.method === "GET") {
+    const inboxItemRows = db.select().from(inboxItems).orderBy(desc(inboxItems.modifiedAt)).all();
+    const taskRows = db.select().from(tasks).where(eq(tasks.status, "inbox")).all();
+    const tasksMapped = taskRows.map(t => ({
+      id: t.id,
+      title: t.title,
+      content: t.notes ?? null,
+      summary: t.notes?.slice(0, 200) ?? null,
+      type: "task",
+      requiresAction: true,
+      actionStatus: "pending",
+      isRead: false,
+      sourceAgent: t.agent ?? t.owner ?? "lobs",
+      goalId: t.goalId ?? null,
+      priority: t.priority ?? "medium",
+      modifiedAt: t.updatedAt ?? t.createdAt,
+      _isTask: true,
+    }));
+    const merged = [...inboxItemRows, ...tasksMapped].sort((a, b) => {
+      const ta = a.modifiedAt ?? "";
+      const tb = b.modifiedAt ?? "";
+      return tb < ta ? -1 : tb > ta ? 1 : 0;
+    });
+    return json(res, merged);
+  }
   if (req.method === "POST") {
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.title) return error(res, "title required");
