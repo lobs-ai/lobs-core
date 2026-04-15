@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/opt/homebrew/bin/tsx
 /**
  * paw-task — Create, list, update, and manage PAW tasks.
  *

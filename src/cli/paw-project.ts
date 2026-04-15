@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/opt/homebrew/bin/tsx
 /**
  * paw-project — Create, list, manage, sync, and archive PAW projects.
  *

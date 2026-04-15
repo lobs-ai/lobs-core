@@ -77,6 +77,39 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   return denom === 0 ? 0 : dot / denom;
 }
 
+// ── Title similarity fallback ─────────────────────────────────────────────────
+
+const TITLE_SIMILARITY_THRESHOLD = 0.7;
+
+/** Normalized title similarity (0–1) using Levenshtein on normalized strings. */
+function titleSimilarity(a: string, b: string): number {
+  if (!a || !b) return 0;
+
+  const na = normalizeTitle(a);
+  const nb = normalizeTitle(b);
+  if (na === nb) return 1.0;
+  if (!na || !nb) return 0.0;
+
+  return levenshteinSimilarity(na, nb);
+}
+
+/**
+ * Normalize a title for comparison:
+ * - lowercase, trim whitespace
+ * - strip date patterns (e.g. "March 12" → "reflection"，留下关键 term)
+ * - strip common noise words
+ */
+function normalizeTitle(title: string): string {
+  return title
+    .toLowerCase()
+    .trim()
+    .replace(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/gi, "")
+    .replace(/\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b/gi, "")
+    .replace(/\b\d{1,2}(?:st|nd|rd|th)?\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 // ── Text similarity fallback ─────────────────────────────────────────────────
 
 /** Normalized Levenshtein distance → similarity (0–1). */
@@ -263,7 +296,17 @@ export async function reconcile(
       if (useEmbeddings && mem.embedding !== null) {
         similarity = cosineSimilarity(candidateEmbedding, mem.embedding);
       } else {
-        similarity = levenshteinSimilarity(candidate.content, mem.content);
+        // No embeddings available — check title similarity first, then content
+        const titleSim = titleSimilarity(candidate.title, mem.memory.title ?? "");
+        const contentSim = levenshteinSimilarity(candidate.content, mem.content);
+
+        if (titleSim >= TITLE_SIMILARITY_THRESHOLD) {
+          // Title is similar — weight title + content together
+          // Strong title signal (0.6 weight) with content confirmation (0.4 weight)
+          similarity = titleSim * 0.6 + contentSim * 0.4;
+        } else {
+          similarity = contentSim;
+        }
       }
 
       if (similarity > bestSimilarity) {

@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/opt/homebrew/bin/node
 /**
  * lobs — CLI for managing lobs-core
  *

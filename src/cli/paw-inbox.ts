@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/opt/homebrew/bin/tsx
 /**
  * paw-inbox — Create, list, and manage PAW inbox items.
  *

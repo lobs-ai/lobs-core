@@ -12,6 +12,7 @@
 
 import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
+import { SessionTranscript } from "../runner/session-transcript.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 

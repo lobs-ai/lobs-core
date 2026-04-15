@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/opt/homebrew/bin/tsx
 /**
  * paw-status — Quick status overview of the PAW system.
  *

@@ -233,13 +233,12 @@ export async function createProposalInboxItem(
       .prepare(
         `
       INSERT INTO inbox_items
-        (type, priority, triage_category, title, content, metadata, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+        (type, triage_category, title, content, metadata, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
     `
       )
       .run(
         inboxItem.type,
-        inboxItem.priority,
         inboxItem.triageCategory,
         inboxItem.title,
         inboxItem.content,
