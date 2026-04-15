@@ -145,7 +145,7 @@ export function getNextTasks(config: SchedulerConfig): Task[] {
   if (selected.length > 0) {
     log().info(
       `[SCHEDULER] Selected ${selected.length} task(s) from ${readyTasks.length} ready ` +
-      `(slots=${availableSlots}, budget_used=$${dailyCost.toFixed(2)}/$${config.maxDailyCostUsd.toFixed(2)})`,
+      `(slots=${availableSlots})`,
     );
   }
 

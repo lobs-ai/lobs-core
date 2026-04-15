@@ -31,6 +31,7 @@ export interface ModelConfig {
     reviewer: ModelChain;
     architect: ModelChain;
     suggester: ModelChain;
+    inbox: ModelChain;  // ADR-008: inbox reader agent for email triage
   };
 
   /** Local model settings (LM Studio) */

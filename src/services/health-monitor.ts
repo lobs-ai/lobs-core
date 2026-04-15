@@ -14,7 +14,7 @@
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { statfs } from "node:fs/promises";
-import { os } from "node:os";
+import * as os from "node:os";
 import { resolve } from "node:path";
 import { getRawDb } from "../db/connection.js";
 import type { PawDB } from "../db/connection.js";
