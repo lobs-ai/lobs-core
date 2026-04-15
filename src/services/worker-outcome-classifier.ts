@@ -201,8 +201,8 @@ export function analyzeWorkerOutcomeFromDb(options: {
 
   const HOME = process.env.HOME ?? "";
   let sessionMtimeMs: number | null = null;
-  const transcriptTurns = 0;
-  const hasResponse = false;
+  let transcriptTurns = 0;
+  let hasResponse = false;
 
   // Try to stat session file
   try {
@@ -213,10 +213,9 @@ export function analyzeWorkerOutcomeFromDb(options: {
 
       // Try to parse transcript line count (rough estimate of turns)
       try {
-        // TODO: implement parseSessionTranscript when SessionTranscript utility is ready
-        // const transcript = SessionTranscript.load(agentType, taskId);
-        // transcriptTurns = transcript.turns.length;
-        // hasResponse = transcript.turns.some(t => t.response !== undefined);
+        const turns = SessionTranscript.load(agentType, taskId);
+        transcriptTurns = turns.length;
+        hasResponse = turns.some((t) => t.response !== undefined);
       } catch (e) {
         // Ignore parse errors
       }
