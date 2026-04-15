@@ -13,6 +13,8 @@
  */
 
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { statfs } from "node:fs/promises";
+import { os } from "node:os";
 import { resolve } from "node:path";
 import { getRawDb } from "../db/connection.js";
 import type { PawDB } from "../db/connection.js";
@@ -271,24 +273,95 @@ export function probeSessionStaleness(db: PawDB): HealthProbeResult {
 
 // ─── Resource Exhaustion (Probe D) ──────────────────────────────────────────
 
+const DISK_CRITICAL_MB = 200;
+const DISK_WARN_MB = 500;
+const MEMORY_CRITICAL_PCT = 90;
+const MEMORY_WARN_PCT = 85;
+const CPU_CRITICAL = 1.0;
+const CPU_WARN = 0.8;
+
 /**
- * Probe D: Check disk and memory availability
- * Returns CRITICAL if disk <200 MB, WARN if <500 MB
+ * Probe D: Check disk, memory, and CPU availability.
+ * Warns or criticals before processes crash with ENOSPC / OOM.
  */
-export function probeResourceExhaustion(): HealthProbeResult {
+export async function probeResourceExhaustion(): Promise<HealthProbeResult> {
   try {
-    // For now, return healthy (statfs is platform-specific and optional)
-    // TODO: Implement platform-specific disk checking (du, df, or statfs)
+    const issues: string[] = [];
+    let diskUsagePct = 0;
+    let diskFreeMB = 0;
+    let memoryUsagePct = 0;
+    let cpuLoad1m = 0;
+
+    // ── Disk check ──────────────────────────────────────────────────────────
+    try {
+      const stateDir = resolve(os.homedir(), ".lobs");
+      const stats = await statfs(stateDir);
+      const freeBytes = stats.bfree * stats.bsize;
+      const totalBytes = stats.blocks * stats.bsize;
+      diskFreeMB = Math.round(freeBytes / 1024 / 1024);
+      diskUsagePct = Math.round(((totalBytes - freeBytes) / totalBytes) * 100);
+
+      if (diskFreeMB < DISK_CRITICAL_MB) {
+        issues.push(`disk CRITICAL: only ${diskFreeMB} MB free (${diskUsagePct}% used)`);
+      } else if (diskFreeMB < DISK_WARN_MB) {
+        issues.push(`disk WARN: ${diskFreeMB} MB free (${diskUsagePct}% used)`);
+      }
+    } catch {
+      // statfs can fail on some platforms — skip disk check
+    }
+
+    // ── Memory check ─────────────────────────────────────────────────────────
+    try {
+      const totalMem = os.totalmem();
+      const freeMem = os.freemem();
+      const usedMem = totalMem - freeMem;
+      memoryUsagePct = Math.round((usedMem / totalMem) * 100);
+
+      if (memoryUsagePct > MEMORY_CRITICAL_PCT) {
+        issues.push(`memory CRITICAL: ${memoryUsagePct}% used`);
+      } else if (memoryUsagePct > MEMORY_WARN_PCT) {
+        issues.push(`memory WARN: ${memoryUsagePct}% used`);
+      }
+    } catch {
+      // skip
+    }
+
+    // ── CPU check ────────────────────────────────────────────────────────────
+    try {
+      const loadAvg = os.loadavg();
+      cpuLoad1m = loadAvg[0]; // 1-minute load average
+      const cpuCount = os.cpus().length;
+      const normalizedLoad = cpuLoad1m / cpuCount;
+
+      if (normalizedLoad > CPU_CRITICAL) {
+        issues.push(`CPU CRITICAL: load ${cpuLoad1m.toFixed(2)} on ${cpuCount} cores`);
+      } else if (normalizedLoad > CPU_WARN) {
+        issues.push(`CPU WARN: load ${cpuLoad1m.toFixed(2)} on ${cpuCount} cores`);
+      }
+    } catch {
+      // skip
+    }
+
+    if (issues.length === 0) {
+      return {
+        probe: "resource-exhaustion",
+        healthy: true,
+        severity: "ok",
+        message: `Resources OK — disk ${diskUsagePct}% used, memory ${memoryUsagePct}%, CPU load ${cpuLoad1m.toFixed(2)}`,
+        timestamp: new Date(),
+        detail: { diskUsagePercent: diskUsagePct, diskFreeMB, memoryUsagePercent: memoryUsagePct, cpuLoad1m },
+      };
+    }
+
+    const topIssue = issues[0];
+    const isCritical = topIssue.includes("CRITICAL");
     return {
       probe: "resource-exhaustion",
-      healthy: true,
-      severity: "ok",
-      message: "Resource check OK (monitoring enabled)",
+      healthy: false,
+      severity: isCritical ? "critical" : "warn",
+      message: issues.join("; "),
       timestamp: new Date(),
-      detail: {
-        diskUsagePercent: 0,
-        diskAvailableMB: 1024,
-      },
+      detail: { diskUsagePercent: diskUsagePct, diskFreeMB, memoryUsagePercent: memoryUsagePct, cpuLoad1m, issues },
     };
   } catch (e) {
     return {
@@ -306,22 +379,24 @@ export function probeResourceExhaustion(): HealthProbeResult {
 /**
  * Run all probes and return combined health snapshot
  */
-export function runHealthCheck(db: PawDB): SystemHealthSnapshot {
-  const probeResults = [
-    probeRestartFrequency(),
-    probeOrphanedTasksAccumulation(db),
-    probeSessionStaleness(db),
-    probeResourceExhaustion(),
-  ];
+export async function runHealthCheck(db: PawDB): Promise<SystemHealthSnapshot> {
+  const [restart, orphan, staleness, resource] = await Promise.all([
+    Promise.resolve(probeRestartFrequency()),
+    Promise.resolve(probeOrphanedTasksAccumulation(db)),
+    Promise.resolve(probeSessionStaleness(db)),
+    probeResourceExhaustion(), // now async (disk + memory + CPU)
+  ]);
+
+  const probeResults = [restart, orphan, staleness, resource];
 
   return {
     timestamp: new Date(),
-    restarts10m: (probeResults[0].detail?.count ?? 0) as number,
-    orphaned1h: (probeResults[1].detail?.count ?? 0) as number,
+    restarts10m: (restart.detail?.count ?? 0) as number,
+    orphaned1h: (orphan.detail?.count ?? 0) as number,
     openSessions: 0, // TODO: compute from db
-    stalledSessions: (probeResults[2].detail?.stalledCount ?? 0) as number,
-    diskUsagePercent: (probeResults[3].detail?.diskUsagePercent ?? 0) as number,
-    memoryUsagePercent: 0, // TODO: compute from process
+    stalledSessions: (staleness.detail?.stalledCount ?? 0) as number,
+    diskUsagePercent: (resource.detail?.diskUsagePercent ?? 0) as number,
+    memoryUsagePercent: (resource.detail?.memoryUsagePercent ?? 0) as number,
     probes: probeResults,
   };
 }

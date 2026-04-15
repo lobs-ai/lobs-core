@@ -3024,8 +3024,8 @@ async function runHealthMonitorCheck(): Promise<void> {
   try {
     const db = getDb();
 
-    // Run health checks (synchronous)
-    const snapshot = runHealthCheck(db);
+    // Run health checks (async — includes disk/memory/CPU probe)
+    const snapshot = await runHealthCheck(db);
 
     // Feed to main agent decision engine
     if (snapshot) {

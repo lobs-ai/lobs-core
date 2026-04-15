@@ -95,13 +95,16 @@ export const DEFAULT_CONFIG: ModelConfig = {
     strong: "opencode-go/glm-5.1",
   },
 
+  // ADR-008: Unlimited Operations — MiniMax subscription covers all tiers except strong.
+  // Fallbacks route through minimax → direct API (emergency only) to avoid single-point-of-failure.
   agents: {
-    programmer: { primary: "minimax/MiniMax-M2.7", fallbacks: [] },
-    researcher: { primary: "minimax/MiniMax-M2.7", fallbacks: [] },
-    writer:     { primary: "minimax/MiniMax-M2.7", fallbacks: [] },
-    reviewer:   { primary: "minimax/MiniMax-M2.7", fallbacks: [] },
-    architect:  { primary: "opencode-go/glm-5.1",   fallbacks: ["minimax/MiniMax-M2.7"] },
+    programmer: { primary: "minimax/MiniMax-M2.7", fallbacks: ["anthropic/claude-sonnet-4-6"] },
+    researcher: { primary: "minimax/MiniMax-M2.7", fallbacks: ["anthropic/claude-sonnet-4-6"] },
+    writer:     { primary: "minimax/MiniMax-M2.7", fallbacks: ["anthropic/claude-sonnet-4-6"] },
+    reviewer:   { primary: "minimax/MiniMax-M2.7", fallbacks: ["anthropic/claude-sonnet-4-6"] },
+    architect:  { primary: "opencode-go/glm-5.1",  fallbacks: ["minimax/MiniMax-M2.7"] },
     suggester:  { primary: "minimax/MiniMax-M2.7", fallbacks: [] },
+    inbox:      { primary: "minimax/MiniMax-M2.7", fallbacks: ["anthropic/claude-haiku-4-5"] },
   },
 
   local: {
