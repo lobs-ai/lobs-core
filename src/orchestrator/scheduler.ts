@@ -75,15 +75,8 @@ export function getNextTasks(config: SchedulerConfig): Task[] {
     return [];
   }
 
-  // Check daily budget
-  const dailyCost = getDailyCost();
-  if (dailyCost >= config.maxDailyCostUsd) {
-    log().warn(
-      `[SCHEDULER] Daily budget exceeded ($${dailyCost.toFixed(2)}/$${config.maxDailyCostUsd.toFixed(2)}) — pausing task execution`,
-    );
-    return [];
-  }
-
+  // NOTE: As of ADR-008 (Unlimited Operations), cost is managed at the model tier level
+  // (MiniMax is $0; strong tier auto-escalates when needed). No daily budget enforcement here.
   // Get all ready tasks
   const readyTasks = db
     .prepare(

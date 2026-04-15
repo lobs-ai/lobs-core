@@ -410,7 +410,7 @@ async function main() {
   cronService.registerSystemJob({
     id: "heartbeat",
     name: "System Heartbeat",
-    schedule: "*/30 * * * *",
+    schedule: "*/5 * * * *", // ADR-008: continuous monitoring — every 5 minutes
     enabled: true,
     handler: async () => {
       const result = await runHeartbeat();

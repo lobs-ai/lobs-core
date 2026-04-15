@@ -1,13 +1,16 @@
 /**
  * System heartbeat — periodic health check.
  *
- * Runs on a cron schedule (every 30 minutes) to check:
+ * Runs on a cron schedule (every 5 minutes, ADR-008) to check:
  * 1. lobs-core process health
  * 2. lobs-memory server availability
  * 3. LM Studio availability (local model)
  * 4. Task health (failed, blocked, stuck tasks)
  * 5. Recent worker completions
  * 6. Inbox items
+ *
+ * ADR-008 (Unlimited Operations): Also monitors backlog depth and worker idle
+ * capacity to trigger continuous dispatch when tasks pile up.
  *
  * Returns a health report with any alerts.
  */
