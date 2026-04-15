@@ -389,11 +389,17 @@ export async function runHealthCheck(db: PawDB): Promise<SystemHealthSnapshot> {
 
   const probeResults = [restart, orphan, staleness, resource];
 
+  // openSessions = total count of worker_runs with no ended_at
+  const openSessions =
+    (getRawDb()
+      .prepare("SELECT COUNT(*) as count FROM worker_runs WHERE ended_at IS NULL")
+      .get() as { count: number }).count ?? 0;
+
   return {
     timestamp: new Date(),
     restarts10m: (restart.detail?.count ?? 0) as number,
     orphaned1h: (orphan.detail?.count ?? 0) as number,
-    openSessions: 0, // TODO: compute from db
+    openSessions,
     stalledSessions: (staleness.detail?.stalledCount ?? 0) as number,
     diskUsagePercent: (resource.detail?.diskUsagePercent ?? 0) as number,
     memoryUsagePercent: (resource.detail?.memoryUsagePercent ?? 0) as number,
