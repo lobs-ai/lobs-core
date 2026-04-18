@@ -78,8 +78,8 @@ export function getNextTasks(config: SchedulerConfig): Task[] {
   // NOTE: As of ADR-008 (Unlimited Operations), cost is managed at the model tier level
   // (MiniMax is $0; strong tier auto-escalates when needed). No daily budget enforcement here.
 
-  // First, activate any pending tasks so workers can pick them up
-  db.prepare(`UPDATE tasks SET status = 'active', work_state = 'not_started', updated_at = datetime('now') WHERE status = 'pending' AND work_state IS NULL`).run();
+  // First, activate any pending or inbox tasks so workers can pick them up
+  db.prepare(`UPDATE tasks SET status = 'active', work_state = 'not_started', updated_at = datetime('now') WHERE status IN ('pending', 'inbox') AND work_state IS NULL`).run();
 
   // Get all ready tasks (already active or just activated above)
   const readyTasks = db
