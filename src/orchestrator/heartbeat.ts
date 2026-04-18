@@ -17,11 +17,22 @@
 
 import { getRawDb } from "../db/connection.js";
 import { log } from "../util/logger.js";
+import { getNextTasks, getSchedulerConfig } from "./scheduler.js";
+import { ToolName } from "../runner/types.js";
+import { runAgent } from "../runner/index.js";
+import { getModelForTier } from "../config/models.js";
+
+export interface SpawnedWorker {
+  taskId: string;
+  agent: string;
+  model: string;
+}
 
 export interface HeartbeatResult {
   timestamp: Date;
   status: "healthy" | "degraded" | "unhealthy";
   alerts: string[];
+  spawnedWorkers: SpawnedWorker[];
   checks: {
     lobsCore: CheckResult;
     memoryServer: CheckResult;
@@ -238,6 +249,38 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
     }
   }
   
+  // ─── Worker spawning (ADR-008: continuous dispatch) ───────────────────────
+  const spawnedWorkers: SpawnedWorker[] = [];
+
+  try {
+    const config = await getSchedulerConfig();
+    if (config.maxConcurrentWorkers > 0) {
+      const tasks = await getNextTasks(config);
+
+      for (const task of tasks) {
+        if (spawnedWorkers.length >= config.maxConcurrentWorkers) break;
+
+        const model = task.modelTier ? await getModelForTier(task.modelTier as any) : await getModelForTier("standard");
+        log().info(`[heartbeat] Spawning worker taskId=${task.id} agent=${task.agent || "programmer"} model=${model}`);
+
+        // Fire and forget — let the worker run independently
+        runAgent({
+          task: task.title,
+          agent: task.agent || "programmer",
+          model,
+          cwd: process.cwd(),
+          tools: ["read", "write", "edit", "bash", "glob", "grep", "task_create", "task_update", "task_list"] as ToolName[],
+          timeout: 7200000, // 2 hours default
+        }).catch((err) => log().error(`[heartbeat] Worker spawn failed taskId=${task.id}: ${String(err)}`));
+
+        spawnedWorkers.push({ taskId: task.id, agent: task.agent || "programmer", model });
+      }
+    }
+  } catch (err) {
+    log().error("[heartbeat] Worker spawning error: " + String(err));
+    alerts.push("worker_spawn: error");
+  }
+
   // Overall status
   let status: "healthy" | "degraded" | "unhealthy" = "healthy";
   
@@ -251,6 +294,7 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
     timestamp: new Date(),
     status,
     alerts,
+    spawnedWorkers,
     checks,
   };
   
