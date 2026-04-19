@@ -575,6 +575,94 @@ async function main() {
     },
   });
 
+  // Cost audit cron — weekly check on strong-tier spend (opencode-go) per ADR-008
+  cronService.registerSystemJob({
+    id: "cost-audit",
+    name: "Cost Audit",
+    schedule: "0 9 * * 1", // every Monday at 9am ET — verify spend thresholds
+    enabled: true,
+    handler: async () => {
+      const { auditCosts } = await import("./orchestrator/cost-audit.js");
+      const report = await auditCosts();
+      if (report.exceeded.length > 0) {
+        console.warn(`[cost-audit] Threshold exceeded: ${report.exceeded.join(", ")}`);
+      } else {
+        console.log(`[cost-audit] All tiers within limits. Total spend: $${report.totalSpend.toFixed(4)}`);
+      }
+    },
+  });
+
+  // CI runner cron — scheduled lint + typecheck per ADR-008
+  // Runs every 15 minutes to catch issues early. Full weekly deep-dive still runs separately.
+  cronService.registerSystemJob({
+    id: "ci-runner",
+    name: "CI Runner",
+    schedule: "*/15 * * * *", // every 15 minutes
+    enabled: true,
+    handler: async () => {
+      const { runCiChecks } = await import("./ci/runner.js");
+      const results = await runCiChecks();
+      if (results.failed > 0) {
+        console.warn(`[ci-runner] ${results.failed}/${results.total} checks failed`);
+      } else {
+        console.log(`[ci-runner] All ${results.total} checks passed`);
+      }
+    },
+  });
+
+  // GitHub triage cron — per ADR-008: auto-label new issues, detect stale PRs
+  cronService.registerSystemJob({
+    id: "github-triage",
+    name: "GitHub Triage",
+    schedule: "*/30 * * * *", // every 30 minutes
+    enabled: true,
+    handler: async () => {
+      const { runGithubTriage } = await import("./services/github-triage.js");
+      await runGithubTriage();
+    },
+  });
+
+  // Test runner cron — per ADR-008: run vitest suite every 30 minutes
+  cronService.registerSystemJob({
+    id: "test-runner",
+    name: "Test Runner",
+    schedule: "*/30 * * * *", // every 30 minutes
+    enabled: true,
+    handler: async () => {
+      const { runTests } = await import("./ci/test-runner.js");
+      const result = runTests();
+      if (result.failed > 0) {
+        console.error(`[test-runner] ${result.failed}/${result.total} checks failed`);
+      } else {
+        console.log(`[test-runner] All ${result.total} checks passed`);
+      }
+    },
+  });
+
+  // Dependency monitor cron — per ADR-008: npm audit + outlived dependencies
+  cronService.registerSystemJob({
+    id: "dependency-monitor",
+    name: "Dependency Monitor",
+    schedule: "0 9 * * 1", // every Monday at 9am ET
+    enabled: true,
+    handler: async () => {
+      const { runDependencyCheck } = await import("./services/dependency-monitor.js");
+      await runDependencyCheck();
+    },
+  });
+
+  // Repo health cron — per ADR-008: test coverage, unresolved TODO/FIXME scan
+  cronService.registerSystemJob({
+    id: "repo-health",
+    name: "Repo Health",
+    schedule: "0 10 * * 5", // every Friday at 10am ET
+    enabled: true,
+    handler: async () => {
+      const { runRepoHealthCheck } = await import("./services/repo-health.js");
+      await runRepoHealthCheck();
+    },
+  });
+
   // Daily reflection — run at 03:00 local time, after daily db-maintenance
   let lastDailyReflectionDate = "";
   const DAILY_REFLECTION_HOUR = 3;

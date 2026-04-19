@@ -10,15 +10,26 @@ export function setLogger(logger: PluginLogger): void {
   _logger = logger;
 }
 
-export function log(): PluginLogger {
-  if (!_logger) {
-    // Fallback to console if not yet initialized
-    return {
-      info: (msg) => console.log(`[paw] ${msg}`),
-      warn: (msg) => console.warn(`[paw] ${msg}`),
-      error: (msg) => console.error(`[paw] ${msg}`),
-      debug: (msg) => console.debug(`[paw] ${msg}`),
-    };
+export interface RequiredLogger {
+  info(msg: string): void;
+  warn(msg: string): void;
+  error(msg: string): void;
+  debug(msg: string): void;
+}
+
+function fallbackLogger(): RequiredLogger {
+  return {
+    info: (msg) => console.log(`[paw] ${msg}`),
+    warn: (msg) => console.warn(`[paw] ${msg}`),
+    error: (msg) => console.error(`[paw] ${msg}`),
+    debug: (msg) => console.debug(`[paw] ${msg}`),
+  };
+}
+
+export function log(): RequiredLogger {
+  if (_logger) {
+    // Cast to RequiredLogger — caller should only use methods present in PluginLogger
+    return _logger as unknown as RequiredLogger;
   }
-  return _logger;
+  return fallbackLogger();
 }

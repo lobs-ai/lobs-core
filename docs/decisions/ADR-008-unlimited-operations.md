@@ -1,7 +1,7 @@
 # ADR-008: Unlimited Operations — Removing Cost Constraints from Agent Behavior
 
 **Date:** 2026-04-14
-**Status:** Proposed
+**Status:** Accepted
 **Decision:** Shift from cost-constrained to impact-constrained agent operations
 
 ## Context
