@@ -107,15 +107,66 @@ export function parseCronExpression(expr: string): ParsedSchedule {
 }
 
 /**
- * Check if a Date matches a parsed cron schedule.
+ * Extract date-part values from a Date in the given timezone.
+ * Uses Intl.DateTimeFormat so the interpretation is timezone-aware,
+ * not dependent on the host system clock.
  */
-function matchesCronSchedule(schedule: ParsedSchedule, time: Date): boolean {
+function getDatePartsInTz(time: Date, tz: string): {
+  minute: number;
+  hour: number;
+  dayOfMonth: number;
+  month: number;
+  dayOfWeek: number;
+} {
+  // Intl.DateTimeFormat returns numeric values for all fields except weekday.
+  // weekday: "long" → "Sunday", "Monday", ..., "Saturday"
+  const dayMap: Record<string, number> = {
+    Sunday: 0,
+    Monday: 1,
+    Tuesday: 2,
+    Wednesday: 3,
+    Thursday: 4,
+    Friday: 5,
+    Saturday: 6,
+  };
+
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    weekday: "long",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "numeric",
+    hour12: false,
+  });
+
+  const parts = fmt.formatToParts(time);
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+
+  const weekdayStr = get("weekday");
+  // dayOfWeek: Sunday=0 convention for cron
+  const dayOfWeek = dayMap[weekdayStr] ?? parseInt(get("weekday"), 10);
+
+  return {
+    minute: parseInt(get("minute"), 10),
+    hour: parseInt(get("hour"), 10),
+    dayOfMonth: parseInt(get("day"), 10),
+    month: parseInt(get("month"), 10),
+    dayOfWeek,
+  };
+}
+
+/**
+ * Check if a Date matches a parsed cron schedule, evaluated in the given timezone.
+ */
+function matchesCronSchedule(schedule: ParsedSchedule, time: Date, tz: string): boolean {
+  const { minute, hour, dayOfMonth, month, dayOfWeek } = getDatePartsInTz(time, tz);
   return (
-    schedule.minute.includes(time.getMinutes()) &&
-    schedule.hour.includes(time.getHours()) &&
-    schedule.dayOfMonth.includes(time.getDate()) &&
-    schedule.month.includes(time.getMonth() + 1) &&
-    schedule.dayOfWeek.includes(time.getDay())
+    schedule.minute.includes(minute) &&
+    schedule.hour.includes(hour) &&
+    schedule.dayOfMonth.includes(dayOfMonth) &&
+    schedule.month.includes(month) &&
+    schedule.dayOfWeek.includes(dayOfWeek)
   );
 }
 
@@ -477,7 +528,7 @@ export class CronService {
       if (!schedule) continue;
 
       // Find the most recent time this cron should have fired
-      const lastExpectedFire = this.findLastCronMatch(schedule, now, CATCH_UP_WINDOW_MS);
+      const lastExpectedFire = this.findLastCronMatch(schedule, now, CATCH_UP_WINDOW_MS, job.schedule.tz || "America/New_York");
       if (!lastExpectedFire) continue; // No expected fire within the window
 
       // Check if it actually fired at or after that time
@@ -510,6 +561,7 @@ export class CronService {
     schedule: ParsedSchedule,
     now: Date,
     windowMs: number,
+    tz: string,
   ): Date | null {
     // Start from the current minute, go backwards
     const candidate = new Date(now);
@@ -522,7 +574,7 @@ export class CronService {
     for (let i = 0; i < maxMinutes; i++) {
       if (candidate.getTime() < cutoff) break;
 
-      if (matchesCronSchedule(schedule, candidate)) {
+      if (matchesCronSchedule(schedule, candidate, tz)) {
         return new Date(candidate);
       }
       candidate.setMinutes(candidate.getMinutes() - 1);
@@ -691,7 +743,8 @@ export class CronService {
       const schedule = this.systemSchedules.get(id);
       if (!schedule) continue;
 
-      if (!matchesCronSchedule(schedule, now)) continue;
+      // System jobs use the default timezone
+      if (!matchesCronSchedule(schedule, now, "America/New_York")) continue;
 
       // Avoid duplicate runs within the same minute
       if (job.lastRun && job.lastRun.getTime() === now.getTime()) continue;
@@ -715,7 +768,7 @@ export class CronService {
           const schedule = this.agentSchedules.get(id);
           if (!schedule) continue;
 
-          if (!matchesCronSchedule(schedule, now)) continue;
+          if (!matchesCronSchedule(schedule, now, job.schedule.tz || "America/New_York")) continue;
 
           // Avoid duplicate runs within the same minute
           if (job.lastFired) {
