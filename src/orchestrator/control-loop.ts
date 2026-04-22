@@ -2644,6 +2644,7 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
   // Runs BEFORE model selection so the updated escalationTier can influence
   // the model choice below.
   let taskEscalationTier = 0;
+  let effectiveFailCount = 0; // hoisted for use in model selection below
   if (req.taskId) {
     try {
       const escalTaskRow = getRawDb()
@@ -2652,7 +2653,7 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
       if (escalTaskRow) {
         const spawnCount = escalTaskRow.spawn_count ?? 0;
         const crashCount = escalTaskRow.crash_count ?? 0;
-        const effectiveFailCount = spawnCount - crashCount;
+        effectiveFailCount = spawnCount - crashCount;
         taskEscalationTier = escalTaskRow.escalation_tier ?? 0;
         // Only escalate when there are genuine prior failures (not first spawn, not crash-only)
         if (effectiveFailCount > 0) {
@@ -2699,15 +2700,29 @@ async function processSpawnRequest(req: SpawnRequest): Promise<void> {
     model = complianceOverrideModel;
     log().info(`[COMPLIANCE] Using local-only model: ${model} (no cloud fallback)`);
   } else {
-    // If the task has been escalated, bump to next model tier so retries use a stronger model
-    const modelChoice = taskEscalationTier > 0
-      ? escalationModel(
-          (req.modelTier as ModelTier | undefined) ?? resolveTaskTier({ agent: req.agentType }),
-          req.agentType,
-        )
-      : req.modelTier
-        ? chooseModel(req.modelTier, req.agentType)
-        : chooseModel("medium", req.agentType);
+    // ADR-008: strong tier auto-escalation — 2+ effective failures jump directly to
+    // strong tier rather than stepping one tier at a time (which would never reach
+    // strong from standard within the normal escalation window).
+    const currentTier = (req.modelTier as ModelTier | undefined) ?? resolveTaskTier({ agent: req.agentType });
+    const isStrongEligible = effectiveFailCount >= 2 && currentTier !== "strong";
+    const escalatedTier: ModelTier = isStrongEligible ? "strong" : taskEscalationTier > 0 ? escalationModel(currentTier, req.agentType).tier : (req.modelTier as ModelTier | undefined) ?? "medium";
+    const modelChoice = isStrongEligible
+      ? chooseModel("strong", req.agentType)
+      : taskEscalationTier > 0
+        ? escalationModel(currentTier, req.agentType)
+        : req.modelTier
+          ? chooseModel(req.modelTier, req.agentType)
+          : chooseModel("medium", req.agentType);
+
+    // Persist the escalated tier back to the task so future retries use it
+    if (req.taskId && escalatedTier !== (req.modelTier as ModelTier | undefined) && escalatedTier !== "medium") {
+      try {
+        getRawDb().prepare(`UPDATE tasks SET model_tier = ?, updated_at = ? WHERE id = ?`).run(escalatedTier, new Date().toISOString(), req.taskId);
+        log().info(`[ESCALATION] Persisted model_tier=${escalatedTier} on task ${req.taskId.slice(0, 8)} after ${effectiveFailCount} effective failures`);
+      } catch (e) {
+        log().warn(`[ESCALATION] Failed to persist model_tier=${escalatedTier} on task ${req.taskId.slice(0, 8)}: ${e}`);
+      }
+    }
 
     // Build fallback chain: uses AGENT_FALLBACK_CHAINS if available, else tier-level alternatives
     const primaryModel = modelChoice.model;

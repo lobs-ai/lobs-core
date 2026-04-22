@@ -1,6 +1,8 @@
 import { eq, sql } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
-import { workerRuns, type WorkerRuns } from "../db/schema.js";
+import { workerRuns } from "../db/schema.js";
+
+type WorkerRunsRow = typeof workerRuns.$inferSelect;
 import { getModelCost } from "../config/models.js";
 
 /**
@@ -30,7 +32,7 @@ export async function auditCosts(): Promise<CostAuditReport> {
   // Query worker_runs for strong-tier model usage in the last 7 days
   // Use raw SQL for aggregation to keep it simple and performant
   const rows = await db.all<
-    Pick<WorkerRuns, "model" | "totalCostUsd" | "inputTokens" | "outputTokens">
+    Pick<WorkerRunsRow, "model" | "totalCostUsd" | "inputTokens" | "outputTokens">
   & { run_count: number }>(
     sql`SELECT
          model,

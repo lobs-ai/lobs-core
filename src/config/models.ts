@@ -154,6 +154,18 @@ export const DEFAULT_CONFIG: ModelConfig = {
     "MiniMax-M2.7":      204_800,
     "glm-5.1":           128_000,
   },
+
+  // ADR-008: Tier-level fallback chains.
+  // If a model at a given tier fails, fall through to the next model in the same tier,
+  // then to the next tier up. Tier order: micro → small → medium → standard → strong.
+  // Only strong tier (opencode-go/Opus) costs real money — all others are free tier.
+  tierFallbacks: {
+    micro:    ["qwen/qwen3.5-9b"],
+    small:    ["anthropic/claude-haiku-4-5", "openai/gpt-4o-mini"],
+    medium:   ["anthropic/claude-haiku-4-5", "openai/gpt-4o-mini"],
+    standard: ["anthropic/claude-sonnet-4-5", "openai/gpt-4o"],
+    strong:   ["anthropic/claude-opus-4-5", "openai/gpt-4o"],
+  },
 };
 
 // ── Singleton ────────────────────────────────────────────────────────────────

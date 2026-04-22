@@ -18,12 +18,11 @@ interface GhConfig {
   token: string;
 }
 
-function getGhConfig(): GhConfig | null {
+async function getGhConfig(): Promise<GhConfig | null> {
   const configPath = join(getLobsRoot(), "config/secrets/api-keys.json");
   if (!existsSync(configPath)) return null;
 
   try {
-    // Dynamic require workaround — read directly
     const { readFileSync } = await import("node:fs");
     const data = JSON.parse(readFileSync(configPath, "utf-8"));
     if (!data.github?.owner || !data.github?.repo || !data.github?.token) return null;
@@ -98,7 +97,7 @@ function daysSince(dateStr: string): number {
 }
 
 export async function runGithubTriage(): Promise<void> {
-  const cfg = getGhConfig();
+  const cfg = await getGhConfig();
   if (!cfg) {
     log().info("[github-triage] No GitHub config — skipping");
     return;

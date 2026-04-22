@@ -166,7 +166,7 @@ function estimateTaskCost(tier: string): number {
     small: 0.50, // ~100K tokens at sonnet pricing
     medium: 1.0,
     standard: 1.5,
-    strong: 5.0, // Opus pricing
+    strong: 5.0, // opencode-go pricing
   };
 
   return costMap[tier] ?? costMap.standard;
@@ -267,9 +267,9 @@ export function getSchedulerConfig(): SchedulerConfig {
     }
   }
 
-  // Defaults
+  // Default: max 3 concurrent workers (ADR-008 recommendation to prevent resource contention)
   return {
-    maxConcurrentWorkers: 5,
+    maxConcurrentWorkers: 3,
     maxDailyCostUsd: 50.0,
     priorityWeights: {
       urgency: 10,

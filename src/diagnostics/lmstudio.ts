@@ -54,7 +54,7 @@ export interface LmStudioDiagnosticReport {
 // ── Model ID extraction ───────────────────────────────────────────────────────
 
 /** Strip known routing prefixes: "lmstudio/qwen/qwen3-4b" → "qwen/qwen3-4b" */
-const LOCAL_ROUTING_PREFIXES = ["lmstudio/"];
+const LOCAL_ROUTING_PREFIXES = ["local/", "lmstudio/"];
 
 function stripPrefix(modelId: string): string {
   for (const prefix of LOCAL_ROUTING_PREFIXES) {
