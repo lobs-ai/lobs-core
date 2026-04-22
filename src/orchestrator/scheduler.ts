@@ -254,7 +254,7 @@ export function getSchedulerConfig(): SchedulerConfig {
     try {
       const parsed = JSON.parse(row.value) as Partial<SchedulerConfig>;
       return {
-        maxConcurrentWorkers: parsed.maxConcurrentWorkers ?? 5,
+        maxConcurrentWorkers: parsed.maxConcurrentWorkers ?? 3,
         maxDailyCostUsd: parsed.maxDailyCostUsd ?? 50.0,
         priorityWeights: {
           urgency: parsed.priorityWeights?.urgency ?? 10,

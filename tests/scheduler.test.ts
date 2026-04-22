@@ -194,7 +194,7 @@ describe("getSchedulerConfig()", () => {
 
   it("default maxConcurrentWorkers is 5", () => {
     const cfg = getSchedulerConfig();
-    expect(cfg.maxConcurrentWorkers).toBe(5);
+    expect(cfg.maxConcurrentWorkers).toBe(3);
   });
 
   it("default maxDailyCostUsd is 50", () => {
@@ -246,7 +246,7 @@ describe("getSchedulerConfig()", () => {
     `).run('"not-an-object"');
 
     const cfg = getSchedulerConfig();
-    expect(cfg.maxConcurrentWorkers).toBe(5); // default
+    expect(cfg.maxConcurrentWorkers).toBe(3); // default
 
     // Cleanup
     raw.prepare("DELETE FROM orchestrator_settings WHERE key = 'scheduler_config'").run();
