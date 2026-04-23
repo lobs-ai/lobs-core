@@ -794,7 +794,9 @@ export function escapeLatex(s: string): string {
     .replace(/</g, "\\textless{}")
     .replace(/>/g, "\\textgreater{}")
     .replace(/\|/g, "\\textbar{}")
-    .replace(/\u0000BS\u0000/g, "\\textbackslash{}");
+    /* eslint-disable no-control-regex */
+    .replace(/\u0000BS\u0000/g, "\\textbackslash{}")
+    /* eslint-enable no-control-regex */;
 }
 
 export function buildLatex(
