@@ -206,19 +206,19 @@ describe("findDuplicateTask", () => {
   });
 
   it("matches when DB row has null agent (wildcard match)", () => {
-    insertTask({ title: "Null Agent Task", agent: undefined, modelTier: "standard" });
+    insertTask({ title: "Null Agent Task", agent: null, modelTier: "standard" });
     const dup = findDuplicateTask({ title: "Null Agent Task", agent: "programmer", modelTier: "standard" });
     expect(dup).toBeDefined();
   });
 
   it("matches when DB row has null model_tier (wildcard match)", () => {
-    insertTask({ title: "Null Tier Task", agent: "programmer", modelTier: undefined });
+    insertTask({ title: "Null Tier Task", agent: "programmer", modelTier: null });
     const dup = findDuplicateTask({ title: "Null Tier Task", agent: "programmer", modelTier: "standard" });
     expect(dup).toBeDefined();
   });
 
   it("matches when DB row has null agent AND null tier (both wildcards)", () => {
-    insertTask({ title: "Null Both Task", agent: undefined, modelTier: undefined });
+    insertTask({ title: "Null Both Task", agent: null, modelTier: null });
     const dup = findDuplicateTask({ title: "Null Both Task", agent: "programmer", modelTier: "standard" });
     expect(dup).toBeDefined();
   });
