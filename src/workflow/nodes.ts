@@ -15,6 +15,7 @@ import { evaluateCondition, evaluateExpression, interpolate } from "./functions.
 import { log } from "../util/logger.js";
 import { emitQueueEvent } from "../util/queue-logger.js";
 import { executeCallable } from "./callables.js";
+import { withTimeout } from "../util/timeout.js";
 import { shouldTriggerReview } from "../orchestrator/review-triggers.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -550,9 +551,10 @@ export class NodeHandlers {
   // ── ts_call ───────────────────────────────────────────────────────────────
 
   private async _executeTsCall(nodeDef: NodeDef, run: WorkflowRun): Promise<NodeResult> {
-    const config = nodeDef.config as Record<string, unknown> & { callable?: string };
+    const config = nodeDef.config as Record<string, unknown> & { callable?: string; timeout_ms?: number };
     const callable = config.callable ?? "";
     const rawArgs = (config.args as Record<string, unknown>) ?? {};
+    const timeoutMs = config.timeout_ms ?? 300000; // default 5min
 
     // Interpolate args from run context — replace {node.field} patterns
     const args: Record<string, unknown> = {};
@@ -571,8 +573,8 @@ export class NodeHandlers {
       agentType: (run as unknown as Record<string, unknown>).agentType as string | undefined,
       runContext: run.context, // Pass full context so callables can access it
     };
-    log().info(`[WORKFLOW] ts_call: ${callable}`);
-    const result = await executeCallable(callable, args, ctx);
+    log().info(`[WORKFLOW] ts_call: ${callable}${timeoutMs !== 300000 ? ` (timeout=${timeoutMs}ms)` : ""}`);
+    const result = await withTimeout(() => Promise.resolve(executeCallable(callable, args, ctx)), timeoutMs, `ts_call ${callable} timed out`);
     return { status: "completed", output: result };
   }
 

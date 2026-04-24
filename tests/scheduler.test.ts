@@ -412,13 +412,14 @@ describe("getNextTasks()", () => {
     expect(result.some((t) => t.id === inProgressId)).toBe(false);
   });
 
-  it("returns empty array when daily budget is exceeded", () => {
+  it("returns tasks regardless of daily cost (ADR-008 Unlimited Operations)", () => {
     // Seed the mock file so getDailyCost() returns > maxDailyCostUsd
     writeMockCostTracker({ date: today(), totalCostUsd: 100.0, taskCount: 20 });
 
-    insertTask({ title: "[sched-test] Budget blocked task" });
+    insertTask({ title: "[sched-test] High budget day task" });
     const result = getNextTasks(cfg);
-    expect(result).toHaveLength(0);
+    // ADR-008 removed daily budget enforcement; cost is managed at model tier level
+    expect(result.some((t) => t.title === "[sched-test] High budget day task")).toBe(true);
   });
 
   it("returns empty array when no worker slots are available", () => {

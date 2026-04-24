@@ -179,7 +179,7 @@ describe("OpenAI-compatible tool parsing", () => {
     ) as any;
 
     const { createClient } = await import("../src/runner/providers.js");
-    const client = createClient({ provider: "lmstudio", modelId: "qwen/qwen3.5-9b" }, "session-local");
+    const client = await createClient({ provider: "lmstudio", modelId: "qwen/qwen3.5-9b" }, "session-local");
     const response = await client.createMessage({
       model: "qwen/qwen3.5-9b",
       system: "test system",
@@ -236,7 +236,7 @@ describe("OpenAI-compatible tool parsing", () => {
     const { getKeyPool, shutdownKeyPool } = await import("../src/services/key-pool.js");
 
     try {
-      const client = createResilientClient("openai/gpt-4o", {
+      const client = await createResilientClient("openai/gpt-4o", {
         sessionId: "session-rate-limit",
         maxRetries: 3,
       });
@@ -289,7 +289,7 @@ describe("OpenAI-compatible tool parsing", () => {
     const { createResilientClient } = await import("../src/runner/providers.js");
 
     try {
-      const client = createResilientClient("openai/gpt-4o", {
+      const client = await createResilientClient("openai/gpt-4o", {
         sessionId: "session-long-retry",
         maxRetries: 3,
       });
@@ -332,7 +332,7 @@ describe("OpenAI-compatible tool parsing", () => {
     }) as any;
 
     const { createResilientClient } = await import("../src/runner/providers.js");
-    const client = createResilientClient("openai/gpt-4o", {
+    const client = await createResilientClient("openai/gpt-4o", {
       sessionId: "session-timeout",
       maxRetries: 2,
     });

@@ -83,7 +83,7 @@ describe("key rotation", () => {
     const { shutdownKeyPool } = await import("../src/services/key-pool.js");
 
     try {
-      const client = createResilientClient("openai/gpt-4o", {
+      const client = await createResilientClient("openai/gpt-4o", {
         sessionId: "session-rotate",
         maxRetries: 2,
       });
@@ -169,7 +169,7 @@ describe("key rotation", () => {
 
     try {
       const keyPool = getKeyPool();
-      const client = createResilientClient("openai/gpt-4o", {
+      const client = await createResilientClient("openai/gpt-4o", {
         sessionId: "session-rotate",
         maxRetries: 1,
       });

@@ -59,16 +59,16 @@ export function findDuplicateTask(opts: DedupOptions): DedupMatch | undefined {
     gte(tasks.createdAt, since),
   ];
 
-  // Agent match: if caller supplied an agent, require same agent OR null in DB.
-  // If caller supplied no agent, skip the agent filter (matches any).
-  if (agent) {
+  // Agent match: if caller supplied an agent (not null), require same agent OR null in DB.
+  // If caller supplied no agent (null/undefined), skip the agent filter (matches any).
+  if (agent != null) {
     conditions.push(
       or(eq(tasks.agent, agent), isNull(tasks.agent)) as ReturnType<typeof eq>
     );
   }
 
   // Model tier match: same logic — if caller specified a tier, require same tier OR null in DB.
-  if (modelTier) {
+  if (modelTier != null) {
     conditions.push(
       or(eq(tasks.modelTier, modelTier), isNull(tasks.modelTier)) as ReturnType<typeof eq>
     );

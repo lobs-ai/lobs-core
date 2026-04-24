@@ -79,7 +79,8 @@ export function getNextTasks(config: SchedulerConfig): Task[] {
   // (MiniMax is $0; strong tier auto-escalates when needed). No daily budget enforcement here.
 
   // First, activate any pending or inbox tasks so workers can pick them up
-  db.prepare(`UPDATE tasks SET status = 'active', work_state = 'not_started', updated_at = datetime('now') WHERE status IN ('pending', 'inbox') AND work_state IS NULL`).run();
+  // Include tasks with work_state='not_started' — they were previously activated but not picked up
+  db.prepare(`UPDATE tasks SET status = 'active', updated_at = datetime('now') WHERE status IN ('pending', 'inbox', 'todo') AND (work_state IS NULL OR work_state = 'not_started')`).run();
 
   // Get all ready tasks (already active or just activated above)
   const readyTasks = db

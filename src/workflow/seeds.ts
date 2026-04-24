@@ -1100,7 +1100,7 @@ const DEFAULT_WORKFLOWS = [
       {
         id: "process",
         type: "ts_call",
-        config: { callable: "inbox.process_threads" },
+        config: { callable: "inbox.process_threads", timeout_ms: 180000 },
         on_success: "done",
         on_failure: { retry: 1, abort_on: ["python_error"] },
       },

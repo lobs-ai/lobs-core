@@ -3342,9 +3342,12 @@ export class MainAgent {
 
         const ephemeralContent3 = this.promoteQueuedMessage(nextMsg, "timer-recovery");
         this.updateChannelSession(channelId, "processing", nextMsg.authorId, nextMsg.authorName);
-        this.processConversation(channelId, ephemeralContent3 || undefined).catch((err) =>
-          console.error(`[main-agent] Queue recovery failed for ${channelId.slice(0, 16)}:`, err),
-        );
+        const ephemeralContent = typeof ephemeralContent3 === 'string' ? ephemeralContent3 : undefined;
+        if (ephemeralContent !== undefined) {
+          this.processConversation(channelId, ephemeralContent).catch((err) =>
+            console.error(`[main-agent] Queue recovery failed for ${channelId.slice(0, 16)}:`, err),
+          );
+        }
       } catch (err) {
         console.error(`[main-agent] Queue recovery crashed for ${this.channelTag(channelId)}:`, err);
       }
