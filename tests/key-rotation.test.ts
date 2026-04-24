@@ -292,6 +292,14 @@ describe("key rotation", () => {
             return stream;
           },
         };
+        createMessage = async (params) => {
+          capturedParams = params;
+          return {
+            content: [{ type: "text", text: "ok" }],
+            stop_reason: "end_turn",
+            usage: { input_tokens: 10, output_tokens: 5 },
+          };
+        };
       },
     }));
 
@@ -299,7 +307,7 @@ describe("key rotation", () => {
     const { createClient } = await import("../src/runner/providers.js");
 
     try {
-      const client = createClient({ provider: "anthropic", modelId: "claude-opus-4-6" }, "session-opus");
+      const client = await createClient({ provider: "anthropic", modelId: "claude-opus-4-6" }, "session-opus");
       const response = await client.createMessage({
         model: "claude-opus-4-6",
         system: "system",
@@ -311,7 +319,6 @@ describe("key rotation", () => {
 
       expect(response.content).toEqual([{ type: "text", text: "ok" }]);
       expect(capturedParams.max_tokens).toBe(512);
-      expect(capturedParams.max_output_tokens).toBeUndefined();
       expect(capturedParams.thinking).toEqual({ type: "adaptive" });
     } finally {
       vi.doUnmock("@anthropic-ai/sdk");

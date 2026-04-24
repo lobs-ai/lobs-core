@@ -77,8 +77,8 @@ describe("shouldRetryProviderError", () => {
       const keyPool = getKeyPool();
       keyPool.markSessionFailed("anthropic", "session-1", "429 rate limited", "rate_limit");
 
-      expect(() => createClient({ provider: "anthropic", modelId: "claude-sonnet-4-6" }, "session-1"))
-        .toThrow("all_anthropic_keys_unavailable");
+      await expect(createClient({ provider: "anthropic", modelId: "claude-sonnet-4-6" }, "session-1"))
+        .rejects.toThrow("all_anthropic_keys_unavailable");
     } finally {
       shutdownKeyPool();
     }
