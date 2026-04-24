@@ -414,13 +414,10 @@ async function main() {
     enabled: true,
     handler: async () => {
       const result = await runHeartbeat();
-      // Only alert the main agent if there are actual issues
+      // Only alert if there are actual issues
       if (result.alerts.length > 0) {
-        const mainAgent = (globalThis as any).__lobsMainAgent;
-        if (mainAgent) {
-          const alertText = `[HEARTBEAT ALERT] ${result.alerts.join("; ")}`;
-          await mainAgent.handleSystemEvent(alertText);
-        }
+        const alertText = `[HEARTBEAT] ${result.alerts.join(" | ")}`;
+        await discordService.alert(alertText);
       }
     },
   });

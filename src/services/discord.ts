@@ -491,6 +491,28 @@ class DiscordService {
     }
   }
 
+  /** Send an structured alert embed to the configured alerts channel */
+  async sendAlert(alert: {
+    title: string;
+    description: string;
+    color?: number;
+    fields?: Array<{ name: string; value: string; inline?: boolean }>;
+    footer?: string;
+    timestamp?: boolean;
+  }): Promise<void> {
+    const channelId = this.config?.channels.alerts;
+    if (!channelId) return;
+
+    await this.sendEmbed(channelId, {
+      title: alert.title,
+      description: alert.description,
+      color: alert.color ?? 0xf59e0b, // amber warning color
+      fields: alert.fields,
+      footer: alert.footer,
+      timestamp: alert.timestamp ?? true,
+    });
+  }
+
   /** Send a task completion notification */
   async notifyCompletion(task: {
     title: string;
