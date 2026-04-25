@@ -572,6 +572,18 @@ async function main() {
     },
   });
 
+  // Daily inbox scan — per ADR-008: autonomous work generation, runs every morning
+  cronService.registerSystemJob({
+    id: "daily-scan",
+    name: "Daily Inbox Scan",
+    schedule: "0 8 * * *", // daily at 8am ET — GitHub scan, TODO/FIXME capture, morning brief
+    enabled: true,
+    handler: async () => {
+      const { runDailyScan } = await import("./orchestrator/daily-scan.js");
+      await runDailyScan();
+    },
+  });
+
   // Cost audit cron — weekly check on strong-tier spend (opencode-go) per ADR-008
   cronService.registerSystemJob({
     id: "cost-audit",

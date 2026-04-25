@@ -529,6 +529,7 @@ Return ONLY valid JSON:
     const query = parseQuery(req.url ?? "");
     const conditions = [];
     if (query.status) conditions.push(eq(tasks.status, query.status));
+    if (query.review_state) conditions.push(eq(tasks.reviewState, query.review_state));
     if (query.project_id) conditions.push(eq(tasks.projectId, query.project_id));
     // Direct compliance flag filter (does NOT include project-inherited compliance —
     // use normalizeTaskBatch result's `compliant` field for the full effective value)
