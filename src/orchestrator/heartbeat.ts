@@ -106,7 +106,7 @@ async function checkLMStudio(): Promise<CheckResult> {
     } else {
       return { status: "warning", message: `LM Studio returned ${response.status}` };
     }
-  } catch (error) {
+  } catch {
     return {
       status: "warning",
       message: "LM Studio not responding (local model unavailable)",
@@ -401,27 +401,22 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
 
       if (tasks.length === 0) {
         log().info("[heartbeat] ✓ All healthy, no pending tasks");
-      } else if (spawnedWorkers.length >= config.maxConcurrentWorkers) {
-        log().info(`[heartbeat] No slots available (max=${config.maxConcurrentWorkers})`);
-      }
-
-      for (const task of tasks) {
-        if (spawnedWorkers.length >= config.maxConcurrentWorkers) break;
-
-        const model = task.modelTier ? await getModelForTier(task.modelTier as any) : await getModelForTier("standard");
-        log().info(`[heartbeat] Spawning worker taskId=${task.id} agent=${task.agent || "programmer"} model=${model}`);
-
-        // Fire and forget — let the worker run independently
-        runAgent({
-          task: task.title,
-          agent: task.agent || "programmer",
-          model,
-          cwd: process.cwd(),
-          tools: ["read", "write", "edit", "bash", "glob", "grep", "task_create", "task_update", "task_list"] as ToolName[],
-          timeout: 7200000, // 2 hours default
-        }).catch((err) => log().error(`[heartbeat] Worker spawn failed taskId=${task.id}: ${String(err)}`));
-
-        spawnedWorkers.push({ taskId: task.id, agent: task.agent || "programmer", model });
+      } else {
+        for (const task of tasks) {
+          if (spawnedWorkers.length >= config.maxConcurrentWorkers) break;
+          const model = task.modelTier ? getModelForTier(task.modelTier) : getModelForTier("standard");
+          log().info(`[heartbeat] Spawning worker taskId=${task.id} agent=${task.agent || "programmer"} model=${model}`);
+          // Fire and forget — let the worker run independently
+          runAgent({
+            task: task.title,
+            agent: task.agent || "programmer",
+            model,
+            cwd: process.cwd(),
+            tools: ["read", "write", "edit", "bash", "glob", "grep", "task_create", "task_update", "task_list"] as ToolName[],
+            timeout: 7200000, // 2 hours default
+          }).catch((err) => log().error(`[heartbeat] Worker spawn failed taskId=${task.id}: ${String(err)}`));
+          spawnedWorkers.push({ taskId: task.id, agent: task.agent || "programmer", model });
+        }
       }
     }
   } catch (err) {
