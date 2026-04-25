@@ -1383,6 +1383,7 @@ function autoCloseSucceededTasks(): void {
     UPDATE tasks
     SET review_state = 'needs_review',
         status = 'needs_review',
+        finished_at = ?,
         updated_at = ?
     WHERE id = ?
   `);
@@ -1432,7 +1433,7 @@ function autoCloseSucceededTasks(): void {
       // Phantom completion detected — do NOT close; flag for human review.
       // Set status='needs_review' so it exits the active pool and doesn't get
       // re-evaluated every tick.
-      needsReviewStmt.run(now, task.id);
+      needsReviewStmt.run(now, now, task.id);
       const warningTitle = `⚠️ Phantom completion: ${task.title.slice(0, 60)}`;
       const warningContent =
         `Task ${task.id.slice(0, 8)} (${task.agent}) reported succeeded=true but produced no output.\n\n` +
