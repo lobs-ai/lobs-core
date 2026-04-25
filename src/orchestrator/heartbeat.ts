@@ -399,6 +399,12 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
     if (config.maxConcurrentWorkers > 0) {
       const tasks = await getNextTasks(config);
 
+      if (tasks.length === 0) {
+        log().info("[heartbeat] ✓ All healthy, no pending tasks");
+      } else if (spawnedWorkers.length >= config.maxConcurrentWorkers) {
+        log().info(`[heartbeat] No slots available (max=${config.maxConcurrentWorkers})`);
+      }
+
       for (const task of tasks) {
         if (spawnedWorkers.length >= config.maxConcurrentWorkers) break;
 
@@ -421,6 +427,28 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
   } catch (err) {
     log().error("[heartbeat] Worker spawning error: " + String(err));
     alerts.push("worker_spawn: error");
+  }
+
+  // ─── Stuck Worker Detection (ADR-008) ─────────────────────────────────────
+  // Log warning for workers running >45 minutes without completion
+  try {
+    const db = getRawDb();
+    const stuckResult = db.prepare(`
+      SELECT id, task_id, started_at, strftime('%s', 'now') - strftime('%s', started_at) as running_seconds
+      FROM worker_runs
+      WHERE finished_at IS NULL
+      AND started_at <= datetime('now', '-45 minutes')
+      ORDER BY started_at ASC
+      LIMIT 5
+    `).all() as { id: string; task_id: string; started_at: string; running_seconds: number }[];
+
+    for (const worker of stuckResult) {
+      const durationMin = Math.floor(worker.running_seconds / 60);
+      log().warn(`[heartbeat] Worker ${worker.id} may be stuck (task=${worker.task_id}, duration=${durationMin}m)`);
+      alerts.push(`stuck_worker: ${worker.id} (task=${worker.task_id}, ${durationMin}m)`);
+    }
+  } catch (err) {
+    log().warn("[heartbeat] Stuck worker detection error: " + String(err));
   }
 
   // Overall status

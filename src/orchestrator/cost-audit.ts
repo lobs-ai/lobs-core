@@ -127,7 +127,6 @@ export async function runCostAudit(): Promise<CostAuditReport> {
   try {
     const db = getDb();
     const timestamp = new Date().toISOString();
-    // value is stored as JSON string
     const existing = db.prepare("SELECT key FROM orchestrator_settings WHERE key = 'last_cost_audit_at'").get();
     if (existing) {
       db.prepare("UPDATE orchestrator_settings SET value = ?, updated_at = datetime('now') WHERE key = 'last_cost_audit_at'").run(JSON.stringify(timestamp));

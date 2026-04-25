@@ -435,7 +435,7 @@ async function main() {
       const lines = [
         `*[Cost Audit Weekly Digest]*`,
         `Total spend (7d): $${report.totalSpend.toFixed(2)}`,
-        ...report.byTier.map(t => `  ${t.tier}: $${t.spend.toFixed(2)} (${t.estimated ? "estimated" : "actual"})`),
+        ...Object.entries(report.byTier).map(([tier, data]) => `  ${tier}: $${data.spend.toFixed(2)} (${report.estimated ? "estimated" : "actual"})`),
       ];
       if (report.exceeded.length > 0) {
         lines.push(`⚠️ *Exceeded:* ${report.exceeded.join(", ")}`);
@@ -591,18 +591,6 @@ async function main() {
           `[memory-gc] Evaluated ${result.totalEvaluated} memories: ${result.transitionsToStale} → stale, ${result.transitionsToArchived} → archived, ${result.confidenceReductions} confidence reductions`,
         );
       }
-    },
-  });
-
-  // Daily inbox scan — per ADR-008: autonomous work generation, runs every morning
-  cronService.registerSystemJob({
-    id: "daily-scan",
-    name: "Daily Inbox Scan",
-    schedule: "0 8 * * *", // daily at 8am ET — GitHub scan, TODO/FIXME capture, morning brief
-    enabled: true,
-    handler: async () => {
-      const { runDailyScan } = await import("./orchestrator/daily-scan.js");
-      await runDailyScan();
     },
   });
 
