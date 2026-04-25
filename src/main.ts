@@ -646,7 +646,7 @@ async function main() {
     enabled: true,
     handler: async () => {
       const { runTests } = await import("./ci/test-runner.js");
-      const result = runTests();
+      const result = await runTests();
       if (result.failed > 0) {
         console.error(`[test-runner] ${result.failed}/${result.total} checks failed`);
       } else {
@@ -688,18 +688,6 @@ async function main() {
     handler: async () => {
       const { runMemoryCompaction } = await import("./memory/gc.js");
       await runMemoryCompaction();
-    },
-  });
-
-  // Cost audit cron — per ADR-008: daily spend audit and reporting
-  cronService.registerSystemJob({
-    id: "cost-audit-daily",
-    name: "Cost Audit",
-    schedule: "0 8 * * *", // every day at 8am ET
-    enabled: true,
-    handler: async () => {
-      const { runCostAudit } = await import("./orchestrator/cost-audit.js");
-      await runCostAudit();
     },
   });
 
