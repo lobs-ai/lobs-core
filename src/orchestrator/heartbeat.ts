@@ -21,6 +21,7 @@ import { getNextTasks, getSchedulerConfig } from "./scheduler.js";
 import { ToolName } from "../runner/types.js";
 import { runAgent } from "../runner/index.js";
 import { getModelForTier } from "../config/models.js";
+import { recordWorkerStart } from "./worker-manager.js";
 
 export interface SpawnedWorker {
   taskId: string;
@@ -409,6 +410,7 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
             ? "strong"
             : (task.model_tier ?? "standard");
           const model = getModelForTier(tier);
+          const workerId = `heartbeat-${task.id}-${Date.now()}`;
           log().info(`[heartbeat] Spawning worker taskId=${task.id} agent=${task.agent || "programmer"} model=${model} tier=${tier}`);
           // Fire and forget — let the worker run independently
           runAgent({
@@ -420,6 +422,8 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
             timeout: 7200000, // 2 hours default
             context: { taskId: task.id },
           }).catch((err) => log().error(`[heartbeat] Worker spawn failed taskId=${task.id}: ${String(err)}`));
+          // ADR-008: track worker runs so stuck worker detection works
+          recordWorkerStart({ workerId, agentType: task.agent || "programmer", taskId: task.id, model });
           spawnedWorkers.push({ taskId: task.id, agent: task.agent || "programmer", model });
         }
       }
