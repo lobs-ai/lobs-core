@@ -428,7 +428,7 @@ async function main() {
 
   // ADR-008: Weekly cost audit digest — every Sunday at midnight
   cronService.registerSystemJob({
-    id: "cost-audit",
+    id: "cost-audit-digest",
     name: "Cost Audit Digest",
     schedule: "0 0 * * 0", // weekly on Sunday at midnight
     enabled: true,
@@ -659,7 +659,7 @@ async function main() {
   cronService.registerSystemJob({
     id: "dependency-monitor",
     name: "Dependency Monitor",
-    schedule: "0 9 * * 1", // every Monday at 9am ET
+    schedule: "0 9 * * *", // daily at 9am ET
     enabled: true,
     handler: async () => {
       const { runDependencyCheck } = await import("./services/dependency-monitor.js");
@@ -671,7 +671,7 @@ async function main() {
   cronService.registerSystemJob({
     id: "repo-health",
     name: "Repo Health",
-    schedule: "0 10 * * 5", // every Friday at 10am ET
+    schedule: "0 10 * * *", // daily at 10am ET
     enabled: true,
     handler: async () => {
       const { runRepoHealthCheck } = await import("./services/repo-health.js");
@@ -693,7 +693,7 @@ async function main() {
 
   // Cost audit cron — per ADR-008: daily spend audit and reporting
   cronService.registerSystemJob({
-    id: "cost-audit",
+    id: "cost-audit-daily",
     name: "Cost Audit",
     schedule: "0 8 * * *", // every day at 8am ET
     enabled: true,
