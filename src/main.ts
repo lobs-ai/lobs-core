@@ -679,17 +679,20 @@ async function main() {
     schedule: "0 9 * * *", // every day at 9am ET
     enabled: true,
     handler: async () => {
-      const { runMemoryGC } = await import("./memory/gc.js");
-      const result = await runMemoryGC();
-      if (result.totalEvaluated === 0) {
-        console.log("[memory-compaction] No memories to compact");
-      } else {
-        console.log(
-          `[memory-compaction] Evaluated ${result.totalEvaluated} memories: ` +
-            `${result.transitionsToStale} → stale, ${result.transitionsToArchived} archived, ` +
-            `${result.protectedMemories} protected`,
-        );
-      }
+      const { runMemoryCompaction } = await import("./memory/gc.js");
+      await runMemoryCompaction();
+    },
+  });
+
+  // Cost audit cron — per ADR-008: daily spend audit and reporting
+  cronService.registerSystemJob({
+    id: "cost-audit",
+    name: "Cost Audit",
+    schedule: "0 8 * * *", // every day at 8am ET
+    enabled: true,
+    handler: async () => {
+      const { runCostAudit } = await import("./orchestrator/cost-audit.js");
+      await runCostAudit();
     },
   });
 

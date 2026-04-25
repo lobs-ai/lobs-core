@@ -40,6 +40,10 @@ export interface HeartbeatResult {
     tasks: TaskHealthResult;
     workers: WorkerHealthResult;
     inbox: InboxHealthResult;
+    schedulerQueueDepth: CheckResult;
+    memoryPressure: CheckResult;
+    heartbeatLiveness: CheckResult;
+    costAudit: CheckResult;
   };
 }
 
@@ -196,7 +200,132 @@ async function checkWorkerHealth(): Promise<WorkerHealthResult> {
 }
 
 /**
- * Check inbox health.
+ * Check scheduler queue depth (ADR-008).
+ * Error when: pending > 50 AND pending > 3 * active
+ */
+async function checkSchedulerQueueDepth(): Promise<CheckResult> {
+  const db = getRawDb();
+  
+  const pendingResult = db.prepare("SELECT COUNT(*) as count FROM tasks WHERE status IN ('pending', 'active')").get() as { count: number };
+  const pending = pendingResult.count;
+  
+  const activeResult = db.prepare("SELECT COUNT(*) as count FROM tasks WHERE status = 'active'").get() as { count: number };
+  const active = activeResult.count;
+  
+  if (pending > 50 && pending > 3 * active) {
+    return {
+      status: "error",
+      message: `Scheduler backlog critical: ${pending} pending (${active} active) — worker capacity insufficient`,
+    };
+  }
+  
+  return {
+    status: "ok",
+    message: `Scheduler queue OK: ${pending} pending, ${active} active`,
+  };
+}
+
+/**
+ * Check memory pressure (ADR-008).
+ * Warning when: heap > 70%
+ * Error when: RSS > 1GB
+ */
+async function checkMemoryPressure(): Promise<CheckResult> {
+  const memUsage = process.memoryUsage();
+  const heapUsedPct = (memUsage.heapUsed / memUsage.heapTotal) * 100;
+  const rssMB = memUsage.rss / 1024 / 1024;
+  
+  if (rssMB > 1024) {
+    return {
+      status: "error",
+      message: `Memory pressure critical: RSS ${rssMB.toFixed(0)}MB (${heapUsedPct.toFixed(0)}% heap)`,
+    };
+  }
+  
+  if (heapUsedPct > 70) {
+    return {
+      status: "warning",
+      message: `Memory pressure elevated: ${heapUsedPct.toFixed(0)}% heap used (RSS ${rssMB.toFixed(0)}MB)`,
+    };
+  }
+  
+  return {
+    status: "ok",
+    message: `Memory OK: ${heapUsedPct.toFixed(0)}% heap, RSS ${rssMB.toFixed(0)}MB`,
+  };
+}
+
+/**
+ * Check heartbeat liveness (ADR-008).
+ * Error when: last heartbeat > 3 minutes ago.
+ * Uses the orchestrator_settings table to track last heartbeat time.
+ */
+async function checkHeartbeatLiveness(): Promise<CheckResult> {
+  const db = getRawDb();
+  
+  const lastHeartbeatRow = db.prepare("SELECT value FROM orchestrator_settings WHERE key = 'last_heartbeat_at'").get() as { value: string } | undefined;
+  
+  if (!lastHeartbeatRow) {
+    return {
+      status: "error",
+      message: "No heartbeat recorded — orchestrator may be stalled",
+    };
+  }
+  
+  const lastHeartbeat = new Date(lastHeartbeatRow.value);
+  const now = new Date();
+  const diffMinutes = (now.getTime() - lastHeartbeat.getTime()) / 1000 / 60;
+  
+  if (diffMinutes > 3) {
+    return {
+      status: "error",
+      message: `Heartbeat stalled: last run ${diffMinutes.toFixed(1)} minutes ago`,
+    };
+  }
+  
+  return {
+    status: "ok",
+    message: `Heartbeat OK: ${diffMinutes.toFixed(1)} minutes since last run`,
+  };
+}
+
+/**
+ * Check cost audit status (ADR-008).
+ * Weekly digest alert if last audit > 7 days ago.
+ */
+async function checkCostAudit(): Promise<CheckResult> {
+  const db = getRawDb();
+  
+  const lastAuditRow = db.prepare("SELECT value FROM orchestrator_settings WHERE key = 'last_cost_audit_at'").get() as { value: string } | undefined;
+  
+  if (!lastAuditRow) {
+    return {
+      status: "warning",
+      message: "No cost audit recorded yet",
+    };
+  }
+  
+  const lastAudit = new Date(lastAuditRow.value);
+  const now = new Date();
+  const diffDays = (now.getTime() - lastAudit.getTime()) / 1000 / 60 / 60 / 24;
+  
+  if (diffDays > 7) {
+    return {
+      status: "warning",
+      message: `Cost audit overdue: ${diffDays.toFixed(0)} days since last audit`,
+    };
+  }
+  
+  return {
+    status: "ok",
+    message: `Cost audit OK: ${diffDays.toFixed(0)} days since last audit`,
+  };
+}
+
+/**
+ * Check inbox health (ADR-008).
+ * Warning when: pending > 30
+ * Error when: pending > 100
  */
 async function checkInboxHealth(): Promise<InboxHealthResult> {
   const db = getRawDb();
@@ -211,7 +340,10 @@ async function checkInboxHealth(): Promise<InboxHealthResult> {
   let status: "ok" | "warning" | "error" = "ok";
   let message = `${unreadItems} unread items`;
   
-  if (unreadItems > 20) {
+  if (unreadItems > 100) {
+    status = "error";
+    message = `Inbox critical: ${unreadItems} unread items`;
+  } else if (unreadItems > 30) {
     status = "warning";
     message = `Inbox backing up: ${unreadItems} unread items`;
   }
@@ -236,6 +368,10 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
     tasks: await checkTaskHealth(),
     workers: await checkWorkerHealth(),
     inbox: await checkInboxHealth(),
+    schedulerQueueDepth: await checkSchedulerQueueDepth(),
+    memoryPressure: await checkMemoryPressure(),
+    heartbeatLiveness: await checkHeartbeatLiveness(),
+    costAudit: await checkCostAudit(),
   };
   
   // Collect alerts
