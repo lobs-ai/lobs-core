@@ -414,6 +414,7 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
             cwd: process.cwd(),
             tools: ["read", "write", "edit", "bash", "glob", "grep", "task_create", "task_update", "task_list"] as ToolName[],
             timeout: 7200000, // 2 hours default
+            context: { taskId: task.id },
           }).catch((err) => log().error(`[heartbeat] Worker spawn failed taskId=${task.id}: ${String(err)}`));
           spawnedWorkers.push({ taskId: task.id, agent: task.agent || "programmer", model });
         }
