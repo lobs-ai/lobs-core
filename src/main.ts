@@ -65,6 +65,8 @@ import { initIntelSweepService } from "./services/intel-sweep.js";
 import { initResearchRadarService } from "./services/research-radar.js";
 import { runLmStudioAlertCheck } from "./services/lm-studio-monitor.js";
 import { runDbMaintenance } from "./services/db-maintenance.js";
+import { runGithubTriage } from "./services/github-triage.js";
+import { runRepoHealthCheck } from "./services/repo-health.js";
 import { VoiceManager } from "./services/voice/index.js";
 
 const DB_PATH = resolve(getLobsRoot(), "lobs.db");

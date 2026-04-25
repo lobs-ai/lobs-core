@@ -1,54 +1,61 @@
-import { execSync } from "node:child_process";
-import { join } from "node:path";
+/**
+ * CI Runner — runs build + lint + typecheck on lobs-core.
+ * Per ADR-008: runs every 15 min, reports failures.
+ */
 
-export interface CiCheck {
+import { execSync } from "child_process";
+
+export interface CiCheckResult {
   name: string;
   passed: boolean;
-  output?: string;
+  output: string;
+  durationMs: number;
 }
 
-export interface CiResult {
+export interface CiReport {
   total: number;
+  passed: number;
   failed: number;
-  checks: CiCheck[];
+  checks: CiCheckResult[];
 }
 
-function runCheck(name: string, command: string, cwd: string): CiCheck {
+function runCheck(name: string, fn: () => string): CiCheckResult {
+  const start = Date.now();
   try {
-    const output = execSync(command, {
-      cwd,
-      timeout: 120_000,
-      encoding: "utf-8",
-    });
-    return { name, passed: true, output };
-  } catch (err: unknown) {
-    const exitCode = (err as { status?: number }).status ?? 1;
-    const output = err instanceof Error ? (err as { stdout?: string; stderr?: string }).stdout ?? "" : "";
-    const stderr =
-      err instanceof Error ? (err as { stderr?: string }).stderr ?? "" : "";
-    return {
-      name,
-      passed: false,
-      output: output + (stderr.length > 200 ? "\n[...truncated]\n" + stderr.slice(-200) : stderr),
-    };
+    const output = fn();
+    return { name, passed: true, output, durationMs: Date.now() - start };
+  } catch (err) {
+    return { name, passed: false, output: String(err), durationMs: Date.now() - start };
   }
 }
 
 /**
- * Run CI checks — lint + typecheck — per ADR-008.
- *
- * Scheduled weekly on Monday at 8am ET (just before cost audit).
- * Both checks must pass for a clean report.
- *
- * Returns summary of pass/fail counts.
+ * Run all CI checks: build, lint, typecheck.
  */
-export function runCiChecks(): CiResult {
-  const cwd = process.cwd();
-  const checks: CiCheck[] = [
-    runCheck("lint", "npm run lint", cwd),
-    runCheck("typecheck", "npm run typecheck", cwd),
-  ];
+export async function runCiChecks(): Promise<CiReport> {
+  const checks: CiCheckResult[] = [];
+  const root = process.cwd();
 
+  // Typecheck
+  checks.push(runCheck("typecheck", () => {
+    execSync("npm run typecheck", { cwd: root, stdio: "pipe" });
+    return "OK";
+  }));
+
+  // Lint
+  checks.push(runCheck("lint", () => {
+    execSync("npm run lint", { cwd: root, stdio: "pipe" });
+    return "OK";
+  }));
+
+  // Build
+  checks.push(runCheck("build", () => {
+    execSync("npm run build", { cwd: root, stdio: "pipe" });
+    return "OK";
+  }));
+
+  const passed = checks.filter((c) => c.passed).length;
   const failed = checks.filter((c) => !c.passed).length;
-  return { total: checks.length, failed, checks };
+
+  return { total: checks.length, passed, failed, checks };
 }

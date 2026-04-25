@@ -404,7 +404,7 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
       } else {
         for (const task of tasks) {
           if (spawnedWorkers.length >= config.maxConcurrentWorkers) break;
-          const model = task.modelTier ? getModelForTier(task.modelTier) : getModelForTier("standard");
+          const model = task.model_tier ? getModelForTier(task.model_tier) : getModelForTier("standard");
           log().info(`[heartbeat] Spawning worker taskId=${task.id} agent=${task.agent || "programmer"} model=${model}`);
           // Fire and forget — let the worker run independently
           runAgent({
