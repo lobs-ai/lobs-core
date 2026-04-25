@@ -110,3 +110,16 @@ export async function auditCosts(): Promise<CostAuditReport> {
 
   return { exceeded, totalSpend, byTier, estimated };
 }
+
+/**
+ * Cron entry point — runs cost audit and logs the report.
+ * Called by the daily cost-audit cron job per ADR-008.
+ */
+export async function runCostAudit(): Promise<void> {
+  const report = await auditCosts();
+  const summary = `[Cost Audit] Total: $${report.totalSpend.toFixed(2)} | Exceeded: ${report.exceeded.length > 0 ? report.exceeded.join(", ") : "none"}`;
+  console.log(summary);
+  if (report.estimated) {
+    console.warn("[Cost Audit] Warning: some costs were estimated (no actual API data)");
+  }
+}

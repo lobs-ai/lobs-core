@@ -426,3 +426,14 @@ export function importanceScore(memory: Memory): number {
 
   return Math.min(1, blended * authorityMultiplier);
 }
+
+/**
+ * Cron entry point — runs memory garbage collection and logs the report.
+ * Called by the daily memory-compaction cron job per ADR-008.
+ */
+export async function runMemoryCompaction(): Promise<void> {
+  const result = await runMemoryGC();
+  console.log(
+    `[Memory Compaction] stale=${result.transitionsToStale} archived=${result.transitionsToArchived} evaluated=${result.totalEvaluated}`
+  );
+}
