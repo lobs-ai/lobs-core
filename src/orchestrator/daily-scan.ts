@@ -368,7 +368,7 @@ async function processMorningBrief(): Promise<void> {
     db.prepare(
       `INSERT INTO inbox_items (id, title, content, type, requires_action, action_status, triage_category, triage_urgency, triage_route, triage_confidence, triage_reasoning, triaged_at, metadata)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
+    )?.run(
       randomUUID(),
       `[Morning Brief] ${task.title}`,
       `Priority: ${task.priority}\nStatus: ${task.status}\nDue: ${task.due_date || "none"}\n\nAction required: review and prioritize this task.`,
