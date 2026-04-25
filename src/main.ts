@@ -601,13 +601,8 @@ async function main() {
     schedule: "0 9 * * 1", // every Monday at 9am ET — verify spend thresholds
     enabled: true,
     handler: async () => {
-      const { auditCosts } = await import("./orchestrator/cost-audit.js");
-      const report = await auditCosts();
-      if (report.exceeded.length > 0) {
-        console.warn(`[cost-audit] Threshold exceeded: ${report.exceeded.join(", ")}`);
-      } else {
-        console.log(`[cost-audit] All tiers within limits. Total spend: $${report.totalSpend.toFixed(4)}`);
-      }
+      const { runCostAudit } = await import("./orchestrator/cost-audit.js");
+      await runCostAudit();
     },
   });
 
