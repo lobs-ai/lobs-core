@@ -404,8 +404,12 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
       } else {
         for (const task of tasks) {
           if (spawnedWorkers.length >= config.maxConcurrentWorkers) break;
-          const model = task.model_tier ? getModelForTier(task.model_tier) : getModelForTier("standard");
-          log().info(`[heartbeat] Spawning worker taskId=${task.id} agent=${task.agent || "programmer"} model=${model}`);
+          // ADR-008: Auto-escalate to strong tier after 2+ failures on same task
+          const tier = (task.escalation_tier ?? 0) > 0 || (task.retry_count ?? 0) >= 2
+            ? "strong"
+            : (task.model_tier ?? "standard");
+          const model = getModelForTier(tier);
+          log().info(`[heartbeat] Spawning worker taskId=${task.id} agent=${task.agent || "programmer"} model=${model} tier=${tier}`);
           // Fire and forget — let the worker run independently
           runAgent({
             task: task.title,
