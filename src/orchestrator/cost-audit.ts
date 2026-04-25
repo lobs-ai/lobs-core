@@ -115,11 +115,28 @@ export async function auditCosts(): Promise<CostAuditReport> {
  * Cron entry point — runs cost audit and logs the report.
  * Called by the daily cost-audit cron job per ADR-008.
  */
-export async function runCostAudit(): Promise<void> {
+export async function runCostAudit(): Promise<CostAuditReport> {
   const report = await auditCosts();
   const summary = `[Cost Audit] Total: $${report.totalSpend.toFixed(2)} | Exceeded: ${report.exceeded.length > 0 ? report.exceeded.join(", ") : "none"}`;
   console.log(summary);
   if (report.estimated) {
     console.warn("[Cost Audit] Warning: some costs were estimated (no actual API data)");
   }
+
+  // ADR-008: Record last audit time so heartbeat can detect stale audits
+  try {
+    const db = getDb();
+    const timestamp = new Date().toISOString();
+    // value is stored as JSON string
+    const existing = db.prepare("SELECT key FROM orchestrator_settings WHERE key = 'last_cost_audit_at'").get();
+    if (existing) {
+      db.prepare("UPDATE orchestrator_settings SET value = ?, updated_at = datetime('now') WHERE key = 'last_cost_audit_at'").run(JSON.stringify(timestamp));
+    } else {
+      db.prepare("INSERT INTO orchestrator_settings (key, value) VALUES ('last_cost_audit_at', ?)").run(JSON.stringify(timestamp));
+    }
+  } catch (err) {
+    console.warn(`[Cost Audit] Failed to record last_cost_audit_at: ${String(err)}`);
+  }
+
+  return report;
 }

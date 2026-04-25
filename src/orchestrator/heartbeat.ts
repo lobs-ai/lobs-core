@@ -263,6 +263,7 @@ async function checkMemoryPressure(): Promise<CheckResult> {
 async function checkHeartbeatLiveness(): Promise<CheckResult> {
   const db = getRawDb();
   
+  // value is stored as JSON string in the DB
   const lastHeartbeatRow = db.prepare("SELECT value FROM orchestrator_settings WHERE key = 'last_heartbeat_at'").get() as { value: string } | undefined;
   
   if (!lastHeartbeatRow) {
@@ -272,7 +273,9 @@ async function checkHeartbeatLiveness(): Promise<CheckResult> {
     };
   }
   
-  const lastHeartbeat = new Date(lastHeartbeatRow.value);
+  // value is JSON-encoded string
+  const lastHeartbeatStr = typeof lastHeartbeatRow.value === "string" ? JSON.parse(lastHeartbeatRow.value) : lastHeartbeatRow.value;
+  const lastHeartbeat = new Date(lastHeartbeatStr as string);
   const now = new Date();
   const diffMinutes = (now.getTime() - lastHeartbeat.getTime()) / 1000 / 60;
   
@@ -296,6 +299,7 @@ async function checkHeartbeatLiveness(): Promise<CheckResult> {
 async function checkCostAudit(): Promise<CheckResult> {
   const db = getRawDb();
   
+  // value is stored as JSON string in the DB
   const lastAuditRow = db.prepare("SELECT value FROM orchestrator_settings WHERE key = 'last_cost_audit_at'").get() as { value: string } | undefined;
   
   if (!lastAuditRow) {
@@ -305,7 +309,9 @@ async function checkCostAudit(): Promise<CheckResult> {
     };
   }
   
-  const lastAudit = new Date(lastAuditRow.value);
+  // value is JSON-encoded string
+  const lastAuditStr = typeof lastAuditRow.value === "string" ? JSON.parse(lastAuditRow.value) : lastAuditRow.value;
+  const lastAudit = new Date(lastAuditStr as string);
   const now = new Date();
   const diffDays = (now.getTime() - lastAudit.getTime()) / 1000 / 60 / 60 / 24;
   
@@ -440,6 +446,21 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
   } else {
     log().info(`[heartbeat] ⚠ System ${status}: ${alerts.join("; ")}`);
   }
-  
+
+  // Record last heartbeat time in orchestrator_settings (ADR-008: heartbeat liveness check)
+  try {
+    const db = getRawDb();
+    const timestamp = new Date().toISOString();
+    // upsert — value is stored as JSON
+    const existing = db.prepare("SELECT key FROM orchestrator_settings WHERE key = 'last_heartbeat_at'").get();
+    if (existing) {
+      db.prepare("UPDATE orchestrator_settings SET value = ?, updated_at = datetime('now') WHERE key = 'last_heartbeat_at'").run(JSON.stringify(timestamp));
+    } else {
+      db.prepare("INSERT INTO orchestrator_settings (key, value) VALUES ('last_heartbeat_at', ?)").run(JSON.stringify(timestamp));
+    }
+  } catch (err) {
+    log().warn(`[heartbeat] Failed to record last_heartbeat_at: ${String(err)}`);
+  }
+
   return result;
 }

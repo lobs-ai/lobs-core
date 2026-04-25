@@ -21,6 +21,8 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, renameS
 import { initToolGate } from "./runner/tool-gate.js";
 import { initToolManager } from "./runner/tools/tool-manager.js";
 import { runHeartbeat } from "./orchestrator/heartbeat.js";
+import { runCostAudit } from "./orchestrator/cost-audit.js";
+import { registerDailyScan } from "./orchestrator/daily-scan.js";
 import { initCronService } from "./services/cron.js";
 import { runSentinelCheck } from "./services/system-sentinel.js";
 import { runCalendarSentinel } from "./services/calendar-sentinel.js";
@@ -422,6 +424,26 @@ async function main() {
     },
   });
 
+  // ADR-008: Weekly cost audit digest — every Sunday at midnight
+  cronService.registerSystemJob({
+    id: "cost-audit",
+    name: "Cost Audit Digest",
+    schedule: "0 0 * * 0", // weekly on Sunday at midnight
+    enabled: true,
+    handler: async () => {
+      const report = await runCostAudit();
+      const lines = [
+        `*[Cost Audit Weekly Digest]*`,
+        `Total spend (7d): $${report.totalSpend.toFixed(2)}`,
+        ...report.byTier.map(t => `  ${t.tier}: $${t.spend.toFixed(2)} (${t.estimated ? "estimated" : "actual"})`),
+      ];
+      if (report.exceeded.length > 0) {
+        lines.push(`⚠️ *Exceeded:* ${report.exceeded.join(", ")}`);
+      }
+      await discordService.alert(lines.join("\n"));
+    },
+  });
+
   cronService.registerSystemJob({
     id: "system-sentinel",
     name: "System Sentinel",
@@ -586,8 +608,8 @@ async function main() {
 
   // Cost audit cron — weekly check on strong-tier spend (opencode-go) per ADR-008
   cronService.registerSystemJob({
-    id: "cost-audit",
-    name: "Cost Audit",
+    id: "cost-audit-weekly",
+    name: "Cost Audit (Weekly)",
     schedule: "0 9 * * 1", // every Monday at 9am ET — verify spend thresholds
     enabled: true,
     handler: async () => {
@@ -695,6 +717,9 @@ async function main() {
       await runCostAudit();
     },
   });
+
+  // Daily inbox scan — per ADR-008: scan for stale inbox items
+  registerDailyScan(cronService);
 
   // Daily reflection — run at 03:00 local time, after daily db-maintenance
   let lastDailyReflectionDate = "";
