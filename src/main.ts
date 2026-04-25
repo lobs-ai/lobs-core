@@ -672,6 +672,27 @@ async function main() {
     },
   });
 
+  // Memory compaction cron — per ADR-008: daily cleanup of stale memories
+  cronService.registerSystemJob({
+    id: "memory-compaction",
+    name: "Memory Compaction",
+    schedule: "0 9 * * *", // every day at 9am ET
+    enabled: true,
+    handler: async () => {
+      const { runMemoryGC } = await import("./memory/gc.js");
+      const result = await runMemoryGC();
+      if (result.totalEvaluated === 0) {
+        console.log("[memory-compaction] No memories to compact");
+      } else {
+        console.log(
+          `[memory-compaction] Evaluated ${result.totalEvaluated} memories: ` +
+            `${result.transitionsToStale} → stale, ${result.transitionsToArchived} archived, ` +
+            `${result.protectedMemories} protected`,
+        );
+      }
+    },
+  });
+
   // Daily reflection — run at 03:00 local time, after daily db-maintenance
   let lastDailyReflectionDate = "";
   const DAILY_REFLECTION_HOUR = 3;
