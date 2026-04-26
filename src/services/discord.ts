@@ -506,10 +506,9 @@ class DiscordService {
     await this.sendEmbed(channelId, {
       title: alert.title,
       description: alert.description,
-      color: alert.color ?? 0xf59e0b, // amber warning color
+      color: alert.color ?? 0xf59e0b,
       fields: alert.fields,
       footer: alert.footer,
-      timestamp: alert.timestamp ?? true,
     });
   }
 
