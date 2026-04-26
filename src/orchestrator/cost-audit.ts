@@ -1,5 +1,5 @@
 import { eq, sql } from "drizzle-orm";
-import { getDb } from "../db/connection.js";
+import { getDb, getRawDb } from "../db/connection.js";
 import { workerRuns } from "../db/schema.js";
 
 type WorkerRunsRow = typeof workerRuns.$inferSelect;
@@ -125,7 +125,7 @@ export async function runCostAudit(): Promise<CostAuditReport> {
 
   // ADR-008: Record last audit time so heartbeat can detect stale audits
   try {
-    const db = getDb();
+    const db = getRawDb();
     const timestamp = new Date().toISOString();
     const existing = db.prepare("SELECT key FROM orchestrator_settings WHERE key = 'last_cost_audit_at'")?.get();
     if (existing) {

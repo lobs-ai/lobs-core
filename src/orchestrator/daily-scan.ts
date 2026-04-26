@@ -44,7 +44,7 @@ export async function runDailyScan(): Promise<void> {
 
     LOG.info("Daily scan complete.");
   } catch (err) {
-    LOG.error("Daily scan failed", err);
+    LOG.error("Daily scan failed: " + String(err));
   }
 }
 
@@ -62,7 +62,7 @@ async function scanGitHubIssues(): Promise<void> {
         await processGitHubIssue(org, issue);
       }
     } catch (err) {
-      LOG.error(`GitHub scan failed for ${org}`, err);
+      LOG.error(`GitHub scan failed for ${org}: ` + String(err));
       // Continue to next org — graceful degradation
     }
   }
@@ -216,7 +216,7 @@ async function processTodoLine(line: string, basePath: string): Promise<void> {
   const relativePath = filePath.replace(basePath + "/", "");
 
   // Check if a task already exists for this TODO
-  const db = getDb();
+  const db = getRawDb();
   const existing = db
     .prepare(
       `SELECT id FROM tasks WHERE title LIKE ? AND status IN ('inbox','active') LIMIT 1`
@@ -275,7 +275,7 @@ async function captureReflections(): Promise<void> {
   // The reflection output is in the event log — we read it from the session
   // context or event stream. For now, capture the last 24 hours of reflection
   // events from the database.
-  const db = getDb();
+  const db = getRawDb();
   const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
   interface ReflectionRow {
@@ -323,7 +323,7 @@ interface MorningBriefTask {
 async function processMorningBrief(): Promise<void> {
   LOG.info("Processing morning brief for actionable tasks...");
 
-  const db = getDb();
+  const db = getRawDb();
 
   // Get overdue and high-priority tasks from the morning brief context
   // The morning brief already runs and formats this data — we re-query to
