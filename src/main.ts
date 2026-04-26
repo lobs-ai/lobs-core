@@ -493,6 +493,21 @@ async function main() {
     },
   });
 
+  // GSI FAQ seed — daily at 5am ET, re-seeds course knowledge bases (no-ops if already seeded)
+  cronService.registerSystemJob({
+    id: "gsi-faq-seed",
+    name: "GSI FAQ Seed",
+    schedule: "0 5 * * *", // daily at 5am ET
+    enabled: true,
+    handler: async () => {
+      const results = await seedAllCourses(false);
+      const seeded = results.filter(r => !r.skipped && r.filesIndexed > 0);
+      if (seeded.length > 0) {
+        console.log(`[gsi-faq-seed] Seeded ${seeded.length} course(s)`);
+      }
+    },
+  });
+
   cronService.registerSystemJob({
     id: "scheduler-intelligence-refresh",
     name: "Scheduler Intelligence Refresh",
