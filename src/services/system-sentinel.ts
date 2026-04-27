@@ -137,6 +137,12 @@ ${context.recentErrors.length > 0
 
     const result = JSON.parse(jsonMatch[0]) as TaskHealthResult;
 
+    // Guard: if the DB has no stale tasks, the LLM shouldn't flag any stale_task alerts
+    // This prevents false positives from model hallucination or reasoning artifacts
+    const filteredAlerts = result.alerts.filter(a =>
+      a.type !== "stale_task" || context.staleTasks.length > 0
+    );
+
     // Log as training data
     logTrainingExample({
       taskType: "system_state",
@@ -147,8 +153,8 @@ ${context.recentErrors.length > 0
       modelUsed: "local",
     });
 
-    log().info(`[SENTINEL] Task health: ${result.summary} (${result.alerts.length} alerts)`);
-    return result;
+    log().info(`[SENTINEL] Task health: ${result.summary} (${filteredAlerts.length} alerts)`);
+    return { ...result, alerts: filteredAlerts };
   } catch (err) {
     log().warn(`[SENTINEL] Task health check failed: ${err}`);
     return null;
