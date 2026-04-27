@@ -356,6 +356,13 @@ export function runMigrations(db: PawDB): void {
   try { db.run(sql`ALTER TABLE tasks ADD COLUMN due_date TEXT`); } catch (_) { /* already exists */ }
   try { db.run(sql`ALTER TABLE tasks ADD COLUMN expected_artifacts TEXT`); } catch (_) { /* already exists */ }
 
+  // Idempotent: add updated_at column if missing (critical — stale task detection depends on it)
+  try { db.run(sql`ALTER TABLE tasks ADD COLUMN updated_at TEXT`); } catch (_) { /* already exists */ }
+
+  // Backfill updated_at = created_at for rows where it was never set
+  // This fixes stale-task false positives that were marking ALL active tasks as stale
+  db.run(sql`UPDATE tasks SET updated_at = created_at WHERE updated_at IS NULL`);
+
   // Indexes
   db.run(sql`CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)`);
   db.run(sql`CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id)`);
