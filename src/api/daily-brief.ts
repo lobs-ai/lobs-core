@@ -1,21 +1,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { eq, and, gte, inArray, desc } from "drizzle-orm";
+import { exec } from "node:child_process";
+import { eq, and, gte, inArray, desc, sql } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
-import { tasks, projects } from "../db/schema.js";
+import { tasks, projects, goals, workerRuns } from "../db/schema.js";
 import { json, error } from "./index.js";
 import { getCachedBrief, getCachedHealth, generateDailyBriefSummary } from "../services/system-sentinel.js";
-import {
-  getCachedTodayEvents,
-  getLastCalendarSentinelResult,
-  formatActionItems,
-} from "../services/calendar-sentinel.js";
-import {
-  getTodayEvents,
-  formatEventForContext,
-  isAllDayEvent,
-  isGoogleCalendarAvailable,
-} from "../services/google-calendar.js";
-import { getLocalConfig } from "../config/models.js";
 
 /**
  * Daily brief endpoint — AI-enhanced daily summary.
@@ -23,6 +12,61 @@ import { getLocalConfig } from "../config/models.js";
  * GET /api/daily-brief → returns today's brief with AI narrative
  * POST /api/daily-brief/refresh → force regenerate the AI summary
  */
+
+interface RecentCommit {
+  sha: string;
+  message: string;
+  author: string;
+  date: string;
+  repo: string;
+  url: string;
+}
+
+// Repos to monitor for recent commits
+const MONITORED_REPOS = [
+  "lobs-ai/lobs-core",
+  "lobs-ai/lobs-nexus",
+  "paw-engineering/paw-hub",
+  "paw-engineering/trident",
+];
+
+function ghApiExec(cmd: string, timeoutMs = 12_000): Promise<string> {
+  return new Promise((resolve) => {
+    exec(cmd, { encoding: "utf-8", timeout: timeoutMs }, (err, stdout) => {
+      if (err) resolve("");
+      else resolve(stdout);
+    });
+  });
+}
+
+async function fetchRecentCommits(since: string): Promise<RecentCommit[]> {
+  const results = await Promise.allSettled(
+    MONITORED_REPOS.map(async (repo) => {
+      const raw = await ghApiExec(
+        `gh api "repos/${repo}/commits?since=${since}&per_page=10" --jq '[.[] | {sha: .sha[0:8], message: (.commit.message | split("\n")[0]), author: .commit.author.name, date: .commit.author.date}]'`,
+      );
+      if (!raw.trim()) return [];
+      try {
+        const commits: Array<{ sha: string; message: string; author: string; date: string }> = JSON.parse(raw);
+        return commits.map(c => ({
+          ...c,
+          repo,
+          url: `https://github.com/${repo}/commit/${c.sha}`,
+        }));
+      } catch (_) {
+        return [];
+      }
+    }),
+  );
+
+  const commits: RecentCommit[] = [];
+  for (const r of results) {
+    if (r.status === "fulfilled") commits.push(...r.value);
+  }
+  // Sort newest first
+  commits.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  return commits;
+}
 
 interface DailyBriefResponse {
   date: string;
@@ -35,17 +79,31 @@ interface DailyBriefResponse {
   activeTasks: Array<{ id: string; title: string; status: string; priority: string | null; project: string | null }>;
   completedToday: Array<{ id: string; title: string; completedAt: string }>;
   blockedTasks: Array<{ id: string; title: string; blockedBy: string | null }>;
-  calendar: Array<{
+  goals: Array<{
     id: string;
+    title: string;
+    priority: number;
+    openTaskCount: number;
+    completedToday: number;
+    completedTotal: number;
+    lastSessionAt: string | null;
+    daysSinceActivity: number | null;
+  }>;
+  recentAgentWork: Array<{
+    id: number;
+    agentType: string;
+    startedAt: string;
     summary: string;
-    start: string;
-    end: string;
-    allDay: boolean;
-    location?: string;
-    attendeeCount: number;
-    hasActionItem: boolean;
-    actionDescription?: string;
-  }>; // Today's Google Calendar events (populated when sentinel is running)
+    succeeded: boolean;
+    commitShas: string | null;
+    githubCompareUrl: string | null;
+    totalCostUsd: number | null;
+  }>;
+  agentStats: {
+    last24h: { total: number; succeeded: number; failed: number; totalCostUsd: number };
+  };
+  recentCommits: RecentCommit[];
+  calendar: any[]; // Populated by calendar sentinel when available
   highlights: string[];
   aiSummary: {
     narrative: string;
@@ -53,12 +111,11 @@ interface DailyBriefResponse {
     concerns: string[];
     suggestedActions: string[];
   } | null;
-  calendarNarrative: string | null; // AI-generated narrative of today's calendar
-  calendarActionItems: string | null; // Formatted action items from sentinel
   sentinel: {
     alerts: Array<{ type: string; severity: string; message: string }>;
     summary: string;
   } | null;
+  scheduler?: undefined;
 }
 
 export async function handleDailyBriefRequest(
@@ -96,7 +153,7 @@ export async function handleDailyBriefRequest(
         })
         .from(tasks)
         .where(inArray(tasks.status, ["active", "in_progress"]))
-        .orderBy(desc(tasks.updatedAt))
+        .orderBy(desc(tasks.createdAt))
         .all();
 
       // Build project map
@@ -117,18 +174,18 @@ export async function handleDailyBriefRequest(
 
       // Completed today
       const completedRows = db
-        .select({ id: tasks.id, title: tasks.title, updatedAt: tasks.updatedAt })
+        .select({ id: tasks.id, title: tasks.title, finishedAt: tasks.finishedAt })
         .from(tasks)
         .where(and(
           eq(tasks.status, "completed"),
-          gte(tasks.updatedAt, todayStartISO),
+          gte(tasks.finishedAt, todayStartISO),
         ))
         .all();
 
       const completedToday = completedRows.map(t => ({
         id: t.id,
         title: t.title,
-        completedAt: t.updatedAt,
+        completedAt: t.finishedAt ?? "",
       }));
 
       // Blocked tasks
@@ -144,6 +201,93 @@ export async function handleDailyBriefRequest(
         blockedBy: typeof t.blockedBy === "string" ? t.blockedBy : null,
       }));
 
+      // Goals with open task counts and completions today
+      const activeGoals = db
+        .select({ id: goals.id, title: goals.title, priority: goals.priority })
+        .from(goals)
+        .where(eq(goals.status, "active"))
+        .orderBy(goals.priority)
+        .all();
+
+      const goalIds = activeGoals.map(g => g.id);
+      const goalSummaries: Array<{
+        id: string;
+        title: string;
+        priority: number;
+        openTaskCount: number;
+        completedToday: number;
+        completedTotal: number;
+        lastSessionAt: string | null;
+        daysSinceActivity: number | null;
+      }> = [];
+
+      if (goalIds.length > 0) {
+        const openTaskRows = db
+          .select({ goalId: tasks.goalId, count: sql<number>`COUNT(*)` })
+          .from(tasks)
+          .where(and(
+            inArray(tasks.goalId, goalIds),
+            inArray(tasks.status, ["inbox", "active", "in_progress"]),
+          ))
+          .groupBy(tasks.goalId)
+          .all();
+
+        const doneTaskRows = db
+          .select({ goalId: tasks.goalId, count: sql<number>`COUNT(*)` })
+          .from(tasks)
+          .where(and(
+            inArray(tasks.goalId, goalIds),
+            eq(tasks.status, "completed"),
+            gte(tasks.finishedAt, todayStartISO),
+          ))
+          .groupBy(tasks.goalId)
+          .all();
+
+        const doneTotalRows = db
+          .select({ goalId: tasks.goalId, count: sql<number>`COUNT(*)` })
+          .from(tasks)
+          .where(and(
+            inArray(tasks.goalId, goalIds),
+            eq(tasks.status, "completed"),
+          ))
+          .groupBy(tasks.goalId)
+          .all();
+
+        // Last activity per goal: most recent completed task updatedAt
+        const lastActivityRows = db
+          .select({ goalId: tasks.goalId, lastAt: sql<string>`MAX(finished_at)` })
+          .from(tasks)
+          .where(and(
+            inArray(tasks.goalId, goalIds),
+            eq(tasks.status, "completed"),
+          ))
+          .groupBy(tasks.goalId)
+          .all();
+
+        const openByGoal = new Map(openTaskRows.map(r => [r.goalId, Number(r.count)]));
+        const doneByGoal = new Map(doneTaskRows.map(r => [r.goalId, Number(r.count)]));
+        const doneTotalByGoal = new Map(doneTotalRows.map(r => [r.goalId, Number(r.count)]));
+        const lastActivityByGoal = new Map(lastActivityRows.map(r => [r.goalId, r.lastAt as string | null]));
+
+        const nowMs = Date.now();
+        for (const g of activeGoals) {
+          const lastAt = lastActivityByGoal.get(g.id) ?? null;
+          const daysSince = lastAt
+            ? Math.floor((nowMs - new Date(lastAt).getTime()) / (1000 * 60 * 60 * 24))
+            : null;
+          goalSummaries.push({
+            id: g.id,
+            title: g.title,
+            priority: g.priority,
+            openTaskCount: openByGoal.get(g.id) ?? 0,
+            completedToday: doneByGoal.get(g.id) ?? 0,
+            completedTotal: doneTotalByGoal.get(g.id) ?? 0,
+            lastSessionAt: lastAt,
+            daysSinceActivity: daysSince,
+          });
+        }
+      }
+
       // Overdue tasks
       const now = new Date().toISOString();
       const overdueRows = db
@@ -154,6 +298,52 @@ export async function handleDailyBriefRequest(
         ))
         .all()
         .filter(t => t.dueDate && t.dueDate < now);
+
+      // Recent agent work (last 24h)
+      const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const recentRunRows = db
+        .select({
+          id: workerRuns.id,
+          agentType: workerRuns.agentType,
+          startedAt: workerRuns.startedAt,
+          summary: workerRuns.summary,
+          succeeded: workerRuns.succeeded,
+          commitShas: workerRuns.commitShas,
+          githubCompareUrl: workerRuns.githubCompareUrl,
+          totalCostUsd: workerRuns.totalCostUsd,
+          failureType: workerRuns.failureType,
+        })
+        .from(workerRuns)
+        .where(gte(workerRuns.startedAt, since24h))
+        .orderBy(desc(workerRuns.startedAt))
+        .limit(50)
+        .all();
+
+      const recentAgentWork = recentRunRows
+        .filter(r => r.succeeded && r.summary)
+        .map(r => ({
+          id: r.id,
+          agentType: r.agentType ?? "worker",
+          startedAt: r.startedAt ?? "",
+          summary: r.summary ?? "",
+          succeeded: !!r.succeeded,
+          commitShas: typeof r.commitShas === "string" ? r.commitShas : (r.commitShas ? JSON.stringify(r.commitShas) : null),
+          githubCompareUrl: r.githubCompareUrl ?? null,
+          totalCostUsd: r.totalCostUsd ?? null,
+        }));
+
+      const totalRuns = recentRunRows.length;
+      const succeededRuns = recentRunRows.filter(r => r.succeeded).length;
+      const failedRuns = totalRuns - succeededRuns;
+      const totalCost = recentRunRows.reduce((sum, r) => sum + (r.totalCostUsd ?? 0), 0);
+      const agentStats = {
+        last24h: {
+          total: totalRuns,
+          succeeded: succeededRuns,
+          failed: failedRuns,
+          totalCostUsd: Math.round(totalCost * 10000) / 10000,
+        },
+      };
 
       // Generate highlights
       const highlights: string[] = [];
@@ -174,9 +364,16 @@ export async function handleDailyBriefRequest(
       if (urgentTasks.length > 0) {
         highlights.push(`🔴 ${urgentTasks.length} high-priority task${urgentTasks.length > 1 ? "s" : ""}`);
       }
+      const stagnantGoals = goalSummaries.filter(g => g.daysSinceActivity !== null && g.daysSinceActivity >= 3);
+      if (stagnantGoals.length > 0) {
+        highlights.push(`⏸️ ${stagnantGoals.length} goal${stagnantGoals.length > 1 ? "s" : ""} with no activity in 3+ days: ${stagnantGoals.map(g => g.title).join(", ")}`);
+      }
       if (highlights.length === 0) {
         highlights.push("📋 No urgent items — steady state");
       }
+
+      // Recent commits from monitored GitHub repos (last 24h)
+      const recentCommits = await fetchRecentCommits(since24h);
 
       // Get AI-generated content from sentinel cache
       const aiSummary = getCachedBrief();
@@ -193,6 +390,10 @@ export async function handleDailyBriefRequest(
         activeTasks,
         completedToday,
         blockedTasks,
+        goals: goalSummaries,
+        recentAgentWork,
+        agentStats,
+        recentCommits,
         calendar: [], // Populated when Google Calendar sentinel is running
         highlights,
         aiSummary: aiSummary ? {
