@@ -418,10 +418,10 @@ async function main() {
     enabled: true,
     handler: async () => {
       const result = await runHeartbeat();
-      // Only alert if there are actual issues
+      // ADR-008: Health checks run continuously for monitoring; Discord alert removed —
+      // spam from normal Node.js GC cycles was noisy. Fix underlying thresholds instead.
       if (result.alerts.length > 0) {
-        const alertText = `[HEARTBEAT] ${result.alerts.join(" | ")}`;
-        await discordService.alert(alertText);
+        log().warn(`[heartbeat] System issues detected: ${result.alerts.join("; ")}`);
       }
     },
   });

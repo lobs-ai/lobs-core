@@ -236,6 +236,9 @@ async function checkMemoryPressure(): Promise<CheckResult> {
   const heapUsedPct = (memUsage.heapUsed / memUsage.heapTotal) * 100;
   const rssMB = memUsage.rss / 1024 / 1024;
   
+  // ADR-008: RSS > 1GB = error. Heap > 90% = warning.
+  // 90% heap is normal for long-running Node.js — don't alert on heap alone.
+  // RSS is the real signal (physical memory pressure).
   if (rssMB > 1024) {
     return {
       status: "error",
@@ -243,7 +246,7 @@ async function checkMemoryPressure(): Promise<CheckResult> {
     };
   }
   
-  if (heapUsedPct > 70) {
+  if (heapUsedPct > 90) {
     return {
       status: "warning",
       message: `Memory pressure elevated: ${heapUsedPct.toFixed(0)}% heap used (RSS ${rssMB.toFixed(0)}MB)`,
@@ -368,6 +371,22 @@ async function checkInboxHealth(): Promise<InboxHealthResult> {
 export async function runHeartbeat(): Promise<HeartbeatResult> {
   log().info("[heartbeat] Running system health check");
   
+  // Record heartbeat timestamp FIRST so the liveness check sees an accurate reading.
+  // ADR-008: If this runs slowly (>3min), the NEXT heartbeat's liveness check would
+  // see a stale timestamp and false-positive. Recording at start avoids that.
+  try {
+    const db = getRawDb();
+    const timestamp = new Date().toISOString();
+    const existing = db.prepare("SELECT key FROM orchestrator_settings WHERE key = 'last_heartbeat_at'").get();
+    if (existing) {
+      db.prepare("UPDATE orchestrator_settings SET value = ?, updated_at = datetime('now') WHERE key = 'last_heartbeat_at'").run(JSON.stringify(timestamp));
+    } else {
+      db.prepare("INSERT INTO orchestrator_settings (key, value) VALUES ('last_heartbeat_at', ?)").run(JSON.stringify(timestamp));
+    }
+  } catch (err) {
+    log().warn(`[heartbeat] Failed to record last_heartbeat_at: ${String(err)}`);
+  }
+  
   const checks = {
     lobsCore: { status: "ok" as const, message: "Process running" },
     memoryServer: await checkMemoryServer(),
@@ -441,7 +460,7 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
     const stuckResult = db.prepare(`
       SELECT id, task_id, started_at, strftime('%s', 'now') - strftime('%s', started_at) as running_seconds
       FROM worker_runs
-      WHERE finished_at IS NULL
+      WHERE ended_at IS NULL
       AND started_at <= datetime('now', '-45 minutes')
       ORDER BY started_at ASC
       LIMIT 5
@@ -478,21 +497,6 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
     log().info(`[heartbeat] ✓ System healthy`);
   } else {
     log().info(`[heartbeat] ⚠ System ${status}: ${alerts.join("; ")}`);
-  }
-
-  // Record last heartbeat time in orchestrator_settings (ADR-008: heartbeat liveness check)
-  try {
-    const db = getRawDb();
-    const timestamp = new Date().toISOString();
-    // upsert — value is stored as JSON
-    const existing = db.prepare("SELECT key FROM orchestrator_settings WHERE key = 'last_heartbeat_at'").get();
-    if (existing) {
-      db.prepare("UPDATE orchestrator_settings SET value = ?, updated_at = datetime('now') WHERE key = 'last_heartbeat_at'").run(JSON.stringify(timestamp));
-    } else {
-      db.prepare("INSERT INTO orchestrator_settings (key, value) VALUES ('last_heartbeat_at', ?)").run(JSON.stringify(timestamp));
-    }
-  } catch (err) {
-    log().warn(`[heartbeat] Failed to record last_heartbeat_at: ${String(err)}`);
   }
 
   return result;
