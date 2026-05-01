@@ -33,7 +33,7 @@ export interface HeartbeatResult {
   timestamp: Date;
   status: "healthy" | "degraded" | "unhealthy";
   alerts: string[];
-  spawnedWorkers: SpawnedWorker[];
+  spawnedWorkers?: SpawnedWorker[];
   checks: {
     lobsCore: CheckResult;
     memoryServer: CheckResult;
