@@ -24,6 +24,7 @@ import { promisify } from "node:util";
 import type Database from "better-sqlite3";
 import { log } from "../util/logger.js";
 import { gatherStandupData } from "./standup-gatherer.js";
+import { WorkflowExecutor } from "../workflow/engine.js";
 
 const execAsync = promisify(execCb);
 
@@ -183,8 +184,8 @@ export interface AgentJob {
     everyMs?: number;    // interval ms (for kind=every)
     tz?: string;         // timezone
   };
-  payload: string;       // Text injected as system event (agent) or shell command (script)
-  payloadKind?: "agent" | "script" | "standup"; // Execution mode (default: 'agent')
+  payload: string;       // Text injected as system event (agent), shell command (script), or workflow_definition_id (workflow)
+  payloadKind?: "agent" | "script" | "standup" | "workflow"; // Execution mode (default: 'agent')
   enabled: boolean;
   lastFired?: string;    // ISO timestamp
   createdAt: string;
@@ -211,7 +212,7 @@ export interface CronJobView {
   lastRun: string | null;
   nextRun: string | null; // ISO timestamp of next scheduled run
   channelId?: string;     // Discord channel ID for agent jobs
-  payloadKind: "system" | "agent" | "script" | "standup"; // Execution mode
+  payloadKind: "system" | "agent" | "script" | "standup" | "workflow"; // Execution mode
 }
 
 /**
@@ -271,6 +272,9 @@ export class CronService {
   // ── Fire-log ring buffer ──
   /** Per-job ring buffer of the last FIRE_LOG_MAX_PER_JOB fire events (newest first). */
   private fireLog: Map<string, CronFireEvent[]> = new Map();
+
+  /** Workflow executor — used for payloadKind='workflow' cron jobs */
+  private workflowExecutor = new WorkflowExecutor();
 
   constructor(db: Database.Database) {
     this.db = db;
@@ -424,7 +428,7 @@ export class CronService {
         tz: row.schedule_tz ?? "America/New_York",
       },
       payload: row.payload,
-      payloadKind: (row.payload_kind as "agent" | "script") || "agent",
+      payloadKind: (row.payload_kind as "agent" | "script" | "workflow") || "agent",
       enabled: row.enabled === 1,
       lastFired: row.last_fired ?? undefined,
       createdAt: row.created_at,
@@ -875,7 +879,7 @@ export class CronService {
           tz: row.schedule_tz ?? "America/New_York",
         },
         payload: row.payload,
-        payloadKind: (row.payload_kind as "agent" | "script") || "agent",
+        payloadKind: (row.payload_kind as "agent" | "script" | "workflow") || "agent",
         enabled: row.enabled === 1,
         lastFired: row.last_fired ?? undefined,
         createdAt: row.created_at,
@@ -973,7 +977,7 @@ export class CronService {
   }
 
   private async fireAgentJob(job: AgentJob, manual = false) {
-    const jobKind = job.payloadKind === "script" ? "script" : "agent";
+    const jobKind = job.payloadKind === "script" ? "script" : job.payloadKind === "workflow" ? "workflow" : "agent";
     log().info(`[cron] Firing ${jobKind} job: "${job.name}"${manual ? " (manual)" : ""}`);
 
     const start = Date.now();
@@ -1002,6 +1006,31 @@ export class CronService {
         const durationMs = Date.now() - start;
         const msg = err instanceof Error ? err.message : String(err);
         log().warn(`[cron] ❌ Script job "${job.name}" fired${manual ? " (manual)" : ""} — FAILED after ${durationMs}ms: ${msg}`);
+        this.recordFire({ jobId: job.id, jobName: job.name, jobKind, firedAt, success: false, durationMs, error: msg, manual });
+      }
+      return;
+    }
+
+    // Workflow jobs: execute via WorkflowExecutor (no LLM involved)
+    if (job.payloadKind === "workflow") {
+      const workflowId = job.payload.trim(); // payload is the workflow_definition_id UUID
+      try {
+        const run = await this.workflowExecutor.run(workflowId, {
+          triggered_by: "cron",
+          cron_job_id: job.id,
+          cron_job_name: job.name,
+        });
+        const durationMs = Date.now() - start;
+        if (run) {
+          log().info(`[cron] ✅ Workflow job "${job.name}" fired${manual ? " (manual)" : ""} — run ${run.id.slice(0, 8)} started in ${durationMs}ms`);
+        } else {
+          log().warn(`[cron] ⚠️  Workflow job "${job.name}" fired${manual ? " (manual)" : ""} but no active workflow found with id '${workflowId}'`);
+        }
+        this.recordFire({ jobId: job.id, jobName: job.name, jobKind, firedAt, success: !!run, durationMs, manual });
+      } catch (err) {
+        const durationMs = Date.now() - start;
+        const msg = err instanceof Error ? err.message : String(err);
+        log().warn(`[cron] ❌ Workflow job "${job.name}" fired${manual ? " (manual)" : ""} — FAILED after ${durationMs}ms: ${msg}`);
         this.recordFire({ jobId: job.id, jobName: job.name, jobKind, firedAt, success: false, durationMs, error: msg, manual });
       }
       return;
