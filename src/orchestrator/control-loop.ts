@@ -83,7 +83,7 @@ function loadRepoDocs(repoPath: string | undefined): string {
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
-let executor: WorkflowExecutor | null = null;
+export let executor: WorkflowExecutor | null = null;
 let gatewayPort: number = 18789;
 let gatewayToken: string = "";
 let lastHealthCheckMs: number = 0; // Track health monitor ticks (every 30s)

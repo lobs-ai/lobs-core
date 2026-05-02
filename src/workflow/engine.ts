@@ -381,6 +381,27 @@ export class WorkflowExecutor {
     return started;
   }
 
+  // Run a workflow by name (used by system jobs)
+  async run(workflowName: string, context?: Record<string, unknown>): Promise<WorkflowRunRow | null> {
+    const db = getDb();
+    const wf = db.select().from(workflowDefinitions)
+      .where(and(
+        eq(workflowDefinitions.name, workflowName),
+        eq(workflowDefinitions.isActive, true),
+      ))
+      .get();
+
+    if (!wf) {
+      log().warn(`[WORKFLOW] run: no active workflow found with name '${workflowName}'`);
+      return null;
+    }
+
+    return this.startRun(wf, {
+      triggerType: "system",
+      triggerPayload: context ?? {},
+    });
+  }
+
   emitEvent(eventType: string, payload: Record<string, unknown>, source = "internal"): string {
     const db = getDb();
     const id = randomUUID();

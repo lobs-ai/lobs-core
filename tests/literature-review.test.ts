@@ -83,7 +83,7 @@ describe("LiteratureReviewService – search functions", () => {
     }
     // Pass even if arXiv is temporarily unavailable — search is best-effort
     expect(Array.isArray(results)).toBe(true);
-  });
+  }, 30000);
 
   it("searchArxiv abstracts are cleaned (whitespace normalized)", async () => {
     const results = await searchArxiv("transformer attention mechanism", 3);
@@ -92,7 +92,7 @@ describe("LiteratureReviewService – search functions", () => {
       expect(results[0].abstract).not.toContain("   ");
     }
     expect(Array.isArray(results)).toBe(true);
-  });
+  }, 30000);
 
   it("searchSemanticScholar returns PaperSummary array with required fields", async () => {
     // S2 API is rate-limited; the test needs a longer timeout to accommodate
@@ -127,7 +127,7 @@ describe("LiteratureReviewService – PaperSummary type", () => {
         expect(r.paperId).not.toMatch(/v\d+$/);
       });
     }
-  });
+  }, 30000);
 
   it("author list is capped at 5 for readability", async () => {
     // Mock data doesn't have >5 authors, but the real parseArxivAtom does .slice(0, 5)

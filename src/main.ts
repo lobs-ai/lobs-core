@@ -12,7 +12,7 @@ import { seedDefaultWorkflows } from "./workflow/seeds.js";
 import { seedAllCourses } from "./gsi/gsi-seed.js";
 import { initGsiStore } from "./gsi/gsi-store.js";
 import { initGradingStore } from "./services/grading-store.js";
-import { startControlLoop, stopControlLoop, flushWorkerCheckpoints } from "./orchestrator/control-loop.js";
+import { startControlLoop, stopControlLoop, flushWorkerCheckpoints, executor } from "./orchestrator/control-loop.js";
 import { startServer } from "./server.js";
 import { purgeOldArchivedSessions } from "./api/chat.js";
 import { setLogger, log } from "./util/logger.js";
@@ -703,6 +703,22 @@ async function main() {
     handler: async () => {
       const { runMemoryCompaction } = await import("./memory/gc.js");
       await runMemoryCompaction();
+    },
+  });
+
+  // Strategic reflection — per ADR-008: wake main agent every 3h to analyze patterns, create tasks
+  cronService.registerSystemJob({
+    id: "scheduler-strategic-reflection",
+    name: "Scheduler Strategic Reflection",
+    schedule: "0 */3 * * *", // every 3 hours
+    enabled: true,
+    handler: async () => {
+      log().info("[scheduler-strategic-reflection] Firing strategic reflection workflow");
+      if (!executor) {
+        log().warn("[scheduler-strategic-reflection] executor not initialized");
+        return;
+      }
+      await executor.run("reflection-cycle");
     },
   });
 
