@@ -23,6 +23,7 @@ import { initToolManager } from "./runner/tools/tool-manager.js";
 import { runHeartbeat } from "./orchestrator/heartbeat.js";
 import { runCostAudit } from "./orchestrator/cost-audit.js";
 import { registerDailyScan } from "./orchestrator/daily-scan.js";
+import { runDbMaintenance } from "./services/db-maintenance.js";
 import { initCronService } from "./services/cron.js";
 import { runSentinelCheck } from "./services/system-sentinel.js";
 import { runCalendarSentinel } from "./services/calendar-sentinel.js";
