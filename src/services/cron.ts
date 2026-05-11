@@ -502,7 +502,12 @@ export class CronService {
 
     // Check for missed agent jobs and catch up (async, non-blocking)
     this.catchUpMissedJobs().catch((err) => {
-      log().warn(`[cron] Error during startup catch-up: ${err}`);
+      log().warn(`[cron] Error during agent job startup catch-up: ${err}`);
+    });
+
+    // Check for missed system jobs and catch up (async, non-blocking)
+    this.catchUpMissedSystemJobs().catch((err) => {
+      log().warn(`[cron] Error during system job startup catch-up: ${err}`);
     });
 
     // Start the 60-second tick for ALL jobs (system + agent)
@@ -513,6 +518,46 @@ export class CronService {
     console.log(
       `[cron] Started — ${systemCount} system job(s), ${agentCount} agent job(s)`,
     );
+  }
+
+  /**
+   * Catch-up: on startup, check if any enabled cron-type system jobs missed
+   * their scheduled fire time while lobs was down. If a job should have fired
+   * within the last CATCH_UP_WINDOW_MS but didn't, fire it now.
+   * Only catches up the most recent missed occurrence (not all of them).
+   */
+  private async catchUpMissedSystemJobs(): Promise<void> {
+    const CATCH_UP_WINDOW_MS = 4 * 60 * 60 * 1000; // 4 hours
+    const now = new Date();
+
+    for (const [id, job] of this.systemJobs.entries()) {
+      if (!job.enabled) continue;
+
+      const schedule = this.systemSchedules.get(id);
+      if (!schedule) continue;
+
+      // Find the most recent time this cron should have fired
+      const lastExpectedFire = this.findLastCronMatch(
+        schedule,
+        now,
+        CATCH_UP_WINDOW_MS,
+        "America/New_York",
+      );
+      if (!lastExpectedFire) continue; // No expected fire within the window
+
+      // System jobs track lastRun in-memory — reset to undefined on restart.
+      // If never run (lastRun is undefined) or last run was before the expected
+      // fire time, catch up by firing once now.
+      const needsCatchUp = !job.lastRun || job.lastRun.getTime() < lastExpectedFire.getTime();
+      if (needsCatchUp) {
+        log().info(
+          `[cron] Catch-up: firing missed system job "${job.name}" ` +
+          `(should have fired at ${lastExpectedFire.toISOString()}, ` +
+          `last run: ${job.lastRun?.toISOString() ?? "never"})`,
+        );
+        await this.runSystemJob(job);
+      }
+    }
   }
 
   /**
@@ -552,6 +597,42 @@ export class CronService {
           `last fired: ${lastFiredTime?.toISOString() ?? "never"})`,
         );
         await this.fireAgentJob(job);
+      }
+    }
+  }
+
+  /**
+   * Catch-up: on startup, check if any enabled cron-type system jobs missed
+   * their scheduled fire time while lobs was down. If a job should have fired
+   * within the last CATCH_UP_WINDOW_MS but didn't, fire it now.
+   * System jobs live in-memory only, so lastRun is reset on every restart —
+   * we always catch up on the first startup after a long downtime.
+   * Only catches up the most recent missed occurrence (not all of them).
+   */
+  private async catchUpMissedSystemJobs(): Promise<void> {
+    const CATCH_UP_WINDOW_MS = 4 * 60 * 60 * 1000; // 4 hours
+    const now = new Date();
+
+    for (const [id, job] of this.systemJobs.entries()) {
+      if (!job.enabled) continue;
+
+      const schedule = this.systemSchedules.get(id);
+      if (!schedule) continue;
+
+      // Find the most recent time this cron should have fired
+      const lastExpectedFire = this.findLastCronMatch(schedule, now, CATCH_UP_WINDOW_MS, "America/New_York");
+      if (!lastExpectedFire) continue; // No expected fire within the window
+
+      // Check if it actually fired at or after that time
+      // System jobs store lastRun as a Date (in-memory), which is reset on restart.
+      // If lastRun is undefined, the job has never fired since startup — catch up.
+      if (!job.lastRun || job.lastRun.getTime() < lastExpectedFire.getTime()) {
+        log().info(
+          `[cron] Catch-up: firing missed system job "${job.name}" ` +
+          `(should have fired at ${lastExpectedFire.toISOString()}, ` +
+          `last ran: ${job.lastRun?.toISOString() ?? "never"})`,
+        );
+        await this.runSystemJob(job);
       }
     }
   }
