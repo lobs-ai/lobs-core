@@ -236,6 +236,8 @@ export interface CreateMemoryIndexOptions {
 
 export interface MemoryIndex {
   search(query: string, limit?: number): Promise<SearchResult[]>;
+  expandQuery(query: string): Promise<string>;
+  refreshMemory(): Promise<number>;
   indexPaths(paths?: string[]): Promise<number>;
   health(): Promise<HealthStatus>;
   status(): Promise<IndexStatus>;
@@ -501,9 +503,60 @@ export async function createAgentMemory(opts: CreateMemoryIndexOptions): Promise
     }));
   }
 
+  // ── Query expansion (synonym-based) ─────────────────────────────────
+  const SYNONYMS: Record<string, string[]> = {
+    // Programming
+    bug: ["defect", "issue", "error", "fault"],
+    feat: ["feature", "functionality", "enhancement"],
+    refactor: ["restructure", "rework", "rewrite"],
+    test: ["spec", "case", "coverage"],
+    // Project
+    memory: ["storage", "index", "persist"],
+    search: ["find", "lookup", "query", "retrieve"],
+    sync: ["sync", "synchronize", "backup"],
+    config: ["configuration", "settings", "options"],
+  };
+
+  async function expandQuery(query: string): Promise<string> {
+    const lower = query.toLowerCase();
+    const terms = lower.split(/\s+/);
+    const expanded = new Set<string>(terms);
+
+    for (const term of terms) {
+      const synonyms = SYNONYMS[term] ?? [];
+      for (const syn of synonyms) {
+        // Only add synonym if it adds information (not already in query)
+        if (!lower.includes(syn)) {
+          expanded.add(syn);
+        }
+      }
+    }
+
+    return Array.from(expanded).join(" ");
+  }
+
+  // ── Refresh (full re-index) ────────────────────────────────────────
+  async function refreshMemory(): Promise<number> {
+    log().info(`[lobs-memory] refreshMemory: forcing full re-index`);
+    const files = collectWatchedFiles(opts.watchPaths);
+    let total = 0;
+    for (const f of files) {
+      try {
+        total += await indexFile(f);
+      } catch (err) {
+        log().warn(`[lobs-memory] refreshMemory: ${f}: ${err}`);
+      }
+    }
+    db.prepare("UPDATE memory_backup_meta SET last_index = ? WHERE id = 1").run(Date.now());
+    log().info(`[lobs-memory] refreshMemory done — indexed ${total} records`);
+    return total;
+  }
+
   // ── Public API ────────────────────────────────────────────────────────
   return {
     search,
+    expandQuery,
+    refreshMemory,
     async indexPaths(paths?: string[]): Promise<number> {
       const files = paths?.length ? paths : collectWatchedFiles(opts.watchPaths);
       let total = 0;

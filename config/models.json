@@ -1,0 +1,164 @@
+{
+  "tiers": {
+    "micro": "local/qwen2.5-1.5b-instruct-mlx",
+    "small": "minimax/MiniMax-M2.7",
+    "medium": "minimax/MiniMax-M2.7",
+    "standard": "minimax/MiniMax-M2.7",
+    "strong": "opencode-go/glm-5.1"
+  },
+  "agents": {
+    "programmer": {
+      "primary": "minimax/MiniMax-M2.7",
+      "fallbacks": [
+        "anthropic/claude-sonnet-4-6"
+      ]
+    },
+    "researcher": {
+      "primary": "minimax/MiniMax-M2.7",
+      "fallbacks": [
+        "anthropic/claude-sonnet-4-6"
+      ]
+    },
+    "writer": {
+      "primary": "minimax/MiniMax-M2.7",
+      "fallbacks": [
+        "anthropic/claude-sonnet-4-6"
+      ]
+    },
+    "reviewer": {
+      "primary": "minimax/MiniMax-M2.7",
+      "fallbacks": [
+        "anthropic/claude-sonnet-4-6"
+      ]
+    },
+    "architect": {
+      "primary": "opencode-go/glm-5.1",
+      "fallbacks": [
+        "minimax/MiniMax-M2.7"
+      ]
+    },
+    "suggester": {
+      "primary": "minimax/MiniMax-M2.7",
+      "fallbacks": []
+    },
+    "inbox": {
+      "primary": "minimax/MiniMax-M2.7",
+      "fallbacks": [
+        "anthropic/claude-haiku-4-5"
+      ]
+    }
+  },
+  "local": {
+    "baseUrl": "http://localhost:1234/v1",
+    "chatModel": "qwen/qwen3.5-9b",
+    "embeddingModel": "text-embedding-qwen3-embedding-4b"
+  },
+  "scheduler": {
+    "enabled": true,
+    "localOnly": true,
+    "tier": "micro",
+    "overrideModel": null,
+    "temperature": 0.2,
+    "maxTokens": 900
+  },
+  "costs": {
+    "claude-sonnet-4-6": {
+      "input": 3,
+      "output": 15,
+      "cacheRead": 0.3,
+      "cacheWrite": 3.75
+    },
+    "claude-sonnet-4-5": {
+      "input": 3,
+      "output": 15,
+      "cacheRead": 0.3,
+      "cacheWrite": 3.75
+    },
+    "claude-sonnet-4": {
+      "input": 3,
+      "output": 15,
+      "cacheRead": 0.3,
+      "cacheWrite": 3.75
+    },
+    "claude-opus-4-6": {
+      "input": 15,
+      "output": 75,
+      "cacheRead": 1.5,
+      "cacheWrite": 18.75
+    },
+    "claude-opus-4-5": {
+      "input": 15,
+      "output": 75,
+      "cacheRead": 1.5,
+      "cacheWrite": 18.75
+    },
+    "claude-opus-4": {
+      "input": 15,
+      "output": 75,
+      "cacheRead": 1.5,
+      "cacheWrite": 18.75
+    },
+    "claude-haiku-4-5": {
+      "input": 0.8,
+      "output": 4,
+      "cacheRead": 0.08,
+      "cacheWrite": 1
+    },
+    "gpt-4o": {
+      "input": 2.5,
+      "output": 10,
+      "cacheRead": 1.25,
+      "cacheWrite": 2.5
+    },
+    "MiniMax-M2.7": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    },
+    "glm-5.1": {
+      "input": 1.4,
+      "output": 4.4,
+      "cacheRead": 0.26,
+      "cacheWrite": 0
+    }
+  },
+  "voice": {
+    "realtimeModel": "gpt-4o-realtime-preview",
+    "transcriptionModel": "gpt-4o-mini-transcribe"
+  },
+  "contextLimits": {
+    "claude-sonnet-4-6": 200000,
+    "claude-sonnet-4-5": 200000,
+    "claude-sonnet-4": 200000,
+    "claude-opus-4-6": 200000,
+    "claude-opus-4-5": 200000,
+    "claude-opus-4": 200000,
+    "claude-haiku-4-5": 200000,
+    "gpt-4o": 128000,
+    "qwen": 32000,
+    "MiniMax-M2.7": 204800,
+    "glm-5.1": 128000
+  },
+  "tierFallbacks": {
+    "micro": [
+      "qwen/qwen3.5-9b"
+    ],
+    "small": [
+      "anthropic/claude-haiku-4-5",
+      "openai/gpt-4o-mini"
+    ],
+    "medium": [
+      "anthropic/claude-haiku-4-5",
+      "openai/gpt-4o-mini"
+    ],
+    "standard": [
+      "anthropic/claude-sonnet-4-5",
+      "openai/gpt-4o"
+    ],
+    "strong": [
+      "anthropic/claude-opus-4-5",
+      "openai/gpt-4o"
+    ]
+  }
+}
