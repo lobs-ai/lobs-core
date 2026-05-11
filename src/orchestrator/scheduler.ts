@@ -83,11 +83,14 @@ export function getNextTasks(config: SchedulerConfig): Task[] {
   db.prepare(`UPDATE tasks SET status = 'active', updated_at = datetime('now') WHERE status IN ('pending', 'inbox', 'todo') AND (work_state IS NULL OR work_state = 'not_started')`).run();
 
   // Get all ready tasks (already active or just activated above)
+  // EXCLUDE tasks with work_state='done' (completed tasks that may still have active status)
+  // EXCLUDE tasks with status='waiting_on' (blocked on external input)
   const readyTasks = db
     .prepare(
       `SELECT id, title, priority, agent, model_tier, created_at, project_id 
        FROM tasks 
-       WHERE status = 'active' AND (work_state = 'not_started' OR work_state IS NULL)
+       WHERE status = 'active' AND work_state != 'done'
+       AND (work_state = 'not_started' OR work_state IS NULL)
        ORDER BY created_at ASC`,
     )
     .all() as Array<{
