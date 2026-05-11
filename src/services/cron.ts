@@ -602,42 +602,6 @@ export class CronService {
   }
 
   /**
-   * Catch-up: on startup, check if any enabled cron-type system jobs missed
-   * their scheduled fire time while lobs was down. If a job should have fired
-   * within the last CATCH_UP_WINDOW_MS but didn't, fire it now.
-   * System jobs live in-memory only, so lastRun is reset on every restart —
-   * we always catch up on the first startup after a long downtime.
-   * Only catches up the most recent missed occurrence (not all of them).
-   */
-  private async catchUpMissedSystemJobs(): Promise<void> {
-    const CATCH_UP_WINDOW_MS = 4 * 60 * 60 * 1000; // 4 hours
-    const now = new Date();
-
-    for (const [id, job] of this.systemJobs.entries()) {
-      if (!job.enabled) continue;
-
-      const schedule = this.systemSchedules.get(id);
-      if (!schedule) continue;
-
-      // Find the most recent time this cron should have fired
-      const lastExpectedFire = this.findLastCronMatch(schedule, now, CATCH_UP_WINDOW_MS, "America/New_York");
-      if (!lastExpectedFire) continue; // No expected fire within the window
-
-      // Check if it actually fired at or after that time
-      // System jobs store lastRun as a Date (in-memory), which is reset on restart.
-      // If lastRun is undefined, the job has never fired since startup — catch up.
-      if (!job.lastRun || job.lastRun.getTime() < lastExpectedFire.getTime()) {
-        log().info(
-          `[cron] Catch-up: firing missed system job "${job.name}" ` +
-          `(should have fired at ${lastExpectedFire.toISOString()}, ` +
-          `last ran: ${job.lastRun?.toISOString() ?? "never"})`,
-        );
-        await this.runSystemJob(job);
-      }
-    }
-  }
-
-  /**
    * Scan backwards from `now` to find the most recent time a cron schedule
    * would have matched, within `windowMs` milliseconds.
    * Returns the matching Date or null if none found within the window.
