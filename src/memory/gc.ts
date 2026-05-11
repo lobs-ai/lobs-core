@@ -362,6 +362,123 @@ async function fetchEmbeddingForResurrect(
   }
 }
 
+// ── Memory refresh ─────────────────────────────────────────────────────────────
+
+const _REFRESH_EMBED_URL = "http://localhost:1234/v1/embeddings";
+const _REFRESH_EMBED_MODEL = "text-embedding-qwen3-embedding-4b";
+const _REFRESH_EMBED_TIMEOUT_MS = 15_000;
+
+async function fetchEmbeddingForRefresh(text: string): Promise<Float32Array | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), _REFRESH_EMBED_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(_REFRESH_EMBED_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: _REFRESH_EMBED_MODEL, input: text }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) return null;
+
+    const data = (await response.json()) as {
+      data?: Array<{ embedding?: number[] }>;
+    };
+    const raw = data.data?.[0]?.embedding;
+    if (!raw || !Array.isArray(raw)) return null;
+
+    return new Float32Array(raw);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Refresh a memory by re-embedding and optionally updating its content.
+ *
+ * Use this for:
+ * - Stale memories whose embedding may be out of sync
+ * - Updating a memory's content to a newer version
+ * - Periodic reinforcement to keep memories active and embeddings current
+ *
+ * Note: Full LLM re-analysis (title, memory_type, confidence) requires
+ * re-running the extractor with a proper EventCluster. This function
+ * focuses on the embedding/content refresh. For full re-analysis,
+ * pass newContent derived from fresh events.
+ *
+ * @param memoryId  ID of the memory to refresh
+ * @param newContent  New content to re-embed (optional — uses existing content if omitted)
+ * @returns The updated memory, or null if not found
+ */
+export async function refreshMemory(
+  memoryId: number,
+  newContent?: string,
+): Promise<Memory | null> {
+  const db = getMemoryDb();
+
+  const memory = db
+    .prepare(`SELECT * FROM memories WHERE id = ?`)
+    .get(memoryId) as Memory | undefined;
+
+  if (!memory) {
+    log().warn(`[gc] refreshMemory: memory #${memoryId} not found`);
+    return null;
+  }
+
+  if (memory.status === "archived") {
+    log().warn(`[gc] refreshMemory: memory #${memoryId} is archived — use resurrectMemory instead`);
+    return null;
+  }
+
+  const contentToEmbed = newContent ?? memory.content;
+
+  // Re-generate embedding (non-fatal if it fails)
+  let embedding: Float32Array | null = null;
+  try {
+    embedding = await fetchEmbeddingForRefresh(contentToEmbed);
+  } catch {
+    // non-fatal
+  }
+
+  const upsertMemory = db.prepare(
+    `UPDATE memories
+     SET content = ?, updated_at = datetime('now'), last_validated = datetime('now')
+     WHERE id = ?`,
+  );
+  const insertGCLog = db.prepare(
+    `INSERT INTO gc_log (memory_id, from_status, to_status, reason) VALUES (?, ?, ?, ?)`,
+  );
+  const upsertEmbedding = db.prepare(
+    `INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding, created_at) VALUES (?, ?, ?)`,
+  );
+
+  const refreshTx = db.transaction(() => {
+    upsertMemory.run(contentToEmbed, memoryId);
+    if (embedding) {
+      upsertEmbedding.run(memoryId, Buffer.from(embedding.buffer), new Date().toISOString());
+    }
+    insertGCLog.run(
+      memoryId,
+      memory.status,
+      memory.status,
+      newContent ? "refreshed: content updated and re-embedded" : "refreshed: re-embedded with existing content",
+    );
+  });
+
+  refreshTx();
+
+  log().info(
+    `[gc] Memory #${memoryId} refreshed` +
+      (embedding ? ` (${embedding.length} dims re-embedded)` : " (embedding unavailable)") +
+      (newContent ? " [content updated]" : ""),
+  );
+
+  return db.prepare(`SELECT * FROM memories WHERE id = ?`).get(memoryId) as Memory;
+}
+
 // ── Importance score ──────────────────────────────────────────────────────────
 
 /**

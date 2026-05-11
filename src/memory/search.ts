@@ -14,6 +14,67 @@ import { log } from "../util/logger.js";
 import { importanceScore } from "./gc.js";
 import type { Memory } from "./types.js";
 
+// ── Query Expansion ────────────────────────────────────────────────────────────
+
+/**
+ * Synonym map for common terms. Each entry maps a canonical term to a list
+ * of alternative words/phrases that should be searched alongside it.
+ * This is a simple dictionary-based approach; larger deployments could use
+ * embeddings-based expansion (find semantically similar terms from memory content).
+ */
+const SYNONYMS: Record<string, string[]> = {
+  bug: ["error", "issue", "defect", "crash", "failure"],
+  fix: ["repair", "resolve", "patch", "correct", "solve"],
+  crash: ["crash", "crashes", "crashed", "crashing", "panic", "segfault"],
+  error: ["error", "errors", "failed", "failure", "exception", "fault"],
+  learn: ["learned", "learning", "discovered", "found", "realized", " understood"],
+  remember: ["remember", "remembered", "noted", "tracked", "recorded"],
+  decide: ["decided", "decision", "choosing", "chose", "agreed", "resolved"],
+  plan: ["planned", "planning", "schedule", "打算", "计划"],
+  build: ["built", "building", "construct", "created", "implement"],
+  test: ["tested", "testing", "verify", "validated", "checked"],
+  deploy: ["deployed", "deploying", "released", "launch", "shipped"],
+  config: ["config", "configuration", "settings", "setup", "options"],
+  api: ["api", "endpoint", "route", "http", "request", "response"],
+  db: ["database", "db", "sql", "sqlite", "postgres", "mysql"],
+  memory: ["memory", "memories", "remember", "recall", "store"],
+  search: ["search", "searching", "find", "query", "lookup", "retrieve"],
+  sync: ["sync", "synced", "synchronize", "synchronised", "refresh"],
+  update: ["updated", "update", "modified", "changed", "edited"],
+  add: ["added", "add", "create", "insert", "new"],
+  remove: ["removed", "remove", "delete", "drop", "unlink"],
+};
+
+/**
+ * Expand a query by appending synonyms for each significant term.
+ * FTS5 handles phrase-level matching, so we expand individual words and
+ * let the FTS5 engine combine them.
+ *
+ * @param query Raw user query
+ * @returns Expanded query string suitable for FTS5 MATCH
+ */
+export function expandQuery(query: string): string {
+  // Tokenize on whitespace/punctuation
+  const tokens = query.trim().split(/\s+/);
+  const expanded: string[] = [];
+
+  for (const token of tokens) {
+    // Lowercase key for lookup
+    const key = token.toLowerCase().replace(/[^a-z]/gi, "");
+    expanded.push(token); // keep original
+
+    const syns = SYNONYMS[key];
+    if (syns && syns.length > 0) {
+      // Append synonyms as alternatives — FTS5 OR syntax: term OR syn1 OR syn2
+      expanded.push(...syns);
+    }
+  }
+
+  // Join with OR for FTS5 — the FTS5 engine will treat this as a disjunction
+  // which broadens the search without changing the core intent.
+  return expanded.join(" OR ");
+}
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const EMBED_URL = "http://localhost:1234/v1/embeddings";
@@ -247,6 +308,9 @@ export async function searchMemoriesFast(
     const db = getMemoryDb();
     const { where, bindings } = buildWhereClause(opts, "m");
 
+    // Expand query with synonyms to broaden FTS5 recall
+    const expandedQuery = expandQuery(query);
+
     // FTS5 rank is negative (lower = better match); we negate to get positive score
     const rows = db
       .prepare(
@@ -258,7 +322,7 @@ export async function searchMemoriesFast(
          ORDER BY fts.rank
          LIMIT ?`,
       )
-      .all(query, ...bindings, maxResults * 3) as Array<
+      .all(expandedQuery, ...bindings, maxResults * 3) as Array<
       Memory & { fts_rank: number }
     >;
 
@@ -324,6 +388,9 @@ export async function searchMemoriesFull(
     const { where, bindings } = buildWhereClause(opts, "m");
 
     // ── FTS5 results ──────────────────────────────────────────────────────
+    // Expand query with synonyms to broaden FTS5 recall
+    const expandedQuery = expandQuery(query);
+
     let ftsRows: Array<Memory & { fts_rank: number }> = [];
     try {
       ftsRows = db
@@ -336,7 +403,7 @@ export async function searchMemoriesFull(
            ORDER BY fts.rank
            LIMIT ?`,
         )
-        .all(query, ...bindings, maxResults * 5) as Array<
+        .all(expandedQuery, ...bindings, maxResults * 5) as Array<
         Memory & { fts_rank: number }
       >;
     } catch {
