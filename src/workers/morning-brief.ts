@@ -5,7 +5,7 @@
  * Rafe would actually read. No LLM dependency — pure data formatting.
  *
  * Channel: 1466921249421660415 (alerts)
- * Schedule: 30 7 * * * (7:30am daily)
+ * Schedule: 0 7 * * 1-5 (7:00am weekdays)
  */
 
 import { eq, and, gte, inArray, desc, sql } from "drizzle-orm";
@@ -29,7 +29,7 @@ export class MorningBriefWorker extends BaseWorker {
     id: "morning-brief",
     name: "Morning Brief",
     description: "Sends a daily Discord summary of goals, tasks, and agent activity",
-    schedule: "30 7 * * *",
+    schedule: "0 7 * * 1-5",
     enabled: true,
   };
 

@@ -4,6 +4,9 @@
  */
 
 import { execSync } from "child_process";
+import { resolve } from "path";
+
+const NPM = "/opt/homebrew/bin/npm";
 
 export interface CiCheckResult {
   name: string;
@@ -38,19 +41,19 @@ export async function runCiChecks(): Promise<CiReport> {
 
   // Typecheck
   checks.push(runCheck("typecheck", () => {
-    execSync("npm run typecheck", { cwd: root, stdio: "pipe" });
+    execSync(`${NPM} run typecheck`, { cwd: root, stdio: "pipe", env: { ...process.env, PATH: "/opt/homebrew/bin:" + (process.env.PATH || "") } });
     return "OK";
   }));
 
   // Lint
   checks.push(runCheck("lint", () => {
-    execSync("npm run lint", { cwd: root, stdio: "pipe" });
+    execSync(`${NPM} run lint`, { cwd: root, stdio: "pipe", env: { ...process.env, PATH: "/opt/homebrew/bin:" + (process.env.PATH || "") } });
     return "OK";
   }));
 
   // Build
   checks.push(runCheck("build", () => {
-    execSync("npm run build", { cwd: root, stdio: "pipe" });
+    execSync(`${NPM} run build`, { cwd: root, stdio: "pipe", env: { ...process.env, PATH: "/opt/homebrew/bin:" + (process.env.PATH || "") } });
     return "OK";
   }));
 

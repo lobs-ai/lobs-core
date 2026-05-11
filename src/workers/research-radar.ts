@@ -71,7 +71,7 @@ export class ResearchRadarWorker extends BaseWorker {
     id: "research-radar",
     name: "Research Radar",
     description: "Identifies opportunities: research papers, Lobs improvements, and product ideas from intel insights",
-    schedule: "30 7 * * *", // 7:30 AM daily, after intel sweep at 6-7 AM
+    schedule: "0 8 * * 1-5", // 8:00 AM weekdays, after morning brief
     enabled: true,
     maxTokens: 4096,
     timeoutMs: 180_000,
