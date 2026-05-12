@@ -282,52 +282,6 @@ export class ResearchRadarWorker extends BaseWorker {
     };
   }
 
-  // ── Inbox Item Helper ──────────────────────────────────────────────────
-
-  /**
-   * Create an inbox item for a high-potential research idea.
-   */
-  private createIdeaInboxItem(idea: ResearchRadarItem, reason: string): void {
-    const db = getDb();
-    const now = new Date().toISOString();
-    const priority = idea.noveltyScore >= 0.8 ? "high" : "medium";
-    const trackEmoji: Record<IdeaTrack, string> = {
-      paper: "📄",
-      lobs: "🔧",
-      product: "💰",
-    };
-    const inboxId = `rr_${randomUUID().slice(0, 8)}`;
-
-    db.insert(inboxItems).values({
-      id: inboxId,
-      title: `${trackEmoji[idea.track]} Research: ${idea.title}`,
-      content: [
-        `**Thesis:** ${idea.thesis}`,
-        ``,
-        `**Gap Analysis:** ${idea.gapAnalysis ?? "Not yet analyzed"}`,
-        ``,
-        `**Our Angle:** ${idea.ourAngle ?? "Not yet defined"}`,
-        ``,
-        `**Methodology / Implementation Plan:** ${idea.methodology ?? "Not yet defined"}`,
-        ``,
-        `**Key Experiments / Milestones:** ${idea.keyExperiments ?? "Not yet defined"}`,
-        ``,
-        `**Scores:** N:${(idea.noveltyScore * 100).toFixed(0)}% F:${(idea.feasibilityScore * 100).toFixed(0)}% I:${(idea.impactScore * 100).toFixed(0)}%`,
-        ``,
-        `**Source insight count:** ${idea.sourceInsightIds.length}`,
-        ``,
-        `**Reason:** ${reason}`,
-      ].join("\n"),
-      summary: idea.thesis.slice(0, 200),
-      type: "research",
-      isRead: false,
-      requiresAction: true,
-      actionStatus: "pending",
-      modifiedAt: now,
-      sourceAgent: "researcher",
-    }).run();
-  }
-
   // ── Inbox Item Helpers ────────────────────────────────────────────────
 
   /**
