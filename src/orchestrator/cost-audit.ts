@@ -174,7 +174,7 @@ async function insertInboxAlert(report: CostAuditReport): Promise<void> {
     content: lines.join("\n"),
     type: "alert",
     requiresAction: report.exceeded.length > 0,
-    actionStatus: report.exceeded.length > 0 ? "pending" : null,
+    actionStatus: report.exceeded.length > 0 ? "pending" : undefined,
     triageCategory: alertKey,
     triageUrgency: urgency,
     triageRoute: "system",

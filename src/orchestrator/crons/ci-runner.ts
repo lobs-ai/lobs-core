@@ -31,7 +31,12 @@ Be concise.`;
  * Silent when all checks pass.
  */
 export function registerCiRunnerCron(): void {
-  getCronService().addAgentJob({
+  const svc = getCronService();
+  if (!svc) {
+    log().warn("[ci-runner] CronService not initialized, skipping registration");
+    return;
+  }
+  svc.addAgentJob({
     name: "CI Runner",
     schedule: {
       kind: "cron",
