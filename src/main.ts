@@ -639,6 +639,10 @@ async function main() {
     },
   });
 
+  // CI runner cron — ADR-008: DB-backed script job with Discord alerts
+  const { registerCiRunnerCron } = await import("./orchestrator/crons/ci-runner.js");
+  registerCiRunnerCron();
+
   // GitHub triage cron — per ADR-008: auto-label new issues, detect stale PRs
   cronService.registerSystemJob({
     id: "github-triage",
