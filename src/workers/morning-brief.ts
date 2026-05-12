@@ -1,11 +1,11 @@
 /**
- * Morning Brief Worker — sends a daily Discord summary at 7:30am.
+ * Morning Brief Worker — sends a daily Discord summary at 7:30am ET.
  *
  * Reads DB directly (no HTTP round-trip) and formats a compact Discord message
  * Rafe would actually read. No LLM dependency — pure data formatting.
  *
  * Channel: 1466921249421660415 (alerts)
- * Schedule: 0 7 * * 1-5 (7:00am weekdays)
+ * Schedule: 30 7 * * 1-5 (7:30am weekdays ET)
  */
 
 import { eq, and, gte, inArray, desc, sql } from "drizzle-orm";
@@ -20,7 +20,8 @@ import {
   type WorkerResult,
 } from "./base-worker.js";
 
-const ALERTS_CHANNEL = "1466921249421660415";
+const RAFES_DM_ID = "644578016298795010";
+const ALERTS_CHANNEL = "1466921249421660415"; // Fallback for overflow
 const BRIEF_URL = "http://localhost:9420";
 const STAGNANT_DAYS_THRESHOLD = 3;
 
@@ -29,7 +30,7 @@ export class MorningBriefWorker extends BaseWorker {
     id: "morning-brief",
     name: "Morning Brief",
     description: "Sends a daily Discord summary of goals, tasks, and agent activity",
-    schedule: "0 7 * * 1-5",
+    schedule: "30 7 * * 1-5",
     enabled: true,
   };
 
@@ -37,7 +38,7 @@ export class MorningBriefWorker extends BaseWorker {
    * Override run() to skip the LM Studio availability check — this worker
    * does pure data formatting with no LLM calls and should always succeed.
    */
-  async run(): Promise<WorkerResult> {
+  async run(_triggerEvent?: import("./base-worker.js").WorkerEvent): Promise<WorkerResult> {
     const startedAt = new Date();
     try {
       const result = await this.execute({
@@ -403,19 +404,26 @@ async function sendBrief(message: string): Promise<void> {
   const DISCORD_LIMIT = 2000;
 
   if (message.length <= DISCORD_LIMIT) {
-    await discordService.send(ALERTS_CHANNEL, message);
+    // Prefer DM to Rafe; fall back to alerts channel if DM fails
+    try {
+      await discordService.sendDm(RAFES_DM_ID, message);
+    } catch {
+      await discordService.send(ALERTS_CHANNEL, message);
+    }
     return;
   }
 
-  // Split at the last newline before the limit
-  let remaining = message;
+  // Long message: send first chunk via DM, remainder to alerts channel
+  const firstChunk = message.slice(0, DISCORD_LIMIT);
+  try {
+    await discordService.sendDm(RAFES_DM_ID, firstChunk);
+  } catch {
+    await discordService.send(ALERTS_CHANNEL, firstChunk);
+  }
+
+  let remaining = message.slice(DISCORD_LIMIT).replace(/^\n/, "");
   while (remaining.length > 0) {
-    if (remaining.length <= DISCORD_LIMIT) {
-      await discordService.send(ALERTS_CHANNEL, remaining);
-      break;
-    }
-    const splitAt = remaining.lastIndexOf("\n", DISCORD_LIMIT);
-    const chunk = splitAt > 0 ? remaining.slice(0, splitAt) : remaining.slice(0, DISCORD_LIMIT);
+    const chunk = remaining.slice(0, DISCORD_LIMIT);
     await discordService.send(ALERTS_CHANNEL, chunk);
     remaining = remaining.slice(chunk.length).replace(/^\n/, "");
   }
