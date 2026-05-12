@@ -372,7 +372,7 @@ export class CronService {
         job.schedule.expr ?? null,
         job.schedule.at ?? null,
         job.schedule.everyMs ?? null,
-        job.schedule.tz || "America/New_York",
+        job.schedule.tz ?? "America/New_York",
         job.payload,
         job.enabled ? 1 : 0,
         job.channelId ?? null,

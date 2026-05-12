@@ -1,9 +1,11 @@
-import { eq, sql } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { getDb, getRawDb } from "../db/connection.js";
-import { workerRuns } from "../db/schema.js";
+import { workerRuns, inboxItems } from "../db/schema.js";
+import { randomUUID } from "node:crypto";
 
 type WorkerRunsRow = typeof workerRuns.$inferSelect;
 import { getModelCost } from "../config/models.js";
+import { log } from "../util/logger.js";
 
 /**
  * Cost audit — verifies strong-tier spend per ADR-008.
@@ -112,15 +114,92 @@ export async function auditCosts(): Promise<CostAuditReport> {
 }
 
 /**
+ * Insert a cost audit alert into the inbox, de-duplicating against existing
+ * unread alerts with the same triageCategory.
+ */
+async function insertInboxAlert(report: CostAuditReport): Promise<void> {
+  const db = getDb();
+  const alertKey = "cost-audit-weekly";
+  const urgency = report.exceeded.length > 0 ? "high" : "low";
+
+  // De-dup: suppress if an unread alert with the same key already exists
+  const existing = db
+    .select({ id: inboxItems.id })
+    .from(inboxItems)
+    .where(
+      and(
+        eq(inboxItems.triageCategory, alertKey),
+        eq(inboxItems.isRead, false),
+      ),
+    )
+    .all();
+
+  if (existing.length > 0) {
+    log().info?.(`[COST_AUDIT] Suppressing duplicate inbox alert: ${alertKey}`);
+    return;
+  }
+
+  const lines = [
+    `## Weekly Cost Audit — ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}`,
+    ``,
+    `**Period:** last 7 days`,
+    `**Total spend:** $${report.totalSpend.toFixed(2)}`,
+    ``,
+    `### Spend by Tier`,
+  ];
+
+  for (const [tier, data] of Object.entries(report.byTier)) {
+    const status = data.spend > data.threshold ? "⚠️ EXCEEDED" : "✓ within limit";
+    lines.push(`- **${tier}**: $${data.spend.toFixed(2)} / $${data.threshold}/week cap — ${status}`);
+  }
+
+  if (report.exceeded.length > 0) {
+    lines.push(``, `### ⚠️ Exceeded Thresholds`);
+    for (const e of report.exceeded) {
+      lines.push(`- ${e}`);
+    }
+  }
+
+  if (report.estimated) {
+    lines.push(``, `_Note: some costs were estimated (no actual API cost data available for some models)_`);
+  }
+
+  const title = report.exceeded.length > 0
+    ? `💰 Cost Audit: ${report.exceeded.length} tier exceeded`
+    : `💰 Cost Audit: weekly summary`;
+
+  db.insert(inboxItems).values({
+    id: randomUUID() as string,
+    title,
+    content: lines.join("\n"),
+    type: "alert",
+    requiresAction: report.exceeded.length > 0,
+    actionStatus: report.exceeded.length > 0 ? "pending" : null,
+    triageCategory: alertKey,
+    triageUrgency: urgency,
+    triageRoute: "system",
+    sourceAgent: "cost-audit-cron",
+    isRead: false,
+  }).run();
+
+  log().info?.(`[COST_AUDIT] Inbox alert created: ${alertKey} (urgency=${urgency})`);
+}
+
+/**
  * Cron entry point — runs cost audit and logs the report.
- * Called by the daily cost-audit cron job per ADR-008.
+ * Called by the weekly cost-audit cron job per ADR-008.
  */
 export async function runCostAudit(): Promise<CostAuditReport> {
   const report = await auditCosts();
   const summary = `[Cost Audit] Total: $${report.totalSpend.toFixed(2)} | Exceeded: ${report.exceeded.length > 0 ? report.exceeded.join(", ") : "none"}`;
-  console.log(summary);
+  log().info?.(summary);
   if (report.estimated) {
-    console.warn("[Cost Audit] Warning: some costs were estimated (no actual API data)");
+    log().warn?.("[Cost Audit] Warning: some costs were estimated (no actual API data)");
+  }
+
+  // Send inbox alert if thresholds exceeded
+  if (report.exceeded.length > 0) {
+    await insertInboxAlert(report);
   }
 
   // ADR-008: Record last audit time so heartbeat can detect stale audits
@@ -134,7 +213,7 @@ export async function runCostAudit(): Promise<CostAuditReport> {
       db.prepare("INSERT INTO orchestrator_settings (key, value) VALUES ('last_cost_audit_at', ?)")?.run(JSON.stringify(timestamp));
     }
   } catch (err) {
-    console.warn(`[Cost Audit] Failed to record last_cost_audit_at: ${String(err)}`);
+    log().warn?.(`[Cost Audit] Failed to record last_cost_audit_at: ${String(err)}`);
   }
 
   return report;

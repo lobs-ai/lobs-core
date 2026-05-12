@@ -110,3 +110,16 @@ Heartbeat spawning and workflow spawning are **independent paths** that both wri
 - [Scheduler](src/orchestrator/scheduler.ts)
 - [Worker Manager](src/orchestrator/worker-manager.ts)
 - [Control Loop](src/orchestrator/control-loop.ts)
+- [Cost Audit Cron](src/orchestrator/cost-audit.ts) — weekly spend verification per ADR-008 Phase 7
+
+## ADR-008 Implementation Status
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 1 | Models config update (MiniMax at $0) | ✅ Done |
+| 2 | HEARTBEAT.md rewrite (aggressive autonomous mode) | ✅ Done |
+| 3 | Continuous worker system (heartbeat spawns workers) | Pending |
+| 4 | New cron jobs (CI runner, GitHub triage, dependency monitor, test impact) | Partial |
+| 5 | Fallback chain updates (local → MiniMax → strong) | Pending |
+| 6 | Strong tier auto-escalation | Pending |
+| 7 | **Cost audit cron — weekly spend verification** | ✅ Done |

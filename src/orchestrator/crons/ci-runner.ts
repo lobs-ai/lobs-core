@@ -32,7 +32,6 @@ Be concise.`;
  */
 export function registerCiRunnerCron(): void {
   getCronService().addAgentJob({
-    id: CI_JOB_ID,
     name: "CI Runner",
     schedule: {
       kind: "cron",
