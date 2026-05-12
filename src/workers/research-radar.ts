@@ -19,6 +19,9 @@ import type {
   RelatedWork, IdeaTrack,
 } from "../services/research-radar.js";
 import type { IntelSweepService, IntelInsight } from "../services/intel-sweep.js";
+import { getDb, getRawDb } from "../db/connection.js";
+import { inboxItems } from "../db/schema.js";
+import { randomUUID } from "node:crypto";
 import {
   BaseWorker,
   callApiModelJSON,
@@ -248,6 +251,9 @@ export class ResearchRadarWorker extends BaseWorker {
           message: `N:${(idea.noveltyScore * 100).toFixed(0)} F:${(idea.feasibilityScore * 100).toFixed(0)} I:${(idea.impactScore * 100).toFixed(0)} — ${idea.thesis.slice(0, 150)}`,
           actionRequired: false,
         });
+        // Also create a real inbox item for high-potential ideas
+        const reason = `Composite score ${(composite * 100).toFixed(0)}% — N:${(idea.noveltyScore * 100).toFixed(0)}% F:${(idea.feasibilityScore * 100).toFixed(0)}% I:${(idea.impactScore * 100).toFixed(0)}%`;
+        this.createIdeaInboxItem(idea, reason);
       }
     }
 
@@ -259,6 +265,7 @@ export class ResearchRadarWorker extends BaseWorker {
     if (highPotential.length > 0) parts.push(`${highPotential.length} high-potential`);
 
     if (newIdeas > 0) {
+      this.createResearchInboxItem(newIdeas, refined, highPotential.length);
       artifacts.push({
         type: "db_record",
         content: `Research radar: ${newIdeas} new ideas identified across tracks`,
@@ -273,6 +280,128 @@ export class ResearchRadarWorker extends BaseWorker {
       durationMs: 0,
       summary: parts.join(" · "),
     };
+  }
+
+  // ── Inbox Item Helper ──────────────────────────────────────────────────
+
+  /**
+   * Create an inbox item for a high-potential research idea.
+   */
+  private createIdeaInboxItem(idea: ResearchRadarItem, reason: string): void {
+    const db = getDb();
+    const now = new Date().toISOString();
+    const priority = idea.noveltyScore >= 0.8 ? "high" : "medium";
+    const trackEmoji: Record<IdeaTrack, string> = {
+      paper: "📄",
+      lobs: "🔧",
+      product: "💰",
+    };
+    const inboxId = `rr_${randomUUID().slice(0, 8)}`;
+
+    db.insert(inboxItems).values({
+      id: inboxId,
+      title: `${trackEmoji[idea.track]} Research: ${idea.title}`,
+      content: [
+        `**Thesis:** ${idea.thesis}`,
+        ``,
+        `**Gap Analysis:** ${idea.gapAnalysis ?? "Not yet analyzed"}`,
+        ``,
+        `**Our Angle:** ${idea.ourAngle ?? "Not yet defined"}`,
+        ``,
+        `**Methodology / Implementation Plan:** ${idea.methodology ?? "Not yet defined"}`,
+        ``,
+        `**Key Experiments / Milestones:** ${idea.keyExperiments ?? "Not yet defined"}`,
+        ``,
+        `**Scores:** N:${(idea.noveltyScore * 100).toFixed(0)}% F:${(idea.feasibilityScore * 100).toFixed(0)}% I:${(idea.impactScore * 100).toFixed(0)}%`,
+        ``,
+        `**Source insight count:** ${idea.sourceInsightIds.length}`,
+        ``,
+        `**Reason:** ${reason}`,
+      ].join("\n"),
+      summary: idea.thesis.slice(0, 200),
+      type: "research",
+      isRead: false,
+      requiresAction: true,
+      actionStatus: "pending",
+      modifiedAt: now,
+      sourceAgent: "researcher",
+    }).run();
+  }
+
+  // ── Inbox Item Helpers ────────────────────────────────────────────────
+
+  /**
+   * Create an inbox item for a high-potential individual research idea.
+   */
+  private createIdeaInboxItem(idea: ResearchRadarItem, reason: string): void {
+    const db = getDb();
+    const now = new Date().toISOString();
+    const priority = idea.noveltyScore >= 0.8 ? "high" : "medium";
+    const trackEmoji: Record<IdeaTrack, string> = {
+      paper: "📄",
+      lobs: "🔧",
+      product: "💰",
+    };
+    const inboxId = `rr_${randomUUID().slice(0, 8)}`;
+
+    db.insert(inboxItems).values({
+      id: inboxId,
+      title: `${trackEmoji[idea.track]} Research: ${idea.title}`,
+      content: [
+        `**Thesis:** ${idea.thesis}`,
+        ``,
+        `**Gap Analysis:** ${idea.gapAnalysis ?? "Not yet analyzed"}`,
+        ``,
+        `**Our Angle:** ${idea.ourAngle ?? "Not yet defined"}`,
+        ``,
+        `**Methodology / Implementation Plan:** ${idea.methodology ?? "Not yet defined"}`,
+        ``,
+        `**Key Experiments / Milestones:** ${idea.keyExperiments ?? "Not yet defined"}`,
+        ``,
+        `**Scores:** N:${(idea.noveltyScore * 100).toFixed(0)}% F:${(idea.feasibilityScore * 100).toFixed(0)}% I:${(idea.impactScore * 100).toFixed(0)}%`,
+        ``,
+        `**Source insight count:** ${idea.sourceInsightIds.length}`,
+        ``,
+        `**Reason:** ${reason}`,
+      ].join("\n"),
+      summary: idea.thesis.slice(0, 200),
+      type: "research",
+      isRead: false,
+      requiresAction: true,
+      actionStatus: "pending",
+      modifiedAt: now,
+      sourceAgent: "researcher",
+    }).run();
+  }
+
+  /**
+   * Create an inbox item summarizing the research radar run when new ideas are found.
+   */
+  private createResearchInboxItem(newIdeas: number, refined: number, highPotentialCount: number): void {
+    const db = getDb();
+    const now = new Date().toISOString();
+    const inboxId = `rr_${randomUUID().slice(0, 8)}`;
+
+    const lines = [`**Research Radar Run Complete**`, ``];
+    lines.push(`- Analyzed recent intelligence feeds`);
+    if (newIdeas > 0) lines.push(`- ${newIdeas} new research ideas identified`);
+    if (refined > 0) lines.push(`- ${refined} existing ideas refined`);
+    if (highPotentialCount > 0) lines.push(`- ${highPotentialCount} ideas surfaced as high-potential (composite ≥ 0.7)`);
+    lines.push(``);
+    lines.push(`Check individual inbox items for high-potential ideas, or browse the research radar to explore all surfaced ideas.`);
+
+    db.insert(inboxItems).values({
+      id: inboxId,
+      title: `🧭 Research Radar: ${newIdeas} new idea${newIdeas !== 1 ? "s" : ""} identified`,
+      content: lines.join("\n"),
+      summary: `${newIdeas} new ideas, ${refined} refined, ${highPotentialCount} high-potential from this run`,
+      type: "research",
+      isRead: false,
+      requiresAction: true,
+      actionStatus: "pending",
+      modifiedAt: now,
+      sourceAgent: "researcher",
+    }).run();
   }
 
   // ── Prompt Builders ─────────────────────────────────────────────────
