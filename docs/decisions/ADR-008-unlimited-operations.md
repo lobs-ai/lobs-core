@@ -1,7 +1,7 @@
 # ADR-008: Unlimited Operations — Removing Cost Constraints from Agent Behavior
 
 **Date:** 2026-04-14
-**Status:** Accepted
+**Status:** Completed
 **Decision:** Shift from cost-constrained to impact-constrained agent operations
 
 ## Context
@@ -121,10 +121,12 @@ Update the heartbeat instructions to reflect the new operating mode:
 
 ## Implementation Order
 
-1. **Models config update** — reflect subscription costs (immediate, no code change)
-2. **HEARTBEAT.md rewrite** — new operating posture (immediate, config change)
-3. **Continuous worker system** — heartbeat spawns workers from backlog (code change)
-4. **New cron jobs** — CI, GitHub triage, dependency monitor (code + config)
-5. **Fallback chain update** — prefer minimax, direct API as emergency (config change)
-6. **Strong tier escalation policy** — auto-escalation from standard (code change)
-7. **Cost audit cron** — weekly spend verification (code + config)
+1. ✅ **Models config update** — reflect subscription costs (immediate, no code change)
+2. ✅ **HEARTBEAT.md rewrite** — new operating posture (immediate, config change)
+3. ✅ **Continuous worker system** — heartbeat spawns workers from backlog (code change)
+4. ✅ **New cron jobs** — CI, GitHub triage, dependency monitor (code + config)
+5. ✅ **Fallback chain update** — prefer minimax, direct API as emergency (config change)
+6. ✅ **Strong tier escalation policy** — auto-escalation from standard (code change)
+7. ✅ **Cost audit cron** — weekly spend verification (code + config)
+
+**Implementation complete** — all phases implemented in commits 7752884–1476a76. Heartbeat runs continuous worker dispatch with auto-escalation to strong tier after 2+ failures. All ADR cron jobs exist and are active. Typecheck passes clean.
