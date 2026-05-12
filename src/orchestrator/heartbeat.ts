@@ -424,11 +424,21 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
       } else {
         for (const task of tasks) {
           if (spawnedWorkers.length >= config.maxConcurrentWorkers) break;
-          // ADR-008: Auto-escalate to strong tier after 2+ failures on same task
+          // ADR-008 Phase 6: Auto-escalate to strong tier after 2+ failures on same task
+          const db = getRawDb();
+          const failedCountResult = db.prepare(`
+            SELECT COUNT(*) as count FROM worker_runs
+            WHERE task_id = ? AND succeeded = 0
+          `).get(task.id) as { count: number };
+          const failedCount = failedCountResult?.count ?? 0;
+
           const taskAny = task as unknown as Record<string, unknown>;
-          const tier = ((taskAny["escalationTier"] as number) ?? 0) > 0 || ((taskAny["retryCount"] as number) ?? 0) >= 2
-            ? "strong"
-            : ((taskAny["modelTier"] as string) ?? "standard");
+          const requestedTier = ((taskAny["modelTier"] as string) ?? "standard");
+          // Escalate to strong after 2+ failed runs on standard tier, or if already strong
+          const tier = failedCount >= 2 || requestedTier === "strong" ? "strong" : requestedTier;
+          if (failedCount >= 2 && requestedTier !== "strong") {
+            log().warn(`[heartbeat] ADR-008 Phase 6: Escalating task ${task.id} to strong tier after ${failedCount} failures`);
+          }
           const model = getModelForTier(tier);
           const workerId = `heartbeat-${task.id}-${Date.now()}`;
           log().info(`[heartbeat] Spawning worker taskId=${task.id} agent=${task.agent || "programmer"} model=${model} tier=${tier}`);
