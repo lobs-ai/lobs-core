@@ -154,7 +154,10 @@ function buildLiveStateSection(params: {
       ? (workingState?.objective ??
         spec.task.trim().split("\n").find((line) => line.trim().length > 0) ??
         spec.task.trim())
-      : "Continue the current task.";
+      : (workingState?.objective ??
+        (spec.task.notes
+          ? `${spec.task.title.trim()}\n\n${spec.task.notes.trim()}`
+          : spec.task.title.trim()));
 
   const sources = [contextBlock, learnings, additionalContext, ...(recentHistory ?? [])]
     .filter((value): value is string => Boolean(value && value.trim().length > 0))

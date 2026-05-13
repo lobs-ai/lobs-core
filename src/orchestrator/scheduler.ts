@@ -33,6 +33,7 @@ export interface SchedulerConfig {
 export interface Task {
   id: string;
   title: string;
+  notes?: string;
   priority: string; // "high" | "medium" | "low"
   agent: string;
   modelTier?: string;
@@ -87,7 +88,7 @@ export function getNextTasks(config: SchedulerConfig): Task[] {
   // EXCLUDE tasks with status='waiting_on' (blocked on external input)
   const readyTasks = db
     .prepare(
-      `SELECT id, title, priority, agent, model_tier, created_at, project_id 
+      `SELECT id, title, notes, priority, agent, model_tier, created_at, project_id 
        FROM tasks 
        WHERE status = 'active' AND work_state != 'done'
        AND (work_state = 'not_started' OR work_state IS NULL)
@@ -96,6 +97,7 @@ export function getNextTasks(config: SchedulerConfig): Task[] {
     .all() as Array<{
     id: string;
     title: string;
+    notes: string | null;
     priority: string | null;
     agent: string | null;
     model_tier: string | null;
@@ -132,6 +134,7 @@ export function getNextTasks(config: SchedulerConfig): Task[] {
       task: {
         id: task.id,
         title: task.title,
+        notes: task.notes ?? undefined,
         priority,
         agent: task.agent ?? "programmer",
         modelTier,

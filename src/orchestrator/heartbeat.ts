@@ -444,7 +444,7 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
           log().info(`[heartbeat] Spawning worker taskId=${task.id} agent=${task.agent || "programmer"} model=${model} tier=${tier}`);
           // Fire and forget — let the worker run independently
           runAgent({
-            task: task.title,
+            task: { id: task.id, title: task.title, notes: task.notes ?? undefined },
             agent: task.agent || "programmer",
             model,
             cwd: process.cwd(),

@@ -5,8 +5,8 @@
 import type { TaskCategory } from "../services/model-router.js";
 
 export interface AgentSpec {
-  /** Task prompt — what the agent should do */
-  task: string;
+  /** Task — either a string or an object with id, title, and notes */
+  task: string | { id: string; title: string; notes?: string };
   /** Agent type (programmer, writer, researcher, reviewer, architect) */
   agent: string;
   /** System prompt override (otherwise built from agent template) */
