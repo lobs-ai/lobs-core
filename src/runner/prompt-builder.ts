@@ -172,7 +172,7 @@ export async function buildSmartSystemPrompt(spec: AgentSpec): Promise<{
 
   // 4. Assemble intelligent context using the context engine
   const context = await assembleContext({
-    task: spec.task,
+    task: typeof spec.task === "string" ? spec.task : spec.task.title,
     agentType: spec.agent,
     projectId: spec.context?.projectId,
     contextRefs: spec.context?.contextRefs?.map(r => r.path),

@@ -1,9 +1,10 @@
 /**
  * DependencyMonitorCron — ADR-008 Phase 4: Dependency monitor cron
  *
- * Runs daily. Runs `npm audit --audit-level=high` in lobs-core.
- * If vulnerabilities found, creates a task with details and posts summary to Discord.
+ * Runs Monday at 8 AM ET. For each repo in ~/lobs/ and ~/paw/ with a package.json,
+ * runs `npm audit --audit-level=moderate` and reports vulnerabilities by severity.
  *
+ * Reports to Discord #agent-work.
  * Uses the agent's `agent` payload_kind so the LLM creates the task.
  */
 
@@ -11,20 +12,15 @@ import { getCronService } from "../../services/cron.js";
 import { log } from "../../util/logger.js";
 
 const DM_CHANNEL_ID = "1481131824867573770";
-const DM_SCHEDULE = "0 9 * * *"; // 9 AM daily
-const REPO = "lobs-ai/lobs-core";
+const DM_SCHEDULE = "0 8 * * 1"; // Monday 8 AM ET
 
-const DM_PROMPT = `You are monitoring dependencies for ${REPO}.
+const DM_PROMPT = `You are monitoring dependencies across all repos in ~/lobs/ and ~/paw/ that have a package.json.
 
-Run: \`cd ~/lobs/lobs-core && npm audit --audit-level=high\`
+For each repo with a package.json:
+1. Run: \`npm audit --audit-level=moderate\`
+2. Report vulnerabilities grouped by severity (critical, high, moderate)
 
-If vulnerabilities are found:
-1. Create a task titled "Dependency vulnerabilities found" with notes listing each vulnerability (package, severity, fix available yes/no)
-2. Post a summary to Discord channel <#${DM_CHANNEL_ID}>: count of vulnerabilities, severity breakdown, and whether fixes are available
-
-If no vulnerabilities found, stay silent.
-
-Working directory for npm audit: /Users/lobs/lobs/lobs-core`;
+Post a summary to Discord channel <#${DM_CHANNEL_ID}>: repo name, count by severity, and whether fixes are available. If no vulnerabilities found, stay silent.`;
 
 export function registerDependencyMonitorCron(): void {
   const svc = getCronService();

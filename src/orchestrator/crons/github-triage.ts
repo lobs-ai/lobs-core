@@ -1,46 +1,33 @@
 /**
  * GitHubTriageCron — ADR-008 Phase 4: GitHub triage cron
  *
- * Runs daily at 9 AM ET. Uses `gh` CLI to:
- * - Auto-label new unlabelled issues
- * - Detect stale PRs (no activity 7+ days)
- * - Flag unassigned issues older than 48h
+ * Runs weekdays at 9 AM ET. Uses `gh` CLI to:
+ * - Identify issues with no labels
+ * - Detect issues older than 7 days with no activity
+ * - Flag issues assigned to @RafeSymonds or @marcus-darden
  *
- * Monitors: lobs-ai/lobs-core, lobs-ai/lobs-memory, lobs-ai/lobs-nexus,
- *           paw-engineering/paw-hub, paw-engineering/ship-api
+ * Monitors: lobs-ai, paw-engineering orgs
  *
- * Uses the agent's `agent` payload_kind so the LLM handles labeling.
+ * Uses the agent's `agent` payload_kind so the LLM handles triage.
  */
 
 import { getCronService } from "../../services/cron.js";
 import { log } from "../../util/logger.js";
 
 const GH_CHANNEL_ID = "1481131824867573770";
-const GH_SCHEDULE = "0 9 * * *"; // 9 AM ET daily
-const REPOS = [
-  "lobs-ai/lobs-core",
-  "lobs-ai/lobs-memory",
-  "lobs-ai/lobs-nexus",
-  "paw-engineering/paw-hub",
-  "paw-engineering/ship-api",
-];
+const GH_SCHEDULE = "0 9 * * 1-5"; // 9 AM ET weekdays only
+const ORGS = ["lobs-ai", "paw-engineering"];
 
-const GH_PROMPT = `You are a diligent open-source maintainer. Run GitHub triage every morning.
+const GH_PROMPT = `You are a diligent open-source maintainer doing GitHub triage.
 
-For each of these repos: ${REPOS.join(", ")}:
+For each org in ${ORGS.join(", ")}, run: \`gh issue list --state open --limit 50\`
 
-1. Scan overnight: new issues, PRs, comments
-2. Label new issues: \`bug\`, \`enhancement\`, \`question\` based on content
-3. Flag unassigned issues older than 48h
-4. Label stale PRs (no activity in 7+ days) with \`stale\`
+Identify and report to Discord channel <#${GH_CHANNEL_ID}>:
+1. Issues with no labels
+2. Issues older than 7 days with no activity
+3. Issues assigned to @RafeSymonds or @marcus-darden
 
-Shell commands to use:
-- \`gh issue list --repo ${REPOS[0]} --state open --search "created:>$(date -v-1d +%Y-%m-%d)" --json number,title,author --limit 20\`
-- \`gh pr list --repo ${REPOS[0]} --state open --search "updated:<$(date -v-7d +%Y-%m-%d)" --json number,title,updatedAt --limit 20\`
-- \`gh issue edit --repo ${REPOS[0]} --add-label triage\`
-- \`gh pr edit --repo ${REPOS[0]} --add-label stale\`
-
-After completing all triage actions, post a brief summary to Discord channel <#${GH_CHANNEL_ID}> with counts of: new issues triaged, stale PRs labeled, unassigned issues flagged. If nothing needed doing, stay silent.`;
+Post a summary with counts and links. If nothing notable, stay silent.`;
 
 export function registerGitHubTriageCron(): void {
   const svc = getCronService();

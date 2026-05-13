@@ -12,18 +12,20 @@ import { getCronService } from "../../services/cron.js";
 import { log } from "../../util/logger.js";
 
 const CI_CHANNEL_ID = "1481131824867573770";
-const CI_SCHEDULE = "*/15 * * * *";
+const CI_SCHEDULE = "*/30 * * * *";
 const CI_JOB_ID = "ci-runner-discord";
 
 /** Prompt the LLM receives when the cron fires — it has the Discord tool to post results */
-const CI_PROMPT = `Run CI checks in ${process.cwd()} and post results to channel <#1481131824867573770>.
+const CI_PROMPT = `You are a CI/CD monitor. Check all repos in ~/paw/ and ~/lobs/ that have a package.json or cargo.toml.
 
-Steps:
-1. Run \`npm run typecheck && npm run lint\`
-2. If errors: post failure summary with error count and first 20 lines of output
-3. If no errors: post \`✅ All CI checks passed\`
+For each repo:
+1. Run \`git fetch\` and check if main branch has new unpulled commits
+2. If main has new commits, check for CI risk signals:
+   - Breaking test patterns in recent commits (look for test.skip, it.skip,.skip in .test.ts files)
+   - Major version bumps in package-lock.json (e.g., "major": true)
+3. Alert to Discord channel <#${CI_CHANNEL_ID}> if something needs attention
 
-Be concise.`;
+Use standup mode. Be concise — only report problems, not healthy repos.`;
 
 /**
  * Register the CI runner cron job as an agent payload.

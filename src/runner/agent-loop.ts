@@ -399,7 +399,14 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
       `with ${spec.resumeMessages.length} prior messages (~${resumedTurnCount} turns)`
     );
   } else {
-    messages.push({ role: "user", content: spec.task });
+    messages.push({
+      role: "user",
+      content: typeof spec.task === "string"
+        ? spec.task
+        : (spec.task.notes
+          ? `${spec.task.title}\n\n${spec.task.notes}`
+          : spec.task.title),
+    });
   }
 
   // Token tracking

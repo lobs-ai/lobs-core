@@ -1,10 +1,11 @@
 /**
  * RepoHealthCron — ADR-008 Phase 4: Repo health cron
  *
- * Runs daily. Checks for:
- * - Dead code files (no imports/exports)
- * - Unused dependencies in package.json
- * - Missing docs (files with no corresponding .md)
+ * Runs Monday at 10 AM ET. Checks for:
+ * - Repos with uncommitted changes
+ * - Repos with stale branches (>30 days since last commit)
+ * - Repos with broken package.json
+ * - Repos with no commits in 60+ days
  *
  * Reports to Discord #agent-work.
  * Uses the agent's `agent` payload_kind.
@@ -14,24 +15,23 @@ import { getCronService } from "../../services/cron.js";
 import { log } from "../../util/logger.js";
 
 const RH_CHANNEL_ID = "1481131824867573770";
-const RH_SCHEDULE = "0 10 * * *"; // 10 AM daily
+const RH_SCHEDULE = "0 10 * * 1"; // Monday 10 AM ET
 
-const RH_PROMPT = `You are checking repo health for lobs-core at /Users/lobs/lobs/lobs-core.
+const RH_PROMPT = `You are checking repo health across ~/lobs/ and ~/paw/.
 
-Check and report to Discord channel <#${RH_CHANNEL_ID}> with the following findings:
+For each repo:
+1. Check for uncommitted changes: \`git status --porcelain\`
+2. Check for stale branches: list branches with last commit >30 days ago
+3. Check for broken package.json: try \`node -e "JSON.parse(require('fs').readFileSync('package.json'))"\`
+4. Check for inactive repos: no commits in 60+ days (check \`git log --format="%ci" -1\`)
 
-1. **Dead code files**: Find .ts/.js files in src/ that have no imports from other files and no exports. These are orphaned modules that may be unused. List the file paths.
+Report to Discord channel <#${RH_CHANNEL_ID}>:
+- Repos with uncommitted changes
+- Repos with stale branches
+- Repos with broken package.json
+- Repos with no commits in 60+ days
 
-2. **Unused dependencies**: Run \`cd /Users/lobs/lobs/lobs-core && npm ls --depth=0 2>/dev/null | grep -v "^@" | awk '{print $2}' | while read pkg; do grep -r "import.*$pkg" src/ --include="*.ts" > /dev/null || echo "$pkg"; done\` to find packages in package.json not imported anywhere. Alternatively check manually.
-
-3. **Missing docs**: For each .ts file in src/ that has significant logic (not just re-exports), check if a corresponding .md docs file exists in docs/ or has documentation in the file header. Report files that lack docs.
-
-Format your Discord report as:
-- 🗃️ Dead code: [list or "None found"]
-- 📦 Unused deps: [list or "None found"]
-- 📝 Missing docs: [list or "None found"]
-
-If everything looks healthy, post "✅ Repo health check passed — no issues found."`;
+If everything looks healthy, stay silent.`;
 
 export function registerRepoHealthCron(): void {
   const svc = getCronService();

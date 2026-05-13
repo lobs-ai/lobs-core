@@ -27,6 +27,7 @@ import { registerCiRunnerCron } from "./orchestrator/crons/ci-runner.js";
 import { registerGitHubTriageCron } from "./orchestrator/crons/github-triage.js";
 import { registerDependencyMonitorCron } from "./orchestrator/crons/dependency-monitor.js";
 import { registerRepoHealthCron } from "./orchestrator/crons/repo-health.js";
+import { registerTestRunnerCron } from "./orchestrator/crons/test-runner.js";
 import { runDbMaintenance } from "./services/db-maintenance.js";
 import { initCronService } from "./services/cron.js";
 import { runSentinelCheck } from "./services/system-sentinel.js";
@@ -396,6 +397,7 @@ async function main() {
   registerGitHubTriageCron();
   registerDependencyMonitorCron();
   registerRepoHealthCron();
+  registerTestRunnerCron();
   const researchQueue = initResearchQueueService(getRawDb());
   const workerRegistry = new WorkerRegistry(getRawDb(), cronService);
   workerRegistry.register(new MemoryProcessorWorker());
