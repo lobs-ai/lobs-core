@@ -1,11 +1,11 @@
 /**
- * Morning Brief Worker — sends a daily Discord summary at 7:30am ET.
+ * Morning Brief Worker — sends a daily Discord summary at 7:00am ET.
  *
  * Reads DB directly (no HTTP round-trip) and formats a compact Discord message
  * Rafe would actually read. No LLM dependency — pure data formatting.
  *
  * Channel: 1466921249421660415 (alerts)
- * Schedule: 30 7 * * 1-5 (7:30am weekdays ET)
+ * Schedule: 0 7 * * 1-5 (7:00am weekdays ET)
  */
 
 import { eq, and, gte, inArray, desc, sql } from "drizzle-orm";
