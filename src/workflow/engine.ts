@@ -270,6 +270,11 @@ export class WorkflowExecutor {
       if (trigger["type"] === "task_match") {
         const agentTypes = (trigger["agent_types"] as string[]) ?? [];
         if (agentTypes.includes(task["agent"] as string)) return wf;
+        const titlePatterns = (trigger["title_patterns"] as string[]) ?? [];
+        const taskTitle = (task["title"] as string) ?? "";
+        for (const pattern of titlePatterns) {
+          if (taskTitle.toLowerCase().includes(pattern.toLowerCase())) return wf;
+        }
       }
     }
     return null;

@@ -1089,6 +1089,31 @@ const DEFAULT_WORKFLOWS = [
   },
 
   // ══════════════════════════════════════════════════════════════════
+  // MORNING BRIEFING
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "morning-briefing",
+    description: "Morning briefing and standup — routes to orchestrator for review and action.",
+    trigger: { type: "task_match", title_patterns: ["morning briefing", "standup"] },
+    is_active: true,
+    nodes: [
+      {
+        id: "spawn_orchestrator",
+        type: "spawn",
+        config: {
+          agent_type: "orchestrator",
+          model_tier: "medium",
+          max_runtime_minutes: 30,
+        },
+        on_success: "done",
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: getBotId(), category: "scheduling", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
   // INBOX PROCESSING
   // ══════════════════════════════════════════════════════════════════
   {
