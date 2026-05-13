@@ -12,7 +12,7 @@ import { getCronService } from "../../services/cron.js";
 import { log } from "../../util/logger.js";
 
 const CI_CHANNEL_ID = "1481131824867573770";
-const CI_SCHEDULE = "*/30 * * * *";
+const CI_SCHEDULE = "*/10 * * * *"; // Every 10 minutes
 const CI_JOB_ID = "ci-runner-discord";
 
 /** Prompt the LLM receives when the cron fires — it has the Discord tool to post results */

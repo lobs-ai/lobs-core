@@ -1,125 +1,86 @@
-# HEARTBEAT.md — System Heartbeat
+# HEARTBEAT.md — Control Loop Operations
 
-**ADR-008:** [docs/decisions/ADR-008-unlimited-operations.md](docs/decisions/ADR-008-unlimited-operations.md)
+## Overview
+The heartbeat is a **45-second interval control loop** that monitors system health, manages the backlog, and keeps continuous workers running. It is the central coordination mechanism for all autonomous work in lobs-core.
 
-## Operating Posture
-
-The heartbeat operates in **aggressive autonomous mode** (ADR-008 Phase 3). The system is never idle when there is work to do. Cost is no longer a gating factor — impact is.
-
-> **Old posture:** Conservative. Monitor, alert, let Rafe decide.
-> **New posture:** Proactive. Monitor, then act. Fill idle capacity with backlog work.
-
-## Actions (in order)
-
-### 1. Health Checks (non-blocking, ~5s)
-
-| Check | What it monitors | Alert threshold |
-|-------|-----------------|-----------------|
-| `lobsCore` | Process alive | Always ok (if heartbeat runs) |
-| `memoryServer` | Unified memory DB accessible | Error |
-| `lmStudio` | Local model server reachable | Warning (local-only) |
-| `tasks` | Active/failed/blocked counts | >5 failed, >10 blocked |
-| `workers` | Completions vs failures (last hour) | >50% failure rate |
-| `inbox` | Unread actionable items | >20 unread |
-
-Health checks must **never block** spawning. A degraded health status produces an alert but the heartbeat continues to the worker spawning phase.
-
-### 2. Continuous Worker Spawning (primary action)
-
-After health checks, the heartbeat queries the scheduler for the next batch of tasks to work on:
-
+## Heartbeat Interval
 ```typescript
-import { getNextTasks, getSchedulerConfig } from "./orchestrator/scheduler.js";
+HEARTBEAT_INTERVAL_MS = 45_000
+```
+Defined in `src/orchestrator/heartbeat.ts`.
 
-const config = getSchedulerConfig();
-const tasks = getNextTasks(config);
+## Control Loop Steps (per heartbeat tick)
+
+### 1. Health Probes
+Run health checks in parallel:
+- **Database probe** — `SELECT 1` via SQLite
+- **Memory probe** — HTTP GET to `lobs-memory` on `:7420`
+- **LM Studio probe** — check if LM Studio is running (for `micro` tier)
+- **Disk probe** — `df` check on workspace root
+
+If all probes pass → `healthLevel = "healthy"`
+If 1 probe fails → `healthLevel = "degraded"` (log warning, continue)
+If 2+ probes fail → `healthLevel = "critical"` (log error, skip spawning, escalate to Rafe)
+
+### 2. Backlog Management
+Call `getNextTasks()` from the scheduler:
+- Returns queued tasks sorted by priority, filtered to available agents
+- Each task: `{ task, agent, source, priority }`
+
+### 3. Continuous Worker Management
+Maintains `spawnedWorkers: Map<string, SpawnedWorker>` across heartbeats.
+
+**Worker lifecycle:**
+1. **Spawn** — from backlog tasks with `source: "backlog"` (triggered by heartbeat)
+2. **Track** — add to `spawnedWorkers` with `spawnedAt: Date.now()`
+3. **Monitor** — on each heartbeat, check if running workers are making progress
+4. **Escalate** — workers that fail 2+ times are re-spawned with `modelTier: "strong"`
+5. **Detect stuck workers** — workers running >45 minutes with no tool calls → log error
+6. **Prune** — remove completed/failed workers from `spawnedWorkers`
+
+**Stuck worker threshold:** `STUCK_WORKER_THRESHOLD_MS = 45 * 60 * 1000`
+
+### 4. Lint Check
+If `spawnedWorkers.size > 0` and no lint has run in the last 10 minutes, trigger lint check with a 20-minute timeout. This catches build errors from continuous work.
+
+## Scheduler Config
+`getSchedulerConfig()` reads `~/.lobs/scheduler-config.json`. Schema:
+```json
+{
+  "enabled": true,
+  "maxConcurrentWorkers": 4,
+  "preferHighPriority": true,
+  "modelTierPolicy": {
+    "default": "medium",
+    "escalateAfterFailures": 2,
+    "escalateTo": "strong",
+    "fallbackTier": "micro"
+  },
+  "stuckWorkerThresholdMs": 2700000
+}
 ```
 
-**Limits:** Max 3 concurrent workers total (enforced by scheduler's `maxConcurrentWorkers`). The heartbeat spawns up to `maxConcurrentWorkers` workers per cycle — enough to keep the pipeline moving without overwhelming the system.
+## Health Levels
+| Level | Meaning | Action |
+|-------|---------|--------|
+| `healthy` | All probes pass | Normal operation |
+| `degraded` | 1 probe fails | Log warning, continue |
+| `critical` | 2+ probes fail | Skip spawning, alert Rafe |
 
-**Selection criteria (per ADR-008):**
-- Urgency-weighted priority (high > medium > low)
-- Task age (older tasks score higher)
-- Cost efficiency (cheaper tasks preferred — less relevant now that MiniMax is $0)
+## Implementation Status
+- ✅ Phase 1: Health probe system with database, memory, LM Studio, disk probes
+- ✅ Phase 2: Backlog integration via `getNextTasks()`
+- ✅ Phase 3: Continuous worker system (spawn, track, escalate, prune)
+- ✅ Phase 5: Fallback chain implementation (`strong` → `medium` → `small`)
+- 🔄 Phase 4: Cron job integration (scheduled jobs via `getNextTasks`)
+- 🔄 Phase 6: Strong tier policy (automatic upgrade rules)
+- 🔄 Phase 7: Cost audit cron
 
-**Spawning logic:**
-- For each selected task, spawn using `runAgent()` with the task's `agent` type
-- Default agent: `task.agent ?? 'programmer'`
-- Default model tier: `task.modelTier ?? 'medium'`
-- Log every spawn: `[HEARTBEAT] Spawning {agent} on task {id} ({title})`
-
-**What NOT to do:**
-- Do not wait for workers to complete before returning — spawning is fire-and-forget
-- Do not override task assignment or redistribute work
-- Do not retry failed workers in this phase — that is handled by the failure tracking in `control-loop.ts`
-
-### 3. Stuck Worker Detection
-
-On each heartbeat, if a worker has been running for >45 minutes without completion, log a warning:
-
-```
-[HEARTBEAT] Worker {workerId} may be stuck (task={taskId}, duration={N}m)
-```
-
-This is informational only — heartbeat does not kill workers. Stuck worker recovery is handled by `control-loop.ts` checkpoint logic and the researcher escalation path.
-
-### 4. Alert Forwarding
-
-Alerts from health checks are collected and returned in `HeartbeatResult.alerts`. The cron scheduler (or external monitoring) is responsible for paging Rafe if alerts persist across 3+ consecutive heartbeats. The heartbeat itself does not page — it only reports.
-
-## Cycle Frequency
-
-- **Every 5 minutes** via cron (`*/5 * * * *`)
-- Each cycle: ~5s health checks + up to 2s per spawned worker (non-blocking)
-- Total cycle time: <10 seconds
-
-## No Idle Heartbeats
-
-Every heartbeat cycle should produce at least one action. If there are no tasks to spawn and all health checks pass, log:
-
-```
-[HEARTBEAT] ✓ All healthy, no pending tasks
-```
-
-If there are pending tasks but no available worker slots, log:
-
-```
-[HEARTBEAT] No slots available ({active}/{max} workers active)
-```
-
-## Failure Handling
-
-- If spawning fails (e.g., model unavailable), log the error and **continue** — do not retry within the same cycle
-- Failed spawns are tracked in `worker_runs` table with `succeeded=0`; the scheduler will re-select them on the next cycle
-- The researcher escalation path (control-loop.ts) handles tasks that fail repeatedly
-
-## Relationship to Other Systems
-
-| System | Role |
-|--------|------|
-| `scheduler.ts` | Decides which tasks to run, enforces concurrency limits |
-| `control-loop.ts` | Handles workflow-driven task spawning (from workflow definitions) |
-| `worker-manager.ts` | Tracks active workers, handles session management |
-| `heartbeat.ts` | Fills idle capacity with backlog tasks (this file) |
-
-Heartbeat spawning and workflow spawning are **independent paths** that both write to `worker_runs`. The scheduler's concurrency guard (`maxConcurrentWorkers`) prevents oversubscription regardless of which path spawns the worker.
-
-## References
-
-- [ADR-008: Unlimited Operations](docs/decisions/ADR-008-unlimited-operations.md)
-- [Scheduler](src/orchestrator/scheduler.ts)
-- [Worker Manager](src/orchestrator/worker-manager.ts)
-- [Control Loop](src/orchestrator/control-loop.ts)
-- [Cost Audit Cron](src/orchestrator/cost-audit.ts) — weekly spend verification per ADR-008 Phase 7
-
-## ADR-008 Implementation Status
-
-| Phase | Description | Status |
-|-------|-------------|--------|
-| 1 | Models config update (MiniMax at $0) | ✅ Done |
-| 2 | HEARTBEAT.md rewrite (aggressive autonomous mode) | ✅ Done |
-| 3 | Continuous worker system (heartbeat spawns workers) | Pending |
-| 4 | New cron jobs (CI runner, GitHub triage, dependency monitor, test impact) | Partial |
-| 5 | Fallback chain updates (local → MiniMax → strong) | Pending |
-| 6 | Strong tier auto-escalation | Pending |
-| 7 | **Cost audit cron — weekly spend verification** | ✅ Done |
+## Key Functions
+- `runHeartbeat()` — main control loop, called every 45s
+- `runHealthProbes()` — parallel probe execution, returns `HealthResult`
+- `spawnWorkerFromTask()` — spawns a continuous worker from a queued task
+- `checkStuckWorkers()` — detects and handles stuck workers
+- `runLintCheck()` — triggers lint if continuous work is running
+- `getSchedulerConfig()` — reads scheduler configuration
+- `getNextTasks()` — queries queued tasks from the scheduler

@@ -12,7 +12,7 @@ import { getCronService } from "../../services/cron.js";
 import { log } from "../../util/logger.js";
 
 const TR_CHANNEL_ID = "1481131824867573770";
-const TR_SCHEDULE = "0 */4 * * *"; // Every 4 hours
+const TR_SCHEDULE = "0 */2 * * *"; // Every 2 hours
 
 const TR_PROMPT = `You are running tests in ~/lobs/lobs-core/.
 
