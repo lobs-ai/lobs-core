@@ -218,8 +218,11 @@ export interface CronJobView {
 /**
  * Compute the next fire time for a cron expression, brute-force scanning minute-by-minute.
  * Returns null if no match within 8 days (safeguard).
+ *
+ * @param cronExpr - Standard 5-field cron expression
+ * @param tz - Timezone for evaluation (e.g. "America/New_York"). Defaults to "America/New_York".
  */
-function computeNextCronRun(cronExpr: string): string | null {
+function computeNextCronRun(cronExpr: string, tz = "America/New_York"): string | null {
   try {
     const schedule = parseCronExpression(cronExpr);
     const now = new Date();
@@ -230,12 +233,13 @@ function computeNextCronRun(cronExpr: string): string | null {
 
     // Scan up to 8 days ahead (11520 minutes) to cover weekly schedules
     for (let i = 0; i < 11520; i++) {
+      const { minute, hour, dayOfMonth, month, dayOfWeek } = getDatePartsInTz(candidate, tz);
       if (
-        schedule.minute.includes(candidate.getMinutes()) &&
-        schedule.hour.includes(candidate.getHours()) &&
-        schedule.dayOfMonth.includes(candidate.getDate()) &&
-        schedule.month.includes(candidate.getMonth() + 1) &&
-        schedule.dayOfWeek.includes(candidate.getDay())
+        schedule.minute.includes(minute) &&
+        schedule.hour.includes(hour) &&
+        schedule.dayOfMonth.includes(dayOfMonth) &&
+        schedule.month.includes(month) &&
+        schedule.dayOfWeek.includes(dayOfWeek)
       ) {
         return candidate.toISOString();
       }
@@ -450,7 +454,7 @@ export class CronService {
         schedule: job.schedule,
         enabled: job.enabled,
         lastRun: job.lastRun?.toISOString() ?? null,
-        nextRun: job.enabled ? computeNextCronRun(job.schedule) : null,
+        nextRun: job.enabled ? computeNextCronRun(job.schedule, "America/New_York") : null,
         payloadKind: "system",
       });
     }
@@ -467,7 +471,7 @@ export class CronService {
       let nextRun: string | null = null;
       if (agentJob.enabled) {
         if (agentJob.schedule.kind === "cron" && agentJob.schedule.expr) {
-          nextRun = computeNextCronRun(agentJob.schedule.expr);
+          nextRun = computeNextCronRun(agentJob.schedule.expr, agentJob.schedule.tz ?? "America/New_York");
         } else if (agentJob.schedule.kind === "at" && agentJob.schedule.at) {
           const atTime = new Date(agentJob.schedule.at);
           nextRun = atTime.getTime() > Date.now() ? atTime.toISOString() : null;

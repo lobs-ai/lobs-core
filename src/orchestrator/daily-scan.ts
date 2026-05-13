@@ -396,7 +396,7 @@ export function registerDailyScan(cronService: CronService): void {
   cronService.registerSystemJob({
     id: "daily-scan",
     name: "Daily Scan",
-    schedule: "0 8 * * *", // 8 AM daily
+    schedule: "0 7 * * *", // 7 AM ET daily
     enabled: true,
     handler: async () => {
       LOG.info("Daily scan cron triggered");
@@ -404,5 +404,5 @@ export function registerDailyScan(cronService: CronService): void {
     },
   });
 
-  LOG.info("Registered daily-scan cron job (8 AM daily)");
+  LOG.info("Registered daily-scan cron job (7 AM ET daily)");
 }
