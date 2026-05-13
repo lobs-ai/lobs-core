@@ -399,6 +399,7 @@ async function main() {
   registerDependencyMonitorCron();
   registerRepoHealthCron();
   registerTestRunnerCron();
+  registerDailyScan(cronService);
   const researchQueue = initResearchQueueService(getRawDb());
   const workerRegistry = new WorkerRegistry(getRawDb(), cronService);
   workerRegistry.register(new MemoryProcessorWorker());
@@ -731,9 +732,6 @@ async function main() {
       await executor.run("reflection-cycle");
     },
   });
-
-  // Daily inbox scan — per ADR-008: scan for stale inbox items
-  registerDailyScan(cronService);
 
   // Daily reflection — run at 03:00 local time, after daily db-maintenance
   let lastDailyReflectionDate = "";
