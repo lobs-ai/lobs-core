@@ -30,7 +30,7 @@ export class MorningBriefWorker extends BaseWorker {
     id: "morning-brief",
     name: "Morning Brief",
     description: "Sends a daily Discord summary of goals, tasks, and agent activity",
-    schedule: "30 7 * * 1-5",
+    schedule: "0 7 * * 1-5",
     enabled: true,
   };
 
