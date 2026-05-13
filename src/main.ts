@@ -54,6 +54,7 @@ import { imagineService } from "./services/imagine.js";
 import { countActiveWorkers, getActiveWorkers } from "./orchestrator/worker-manager.js";
 import { runStartupTelemetry, startDiskSpaceMonitor } from "./services/restart-telemetry.js";
 import { getGatewayConfig, getLobsRoot, getServerPort } from "./config/lobs.js";
+import { GitHubTriageWorker } from "./workers/github-triage.js";
 import { WorkerRegistry } from "./workers/index.js";
 import { MemoryProcessorWorker } from "./workers/memory-processor.js";
 import { ResearchProcessorWorker } from "./workers/research-processor.js";
@@ -406,6 +407,7 @@ async function main() {
   const intelSweep = initIntelSweepService(getRawDb(), researchQueue);
   workerRegistry.register(new ResearchProcessorWorker(researchQueue, intelSweep));
   workerRegistry.register(new IntelSweepWorker(intelSweep));
+  workerRegistry.register(new GitHubTriageWorker());
 
   // Research radar — identifies novel paper opportunities from intel insights
   const researchRadar = initResearchRadarService(getRawDb());
