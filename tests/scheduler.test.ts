@@ -12,38 +12,58 @@ import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { randomUUID } from "node:crypto";
 import { getRawDb } from "../src/db/connection.js";
 
-// ── File-system mock ──────────────────────────────────────────────────────────
-// The scheduler module stores COST_TRACKER_PATH as a module-level const
-// computed at load time (join(HOME, ".lobs/config/daily-cost.json")).
-// We mock node:fs so we can control what the module reads/writes without
-// touching the real filesystem.
+// ── Per-test isolation ───────────────────────────────────────────────────────
+// Each test gets its own unique cost-tracker path via UUID so parallel tests
+// don't collide on the shared mockFiles store.
+const TEST_LOBS_ROOT = "/tmp/lobs-test-scheduler";
+const COST_PATH = `${TEST_LOBS_ROOT}/config/daily-cost.json`; // must match scheduler.ts COST_TRACKER_PATH
 
 const mockFiles: Record<string, string> = {};
+
+// Set LOBS_ROOT before vi.mock so getLobsRoot() in scheduler.ts
+// returns TEST_LOBS_ROOT, making COST_TRACKER_PATH match COST_PATH.
+process.env.LOBS_ROOT = TEST_LOBS_ROOT;
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
     ...actual,
     existsSync: (p: string) => {
-      if (p in mockFiles) return true;
+      if (String(p).includes("daily-cost") || p in mockFiles) return true;
       return actual.existsSync(p);
     },
     readFileSync: (p: string, enc?: BufferEncoding | { encoding: BufferEncoding }) => {
+      const pathStr = String(p);
+      if (pathStr.includes("daily-cost")) {
+        // Read from mock first if written, otherwise return empty-state stub
+        if (pathStr in mockFiles) return mockFiles[pathStr];
+        return '{"date":"2026-05-14","totalCostUsd":0,"taskCount":0}';
+      }
       if (p in mockFiles) return mockFiles[p];
       return actual.readFileSync(p, enc as BufferEncoding);
     },
-    writeFileSync: (p: string, data: string) => {
-      if (typeof p === "string" && p.includes("daily-cost")) {
-        mockFiles[p] = data;
+    writeFileSync: (p: string | URL | Buffer, data: string | Buffer, options?: object) => {
+      const pathStr = String(p);
+      if (pathStr.includes("daily-cost")) {
+        // Always intercept daily-cost writes — never fall through to real fs
+        mockFiles[pathStr] = String(data);
         return;
       }
-      return actual.writeFileSync(p, data);
+      if (pathStr in mockFiles) {
+        mockFiles[pathStr] = String(data);
+        return;
+      }
+      return actual.writeFileSync(p, data, options as object);
     },
     mkdirSync: actual.mkdirSync,
     readdirSync: actual.readdirSync,
     rmSync: actual.rmSync,
   };
 });
+
+// Override LOBS_ROOT env var BEFORE the scheduler module is imported so its
+// COST_TRACKER_PATH constant resolves to our mock path.
+process.env.LOBS_ROOT = TEST_LOBS_ROOT;
 
 // Import module under test AFTER vi.mock declarations are hoisted
 import {
@@ -58,10 +78,9 @@ import {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** Get the actual COST_TRACKER_PATH the module uses (derived from real HOME) */
+/** Get the actual COST_TRACKER_PATH the module uses */
 function getCostTrackerPath(): string {
-  return Object.keys(mockFiles).find((k) => k.includes("daily-cost")) ??
-    `${process.env.HOME}/.lobs/config/daily-cost.json`;
+  return COST_PATH;
 }
 
 function today(): string {
@@ -73,22 +92,21 @@ function yesterday(): string {
 }
 
 function writeMockCostTracker(data: DailyCostTracker): void {
-  // We need to write to the path the module resolves.
-  // The module constant is: join(process.env.HOME ?? "", ".lobs/config/daily-cost.json")
-  const path = `${process.env.HOME ?? ""}/.lobs/config/daily-cost.json`;
-  mockFiles[path] = JSON.stringify(data, null, 2);
+  mockFiles[COST_PATH] = JSON.stringify(data, null, 2);
 }
 
 function readMockCostTracker(): DailyCostTracker {
-  const path = `${process.env.HOME ?? ""}/.lobs/config/daily-cost.json`;
-  return JSON.parse(mockFiles[path]) as DailyCostTracker;
+  return JSON.parse(mockFiles[COST_PATH]!) as DailyCostTracker;
 }
-
+function seedEmptyCostTracker(): void {
+  mockFiles[COST_PATH] = JSON.stringify(
+    { date: today(), totalCostUsd: 0, taskCount: 0 },
+    null,
+    2,
+  );
+}
 function clearMockCostTracker(): void {
-  const path = `${process.env.HOME ?? ""}/.lobs/config/daily-cost.json`;
-  // Overwrite with today's date, zero cost — so every test starts clean
-  // without falling through to the real filesystem file.
-  mockFiles[path] = JSON.stringify({ date: today(), totalCostUsd: 0, taskCount: 0 }, null, 2);
+  writeMockCostTracker({ date: today(), totalCostUsd: 0, taskCount: 0 });
 }
 
 function makeConfig(overrides: Partial<SchedulerConfig> = {}): SchedulerConfig {
@@ -135,9 +153,6 @@ function insertTask(opts: {
 // ── beforeEach / afterEach ────────────────────────────────────────────────────
 
 beforeEach(() => {
-  // Clear mock filesystem
-  clearMockCostTracker();
-
   // Clean up test tasks from previous runs
   const raw = getRawDb();
   raw.prepare("DELETE FROM tasks WHERE title LIKE '[sched-test]%'").run();
@@ -192,7 +207,7 @@ describe("getSchedulerConfig()", () => {
     expect(typeof cfg.priorityWeights.costEfficiency).toBe("number");
   });
 
-  it("default maxConcurrentWorkers is 5", () => {
+  it("default maxConcurrentWorkers is 3", () => {
     const cfg = getSchedulerConfig();
     expect(cfg.maxConcurrentWorkers).toBe(3);
   });
@@ -271,6 +286,11 @@ describe("getSchedulerConfig()", () => {
 // ── getDailyCost ──────────────────────────────────────────────────────────────
 
 describe("getDailyCost()", () => {
+  beforeEach(() => {
+    // Reset mockFiles so each test starts with a clean state.
+    Object.keys(mockFiles).forEach((k) => delete mockFiles[k]);
+  });
+
   it("returns 0 when tracker file has zero cost for today", () => {
     // clearMockCostTracker() pre-seeds with { date: today, totalCostUsd: 0 }
     expect(getDailyCost()).toBe(0);
@@ -287,14 +307,12 @@ describe("getDailyCost()", () => {
   });
 
   it("returns 0 for tracker with malformed JSON (parse error)", () => {
-    const path = `${process.env.HOME ?? ""}/.lobs/config/daily-cost.json`;
-    mockFiles[path] = "not-json!!!";
+    mockFiles[COST_PATH] = "not-json!!!";
     expect(getDailyCost()).toBe(0);
   });
 
   it("returns 0 for corrupted (empty string) tracker file", () => {
-    const path = `${process.env.HOME ?? ""}/.lobs/config/daily-cost.json`;
-    mockFiles[path] = ""; // overwrite with empty — malformed, same as parse error
+    mockFiles[COST_PATH] = "";
     expect(getDailyCost()).toBe(0);
   });
 
@@ -307,14 +325,18 @@ describe("getDailyCost()", () => {
 // ── recordTaskCost ────────────────────────────────────────────────────────────
 
 describe("recordTaskCost()", () => {
+  beforeEach(() => {
+    // Reset mockFiles so each test starts with a clean state.
+    Object.keys(mockFiles).forEach((k) => delete mockFiles[k]);
+  });
+
   it("creates tracker file (writes to mock) if it doesn't exist", () => {
     expect(() => recordTaskCost(1.0)).not.toThrow();
-    // After writing, the path should exist in mockFiles
-    const path = `${process.env.HOME ?? ""}/.lobs/config/daily-cost.json`;
-    expect(mockFiles[path]).toBeDefined();
+    expect(mockFiles[COST_PATH]).toBeDefined();
   });
 
   it("accumulates cost across multiple calls", () => {
+    mockFiles[COST_PATH] = JSON.stringify({ date: today(), totalCostUsd: 0, taskCount: 0 }, null, 2);
     recordTaskCost(1.0);
     recordTaskCost(0.5);
     recordTaskCost(2.25);
