@@ -23,7 +23,6 @@ import { initToolManager } from "./runner/tools/tool-manager.js";
 import { runHeartbeat } from "./orchestrator/heartbeat.js";
 import { runCostAudit } from "./orchestrator/cost-audit.js";
 import { registerDailyScan } from "./orchestrator/daily-scan.js";
-import { registerCiRunnerCron } from "./orchestrator/crons/ci-runner.js";
 import { registerGitHubTriageCron } from "./orchestrator/crons/github-triage.js";
 import { registerDependencyMonitorCron } from "./orchestrator/crons/dependency-monitor.js";
 import { registerRepoHealthCron } from "./orchestrator/crons/repo-health.js";
@@ -394,7 +393,6 @@ async function main() {
   console.log("Setting up cron service...");
   const cronService = initCronService(getRawDb());
   cronService.seedDefaults();
-  registerCiRunnerCron();
   registerGitHubTriageCron();
   registerDependencyMonitorCron();
   registerRepoHealthCron();
