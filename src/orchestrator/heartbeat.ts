@@ -430,7 +430,16 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
             SELECT COUNT(*) as count FROM worker_runs
             WHERE task_id = ? AND succeeded = 0
           `).get(task.id) as { count: number };
-          const failedCount = failedCountResult?.count ?? 0;
+          const failedCount = (failedCountResult?.count ?? 0) as number;
+
+          // After 3 failures, escalate to needs_review instead of re-spawning
+          if (failedCount >= 3) {
+            log().error(`[heartbeat] Task ${task.id} failed ${failedCount} times — marking needs_review`);
+            const db2 = getRawDb();
+            db2.prepare(`UPDATE tasks SET status = 'needs_review', updated_at = datetime('now') WHERE id = ?`).run(task.id);
+            alerts.push(`task_needs_review: ${task.id} (${task.title})`);
+            continue; // skip spawning, move to next task
+          }
 
           const taskAny = task as unknown as Record<string, unknown>;
           const requestedTier = ((taskAny["modelTier"] as string) ?? "standard");
@@ -455,6 +464,20 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
           // ADR-008: track worker runs so stuck worker detection works
           recordWorkerStart({ workerId, agentType: "heartbeat", taskId: task.id, model });
           spawnedWorkers.push({ taskId: task.id, agent: task.agent || "programmer", model });
+        }
+
+        // Mark tasks with successful recent worker runs as completed
+        try {
+          const db2 = getRawDb();
+          db2.prepare(`
+            UPDATE tasks SET status = 'completed', work_state = 'done', updated_at = datetime('now')
+            WHERE id IN (
+              SELECT task_id FROM worker_runs
+              WHERE succeeded = 1 AND ended_at >= datetime('now', '-5 minutes')
+            ) AND status = 'active'
+          `).run();
+        } catch (err) {
+          log().warn("[heartbeat] Work state cleanup error: " + String(err));
         }
       }
     }
@@ -483,6 +506,26 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
     }
   } catch (err) {
     log().warn("[heartbeat] Stuck worker detection error: " + String(err));
+  }
+
+  // Detect abandoned tasks (active for >24h with no recent worker runs)
+  try {
+    const db3 = getRawDb();
+    const abandonedResult = db3.prepare(`
+      SELECT id, title, updated_at FROM tasks
+      WHERE status = 'active'
+      AND updated_at <= datetime('now', '-24 hours')
+      AND id NOT IN (SELECT task_id FROM worker_runs WHERE started_at >= datetime('now', '-24 hours'))
+      ORDER BY updated_at ASC
+      LIMIT 5
+    `).all() as { id: string; title: string; updated_at: string }[];
+
+    for (const task of abandonedResult) {
+      log().warn(`[heartbeat] Task ${task.id} appears abandoned (active for >24h, no recent workers): ${task.title}`);
+      alerts.push(`abandoned_task: ${task.id}`);
+    }
+  } catch (err) {
+    log().warn("[heartbeat] Abandoned task detection error: " + String(err));
   }
 
   // Overall status
