@@ -5,9 +5,11 @@ The heartbeat is a **45-second interval control loop** that monitors system heal
 
 ## Heartbeat Interval
 ```typescript
-HEARTBEAT_INTERVAL_MS = 45_000
+// Registered as a system job in src/main.ts:
+// cron: "*/5 * * * *" — every 5 minutes
+// ADR-008: continuous monitoring
 ```
-Defined in `src/orchestrator/heartbeat.ts`.
+Defined in `src/orchestrator/heartbeat.ts` (`runHeartbeat()`).
 
 ## Control Loop Steps (per heartbeat tick)
 

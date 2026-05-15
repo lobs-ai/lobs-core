@@ -106,7 +106,9 @@ export function getAgentMentionNames(): string[] {
       const raw = JSON.parse(readFileSync(identityPath, "utf-8"));
       if (raw?.bot?.name) names.add(raw.bot.name.toLowerCase());
       if (raw?.bot?.id) names.add(raw.bot.id.toLowerCase());
-    } catch {}
+    } catch (err) {
+      console.warn(`[lobs] Failed to read identity from ${identityPath}:`, err);
+    }
   }
 
   // Fallback: AGENT_NAME env var (set in Docker containers)

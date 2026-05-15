@@ -4,6 +4,10 @@
 
 set -e
 
+# Resolve to repo root so this works from any subdirectory
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
 echo "🔍 Running type check..."
 if ! npx tsc --noEmit; then
   echo "❌ Type check failed. Push aborted."
