@@ -1,7 +1,7 @@
 # HEARTBEAT.md — Control Loop Operations
 
 ## Overview
-The heartbeat is a **45-second interval control loop** that monitors system health, manages the backlog, and keeps continuous workers running. It is the central coordination mechanism for all autonomous work in lobs-core.
+The heartbeat is a **5-minute interval control loop** that monitors system health, manages the backlog, and keeps continuous workers running. It is the central coordination mechanism for all autonomous work in lobs-core.
 
 ## Heartbeat Interval
 ```typescript
@@ -73,13 +73,13 @@ If `spawnedWorkers.size > 0` and no lint has run in the last 10 minutes, trigger
 - ✅ Phase 1: Health probe system with database, memory, LM Studio, disk probes
 - ✅ Phase 2: Backlog integration via `getNextTasks()`
 - ✅ Phase 3: Continuous worker system (spawn, track, escalate, prune)
+- ✅ Phase 4: Cron job integration — system jobs registered in `main.ts`, strategic reflection workflow firing
 - ✅ Phase 5: Fallback chain implementation (`strong` → `medium` → `small`)
-- 🔄 Phase 4: Cron job integration (scheduled jobs via `getNextTasks`)
-- 🔄 Phase 6: Strong tier policy (automatic upgrade rules)
-- 🔄 Phase 7: Cost audit cron
+- ✅ Phase 6: Strong tier policy — auto-escalation after 2+ failures (`heartbeat.ts:427-441`)
+- ✅ Phase 7: Cost audit cron — registered in `main.ts`, runs weekly on Sunday midnight
 
 ## Key Functions
-- `runHeartbeat()` — main control loop, called every 45s
+- `runHeartbeat()` — main control loop, registered as system cron `*/5 * * * *` in `main.ts`
 - `runHealthProbes()` — parallel probe execution, returns `HealthResult`
 - `spawnWorkerFromTask()` — spawns a continuous worker from a queued task
 - `checkStuckWorkers()` — detects and handles stuck workers
