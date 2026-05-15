@@ -89,9 +89,9 @@ describe("initializeSubscriptionsTable", () => {
     // Should call prepare 3 times (table + 2 indices)
     expect(mockPrepare.mock.calls.length).toBe(3);
     // Each should be followed by .run()
-    const calls = mockPrepare.mock.calls;
-    calls.forEach(([, stmt]) => {
-      expect((stmt as MockStmt).run).toHaveBeenCalled();
+    const calls = mockPrepare.mock.calls as unknown as Array<[sql: string, stmt?: MockStmt]>;
+    calls.forEach((call) => {
+      if (call[1]) expect(call[1].run).toHaveBeenCalled();
     });
   });
 });

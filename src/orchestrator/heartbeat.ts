@@ -453,7 +453,7 @@ export async function runHeartbeat(): Promise<HeartbeatResult> {
             context: { taskId: task.id },
           }).catch((err) => log().error(`[heartbeat] Worker spawn failed taskId=${task.id}: ${String(err)}`));
           // ADR-008: track worker runs so stuck worker detection works
-          recordWorkerStart({ workerId, agentType: task.agent || "programmer", taskId: task.id, model });
+          recordWorkerStart({ workerId, agentType: "heartbeat", taskId: task.id, model });
           spawnedWorkers.push({ taskId: task.id, agent: task.agent || "programmer", model });
         }
       }
