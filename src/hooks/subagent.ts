@@ -468,7 +468,8 @@ function updateTaskFromEnd(taskId: string, succeeded: boolean, reason?: string, 
     // Analyze the git diff for security-sensitive patterns. If any trigger
     // fires, queue a mandatory reviewer task before considering this done.
     // Non-sensitive diffs pass through without spawning a reviewer.
-    if (agentType === "programmer") {
+    // Extended to writer tasks: they also perform file writes that warrant review.
+    if (agentType === "programmer" || agentType === "writer") {
       const triggerResult = shouldTriggerReview({
         repoPath: scopePath ?? null,
         taskId,
@@ -481,13 +482,18 @@ function updateTaskFromEnd(taskId: string, succeeded: boolean, reason?: string, 
           ` (${(task?.title ?? "").slice(0, 60)})\n` +
           triggerResult.reason
         );
-        queueReviewerFollowup(taskId, triggerResult);
+        queueReviewerFollowup(taskId, triggerResult, agentType);
       } else {
         log().info(
           `[REVIEW-GATE] ⏭  No review needed for task ${taskId.slice(0, 8)}` +
           ` (${(task?.title ?? "").slice(0, 60)})\n` +
           triggerResult.reason
         );
+        // Writer tasks without a repo path still need task-list coverage
+        // even if the diff-based trigger found nothing to review.
+        if (agentType === "writer" && !scopePath) {
+          queueReviewerFollowup(taskId, undefined, agentType);
+        }
       }
     }
 
@@ -533,11 +539,41 @@ function updateTaskFromEnd(taskId: string, succeeded: boolean, reason?: string, 
  *   - updateTaskFromEnd (subagent completion path) — with triggerResult
  *   - workflow/engine.ts (workflow completion path) — without triggerResult (legacy)
  */
-export function queueReviewerFollowup(taskId: string, triggerResult?: ReviewTriggerResult): void {
+export function queueReviewerFollowup(taskId: string, triggerResult?: ReviewTriggerResult, agentType?: string): void {
   const db = getDb();
   const now = new Date().toISOString();
   const sourceTask = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
   if (!sourceTask) return;
+
+  // Guard: writer-mode documentation tasks without a scopePath are inherently
+  // unbounded — the agent writes to arbitrary paths outside any repo context.
+  // These tasks need review-list coverage so nothing slips through. If a
+  // scopePath IS present, the existing repo guard below handles it.
+  if (agentType === "writer" && !sourceTask.artifactPath) {
+    const taskEntry: typeof tasks.$inferInsert = {
+      id: randomUUID(),
+      title: `Writer task list coverage: ${sourceTask.title}`,
+      status: "inbox",
+      owner: sourceTask.owner ?? getBotId(),
+      workState: "not_started",
+      reviewState: "pending",
+      projectId: sourceTask.projectId,
+      notes: [
+        `Writer-mode documentation task requires human review.`,
+        `Original task: ${sourceTask.title}`,
+        `Agent: writer | Task type: documentation`,
+        `No scopePath recorded — verify all generated content is correct and complete.`,
+      ].join("\n"),
+      agent: "programmer", // task list uses programmer type
+      externalSource: "writer-task-list",
+      externalId: taskId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    db.insert(tasks).values(taskEntry);
+    log().info(`[PAW] Writer task list coverage added for task ${taskId.slice(0, 8)}`);
+    return;
+  }
 
   const existing = db.select().from(tasks)
     .where(and(
@@ -555,7 +591,6 @@ export function queueReviewerFollowup(taskId: string, triggerResult?: ReviewTrig
   // Guard: skip auto-review if the target repo/artifact path doesn't exist on disk.
   // This prevents wasted reviewer spawns (and ~5–10min per failed run) when a task
   // references a repo that was never cloned locally or was removed.
-  // TODO: extend this guard to writer tasks if/when auto-review is added for them.
   if (scopePath && !existsSync(scopePath)) {
     log().warn(`[PAW] Auto-review skipped for task ${taskId.slice(0, 8)}: scopePath does not exist on disk (${scopePath})`);
     return;
@@ -586,7 +621,7 @@ export function queueReviewerFollowup(taskId: string, triggerResult?: ReviewTrig
   }
 
   const reviewNotes = [
-    `Auto-review for completed programmer task ${taskId.slice(0, 8)}.`,
+    `Auto-review for completed ${agentType ?? "programmer"} task ${taskId.slice(0, 8)}.`,
     `Original task: ${sourceTask.title}`,
     scopePath ? `Scope directory: ${scopePath}` : "Scope directory: project output directory not recorded; inspect changed files from the completed run.",
     ...(triggerLines.length > 0
