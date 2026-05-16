@@ -1139,6 +1139,43 @@ const DEFAULT_WORKFLOWS = [
   },
 
   // ══════════════════════════════════════════════════════════════════
+  // STRATEGIC REFLECTION
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "strategic-reflection",
+    description: "Deep strategic reflection every 3 hours — review priorities, scan for work, push toward Rafe's goals (PhD, money, agent system).",
+    trigger: { type: "schedule", cron: "0 */3 * * *", timezone: "America/New_York" },
+    is_active: true,
+    nodes: [
+      {
+        id: "reflect",
+        type: "spawn",
+        config: {
+          agent_type: "orchestrator",
+          model_tier: "medium",
+          max_runtime_minutes: 20,
+          prompt: `You are running a strategic reflection cycle. Review:
+1. Current system state (health probes, running workers, active tasks)
+2. Recent memory and decisions
+3. Outstanding tasks and blockers
+4. Rafe's goals: PhD success, revenue generation, building the most powerful agent system
+
+Identify the most important thing to work on RIGHT NOW. Create tasks for anything that needs action. Do NOT just summarize — make decisions and act on them. Push work forward.
+
+After your review, write a brief strategic note to ~/.lobs/lobs-core/context/strategic-notes/YYYY-MM-DD.md documenting your key decisions and priorities.
+
+Respond with a concise summary of what you decided and what you're acting on.`,
+        },
+        on_success: "done",
+        on_failure: { retry: 1 },
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: getBotId(), category: "scheduling", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
   // INBOX PROCESSING
   // ══════════════════════════════════════════════════════════════════
   {
