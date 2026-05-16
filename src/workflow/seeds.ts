@@ -988,6 +988,31 @@ const DEFAULT_WORKFLOWS = [
   },
 
   // ══════════════════════════════════════════════════════════════════
+  // GIT SYNC
+  // ══════════════════════════════════════════════════════════════════
+  {
+    name: "git-sync",
+    description: "Check all repos in ~/lobs/ and ~/paw/ for uncommitted changes, auto-commit and push.",
+    trigger: { type: "schedule", cron: "*/30 * * * *", timezone: "UTC" },
+    is_active: true,
+    nodes: [
+      {
+        id: "sync",
+        type: "tool_call",
+        config: {
+          command: `summary=""; for dir in ~/lobs/* ~/paw/*; do [ -d "$dir/.git" ] || continue; reponame=$(basename "$dir"); cd "$dir"; git fetch origin --quiet 2>/dev/null; LOCAL=$(git rev-parse @ 2>/dev/null); REMOTE=$(git rev-parse origin/$(git branch --show-current 2>/dev/null || echo main) 2>/dev/null); if [ "$LOCAL" != "$REMOTE" ]; then echo "[git-sync] $reponame: behind origin, skipping"; continue; fi; git add -A; if git diff --cached --quiet; then echo "[git-sync] $reponame: nothing to commit"; else git commit -m "git-sync: auto-commit $(date -u '+%Y-%m-%dT%H:%M:%SZ')" --author "lobs <lobs@localhost>" && git push && summary="$summary$reponame committed and pushed; "; fi; done; echo "---SUMMARY---"; [ -z "$summary" ] && echo "No repos had changes to commit." || echo "$summary"`,
+          timeout_seconds: 120,
+        },
+        on_success: "done",
+        on_failure: { retry: 2 },
+      },
+      { id: "done", type: "cleanup", config: { delete_session: false } },
+    ],
+    edges: [],
+    metadata: { author: getBotId(), category: "system", system: true },
+  },
+
+  // ══════════════════════════════════════════════════════════════════
   // MEMORY SYNC
   // ══════════════════════════════════════════════════════════════════
   {
@@ -1046,7 +1071,7 @@ const DEFAULT_WORKFLOWS = [
   {
     name: "weekly-compliance-report",
     description: "Generate and deliver a weekly AI privacy report every Monday at 8am ET. Shows compliant (on-device) vs non-compliant (external cloud) AI call counts and percentages.",
-    trigger: { type: "schedule", cron: "0 8 * * 1", timezone: "America/New_York" },
+    trigger: { type: "schedule", cron: "0 8 * * *", timezone: "America/New_York" },
     is_active: true,
     nodes: [
       {
