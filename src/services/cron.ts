@@ -359,6 +359,18 @@ export class CronService {
 
   /** Add a new agent job. Returns the created job with generated ID. */
   addAgentJob(job: Omit<AgentJob, "id" | "createdAt">): AgentJob {
+    // Idempotency: skip if a job with this name already exists
+    const rows = this.db
+      .prepare("SELECT id, name FROM cron_jobs WHERE name = ?")
+      .all(job.name) as { id: string; name: string }[];
+    const existing = rows.find((r) => r.name === job.name);
+    if (existing) {
+      const fullJob: AgentJob = { ...job, id: existing.id, createdAt: new Date().toISOString() };
+      this.agentJobs.set(existing.id, fullJob);
+      log().info(`[cron] Skipping duplicate agent job "${job.name}" (already exists as ${existing.id})`);
+      return fullJob;
+    }
+
     const id = randomUUID();
     const now = new Date().toISOString();
 

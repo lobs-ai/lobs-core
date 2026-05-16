@@ -29,7 +29,11 @@ vi.mock("node:fs", async (importOriginal) => {
   return {
     ...actual,
     existsSync: (p: string) => {
-      if (String(p).includes("daily-cost") || p in mockFiles) return true;
+      const pathStr = String(p);
+      if (pathStr.includes("daily-cost")) {
+        return pathStr in mockFiles;
+      }
+      if (p in mockFiles) return true;
       return actual.existsSync(p);
     },
     readFileSync: (p: string, enc?: BufferEncoding | { encoding: BufferEncoding }) => {
@@ -78,14 +82,17 @@ import {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** Get the actual COST_TRACKER_PATH the module uses */
+/** Get the actual cost-tracker path the module uses */
 function getCostTrackerPath(): string {
-  return COST_PATH;
+  return join(TEST_LOBS_ROOT, "config/daily-cost.json");
 }
 
 function today(): string {
   return new Date().toISOString().split("T")[0];
 }
+
+/** Stub for when no cost tracker has been written yet — must use today's date so loadCostTracker() doesn't reset */
+const STUB_COST_TRACKER = `{"date":"${today()}","totalCostUsd":0,"taskCount":0}`;
 
 function yesterday(): string {
   return new Date(Date.now() - 86_400_000).toISOString().split("T")[0];
@@ -96,7 +103,8 @@ function writeMockCostTracker(data: DailyCostTracker): void {
 }
 
 function readMockCostTracker(): DailyCostTracker {
-  return JSON.parse(mockFiles[COST_PATH]!) as DailyCostTracker;
+  const raw = mockFiles[COST_PATH];
+  return JSON.parse(raw !== undefined ? raw : STUB_COST_TRACKER) as DailyCostTracker;
 }
 function seedEmptyCostTracker(): void {
   mockFiles[COST_PATH] = JSON.stringify(
@@ -337,9 +345,13 @@ describe("recordTaskCost()", () => {
 
   it("accumulates cost across multiple calls", () => {
     mockFiles[COST_PATH] = JSON.stringify({ date: today(), totalCostUsd: 0, taskCount: 0 }, null, 2);
+    console.log("[DEBUG] Before calls, costTracker:", (schedulerModule as any).__costTracker);
     recordTaskCost(1.0);
+    console.log("[DEBUG] After 1st call, costTracker:", (schedulerModule as any).__costTracker, "mockFiles:", mockFiles[COST_PATH]);
     recordTaskCost(0.5);
+    console.log("[DEBUG] After 2nd call, costTracker:", (schedulerModule as any).__costTracker, "mockFiles:", mockFiles[COST_PATH]);
     recordTaskCost(2.25);
+    console.log("[DEBUG] After 3rd call, costTracker:", (schedulerModule as any).__costTracker, "mockFiles:", mockFiles[COST_PATH]);
     expect(getDailyCost()).toBeCloseTo(3.75);
   });
 

@@ -296,12 +296,13 @@ export function recordReviewUsage(userId: string): void {
  * - invoice.payment_succeeded
  *
  * For now, subscriptions are managed via Discord commands.
- */
+
 export async function handleStripeWebhook(event: any): Promise<void> {
-  // TODO: Implement Stripe webhook handling
-  // See: https://stripe.com/docs/webhooks
-  // For now, subscriptions are managed via Discord commands only
+  // eslint-disable-next-line no-console
+  console.warn('[stripe] handleStripeWebhook called but is not yet implemented. Subscriptions are managed via Discord commands.');
 }
+
+// ─── Helpers ────────────────────────────────────────────────────────
 
 // ─── Helpers ────────────────────────────────────────────────────────
 

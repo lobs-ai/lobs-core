@@ -229,7 +229,27 @@ export async function createProposalInboxItem(
   };
 
   try {
-    const result = getRawDb()
+    const db = getRawDb();
+    // Deduplication: skip if a matching pending item was created in the last 24h
+    const existing = db
+      .prepare(
+        `
+        SELECT id FROM inbox_items
+        WHERE type = 'health_alert_proposal'
+          AND triage_category = ?
+          AND title = ?
+          AND status IN ('pending','inbox')
+          AND created_at > datetime('now', '-24 hours')
+        LIMIT 1
+      `
+      )
+      .get(inboxItem.type, inboxItem.title);
+
+    if (existing) {
+      return null; // suppress duplicate
+    }
+
+    const result = db
       .prepare(
         `
       INSERT INTO inbox_items

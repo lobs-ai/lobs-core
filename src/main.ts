@@ -79,7 +79,7 @@ const PID_FILE = resolve(getLobsRoot(), "lobs.pid");
 const LOG_FILE = resolve(getLobsRoot(), "lobs.log");
 const LOG_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
 const LOG_KEEP = 3; // keep lobs.log.1, .2, .3
-const SCAN_INTERVAL_MS = 10_000;
+const SCAN_INTERVAL_MS = 60_000;
 const HTTP_PORT = getServerPort();
 const ACTIVITY_LOG_INTERVAL_MS = 30_000;
 const LOG_TO_FILE = process.env.LOBS_LOG_TO_FILE !== "0";
@@ -726,12 +726,17 @@ async function main() {
     schedule: "0 */3 * * *", // every 3 hours
     enabled: true,
     handler: async () => {
-      log().info("[scheduler-strategic-reflection] Firing strategic reflection workflow");
-      if (!executor) {
-        log().warn("[scheduler-strategic-reflection] executor not initialized");
-        return;
+      try {
+        log().info("[scheduler-strategic-reflection] Firing strategic reflection workflow");
+        if (!executor) {
+          log().warn("[scheduler-strategic-reflection] executor not initialized");
+          return;
+        }
+        await executor.run("reflection-cycle");
+        log().info("[scheduler-strategic-reflection] Completed successfully");
+      } catch (err) {
+        log().error(`[scheduler-strategic-reflection] Error: ${err}`);
       }
-      await executor.run("reflection-cycle");
     },
   });
 

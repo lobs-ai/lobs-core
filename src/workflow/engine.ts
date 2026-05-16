@@ -6,7 +6,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { eq, and, inArray, desc } from "drizzle-orm";
+import { eq, and, inArray, desc, gt } from "drizzle-orm";
 import { getDb } from "../db/connection.js";
 import {
   workflowDefinitions,
@@ -364,16 +364,16 @@ export class WorkflowExecutor {
       if (!cronMatches(cronExpr, localNow)) continue;
 
       // Check if already ran in this minute
-      const recentCutoff = new Date(now.getTime() - 60_000).toISOString();
+      const recentCutoff = new Date(now.getTime() - 60_000);
       const recentRun = db.select().from(workflowRuns)
         .where(and(
           eq(workflowRuns.workflowId, wf.id),
-          // createdAt > recentCutoff
+          gt(workflowRuns.createdAt, recentCutoff.toISOString()),
         ))
         .orderBy(desc(workflowRuns.createdAt))
         .get();
 
-      if (recentRun && recentRun.createdAt > recentCutoff) continue;
+      if (recentRun) continue;
 
       this.startRun(wf, {
         triggerType: "schedule",

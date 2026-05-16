@@ -294,7 +294,7 @@ export async function probeResourceExhaustion(): Promise<HealthProbeResult> {
 
     // ── Disk check ──────────────────────────────────────────────────────────
     try {
-      const stateDir = resolve(os.homedir(), ".lobs");
+      const stateDir = getLobsRoot();
       const stats = await statfs(stateDir);
       const freeBytes = stats.bfree * stats.bsize;
       const totalBytes = stats.blocks * stats.bsize;
