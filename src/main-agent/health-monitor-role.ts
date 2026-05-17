@@ -235,15 +235,15 @@ export async function createProposalInboxItem(
       .prepare(
         `
         SELECT id FROM inbox_items
-        WHERE type = 'health_alert_proposal'
+        WHERE type = ?
           AND triage_category = ?
           AND title = ?
-          AND status IN ('pending','inbox')
+          AND action_status = 'pending'
           AND created_at > datetime('now', '-24 hours')
         LIMIT 1
       `
       )
-      .get(inboxItem.type, inboxItem.title);
+      .get(inboxItem.type, inboxItem.triageCategory, inboxItem.title);
 
     if (existing) {
       return null; // suppress duplicate
