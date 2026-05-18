@@ -450,7 +450,8 @@ async function cmdStart(opts: { useLaunchd?: boolean } = {}) {
     // Best-effort only. In restricted environments (like sandboxes), we may not
     // be allowed to open ~/.lobs/lobs.log for stdio redirection.
   }
-  const child = spawn("node", [mainJs], {
+  const NODE_BIN = "/opt/homebrew/bin/node";
+  const child = spawn(NODE_BIN, [mainJs], {
     cwd: LOBS_CORE_DIR,
     detached: true,
     stdio: logFd === null ? "ignore" : ["ignore", logFd, logFd],

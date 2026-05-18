@@ -73,14 +73,15 @@ interface GhIssue {
   title: string;
   state: string;
   labels: string[];
-  html_url: string;
-  pull_request?: object;
+  url: string; // html_url equivalent in gh search issues
+  isPullRequest: boolean;
+  repository: { name: string; fullName: string };
 }
 
 async function fetchGitHubIssues(org: string): Promise<GhIssue[]> {
-  // Use gh CLI for rate-limited API calls
+  // gh search issues: different fields from gh issue list
   const output = execSync(
-    `gh issue list --org ${org} --state open --limit 50 --json number,title,state,labels,pullRequest,url`,
+    `gh search issues --owner ${org} --state open --limit 50 --json number,title,state,labels,url,isPullRequest,repository`,
     { encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 }
   );
   const items = JSON.parse(output) as GhIssue[];
@@ -109,11 +110,11 @@ async function processGitHubIssue(org: string, issue: GhIssue): Promise<void> {
   const priority = hasHighLabel ? "high" : "medium";
 
   // Determine if it's a PR or issue
-  const isPR = !!issue.pull_request;
+  const isPR = !!issue.isPullRequest;
   const type = isPR ? "code-review" : "feature-request";
 
   const title = `[${org}] ${isPR ? "PR" : "Issue"} #${issue.number}: ${issue.title}`;
-  const notes = `Source: ${issue.html_url}\nLabels: ${issue.labels.join(", ") || "none"}`;
+  const notes = `Source: ${issue.url}\nLabels: ${issue.labels.join(", ") || "none"}`;
 
   await createTask({
     title,
