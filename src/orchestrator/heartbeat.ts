@@ -228,15 +228,15 @@ async function checkSchedulerQueueDepth(): Promise<CheckResult> {
 
 /**
  * Check memory pressure (ADR-008).
- * Warning when: heap > 70%
- * Error when: RSS > 1GB
+ * Error when: RSS > 1GB.
+ * Heap ratio alone is not alerted on because V8 can keep small heaps nearly full.
  */
 async function checkMemoryPressure(): Promise<CheckResult> {
   const memUsage = process.memoryUsage();
   const heapUsedPct = (memUsage.heapUsed / memUsage.heapTotal) * 100;
   const rssMB = memUsage.rss / 1024 / 1024;
   
-  // ADR-008: RSS > 1GB = error. Heap > 90% = warning.
+  // ADR-008: RSS > 1GB = error.
   // 90% heap is normal for long-running Node.js — don't alert on heap alone.
   // RSS is the real signal (physical memory pressure).
   if (rssMB > 1024) {
