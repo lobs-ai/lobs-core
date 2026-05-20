@@ -12,6 +12,7 @@
  * @see docs/designs/main-agent-proactive-health-monitor.md
  */
 
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { statfs } from "node:fs/promises";
 import * as os from "node:os";
@@ -280,6 +281,57 @@ const MEMORY_WARN_PCT = 85;
 const CPU_CRITICAL = 1.0;
 const CPU_WARN = 0.8;
 
+function parseVmStatAvailablePercent(output: string): number | null {
+  const pageSizeMatch = output.match(/page size of (\d+) bytes/);
+  const totalPagesMatch = output.match(/The system has \d+ \((\d+) pages/);
+  if (!pageSizeMatch || !totalPagesMatch) {
+    return null;
+  }
+
+  const pageSize = Number(pageSizeMatch[1]);
+  const totalPages = Number(totalPagesMatch[1]);
+  if (!Number.isFinite(pageSize) || !Number.isFinite(totalPages) || pageSize <= 0 || totalPages <= 0) {
+    return null;
+  }
+
+  const pageCount = (label: string) => {
+    const match = output.match(new RegExp(`${label}:\\s+(\\d+)\\.`));
+    return match ? Number(match[1]) : 0;
+  };
+
+  // os.freemem() on macOS only reports immediately free pages and can sit near
+  // zero while the OS still has reclaimable inactive/speculative/purgeable pages.
+  // Treat those reclaimable pages as available to avoid false 100% memory alerts.
+  const availablePages =
+    pageCount("Pages free") +
+    pageCount("Pages inactive") +
+    pageCount("Pages speculative") +
+    pageCount("Pages purgeable");
+  const availableBytes = availablePages * pageSize;
+  const totalBytes = totalPages * pageSize;
+
+  return Math.round((availableBytes / totalBytes) * 100);
+}
+
+function getMemoryUsagePercent(): number {
+  if (process.platform === "darwin") {
+    try {
+      const output = execFileSync("/usr/bin/vm_stat", { encoding: "utf-8", timeout: 2_000 });
+      const availablePercent = parseVmStatAvailablePercent(output);
+      if (availablePercent !== null) {
+        return Math.max(0, Math.min(100, 100 - availablePercent));
+      }
+    } catch {
+      // fall back to os.freemem below
+    }
+  }
+
+  const totalMem = os.totalmem();
+  const freeMem = os.freemem();
+  const usedMem = totalMem - freeMem;
+  return Math.round((usedMem / totalMem) * 100);
+}
+
 /**
  * Probe D: Check disk, memory, and CPU availability.
  * Warns or criticals before processes crash with ENOSPC / OOM.
@@ -312,10 +364,7 @@ export async function probeResourceExhaustion(): Promise<HealthProbeResult> {
 
     // ── Memory check ─────────────────────────────────────────────────────────
     try {
-      const totalMem = os.totalmem();
-      const freeMem = os.freemem();
-      const usedMem = totalMem - freeMem;
-      memoryUsagePct = Math.round((usedMem / totalMem) * 100);
+      memoryUsagePct = getMemoryUsagePercent();
 
       if (memoryUsagePct > MEMORY_CRITICAL_PCT) {
         issues.push(`memory CRITICAL: ${memoryUsagePct}% used`);
