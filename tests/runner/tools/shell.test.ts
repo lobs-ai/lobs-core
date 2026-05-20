@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -24,6 +24,29 @@ describe("shell helpers", () => {
     vi.stubEnv("LOBS_SHELL", "/bin/sh");
 
     expect(getShellExecutable()).toBe("/bin/sh");
+  });
+
+  it("resolves command-name shells to absolute paths from PATH", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lobs-shell-path-test-"));
+    const fakeBash = join(tempDir, "bash");
+
+    try {
+      writeFileSync(fakeBash, "#!/bin/sh\n");
+      chmodSync(fakeBash, 0o755);
+      vi.stubEnv("PATH", tempDir);
+
+      expect(shellExists("bash")).toBe(true);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to absolute system shells when PATH is empty", () => {
+    vi.stubEnv("LOBS_SHELL", "");
+    vi.stubEnv("SHELL", "bash");
+    vi.stubEnv("PATH", "");
+
+    expect(getShellExecutable()).toBe("/bin/bash");
   });
 
   it("rejects directories as executable script paths", () => {

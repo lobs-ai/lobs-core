@@ -1,4 +1,5 @@
-import { statSync } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
+import { join } from "node:path";
 
 const FALLBACK_SHELLS = [
   "/bin/bash",
@@ -8,14 +9,31 @@ const FALLBACK_SHELLS = [
   "/bin/sh",
 ];
 
-export function shellExists(path: string): boolean {
-  if (!path.includes("/")) return true;
-
+function isExecutableFile(path: string): boolean {
   try {
-    return statSync(path).isFile();
+    const stat = statSync(path);
+    if (!stat.isFile()) return false;
+    accessSync(path, constants.X_OK);
+    return true;
   } catch {
     return false;
   }
+}
+
+function resolvePathExecutable(command: string): string | null {
+  if (command.includes("/")) return isExecutableFile(command) ? command : null;
+
+  const pathEntries = (process.env.PATH ?? "").split(":").filter(Boolean);
+  for (const dir of pathEntries) {
+    const resolved = join(dir, command);
+    if (isExecutableFile(resolved)) return resolved;
+  }
+
+  return null;
+}
+
+export function shellExists(path: string): boolean {
+  return resolvePathExecutable(path) !== null;
 }
 
 function isSupportedShell(path: string): boolean {
@@ -38,7 +56,8 @@ function shellCandidates(): string[] {
 
 export function getShellExecutable(): string {
   for (const candidate of shellCandidates()) {
-    if (isSupportedShell(candidate) && shellExists(candidate)) return candidate;
+    const resolved = resolvePathExecutable(candidate);
+    if (isSupportedShell(candidate) && resolved) return resolved;
   }
 
   return "/bin/sh";
