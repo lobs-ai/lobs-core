@@ -12,6 +12,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import type { ToolDefinition } from "../types.js";
+import { getShellExecutable, getShellSpawnArgs } from "./shell.js";
 
 const LOBS_BIN = "/opt/homebrew/bin/lobs";
 
@@ -180,7 +181,7 @@ export async function lobsRestartTool(params: Record<string, unknown>): Promise<
 
   const script = steps.join(" && ");
 
-  const child = spawn("bash", ["-c", script], {
+  const child = spawn(getShellExecutable(), getShellSpawnArgs(script), {
     detached: true,
     stdio: "ignore",
     env: { ...process.env },

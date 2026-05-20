@@ -18,6 +18,7 @@ import type { ToolDefinition, ToolExecutorResult } from "../types.js";
 import { capOutput } from "./output-cap.js";
 import { extractCdTarget } from "../../claude-runtime/bash-parser.js";
 import { processTool } from "./process.js";
+import { getShellExecutable, getShellSpawnArgs } from "./shell.js";
 
 export const execToolDefinition: ToolDefinition = {
   name: "exec",
@@ -183,13 +184,14 @@ export async function execTool(
 
   // Wrap the command with a cwd marker so we can detect directory changes
   const wrappedCommand = wrapWithCwdMarker(command);
+  const shell = getShellExecutable();
 
   const { output, detectedCwd } = await new Promise<{ output: string; detectedCwd: string | null }>((resolvePromise) => {
     let stdout = "";
     let stderr = "";
     let killed = false;
 
-    const child = spawn("bash", ["-c", wrappedCommand], {
+    const child = spawn(shell, getShellSpawnArgs(wrappedCommand), {
       cwd: workdir,
       env,
       stdio: ["ignore", "pipe", "pipe"],

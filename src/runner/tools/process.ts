@@ -8,6 +8,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { ToolDefinition } from "../types.js";
+import { getShellExecutable, getShellSpawnArgs } from "./shell.js";
 
 interface BackgroundProcess {
   id: string;
@@ -152,7 +153,8 @@ function startProcess(params: Record<string, unknown>, defaultCwd: string): stri
   };
 
   try {
-    const child = spawn("bash", ["-c", command], {
+    const shell = getShellExecutable();
+    const child = spawn(shell, getShellSpawnArgs(command), {
       cwd,
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
