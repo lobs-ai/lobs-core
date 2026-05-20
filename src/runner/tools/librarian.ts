@@ -499,6 +499,22 @@ const EXCLUDE_PATTERNS = [
 ];
 const EXCLUDE_NAMES = new Set(["CHANGELOG.md", "package.md"]);
 
+export function isKnownMirrorPath(filepath: string): boolean {
+  // lobs-brain/shared-memory is a compatibility mirror of lobs-shared-memory.
+  // Treating both as independent docs makes the audit report intentional copies as duplicates.
+  return filepath.includes("/lobs/lobs-brain/shared-memory/");
+}
+
+export function isStalenessExempt(filepath: string): boolean {
+  // Archived memories and stable context files are expected to be old; age alone is not a maintenance issue.
+  return isKnownMirrorPath(filepath)
+    || filepath.includes("/.lobs/agents/main/context/memory/archive/")
+    || filepath.includes("/.lobs/agents/main/context/memory/weekly/")
+    || filepath.includes("/docs/archive/")
+    || filepath.includes("/.lobs/agents/main/context/PROJECT-")
+    || filepath.includes("/.lobs/agents/main/context/IDENTITY.md");
+}
+
 function findMdFiles(dir: string, depth = 0, results: string[] = []): string[] {
   if (depth > 4 || !existsSync(dir)) return results;
   try {
@@ -695,9 +711,9 @@ export async function librarianAuditTool(
   const hashMap = new Map<string, string[]>();
   for (const filepath of allDocs) {
     if (lineCount(filepath) <= 50) continue;
-    // Skip submodule paths
+    // Skip submodule paths and known compatibility mirrors
     const isSubmodule = Array.from(submodulePaths).some((sp) => filepath.startsWith(sp));
-    if (isSubmodule) continue;
+    if (isSubmodule || isKnownMirrorPath(filepath)) continue;
     const hash = md5File(filepath);
     if (!hash) continue;
     const existing = hashMap.get(hash) ?? [];
@@ -728,6 +744,7 @@ export async function librarianAuditTool(
   const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
   let staleCount = 0;
   for (const filepath of tracked) {
+    if (isStalenessExempt(filepath)) continue;
     try {
       const stat = statSync(filepath);
       if (stat.mtimeMs < thirtyDaysAgo) {
