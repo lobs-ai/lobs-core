@@ -81,7 +81,8 @@ CREATE INDEX IF NOT EXISTS idx_memories_source_path ON memories(source_path) WHE
 
 CREATE TABLE IF NOT EXISTS memory_embeddings (
   memory_id INTEGER PRIMARY KEY REFERENCES memories(id),
-  embedding BLOB NOT NULL
+  embedding BLOB NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS evidence (
@@ -298,6 +299,7 @@ export function initMemoryDb(dbPath?: string): Database.Database {
   addColumnIfMissing("memories", "source_path",  "TEXT");
   addColumnIfMissing("memories", "content_hash", "TEXT");
   addColumnIfMissing("memories", "chunk_index",  "INTEGER");
+  addColumnIfMissing("memory_embeddings", "created_at", "TEXT NOT NULL DEFAULT (datetime('now'))");
   addColumnIfMissing("conflicts", "conflict_type", "TEXT");
   addColumnIfMissing("conflicts", "suggested_action", "TEXT");
 

@@ -21,8 +21,10 @@ import {
   describe,
   it,
   expect,
+  vi,
 } from "vitest";
 import { initMemoryDb, closeMemoryDb, getMemoryDb } from "../src/memory/db.js";
+import { embedMemoryBatchForTest } from "../src/memory/indexer.js";
 import {
   decayedConfidence,
   searchMemoriesFast,
@@ -42,6 +44,8 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+  vi.restoreAllMocks();
+
   const db = getMemoryDb();
   db.exec("DELETE FROM retrieval_log");
   db.exec("DELETE FROM evidence");
@@ -658,7 +662,39 @@ describe("access tracking after search", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 5. importanceScore() — from gc.ts
+// 5. embedding writes
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("embedding writes", () => {
+  it("skips stale embedding jobs whose memory row was deleted", async () => {
+    const db = getMemoryDb();
+    const id = insertMemory({ content: "deleted before embedding write" });
+
+    db.prepare("DELETE FROM memories WHERE id = ?").run(id);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({ data: [{ embedding: [0.1, 0.2, 0.3] }] }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+
+    await expect(
+      embedMemoryBatchForTest([{ memoryId: id, text: "stale queued job" }]),
+    ).resolves.toBeUndefined();
+
+    const row = db
+      .prepare("SELECT COUNT(*) AS count FROM memory_embeddings WHERE memory_id = ?")
+      .get(id) as { count: number };
+    expect(row.count).toBe(0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 6. importanceScore() — from gc.ts
 //    Formula: max(decayed, floor)
 //    where decayed = confidence * 0.5^(daysSinceAccess / 120)
 //    and   floor   = 0.1 * log2(access_count + 1)

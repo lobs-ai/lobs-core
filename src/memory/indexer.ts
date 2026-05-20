@@ -31,7 +31,7 @@ export interface FileIndexerConfig {
 
 // ── Internal types ────────────────────────────────────────────────────────────
 
-interface EmbeddingJob {
+export interface EmbeddingJob {
   memoryId: number;
   text: string;
 }
@@ -84,6 +84,15 @@ export function stopFileIndexer(): void {
   }
   _embeddingQueue = [];
   _config = null;
+}
+
+/**
+ * Embed an explicit batch. Exported for focused tests of stale embedding jobs.
+ */
+export async function embedMemoryBatchForTest(
+  batch: EmbeddingJob[],
+): Promise<void> {
+  await embedBatchWithRetry(batch, 1);
 }
 
 /**
@@ -481,7 +490,8 @@ async function embedBatchWithRetry(
 
       const insertEmbed = db.prepare(
         `INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding, created_at)
-         VALUES (?, ?, ?)`,
+         SELECT ?, ?, ?
+         WHERE EXISTS (SELECT 1 FROM memories WHERE id = ?)`,
       );
 
       const now = new Date().toISOString();
@@ -494,7 +504,7 @@ async function embedBatchWithRetry(
 
           const vec = new Float32Array(item.embedding);
           const buf = Buffer.from(vec.buffer);
-          insertEmbed.run(job.memoryId, buf, now);
+          insertEmbed.run(job.memoryId, buf, now, job.memoryId);
         }
       });
 
