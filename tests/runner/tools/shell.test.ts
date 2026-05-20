@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { getShellExecutable, getShellScriptArgs, shellExists } from "../../../src/runner/tools/shell.js";
@@ -21,6 +24,17 @@ describe("shell helpers", () => {
     vi.stubEnv("LOBS_SHELL", "/bin/sh");
 
     expect(getShellExecutable()).toBe("/bin/sh");
+  });
+
+  it("rejects directories as executable script paths", () => {
+    const scriptDir = mkdtempSync(join(tmpdir(), "lobs-shell-test-"));
+
+    try {
+      expect(shellExists(scriptDir)).toBe(false);
+      expect(getShellScriptArgs(scriptDir)).toEqual(["-c", scriptDir]);
+    } finally {
+      rmSync(scriptDir, { recursive: true, force: true });
+    }
   });
 
   it("falls back to -c for missing script paths", () => {

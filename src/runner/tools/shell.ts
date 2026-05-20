@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 
 const FALLBACK_SHELLS = [
   "/bin/bash",
@@ -9,7 +9,13 @@ const FALLBACK_SHELLS = [
 ];
 
 export function shellExists(path: string): boolean {
-  return path.includes("/") ? existsSync(path) : true;
+  if (!path.includes("/")) return true;
+
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
 }
 
 function isSupportedShell(path: string): boolean {
