@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { inferProjectId } from "../util/project-inference.js";
 import { eq, and, inArray, desc, lte } from "drizzle-orm";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { getDb } from "../db/connection.js";
+import { getDb, getRawDb } from "../db/connection.js";
 import { tasks, projects, workerRuns } from "../db/schema.js";
 import { json, error, parseBody, parseQuery } from "./index.js";
 import { readFileSync as _readFileSync } from "node:fs";
@@ -518,7 +518,13 @@ Return ONLY valid JSON:
       return json(res, normalizeTask(updated));
     }
     if (req.method === "DELETE") {
-      db.delete(tasks).where(eq(tasks.id, id)).run();
+      const rawDb = getRawDb();
+      rawDb.transaction(() => {
+        rawDb.prepare("UPDATE workflow_runs SET task_id = NULL WHERE task_id = ?").run(id);
+        rawDb.prepare("UPDATE worker_runs SET task_id = NULL WHERE task_id = ?").run(id);
+        rawDb.prepare("DELETE FROM task_outcomes WHERE task_id = ?").run(id);
+        db.delete(tasks).where(eq(tasks.id, id)).run();
+      })();
       return json(res, { deleted: true });
     }
     return error(res, "Method not allowed", 405);

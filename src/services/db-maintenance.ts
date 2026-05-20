@@ -18,6 +18,7 @@ import { getLobsRoot } from "../config/lobs.js";
 
 interface MaintenanceResult {
   pruned: Record<string, number>;
+  repaired: Record<string, number>;
   vacuumed: boolean;
   durationMs: number;
   dbSizeBefore: number;
@@ -28,9 +29,23 @@ export async function runDbMaintenance(): Promise<MaintenanceResult> {
   const start = Date.now();
   const db = getRawDb();
   const pruned: Record<string, number> = {};
+  const repaired: Record<string, number> = {};
 
   // Get DB size before
   const dbSizeBefore = getDbSizeBytes();
+
+  // Preserve historical run records while clearing references to tasks that no longer exist.
+  // task_outcomes.task_id is NOT NULL, so orphaned outcomes cannot be repaired without
+  // losing the task linkage semantics; delete those orphaned rows instead.
+  repaired.workflow_runs = db.prepare(
+    "UPDATE workflow_runs SET task_id = NULL WHERE task_id IS NOT NULL AND task_id NOT IN (SELECT id FROM tasks)"
+  ).run().changes;
+  repaired.worker_runs = db.prepare(
+    "UPDATE worker_runs SET task_id = NULL WHERE task_id IS NOT NULL AND task_id NOT IN (SELECT id FROM tasks)"
+  ).run().changes;
+  repaired.task_outcomes = db.prepare(
+    "DELETE FROM task_outcomes WHERE task_id NOT IN (SELECT id FROM tasks)"
+  ).run().changes;
 
   // Prune control loop events > 7 days
   const cle = db.prepare(
@@ -69,10 +84,12 @@ export async function runDbMaintenance(): Promise<MaintenanceResult> {
   pruned.diagnostic_trigger_events = dte.changes;
 
   const totalPruned = Object.values(pruned).reduce((a, b) => a + b, 0);
+  const totalRepaired = Object.values(repaired).reduce((a, b) => a + b, 0);
+  const totalChanged = totalPruned + totalRepaired;
 
   // VACUUM only if we actually deleted stuff (it's expensive)
   let vacuumed = false;
-  if (totalPruned > 100) {
+  if (totalChanged > 100) {
     try {
       db.exec("VACUUM");
       vacuumed = true;
@@ -84,22 +101,28 @@ export async function runDbMaintenance(): Promise<MaintenanceResult> {
   const dbSizeAfter = getDbSizeBytes();
   const durationMs = Date.now() - start;
 
-  if (totalPruned > 0) {
+  if (totalChanged > 0) {
     const savedMB = ((dbSizeBefore - dbSizeAfter) / 1048576).toFixed(1);
-    const entries = Object.entries(pruned)
+    const pruneEntries = Object.entries(pruned)
+      .filter(([, v]) => v > 0)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join(", ");
+    const repairEntries = Object.entries(repaired)
       .filter(([, v]) => v > 0)
       .map(([k, v]) => `${k}: ${v}`)
       .join(", ");
     log().info(
-      `[db-maintenance] Pruned ${totalPruned} rows (${entries}). ` +
+      `[db-maintenance] Changed ${totalChanged} rows` +
+      `${totalPruned > 0 ? `; pruned ${totalPruned} (${pruneEntries})` : ""}` +
+      `${totalRepaired > 0 ? `; repaired ${totalRepaired} (${repairEntries})` : ""}. ` +
       `DB: ${(dbSizeBefore / 1048576).toFixed(1)}MB → ${(dbSizeAfter / 1048576).toFixed(1)}MB ` +
       `(saved ${savedMB}MB). VACUUM: ${vacuumed}. Took ${durationMs}ms.`
     );
   } else {
-    log().info(`[db-maintenance] No rows to prune. DB size: ${(dbSizeAfter / 1048576).toFixed(1)}MB.`);
+    log().info(`[db-maintenance] No rows to prune or repair. DB size: ${(dbSizeAfter / 1048576).toFixed(1)}MB.`);
   }
 
-  return { pruned, vacuumed, durationMs, dbSizeBefore, dbSizeAfter };
+  return { pruned, repaired, vacuumed, durationMs, dbSizeBefore, dbSizeAfter };
 }
 
 function getDbSizeBytes(): number {
