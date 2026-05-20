@@ -23,8 +23,8 @@ export type AlertClassification =
   | "orphan_accumulation_severe" // ≥10 orphaned in 1h
   | "orphan_accumulation_warn" // ≥5 orphaned in 1h
   | "session_stall" // Session unchanged for >grace period
-  | "resource_exhaustion_critical" // Disk <200 MB
-  | "resource_exhaustion_warn"; // Disk <500 MB
+  | "resource_exhaustion_critical" // Disk, memory, or CPU critically exhausted
+  | "resource_exhaustion_warn"; // Disk, memory, or CPU near exhaustion
 
 export interface RemediationAction {
   type: "auto" | "propose";
@@ -170,11 +170,12 @@ export async function decideRemediationAction(
         type: "propose",
         category: "cleanup",
         description:
-          `Disk usage critically high (${snapshot.diskUsagePercent}%). ` +
-          "Recommend cleaning up old sessions and compressing logs.",
+          "System resources critically exhausted. " +
+          `Disk usage: ${snapshot.diskUsagePercent}%. ` +
+          "Review resource diagnostics before cleanup or restart.",
         rationale:
-          "Disk space <200 MB may cause ENOSPC errors and restart cascades. " +
-          "Cleanup can free space immediately; if insufficient, recommend restart.",
+          "Resource exhaustion may cause ENOSPC, OOM, or restart cascades. " +
+          "Probe details identify whether disk, memory, or CPU is the current bottleneck.",
         logs: await getDiagnosticLogs(db, "disk_exhaustion"),
       };
 
@@ -182,8 +183,8 @@ export async function decideRemediationAction(
       return {
         type: "auto",
         category: "cleanup",
-        description: `Disk usage high (${snapshot.diskUsagePercent}%). Archiving old sessions.`,
-        rationale: "Disk usage >87%. Archiving sessions from >7 days ago to free space proactively.",
+        description: `System resources near exhaustion. Disk usage: ${snapshot.diskUsagePercent}%.`,
+        rationale: "Probe details identify whether disk, memory, or CPU is near exhaustion.",
         changes: { archive_old_sessions: true, archive_cutoff_days: 7 },
       };
 

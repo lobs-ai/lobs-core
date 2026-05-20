@@ -276,6 +276,8 @@ export function probeSessionStaleness(db: PawDB): HealthProbeResult {
 
 const DISK_CRITICAL_MB = 200;
 const DISK_WARN_MB = 500;
+const DISK_CRITICAL_PCT = 95;
+const DISK_WARN_PCT = 90;
 const MEMORY_CRITICAL_PCT = 90;
 const MEMORY_WARN_PCT = 85;
 const CPU_CRITICAL = 1.0;
@@ -283,13 +285,12 @@ const CPU_WARN = 0.8;
 
 function parseVmStatAvailablePercent(output: string): number | null {
   const pageSizeMatch = output.match(/page size of (\d+) bytes/);
-  const totalPagesMatch = output.match(/The system has \d+ \((\d+) pages/);
-  if (!pageSizeMatch || !totalPagesMatch) {
+  if (!pageSizeMatch) {
     return null;
   }
 
   const pageSize = Number(pageSizeMatch[1]);
-  const totalPages = Number(totalPagesMatch[1]);
+  const totalPages = os.totalmem() / pageSize;
   if (!Number.isFinite(pageSize) || !Number.isFinite(totalPages) || pageSize <= 0 || totalPages <= 0) {
     return null;
   }
@@ -353,10 +354,10 @@ export async function probeResourceExhaustion(): Promise<HealthProbeResult> {
       diskFreeMB = Math.round(freeBytes / 1024 / 1024);
       diskUsagePct = Math.round(((totalBytes - freeBytes) / totalBytes) * 100);
 
-      if (diskFreeMB < DISK_CRITICAL_MB) {
-        issues.push(`disk CRITICAL: only ${diskFreeMB} MB free (${diskUsagePct}% used)`);
-      } else if (diskFreeMB < DISK_WARN_MB) {
-        issues.push(`disk WARN: ${diskFreeMB} MB free (${diskUsagePct}% used)`);
+      if (diskFreeMB < DISK_CRITICAL_MB || diskUsagePct >= DISK_CRITICAL_PCT) {
+        issues.push(`disk CRITICAL: ${diskUsagePct}% used, ${diskFreeMB} MB free`);
+      } else if (diskFreeMB < DISK_WARN_MB || diskUsagePct >= DISK_WARN_PCT) {
+        issues.push(`disk WARN: ${diskUsagePct}% used, ${diskFreeMB} MB free`);
       }
     } catch {
       // statfs can fail on some platforms — skip disk check
