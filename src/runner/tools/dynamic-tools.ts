@@ -13,6 +13,7 @@ import { resolve, join } from "node:path";
 import { getLobsRoot } from "../../config/lobs.js";
 import { execFile } from "node:child_process";
 import type { ToolDefinition } from "../types.js";
+import { getShellExecutable } from "./shell.js";
 
 export interface ToolJson {
   name: string;
@@ -161,7 +162,7 @@ export class DynamicToolLoader {
     }
 
     return new Promise((resolve, reject) => {
-      execFile("bash", [scriptPath], {
+      execFile(getShellExecutable(), [scriptPath], {
         env,
         cwd,
         timeout: SHELL_TIMEOUT_MS,

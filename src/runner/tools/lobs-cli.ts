@@ -166,7 +166,7 @@ export const lobsRestartToolDefinition: ToolDefinition = {
 export async function lobsRestartTool(params: Record<string, unknown>): Promise<string> {
   // Restart kills the current process, so we can't just spawn `lobs restart` —
   // the CLI makes API calls to lobs-core, and when stop kills the server the
-  // CLI process dies too (or hangs). Instead, spawn a standalone bash script
+  // CLI process dies too (or hangs). Instead, spawn a standalone shell script
   // that does stop → optional build → start as completely independent steps.
   const noBuild = params.no_build === true;
   const noPull = params.no_pull === true;

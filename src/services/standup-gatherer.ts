@@ -15,6 +15,7 @@
 
 import { execSync } from "child_process";
 import { getLobsRoot } from "../config/lobs.js";
+import { getShellExecutable } from "../runner/tools/shell.js";
 
 const PAW_REPOS = [
   "paw-hub",
@@ -38,7 +39,7 @@ function run(cmd: string, timeout = 15_000): string {
       timeout,
       maxBuffer: 1024 * 1024,
       encoding: "utf-8",
-      shell: "/bin/bash",
+      shell: getShellExecutable(),
       env: { ...process.env, HOME: process.env.HOME },
     }).trim();
   } catch {

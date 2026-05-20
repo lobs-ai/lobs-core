@@ -12,6 +12,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
+import { getShellExecutable, getShellScriptArgs } from "../../runner/tools/shell.js";
 import type { VoiceConfig } from "./types.js";
 
 const HOME = process.env.HOME ?? "";
@@ -105,7 +106,7 @@ export class VoiceSidecar {
 
     console.log("[voice:sidecar] Starting STT service...");
     try {
-      this.sttProcess = spawn("bash", [script], {
+      this.sttProcess = spawn(getShellExecutable(), getShellScriptArgs(script), {
         cwd: resolve(VOICE_DIR, "stt"),
         stdio: ["ignore", "pipe", "pipe"],
         detached: true, // Run independently so lobs-core restart doesn't kill it
@@ -155,7 +156,7 @@ export class VoiceSidecar {
 
     console.log("[voice:sidecar] Starting TTS service...");
     try {
-      this.ttsProcess = spawn("bash", [script], {
+      this.ttsProcess = spawn(getShellExecutable(), getShellScriptArgs(script), {
         cwd: resolve(VOICE_DIR, "tts"),
         stdio: ["ignore", "pipe", "pipe"],
         detached: true,

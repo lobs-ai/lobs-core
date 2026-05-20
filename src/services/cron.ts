@@ -23,6 +23,7 @@ import { exec as execCb } from "node:child_process";
 import { promisify } from "node:util";
 import type Database from "better-sqlite3";
 import { log } from "../util/logger.js";
+import { getShellExecutable } from "../runner/tools/shell.js";
 import { gatherStandupData } from "./standup-gatherer.js";
 import { WorkflowExecutor } from "../workflow/engine.js";
 
@@ -1056,7 +1057,7 @@ export class CronService {
           timeout: 120_000,
           maxBuffer: 1024 * 1024,
           env: { ...process.env, HOME: process.env.HOME },
-          shell: "/bin/bash",
+          shell: getShellExecutable(),
         });
         const durationMs = Date.now() - start;
         log().info(`[cron] ✅ Script job "${job.name}" fired${manual ? " (manual)" : ""} — completed in ${durationMs}ms`);
