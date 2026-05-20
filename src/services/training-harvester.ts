@@ -52,9 +52,26 @@ interface TrainingSample {
 
 // ── Quality Scoring ────────────────────────────────────────────────────
 
-function estimateTokens(text: string): number {
+function normalizeContent(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value == null) return "";
+  if (Array.isArray(value)) {
+    return value
+      .map((part) => normalizeContent(part))
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (typeof value === "object") {
+    const maybeText = (value as { text?: unknown; content?: unknown }).text
+      ?? (value as { text?: unknown; content?: unknown }).content;
+    if (maybeText !== undefined) return normalizeContent(maybeText);
+  }
+  return String(value);
+}
+
+function estimateTokens(text: unknown): number {
   // Rough: 1 token ≈ 4 chars for English
-  return Math.ceil(text.length / 4);
+  return Math.ceil(normalizeContent(text).length / 4);
 }
 
 function scoreConversation(turns: ConversationTurn[]): { score: number; flags: string[] } {
@@ -76,35 +93,37 @@ function scoreConversation(turns: ConversationTurn[]): { score: number; flags: s
 
   // Substantive assistant responses (not just "hey" or tool dumps)
   const assistantTurns = turns.filter(t => t.role === "assistant");
-  const avgAssistantLength = assistantTurns.reduce((sum, t) => sum + t.content.length, 0) / assistantTurns.length;
+  const avgAssistantLength = assistantTurns.reduce((sum, t) => sum + normalizeContent(t.content).length, 0) / assistantTurns.length;
   if (avgAssistantLength > 200) { score += 0.1; flags.push("substantive_responses"); }
   if (avgAssistantLength < 20) { score -= 0.2; flags.push("very_short_responses"); }
 
   // Penalize tool-heavy conversations (less useful for style training)
-  const toolTurns = turns.filter(t => t.content.startsWith("[Tool"));
+  const toolTurns = turns.filter(t => normalizeContent(t.content).startsWith("[Tool"));
   if (toolTurns.length > turns.length * 0.5) {
     score -= 0.2;
     flags.push("tool_heavy");
   }
 
   // Penalize system/heartbeat messages
-  const systemMessages = turns.filter(t =>
-    t.content.includes("[System Event]") ||
-    t.content.includes("HEARTBEAT") ||
-    /\bNO_REPLY\b/.test(t.content)
-  );
+  const systemMessages = turns.filter(t => {
+    const content = normalizeContent(t.content);
+    return content.includes("[System Event]") ||
+      content.includes("HEARTBEAT") ||
+      /\bNO_REPLY\b/.test(content);
+  });
   if (systemMessages.length > 0) {
     score -= 0.1;
     flags.push("has_system_messages");
   }
 
   // Bonus for conversations that show real task completion
-  const hasTaskSignals = turns.some(t =>
-    t.content.includes("done") ||
-    t.content.includes("fixed") ||
-    t.content.includes("deployed") ||
-    t.content.includes("committed")
-  );
+  const hasTaskSignals = turns.some(t => {
+    const content = normalizeContent(t.content);
+    return content.includes("done") ||
+      content.includes("fixed") ||
+      content.includes("deployed") ||
+      content.includes("committed");
+  });
   if (hasTaskSignals) { score += 0.1; flags.push("task_completion"); }
 
   return { score: Math.max(0, Math.min(1, score)), flags };
@@ -420,11 +439,12 @@ function condenseSessionToTraining(
 ): { turns: ConversationTurn[]; systemPrompt: string } | null {
   // Extract just the task and final substantive responses
   // Skip tool call/result noise
-  const substantive = turns.filter(t =>
-    !t.content.startsWith("[Tool") &&
-    t.content.trim().length > 50 &&
-    t.role === "assistant"
-  );
+  const substantive = turns.filter(t => {
+    const content = normalizeContent(t.content);
+    return !content.startsWith("[Tool") &&
+      content.trim().length > 50 &&
+      t.role === "assistant";
+  });
 
   if (substantive.length === 0) return null;
 
@@ -434,8 +454,8 @@ function condenseSessionToTraining(
   return {
     systemPrompt: AGENT_TASK_SYSTEM(agentType),
     turns: [
-      { role: "user", content: taskPrompt },
-      { role: "assistant", content: finalResponse.content },
+      { role: "user", content: normalizeContent(taskPrompt) },
+      { role: "assistant", content: normalizeContent(finalResponse.content) },
     ],
   };
 }

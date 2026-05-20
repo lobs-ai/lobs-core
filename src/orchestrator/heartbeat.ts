@@ -246,13 +246,8 @@ async function checkMemoryPressure(): Promise<CheckResult> {
     };
   }
   
-  if (heapUsedPct > 90) {
-    return {
-      status: "warning",
-      message: `Memory pressure elevated: ${heapUsedPct.toFixed(0)}% heap used (RSS ${rssMB.toFixed(0)}MB)`,
-    };
-  }
-  
+  // Do not alert on heap ratio alone. V8 frequently keeps a small heap nearly full
+  // and expands/GCs lazily; with low RSS this is noise, not system pressure.
   return {
     status: "ok",
     message: `Memory OK: ${heapUsedPct.toFixed(0)}% heap, RSS ${rssMB.toFixed(0)}MB`,

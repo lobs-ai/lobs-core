@@ -206,6 +206,15 @@ async function indexFile(
   const newMemoryIds: number[] = [];
 
   const tx = db.transaction(() => {
+    const oldChunks = db.prepare(
+      "SELECT id FROM memories WHERE source_path = ? AND memory_type = 'document'",
+    ).all(filePath) as { id: number }[];
+
+    const deleteEmbedding = db.prepare("DELETE FROM memory_embeddings WHERE memory_id = ?");
+    for (const chunk of oldChunks) {
+      deleteEmbedding.run(chunk.id);
+    }
+
     // Remove old chunks
     db.prepare(
       "DELETE FROM memories WHERE source_path = ? AND memory_type = 'document'",
