@@ -1,48 +1,48 @@
 {
   "tiers": {
     "micro": "local/qwen2.5-1.5b-instruct-mlx",
-    "small": "minimax/MiniMax-M2.7",
-    "medium": "minimax/MiniMax-M2.7",
-    "standard": "minimax/MiniMax-M2.7",
-    "strong": "opencode-go/glm-5.1"
+    "small": "openai-codex/gpt-5.5",
+    "medium": "openai-codex/gpt-5.5",
+    "standard": "openai-codex/gpt-5.5",
+    "strong": "openai-codex/gpt-5.5"
   },
   "agents": {
     "programmer": {
-      "primary": "minimax/MiniMax-M2.7",
+      "primary": "openai-codex/gpt-5.5",
       "fallbacks": [
         "anthropic/claude-sonnet-4-6"
       ]
     },
     "researcher": {
-      "primary": "minimax/MiniMax-M2.7",
+      "primary": "openai-codex/gpt-5.5",
       "fallbacks": [
         "anthropic/claude-sonnet-4-6"
       ]
     },
     "writer": {
-      "primary": "minimax/MiniMax-M2.7",
+      "primary": "openai-codex/gpt-5.5",
       "fallbacks": [
         "anthropic/claude-sonnet-4-6"
       ]
     },
     "reviewer": {
-      "primary": "minimax/MiniMax-M2.7",
+      "primary": "openai-codex/gpt-5.5",
       "fallbacks": [
         "anthropic/claude-sonnet-4-6"
       ]
     },
     "architect": {
-      "primary": "opencode-go/glm-5.1",
+      "primary": "openai-codex/gpt-5.5",
       "fallbacks": [
-        "minimax/MiniMax-M2.7"
+        "anthropic/claude-sonnet-4-6"
       ]
     },
     "suggester": {
-      "primary": "minimax/MiniMax-M2.7",
+      "primary": "openai-codex/gpt-5.5",
       "fallbacks": []
     },
     "inbox": {
-      "primary": "minimax/MiniMax-M2.7",
+      "primary": "openai-codex/gpt-5.5",
       "fallbacks": [
         "anthropic/claude-haiku-4-5"
       ]
@@ -116,6 +116,12 @@
       "cacheRead": 0,
       "cacheWrite": 0
     },
+    "gpt-5.5": {
+      "input": 5,
+      "output": 30,
+      "cacheRead": 0.5,
+      "cacheWrite": 5
+    },
     "glm-5.1": {
       "input": 1.4,
       "output": 4.4,
@@ -138,7 +144,8 @@
     "gpt-4o": 128000,
     "qwen": 32000,
     "MiniMax-M2.7": 204800,
-    "glm-5.1": 128000
+    "glm-5.1": 128000,
+    "gpt-5.5": 200000
   },
   "tierFallbacks": {
     "micro": [
