@@ -4,22 +4,32 @@
  *
  * Model strings: "claude-cli/opus", "claude-cli/sonnet", "claude-cli/haiku".
  *
- * Scope (current):
- *   - Text completions only (system + user/assistant message history → text).
- *   - Tool calling is not yet supported via this provider. If `tools` is
- *     non-empty, we throw a clear error pointing to the anthropic/ prefix.
- *     The plan is to add an in-process MCP server that exposes the agent's
- *     tools to claude — modeled on openclaw's cli-runner — but that requires
- *     extending the LLMClient interface to carry a tool executor, which is a
- *     separate change.
+ * Two modes:
+ *
+ *   - Text completion (no `tools`): claude generates a response from the
+ *     prompt and exits. We parse the JSONL `result` event for text + usage.
+ *
+ *   - Tool-calling agent (`tools` + `toolExecutor`): we stand up an in-process
+ *     MCP server that exposes the caller's tools to claude, then spawn
+ *     `claude -p --mcp-config '{...}' --allowedTools 'mcp__lobs__*'`. Claude
+ *     drives its own agent loop, calling our tools via MCP. We return the
+ *     final text response as a single LLMResponse — callers using
+ *     agent-loop.ts see one createMessage call with `stop_reason=end_turn`
+ *     and no tool_use blocks, which terminates the outer loop correctly.
  */
 import { spawn } from "node:child_process";
 import type {
+  ClaudeCliToolExecutor,
   LLMClient,
   LLMMessage,
   LLMResponse,
 } from "./providers.js";
 import type { ToolDefinition, TokenUsage } from "./types.js";
+import {
+  startClaudeCliMcpServer,
+  CLAUDE_CLI_MCP_SERVER_NAME,
+  type ClaudeCliMcpServerHandle,
+} from "./claude-cli-mcp-server.js";
 
 const CLAUDE_BINARY = process.env.LOBS_CLAUDE_CLI_PATH || "claude";
 
@@ -27,7 +37,7 @@ const CLAUDE_BINARY = process.env.LOBS_CLAUDE_CLI_PATH || "claude";
  * Map a lobs-style model id to the alias claude expects on --model.
  * Accepts both the short aliases ("opus") and full ids ("claude-opus-4-7").
  */
-const MODEL_ALIASES: Record<string, string> = {
+export const CLAUDE_CLI_MODEL_ALIASES: Record<string, string> = {
   opus: "opus",
   "claude-opus-4-7": "opus",
   "claude-opus-4-6": "opus",
@@ -43,8 +53,8 @@ const MODEL_ALIASES: Record<string, string> = {
   "claude-haiku-4": "haiku",
 };
 
-function resolveModelAlias(modelId: string): string {
-  return MODEL_ALIASES[modelId] ?? modelId;
+export function resolveClaudeCliModelAlias(modelId: string): string {
+  return CLAUDE_CLI_MODEL_ALIASES[modelId] ?? modelId;
 }
 
 /**
@@ -52,7 +62,7 @@ function resolveModelAlias(modelId: string): string {
  * (Bedrock, Vertex, API key, etc.) instead of using the local OAuth login.
  * Mirrors openclaw's CLAUDE_CLI_CLEAR_ENV.
  */
-const CLAUDE_CLEAR_ENV = [
+export const CLAUDE_CLI_CLEAR_ENV = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_API_KEY_OLD",
   "ANTHROPIC_API_TOKEN",
@@ -73,11 +83,13 @@ const CLAUDE_CLEAR_ENV = [
   "CLAUDE_CODE_USE_VERTEX",
 ];
 
-function buildChildEnv(): Record<string, string> {
+export function buildClaudeCliChildEnv(
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
+  for (const [key, value] of Object.entries(baseEnv)) {
     if (typeof value !== "string") continue;
-    if (CLAUDE_CLEAR_ENV.includes(key)) continue;
+    if (CLAUDE_CLI_CLEAR_ENV.includes(key)) continue;
     env[key] = value;
   }
   return env;
@@ -91,12 +103,10 @@ function buildChildEnv(): Record<string, string> {
  * role tags so the model has the conversation context, then emit the latest
  * user message as the live prompt.
  */
-function flattenMessagesToPrompt(messages: LLMMessage[]): string {
+export function flattenMessagesToPrompt(messages: LLMMessage[]): string {
   if (messages.length === 0) return "";
 
-  const blockToText = (
-    content: LLMMessage["content"],
-  ): string => {
+  const blockToText = (content: LLMMessage["content"]): string => {
     if (typeof content === "string") return content;
     const parts: string[] = [];
     for (const raw of content) {
@@ -142,7 +152,7 @@ function flattenMessagesToPrompt(messages: LLMMessage[]): string {
 
 type StreamEvent = Record<string, unknown>;
 
-interface ParsedResult {
+export interface ParsedResult {
   text: string;
   thinking: string;
   usage: TokenUsage;
@@ -151,7 +161,7 @@ interface ParsedResult {
   errorMessage?: string;
 }
 
-function parseJsonlOutput(stdout: string): ParsedResult {
+export function parseJsonlOutput(stdout: string): ParsedResult {
   let assistantText = "";
   let thinkingText = "";
   let usage: TokenUsage = {
@@ -190,7 +200,6 @@ function parseJsonlOutput(stdout: string): ParsedResult {
         session_id?: string;
       };
       if (typeof result.result === "string" && result.result.length > 0) {
-        // Prefer the final consolidated result text when available.
         assistantText = result.result;
       }
       if (result.is_error) {
@@ -231,9 +240,6 @@ function parseJsonlOutput(stdout: string): ParsedResult {
       for (const raw of blocks) {
         const block = raw as Record<string, unknown>;
         if (block.type === "text" && typeof block.text === "string") {
-          // Stream-json emits multiple incremental assistant messages; we keep
-          // the latest text per message (each event carries the full block,
-          // not a delta, in non-partial mode).
           assistantText = block.text;
         } else if (
           block.type === "thinking" &&
@@ -256,21 +262,76 @@ function parseJsonlOutput(stdout: string): ParsedResult {
   };
 }
 
+export interface BuildArgsParams {
+  model: string;
+  systemPrompt: string;
+  mcp?: { url: string; authToken: string };
+}
+
+/**
+ * Pure: build the argv we'll pass to `claude`. Exported for test coverage of
+ * the MCP-vs-text-only branching and arg ordering.
+ */
+export function buildClaudeCliArgs(params: BuildArgsParams): string[] {
+  const args: string[] = [
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--setting-sources",
+    "user",
+    "--permission-mode",
+    "bypassPermissions",
+    "--model",
+    resolveClaudeCliModelAlias(params.model),
+  ];
+
+  if (params.mcp) {
+    const mcpConfig = {
+      mcpServers: {
+        [CLAUDE_CLI_MCP_SERVER_NAME]: {
+          type: "http",
+          url: params.mcp.url,
+          headers: { Authorization: `Bearer ${params.mcp.authToken}` },
+        },
+      },
+    };
+    args.push("--mcp-config", JSON.stringify(mcpConfig));
+    args.push("--strict-mcp-config");
+    args.push("--allowedTools", `mcp__${CLAUDE_CLI_MCP_SERVER_NAME}__*`);
+  } else {
+    // No tools — disable claude's built-ins so it acts as a pure completion engine.
+    args.push("--tools", "");
+  }
+
+  if (params.systemPrompt && params.systemPrompt.trim().length > 0) {
+    args.push("--append-system-prompt", params.systemPrompt);
+  }
+
+  return args;
+}
+
 export interface ClaudeCliClientOptions {
   sessionId?: string;
   /** Override the binary path. Defaults to env LOBS_CLAUDE_CLI_PATH or "claude". */
   binaryPath?: string;
+  /**
+   * Override how the MCP server is started — used by tests to inject a stub.
+   */
+  startMcpServer?: typeof startClaudeCliMcpServer;
 }
 
 export class ClaudeCliClient implements LLMClient {
-  private readonly modelAlias: string;
+  private readonly defaultModelAlias: string;
   private readonly sessionId?: string;
   private readonly binary: string;
+  private readonly startMcpServer: typeof startClaudeCliMcpServer;
 
   constructor(modelId: string, options?: ClaudeCliClientOptions) {
-    this.modelAlias = resolveModelAlias(modelId);
+    this.defaultModelAlias = resolveClaudeCliModelAlias(modelId);
     this.sessionId = options?.sessionId;
     this.binary = options?.binaryPath || CLAUDE_BINARY;
+    this.startMcpServer = options?.startMcpServer ?? startClaudeCliMcpServer;
   }
 
   async createMessage(params: {
@@ -282,45 +343,56 @@ export class ClaudeCliClient implements LLMClient {
     thinking?:
       | { type: "enabled"; budgetTokens: number }
       | { type: "adaptive" };
+    toolExecutor?: ClaudeCliToolExecutor;
   }): Promise<LLMResponse> {
-    if (params.tools.length > 0) {
-      throw new Error(
-        "claude-cli provider does not support tool calling yet. " +
-          "Use the anthropic/ prefix (e.g. anthropic/claude-opus-4-6) for " +
-          "agent-loop calls that need tools, or omit tools to use claude-cli " +
-          "for text completions. Planned: MCP-server bridge so claude can " +
-          "call lobs-core tools directly.",
-      );
-    }
-
     const prompt = flattenMessagesToPrompt(params.messages);
     if (!prompt) {
       throw new Error("claude-cli: empty prompt — no messages provided");
     }
 
-    const args: string[] = [
-      "-p",
-      "--output-format",
-      "stream-json",
-      "--verbose",
-      "--setting-sources",
-      "user",
-      "--tools",
-      "", // disable claude's built-in tools — we use it as a plain completion engine
-      "--permission-mode",
-      "bypassPermissions",
-      "--model",
-      resolveModelAlias(params.model || this.modelAlias),
-    ];
-    if (params.system && params.system.trim().length > 0) {
-      args.push("--append-system-prompt", params.system);
+    const wantsTools = params.tools.length > 0;
+    if (wantsTools && !params.toolExecutor) {
+      throw new Error(
+        "claude-cli: tools were provided but no toolExecutor — the caller " +
+          "must pass an executor so the in-process MCP server can dispatch " +
+          "tool calls back to lobs-core.",
+      );
     }
 
-    const env = buildChildEnv();
+    let mcpHandle: ClaudeCliMcpServerHandle | undefined;
+    if (wantsTools && params.toolExecutor) {
+      mcpHandle = await this.startMcpServer({
+        tools: params.tools,
+        executor: params.toolExecutor,
+      });
+    }
 
+    try {
+      const args = buildClaudeCliArgs({
+        model: params.model || this.defaultModelAlias,
+        systemPrompt: params.system,
+        mcp: mcpHandle
+          ? { url: mcpHandle.url, authToken: mcpHandle.authToken }
+          : undefined,
+      });
+      const env = buildClaudeCliChildEnv();
+      return await this.spawnAndCollect({ args, env, prompt, modelLabel: params.model });
+    } finally {
+      if (mcpHandle) {
+        await mcpHandle.close();
+      }
+    }
+  }
+
+  private async spawnAndCollect(params: {
+    args: string[];
+    env: Record<string, string>;
+    prompt: string;
+    modelLabel: string;
+  }): Promise<LLMResponse> {
     return await new Promise<LLMResponse>((resolve, reject) => {
-      const child = spawn(this.binary, args, {
-        env,
+      const child = spawn(this.binary, params.args, {
+        env: params.env,
         stdio: ["pipe", "pipe", "pipe"],
       });
 
@@ -347,9 +419,12 @@ export class ClaudeCliClient implements LLMClient {
       child.on("close", (code) => {
         if (code !== 0) {
           const tail = stderr.trim() || stdout.trim().slice(-500);
+          const aliased = resolveClaudeCliModelAlias(
+            params.modelLabel || this.defaultModelAlias,
+          );
           reject(
             new Error(
-              `claude-cli exited ${code} (model=${resolveModelAlias(params.model || this.modelAlias)}): ${tail || "no output"}`,
+              `claude-cli exited ${code} (model=${aliased}): ${tail || "no output"}`,
             ),
           );
           return;
@@ -373,9 +448,7 @@ export class ClaudeCliClient implements LLMClient {
         resolve(response);
       });
 
-      // Send the prompt on stdin so we don't hit argv length limits and
-      // don't have to worry about shell escaping.
-      child.stdin.end(prompt);
+      child.stdin.end(params.prompt);
     });
   }
 }

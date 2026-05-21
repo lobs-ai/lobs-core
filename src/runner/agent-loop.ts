@@ -543,6 +543,27 @@ export async function runAgent(spec: AgentSpec): Promise<AgentResult> {
           tools,
           maxTokens: DEFAULT_MAX_TOKENS,
           thinking: spec.thinking,
+          // claude-cli routes tool calls back to us via MCP; other clients
+          // ignore this. Side effects (cwd changes) are applied so subsequent
+          // tool calls within the same claude run see updated cwd.
+          toolExecutor:
+            providerConfig.provider === "claude-cli"
+              ? async (toolName, toolInput) => {
+                  const callId = `claude-cli-${Date.now()}-${turns}`;
+                  const exec = spec.toolExecutor
+                    ? await spec.toolExecutor(toolName, toolInput, callId, currentCwd, { toolUseId: callId })
+                    : await executeTool(toolName, toolInput, callId, currentCwd);
+                  if (exec.sideEffects?.newCwd) {
+                    currentCwd = exec.sideEffects.newCwd;
+                    queryState.currentCwd = exec.sideEffects.newCwd;
+                  }
+                  const content =
+                    typeof exec.result.content === "string"
+                      ? exec.result.content
+                      : JSON.stringify(exec.result.content);
+                  return { content, isError: exec.result.is_error };
+                }
+              : undefined,
         });
         console.debug(
           `[agent-loop] run=${runId} agent=${spec.agent} turn=${turns} ` +

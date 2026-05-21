@@ -59,6 +59,17 @@ export interface LLMResponse {
   thinkingContent?: string;
 }
 
+/**
+ * Tool executor passed to LLMClient.createMessage for clients that drive
+ * their own tool-calling loop (currently only claude-cli, which exposes our
+ * tools to claude via an in-process MCP server). For clients that return
+ * tool_use blocks to the caller, this is unused.
+ */
+export type ClaudeCliToolExecutor = (
+  name: string,
+  input: Record<string, unknown>,
+) => Promise<{ content: string; isError?: boolean }>;
+
 export interface LLMClient {
   createMessage(params: {
     model: string;
@@ -72,6 +83,12 @@ export interface LLMClient {
     } | {
       type: "adaptive";
     };
+    /**
+     * Optional callback. When the client manages its own tool-calling loop
+     * (e.g. claude-cli via MCP) and `tools` is non-empty, this is invoked
+     * for each tool call. Most clients ignore it.
+     */
+    toolExecutor?: ClaudeCliToolExecutor;
   }): Promise<LLMResponse>;
 }
 
