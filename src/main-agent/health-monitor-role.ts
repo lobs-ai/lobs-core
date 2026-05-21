@@ -90,8 +90,18 @@ export function classifyHealthAlert(probes: HealthProbeResult[]): AlertClassific
 // ─── Decision Engine ───────────────────────────────────────────────────────
 
 /**
- * Decide what action to take for an alert classification
+ * Pull the human-readable issue list from the resource-exhaustion probe.
+ * Falls back to a generic summary when no per-resource issues were recorded.
  */
+function summarizeResourceIssues(snapshot: SystemHealthSnapshot): string {
+  const resourceProbe = snapshot.probes.find(p => p.probe === "resource-exhaustion");
+  const issues = (resourceProbe?.detail?.issues ?? []) as string[];
+  if (Array.isArray(issues) && issues.length > 0) {
+    return issues.join("; ");
+  }
+  return `disk ${snapshot.diskUsagePercent}% used, memory ${snapshot.memoryUsagePercent}% used`;
+}
+
 export async function decideRemediationAction(
   classification: AlertClassification,
   snapshot: SystemHealthSnapshot,
@@ -170,8 +180,7 @@ export async function decideRemediationAction(
         type: "propose",
         category: "cleanup",
         description:
-          "System resources critically exhausted. " +
-          `Disk usage: ${snapshot.diskUsagePercent}%. ` +
+          `System resources critically exhausted: ${summarizeResourceIssues(snapshot)}. ` +
           "Review resource diagnostics before cleanup or restart.",
         rationale:
           "Resource exhaustion may cause ENOSPC, OOM, or restart cascades. " +
@@ -183,7 +192,7 @@ export async function decideRemediationAction(
       return {
         type: "auto",
         category: "cleanup",
-        description: `System resources near exhaustion. Disk usage: ${snapshot.diskUsagePercent}%.`,
+        description: `System resources near exhaustion: ${summarizeResourceIssues(snapshot)}.`,
         rationale: "Probe details identify whether disk, memory, or CPU is near exhaustion.",
         changes: { archive_old_sessions: true, archive_cutoff_days: 7 },
       };
