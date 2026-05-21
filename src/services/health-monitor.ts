@@ -276,12 +276,37 @@ export function probeSessionStaleness(db: PawDB): HealthProbeResult {
 
 const DISK_CRITICAL_MB = 200;
 const DISK_WARN_MB = 500;
-const DISK_CRITICAL_PCT = 95;
-const DISK_WARN_PCT = 90;
 const MEMORY_CRITICAL_PCT = 90;
 const MEMORY_WARN_PCT = 85;
 const CPU_CRITICAL = 1.0;
 const CPU_WARN = 0.8;
+
+export interface DiskUsageStats {
+  blocks: number;
+  bfree: number;
+  bavail?: number;
+  bsize: number;
+}
+
+export interface DiskUsageInfo {
+  usagePercent: number;
+  availableMB: number;
+}
+
+export function calculateDiskUsage(stats: DiskUsageStats): DiskUsageInfo | null {
+  const totalBytes = stats.blocks * stats.bsize;
+  const availableBlocks = stats.bavail ?? stats.bfree;
+  const availableBytes = availableBlocks * stats.bsize;
+
+  if (!Number.isFinite(totalBytes) || !Number.isFinite(availableBytes) || totalBytes <= 0 || availableBytes < 0) {
+    return null;
+  }
+
+  return {
+    usagePercent: Math.max(0, Math.min(100, Math.round(((totalBytes - availableBytes) / totalBytes) * 100))),
+    availableMB: Math.round(availableBytes / 1024 / 1024),
+  };
+}
 
 function parseVmStatAvailablePercent(output: string): number | null {
   const pageSizeMatch = output.match(/page size of (\d+) bytes/);
@@ -349,15 +374,17 @@ export async function probeResourceExhaustion(): Promise<HealthProbeResult> {
     try {
       const stateDir = getLobsRoot();
       const stats = await statfs(stateDir);
-      const freeBytes = stats.bfree * stats.bsize;
-      const totalBytes = stats.blocks * stats.bsize;
-      diskFreeMB = Math.round(freeBytes / 1024 / 1024);
-      diskUsagePct = Math.round(((totalBytes - freeBytes) / totalBytes) * 100);
+      const diskUsage = calculateDiskUsage(stats);
 
-      if (diskFreeMB < DISK_CRITICAL_MB || diskUsagePct >= DISK_CRITICAL_PCT) {
-        issues.push(`disk CRITICAL: ${diskUsagePct}% used, ${diskFreeMB} MB free`);
-      } else if (diskFreeMB < DISK_WARN_MB || diskUsagePct >= DISK_WARN_PCT) {
-        issues.push(`disk WARN: ${diskUsagePct}% used, ${diskFreeMB} MB free`);
+      if (diskUsage) {
+        diskFreeMB = diskUsage.availableMB;
+        diskUsagePct = diskUsage.usagePercent;
+
+        if (diskFreeMB < DISK_CRITICAL_MB) {
+          issues.push(`disk CRITICAL: ${diskUsagePct}% used, ${diskFreeMB} MB available`);
+        } else if (diskFreeMB < DISK_WARN_MB) {
+          issues.push(`disk WARN: ${diskUsagePct}% used, ${diskFreeMB} MB available`);
+        }
       }
     } catch {
       // statfs can fail on some platforms — skip disk check
