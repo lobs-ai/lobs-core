@@ -299,7 +299,17 @@ export function initMemoryDb(dbPath?: string): Database.Database {
   addColumnIfMissing("memories", "source_path",  "TEXT");
   addColumnIfMissing("memories", "content_hash", "TEXT");
   addColumnIfMissing("memories", "chunk_index",  "INTEGER");
-  addColumnIfMissing("memory_embeddings", "created_at", "TEXT NOT NULL DEFAULT (datetime('now'))");
+  // SQLite refuses ALTER TABLE ADD COLUMN with a non-constant default on tables
+  // that already have rows ("Cannot add a column with non-constant default"),
+  // so the NOT NULL DEFAULT (datetime('now')) form silently fails on existing DBs
+  // and the column never gets added. Add nullable, then backfill — INSERTs from
+  // indexer.ts / gc.ts always provide a value, and nothing reads created_at yet.
+  addColumnIfMissing("memory_embeddings", "created_at", "TEXT");
+  try {
+    db.exec(`UPDATE memory_embeddings SET created_at = datetime('now') WHERE created_at IS NULL`);
+  } catch {
+    // Column genuinely missing on a fresh-from-schema DB shouldn't happen, but tolerate.
+  }
   addColumnIfMissing("conflicts", "conflict_type", "TEXT");
   addColumnIfMissing("conflicts", "suggested_action", "TEXT");
 
