@@ -137,11 +137,17 @@ ${context.recentErrors.length > 0
 
     const result = JSON.parse(jsonMatch[0]) as TaskHealthResult;
 
-    // Guard: if the DB has no stale tasks, the LLM shouldn't flag any stale_task alerts
-    // This prevents false positives from model hallucination or reasoning artifacts
-    const filteredAlerts = result.alerts.filter(a =>
-      a.type !== "stale_task" || context.staleTasks.length > 0
-    );
+    // Guard: if the DB has no stale tasks, drop any alert that talks about stale/old/not-updated
+    // tasks regardless of its declared `type` — local Qwen sometimes emits the same hallucination
+    // under a different type string (e.g. "stale", "task_health") and slips past a strict type match.
+    const filteredAlerts = result.alerts.filter(a => {
+      if (context.staleTasks.length > 0) return true;
+      if (a.type === "stale_task") return false;
+      const msg = (a.message ?? "").toLowerCase();
+      const mentionsStale = /\b(stale|not\s+(?:been\s+)?updated|no(?:t)?\s+updated\s+in|outdated)\b/.test(msg);
+      const mentionsTasks = /\btasks?\b/.test(msg);
+      return !(mentionsStale && mentionsTasks);
+    });
 
     // Log as training data
     logTrainingExample({
