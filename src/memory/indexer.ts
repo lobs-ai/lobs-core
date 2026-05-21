@@ -215,14 +215,29 @@ async function indexFile(
   const newMemoryIds: number[] = [];
 
   const tx = db.transaction(() => {
-    const oldChunks = db.prepare(
-      "SELECT id FROM memories WHERE source_path = ? AND memory_type = 'document'",
-    ).all(filePath) as { id: number }[];
+    // Purge child rows that reference the chunks we're about to delete.
+    // Every table with a FOREIGN KEY to memories(id) must be cleared first,
+    // otherwise the DELETE on memories will fail with a FK constraint error
+    // (foreign_keys pragma is ON).
+    const oldChunkSelector =
+      "SELECT id FROM memories WHERE source_path = ? AND memory_type = 'document'";
 
-    const deleteEmbedding = db.prepare("DELETE FROM memory_embeddings WHERE memory_id = ?");
-    for (const chunk of oldChunks) {
-      deleteEmbedding.run(chunk.id);
-    }
+    db.prepare(
+      `DELETE FROM memory_embeddings WHERE memory_id IN (${oldChunkSelector})`,
+    ).run(filePath);
+    db.prepare(
+      `DELETE FROM evidence WHERE memory_id IN (${oldChunkSelector})`,
+    ).run(filePath);
+    db.prepare(
+      `DELETE FROM retrieval_log WHERE memory_id IN (${oldChunkSelector})`,
+    ).run(filePath);
+    db.prepare(
+      `DELETE FROM gc_log WHERE memory_id IN (${oldChunkSelector})`,
+    ).run(filePath);
+    db.prepare(
+      `DELETE FROM conflicts
+       WHERE memory_a IN (${oldChunkSelector}) OR memory_b IN (${oldChunkSelector})`,
+    ).run(filePath, filePath);
 
     // Remove old chunks
     db.prepare(
