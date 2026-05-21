@@ -4,12 +4,14 @@
  * Tools are stored as directories: ~/.lobs/tools/{name}/
  *   tool.json     — definition + metadata
  *   run.sh        — shell implementation
- *   run.ts        — TypeScript implementation (served as instructions)
+ *   run.ts        — TypeScript implementation
  *   steps.md      — procedural implementation
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, resolve, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { getLobsRoot } from "../../config/lobs.js";
 import { execFile } from "node:child_process";
 import type { ToolDefinition } from "../types.js";
@@ -31,6 +33,10 @@ interface DynamicToolEntry {
 }
 
 const SHELL_TIMEOUT_MS = 30_000;
+const TYPESCRIPT_TIMEOUT_MS = 30_000;
+const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = resolve(MODULE_DIR, "../../..");
+const TSX_IMPORT = resolve(PROJECT_ROOT, "node_modules/tsx/dist/esm/index.mjs");
 
 export class DynamicToolLoader {
   private toolsDir: string;
@@ -118,7 +124,7 @@ export class DynamicToolLoader {
       case "shell":
         return this.executeShell(dir, params, cwd);
       case "typescript":
-        return this.executeTypeScript(dir);
+        return this.executeTypeScript(dir, params, cwd);
       case "procedural":
         return this.executeProcedural(dir);
       default:
@@ -178,17 +184,55 @@ export class DynamicToolLoader {
     });
   }
 
-  private executeTypeScript(dir: string): Promise<string> {
-    // TypeScript tools are served as instructions (full dynamic import is complex/risky).
-    // The LLM receives the source as context and uses it as guidance.
+  private executeTypeScript(dir: string, params: Record<string, unknown>, cwd: string): Promise<string> {
     const scriptPath = join(dir, "run.ts");
     if (!existsSync(scriptPath)) {
       throw new Error("TypeScript implementation file (run.ts) not found");
     }
-    const content = readFileSync(scriptPath, "utf-8");
-    return Promise.resolve(
-      `[TypeScript tool — source code below]\n\n${content}`
-    );
+
+    const wrapperPath = join(tmpdir(), `lobs-dynamic-tool-${process.pid}-${Date.now()}.mjs`);
+    const wrapper = `
+import { pathToFileURL } from "node:url";
+
+const scriptPath = process.argv[2];
+const params = JSON.parse(process.env.LOBS_TOOL_INPUT ?? "{}");
+const mod = await import(pathToFileURL(scriptPath).href + "?t=" + Date.now());
+const tool = mod.default ?? mod.run;
+
+if (typeof tool !== "function") {
+  throw new Error("TypeScript tool must export a default function or named run function");
+}
+
+const result = await tool(params);
+if (typeof result === "string") {
+  console.log(result);
+} else if (result !== undefined) {
+  console.log(JSON.stringify(result, null, 2));
+}
+`;
+    writeFileSync(wrapperPath, wrapper, "utf-8");
+
+    return new Promise((resolve, reject) => {
+      execFile(process.execPath, ["--import", TSX_IMPORT, wrapperPath, scriptPath], {
+        cwd,
+        timeout: TYPESCRIPT_TIMEOUT_MS,
+        env: {
+          ...process.env,
+          LOBS_TOOL_INPUT: JSON.stringify(params),
+        },
+      }, (error, stdout, stderr) => {
+        rmSync(wrapperPath, { force: true });
+        if (error) {
+          const message = stderr.trim() || error.message;
+          reject(new Error(`TypeScript tool failed: ${message}`));
+          return;
+        }
+        const output = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
+        resolve(output || "(no output)");
+      }).on("error", () => {
+        rmSync(wrapperPath, { force: true });
+      });
+    });
   }
 
   private executeProcedural(dir: string): Promise<string> {
