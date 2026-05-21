@@ -111,14 +111,17 @@ export function validatePostSuccessArtifacts(
   let artifactDetail = "";
 
   if (agent === "programmer" || agent === "reviewer" || agent === "architect") {
-    // Check the project repo first
-    const result = checkRepoArtifacts(repoPath, cutoff);
-    hasArtifacts = result.found;
-    artifactDetail = result.detail;
+    // Check the project repo first when one is provided.
+    if (repoPath) {
+      const result = checkRepoArtifacts(repoPath, cutoff);
+      hasArtifacts = result.found;
+      artifactDetail = result.detail;
+    }
 
-    // If no artifacts in project repo, check repos the agent actually worked in.
-    // Agents often work in a different repo than the project's declared repo_path
-    // (e.g., a task filed under PAW might fix code in lobs-core).
+    // If no artifacts in project repo (or no project repo provided), check repos
+    // the agent actually worked in. Agents often work in a different repo than
+    // the project's declared repo_path (e.g., a task filed under PAW might fix
+    // code in lobs-core).
     if (!hasArtifacts) {
       const sessionResult = detectActualWorkingRepos(agent, startedAt, sessionKey);
       const actualRepos = sessionResult.repos;
@@ -146,6 +149,21 @@ export function validatePostSuccessArtifacts(
           `projectRepo=${repoPath ?? "none"} startedAt=${startedAt ?? "unknown"} — ` +
           `possible phantom completion or wrong session matched.`,
         );
+      }
+
+      // Last-resort broad scan of known dev directories. Only run this when we
+      // have no other signal to anchor on: no project repo, no sessionKey, and
+      // detectActualWorkingRepos found no session at all. If a sessionKey was
+      // provided OR any session was matched, we trust that exclusively — falling
+      // back here would mask wrong-session detection (regression: a sessionKey
+      // pointing at a repo with no artifacts must yield no_artifacts, not be
+      // overridden by a sibling repo's recent files).
+      if (!hasArtifacts && !repoPath && !sessionKey && sessionResult.sessionStem === null) {
+        const fallbackResult = checkAnyRecentFiles(null, cutoff);
+        if (fallbackResult.found) {
+          hasArtifacts = true;
+          artifactDetail = fallbackResult.detail;
+        }
       }
     }
   } else if (agent === "writer") {

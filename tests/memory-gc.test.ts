@@ -300,7 +300,9 @@ describe("runMemoryGC()", () => {
 
     it("applies the correct decay formula: confidence * 0.95^(age_in_30day_cycles)", async () => {
       const initialConfidence = 0.9;
-      const ageDays = 120;
+      // 95 days is comfortably inside the [90, 120) window — Math.floor(age/30) = 3
+      // regardless of small jitter from the time between insert and GC.
+      const ageDays = 95;
       const id = insertMemory({
         confidence: initialConfidence,
         access_count: 2, // < 3 so decay applies, but > 0 to avoid stale path
@@ -312,8 +314,6 @@ describe("runMemoryGC()", () => {
       await runMemoryGC();
 
       const updated = getMemory(id)!;
-      // daysAgo(120) produces slightly < 120 days due to sub-day precision
-      // so Math.floor(~119.x / 30) = 3, not 4
       const cycles = 3;
       const expected = initialConfidence * Math.pow(0.95, cycles);
       // Allow for floating-point rounding in the DB round-trip

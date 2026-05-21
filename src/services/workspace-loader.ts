@@ -338,13 +338,21 @@ export function loadWorkspaceContext(agentType: string = "main"): string {
     }
   }
 
+  // Always emit the Available Files section header, even when nothing is
+  // currently registered. This guarantees the workspace context is non-empty
+  // for unknown/sparse agent types and gives readers a stable place to find
+  // on-demand files when more are added later.
+  const availHeader =
+    `## Available Files (read on demand)\n` +
+    `Located at \`~/.lobs/agents/${agentType}/\` (and \`context/\` subdirectory).`;
   if (available.length > 0) {
     sections.push(
-      `## Available Files (read on demand)\n` +
-      `Located at \`~/.lobs/agents/${agentType}/\` (and \`context/\` subdirectory).\n` +
+      `${availHeader}\n` +
       `Use the \`read\` tool when you need them.\n` +
       available.map(a => `- ${a}`).join("\n")
     );
+  } else {
+    sections.push(`${availHeader}\n(none registered)`);
   }
 
   // Inject top important memories for the main agent only.
