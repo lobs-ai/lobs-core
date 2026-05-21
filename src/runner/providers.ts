@@ -30,7 +30,7 @@ import {
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-export type Provider = "anthropic" | "openai" | "openai-codex" | "lmstudio" | "openrouter" | "openai-compatible" | "opencode-zen" | "opencode-go" | "z-ai" | "minimax" | "kimi";
+export type Provider = "anthropic" | "claude-cli" | "openai" | "openai-codex" | "lmstudio" | "openrouter" | "openai-compatible" | "opencode-zen" | "opencode-go" | "z-ai" | "minimax" | "kimi";
 
 export interface ProviderConfig {
   provider: Provider;
@@ -91,6 +91,9 @@ export function parseModelString(model: string): ProviderConfig {
 
     if (providerHint === "anthropic") {
       return { provider: "anthropic", modelId: parts.slice(1).join("/") };
+    }
+    if (providerHint === "claude-cli" || providerHint === "claude-code") {
+      return { provider: "claude-cli", modelId: parts.slice(1).join("/") };
     }
     if (providerHint === "openai") {
       return { provider: "openai", modelId: parts.slice(1).join("/") };
@@ -1193,6 +1196,8 @@ class OpenAICompatibleClient implements LLMClient {
 /** Default base URLs per provider */
 const PROVIDER_DEFAULTS: Record<Provider, { baseUrl: string; envKey: string }> = {
   anthropic: { baseUrl: "https://api.anthropic.com", envKey: "ANTHROPIC_API_KEY" },
+  "claude-cli": { baseUrl: "", envKey: "" }, // spawns local `claude` binary; no URL/key
+
   openai: { baseUrl: "https://api.openai.com", envKey: "OPENAI_API_KEY" },
   "openai-codex": { baseUrl: "https://chatgpt.com/backend-api/codex", envKey: "OPENAI_CODEX_TOKEN" },
   lmstudio: { baseUrl: process.env.LM_STUDIO_URL || "http://localhost:1234", envKey: "" },
@@ -1754,6 +1759,10 @@ class OpenAICodexClient implements LLMClient {
  * @param sessionId - Optional session ID for sticky key assignment
  */
 export async function createClient(config: ProviderConfig, sessionId?: string): Promise<LLMClient> {
+  if (config.provider === "claude-cli") {
+    const { createClaudeCliClient } = await import("./claude-cli-client.js");
+    return createClaudeCliClient(config.modelId, { sessionId });
+  }
   if (config.provider === "anthropic") {
     const keyPool = getKeyPool();
     const auth = resolveAnthropicAuth(sessionId);
