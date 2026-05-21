@@ -253,6 +253,23 @@ async function main() {
       try { process.kill(existingPid, 0); alive = true; } catch {}
     }
     if (alive) {
+      // If launchd spawned us while another instance holds the lock, exit-1 +
+      // KeepAlive=true causes a FATAL retry-spam every ~10s. Instead, stay
+      // alive as a passive standby: poll the primary and exit 0 when it dies
+      // so launchd's next respawn can claim the lock cleanly.
+      const launchdSpawned = process.env.XPC_SERVICE_NAME === "com.lobs.lobs-core";
+      if (launchdSpawned) {
+        console.log(`[STANDBY] Primary lobs-core PID ${existingPid} is running — entering standby`);
+        // Do NOT unref — we want the interval to keep the event loop alive so
+        // launchd sees a running process and skips its retry-throttle.
+        setInterval(() => {
+          try { process.kill(existingPid, 0); } catch {
+            console.log(`[STANDBY] Primary PID ${existingPid} gone — exiting so launchd can respawn`);
+            process.exit(0);
+          }
+        }, 10_000);
+        return;
+      }
       console.error(`[FATAL] Another instance is already running (PID ${existingPid})`);
       console.error(`  Stop it first: lobs stop`);
       process.exit(1);
