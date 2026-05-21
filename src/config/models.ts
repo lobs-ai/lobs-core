@@ -131,6 +131,9 @@ export const DEFAULT_CONFIG: ModelConfig = {
     "claude-opus-4-5":   { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
     "claude-opus-4":     { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
     "claude-haiku-4-5":  { input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1 },
+    // claude-cli/* runs through the user's Claude Code OAuth subscription —
+    // zero per-token cost from lobs's perspective (already paid for via the sub).
+    "claude-cli":        { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     "gpt-4o":            { input: 2.5, output: 10, cacheRead: 1.25, cacheWrite: 2.5 },
     "MiniMax-M2.7":      { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, // Unlimited subscription
     "glm-5.1":           { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }, // opencode-go per-token
@@ -149,6 +152,7 @@ export const DEFAULT_CONFIG: ModelConfig = {
     "claude-opus-4-5":   200_000,
     "claude-opus-4":     200_000,
     "claude-haiku-4-5":  200_000,
+    "claude-cli":        200_000,
     "gpt-4o":            128_000,
     "qwen":              32_000,
     "MiniMax-M2.7":      204_800,

@@ -112,6 +112,12 @@ The orchestrator runs continuous health probes (disk, memory, CPU, session state
 ### Memory GC
 Memory garbage collection runs automatically. The reconciler handles deduplication via title-based fallback. See `src/memory/gc.ts` for details.
 
+### Model Providers
+Model strings are `provider/model-id` — see `src/runner/providers.ts`. Two paths reach Claude models:
+
+- `anthropic/claude-opus-4-6` — direct Anthropic API. Uses API keys from the key pool. Supports native tool calling. Costs API rates.
+- `claude-cli/opus` (also `sonnet`, `haiku`) — spawns the local `claude -p` binary so calls bill against the Claude Code OAuth subscription instead of the API. **Text completions only** — passing `tools` throws a clear error. Use this for summarization, classification, and other text-only tasks where you want Opus quality on the subscription. MCP-server tool bridge is planned but not yet wired.
+
 ---
 
 ## Working with lobs-core
