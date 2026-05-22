@@ -118,6 +118,30 @@ describe("ClaudeCliClient — text-only", () => {
     ).rejects.toThrow(/exited 2.*auth required/);
   });
 
+  it("surfaces api_error_status when binary exits non-zero with a structured result event", async () => {
+    // Real-world shape from Discord report: claude -p exits 1 but stdout has
+    // a result event whose `api_error_status` says "529 overloaded". The
+    // surfaced error must include both the subtype and "overloaded" so the
+    // upstream classifier auto-retries instead of the user seeing JSON garbage.
+    const client = new ClaudeCliClient("opus", { binaryPath: MOCK_BINARY });
+    process.env.MOCK_CLAUDE_MODE = "error-result-fail";
+    process.env.MOCK_CLAUDE_EXIT = "1";
+    delete process.env.MOCK_CLAUDE_STDERR;
+    process.env.MOCK_CLAUDE_LOGFILE = logFile;
+
+    await expect(
+      client.createMessage({
+        model: "opus",
+        system: "",
+        messages: [{ role: "user", content: "x" }],
+        tools: [],
+        maxTokens: 50,
+      }),
+    ).rejects.toThrow(
+      /exited 1.*error_during_execution.*529 overloaded.*Request failed.*bfdb18e5/,
+    );
+  });
+
   it("rejects when result event signals is_error", async () => {
     const client = new ClaudeCliClient("haiku", { binaryPath: MOCK_BINARY });
     process.env.MOCK_CLAUDE_MODE = "error-result";

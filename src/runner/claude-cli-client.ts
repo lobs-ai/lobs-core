@@ -159,6 +159,10 @@ export interface ParsedResult {
   stopReason: LLMResponse["stopReason"];
   sessionId?: string;
   errorMessage?: string;
+  /** result.subtype when is_error (e.g. "error_during_execution"). */
+  errorSubtype?: string;
+  /** result.api_error_status, e.g. "529 overloaded". */
+  apiErrorStatus?: string;
 }
 
 export function parseJsonlOutput(stdout: string): ParsedResult {
@@ -173,6 +177,8 @@ export function parseJsonlOutput(stdout: string): ParsedResult {
   let stopReason: LLMResponse["stopReason"] = "end_turn";
   let sessionId: string | undefined;
   let errorMessage: string | undefined;
+  let errorSubtype: string | undefined;
+  let apiErrorStatus: string | undefined;
 
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
@@ -193,6 +199,7 @@ export function parseJsonlOutput(stdout: string): ParsedResult {
     if (type === "result") {
       const result = event as {
         result?: string;
+        subtype?: string;
         stop_reason?: string;
         is_error?: boolean;
         api_error_status?: string | null;
@@ -207,6 +214,15 @@ export function parseJsonlOutput(stdout: string): ParsedResult {
           result.result ||
           result.api_error_status ||
           "claude -p reported an error";
+        if (typeof result.subtype === "string" && result.subtype.length > 0) {
+          errorSubtype = result.subtype;
+        }
+        if (
+          typeof result.api_error_status === "string" &&
+          result.api_error_status.length > 0
+        ) {
+          apiErrorStatus = result.api_error_status;
+        }
       }
       switch (result.stop_reason) {
         case "end_turn":
@@ -259,7 +275,29 @@ export function parseJsonlOutput(stdout: string): ParsedResult {
     stopReason,
     sessionId,
     errorMessage,
+    errorSubtype,
+    apiErrorStatus,
   };
+}
+
+/**
+ * Build a human-readable summary of a structured claude -p error event for
+ * surfacing in thrown Error messages. Combines subtype + api_error_status +
+ * result text so callers (e.g. Discord) see the actual cause instead of a
+ * truncated tail of stdout.
+ */
+export function summarizeClaudeCliError(parsed: ParsedResult): string | undefined {
+  if (!parsed.errorMessage && !parsed.errorSubtype && !parsed.apiErrorStatus) {
+    return undefined;
+  }
+  const parts: string[] = [];
+  if (parsed.errorSubtype) parts.push(parsed.errorSubtype);
+  if (parsed.apiErrorStatus && parsed.apiErrorStatus !== parsed.errorMessage) {
+    parts.push(parsed.apiErrorStatus);
+  }
+  if (parsed.errorMessage) parts.push(parsed.errorMessage);
+  if (parsed.sessionId) parts.push(`session=${parsed.sessionId}`);
+  return parts.join(" | ");
 }
 
 export interface BuildArgsParams {
@@ -418,14 +456,23 @@ export class ClaudeCliClient implements LLMClient {
 
       child.on("close", (code) => {
         if (code !== 0) {
-          const tail = stderr.trim() || stdout.trim().slice(-500);
           const aliased = resolveClaudeCliModelAlias(
             params.modelLabel || this.defaultModelAlias,
           );
+          const parsedErr = parseJsonlOutput(stdout);
+          const structured = summarizeClaudeCliError(parsedErr);
+          const stderrTail = stderr.trim();
+          let detail: string;
+          if (structured) {
+            detail = structured;
+            if (stderrTail) detail += ` (stderr: ${stderrTail.slice(-200)})`;
+          } else if (stderrTail) {
+            detail = stderrTail;
+          } else {
+            detail = stdout.trim().slice(-500) || "no output";
+          }
           reject(
-            new Error(
-              `claude-cli exited ${code} (model=${aliased}): ${tail || "no output"}`,
-            ),
+            new Error(`claude-cli exited ${code} (model=${aliased}): ${detail}`),
           );
           return;
         }

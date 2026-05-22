@@ -3,7 +3,7 @@
  * Mock `claude` binary for tests of ClaudeCliClient.
  *
  * Behavior is driven by env vars:
- *   MOCK_CLAUDE_MODE   = "text" | "fail" | "echo-argv" | "echo-stdin" | "error-result"
+ *   MOCK_CLAUDE_MODE   = "text" | "fail" | "echo-argv" | "echo-stdin" | "error-result" | "error-result-fail"
  *   MOCK_CLAUDE_TEXT   = canned assistant text (default "ok")
  *   MOCK_CLAUDE_EXIT   = exit code (default 0)
  *   MOCK_CLAUDE_STDERR = text to write to stderr
@@ -48,6 +48,28 @@ process.stdin.on("end", () => {
       stop_reason: "end_turn",
     }) + "\n");
     process.exit(exitCode);
+  }
+
+  if (mode === "error-result-fail") {
+    // Real-world shape: claude exits non-zero but stdout still contains a
+    // structured result event we want to surface.
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      result: "Request failed (request id: bfdb18e5)",
+      api_error_status: "529 overloaded",
+      session_id: "mock-session",
+      total_cost_usd: 0,
+      usage: {
+        input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        output_tokens: 0,
+        server_tool_use: { web_search_count: 0 },
+      },
+    }) + "\n");
+    process.exit(exitCode || 1);
   }
 
   // Default text mode — emit an assistant message + a success result.

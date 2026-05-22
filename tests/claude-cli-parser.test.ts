@@ -10,6 +10,7 @@ import {
   buildClaudeCliArgs,
   buildClaudeCliChildEnv,
   resolveClaudeCliModelAlias,
+  summarizeClaudeCliError,
   CLAUDE_CLI_CLEAR_ENV,
 } from "../src/runner/claude-cli-client.js";
 
@@ -122,6 +123,22 @@ describe("parseJsonlOutput", () => {
     expect(parsed.errorMessage).toBe("529 overloaded");
   });
 
+  it("captures errorSubtype and apiErrorStatus on is_error result", () => {
+    const errResult = JSON.stringify({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      result: "Request failed (request id: bfdb18e5)",
+      api_error_status: "529 overloaded",
+      session_id: "sess-x",
+    });
+    const parsed = parseJsonlOutput(errResult);
+    expect(parsed.errorSubtype).toBe("error_during_execution");
+    expect(parsed.apiErrorStatus).toBe("529 overloaded");
+    expect(parsed.errorMessage).toBe("Request failed (request id: bfdb18e5)");
+    expect(parsed.sessionId).toBe("sess-x");
+  });
+
   it("ignores blank lines and malformed JSON safely", () => {
     const stdout = [
       "",
@@ -145,6 +162,48 @@ describe("parseJsonlOutput", () => {
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
     });
+  });
+});
+
+describe("summarizeClaudeCliError", () => {
+  it("returns undefined when nothing error-related is set", () => {
+    expect(
+      summarizeClaudeCliError({
+        text: "hi",
+        thinking: "",
+        usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        stopReason: "end_turn",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("combines subtype + api_error_status + message + session id", () => {
+    const summary = summarizeClaudeCliError({
+      text: "",
+      thinking: "",
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      stopReason: "end_turn",
+      errorSubtype: "error_during_execution",
+      apiErrorStatus: "529 overloaded",
+      errorMessage: "Request failed (request id: bfdb18e5)",
+      sessionId: "sess-x",
+    });
+    expect(summary).toBe(
+      "error_during_execution | 529 overloaded | Request failed (request id: bfdb18e5) | session=sess-x",
+    );
+  });
+
+  it("does not duplicate api_error_status when it equals errorMessage", () => {
+    const summary = summarizeClaudeCliError({
+      text: "",
+      thinking: "",
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      stopReason: "end_turn",
+      errorSubtype: "error",
+      apiErrorStatus: "529 overloaded",
+      errorMessage: "529 overloaded",
+    });
+    expect(summary).toBe("error | 529 overloaded");
   });
 });
 
