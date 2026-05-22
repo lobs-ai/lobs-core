@@ -116,7 +116,7 @@ class DiscordService {
     this.setupEventHandlers();
 
     this.readyPromise = new Promise((resolve, reject) => {
-      this.client!.once("ready", async () => {
+      this.client!.once("clientReady", async () => {
         console.log(`[discord] Bot connected as ${this.client!.user?.tag}`);
         this.state = "ready";
         this.metrics.state = "ready";
@@ -332,7 +332,7 @@ class DiscordService {
       }
 
       this.readyPromise = new Promise((resolve) => {
-        this.client!.once("ready", async () => {
+        this.client!.once("clientReady", async () => {
           console.log(`[discord] Reconnected as ${this.client!.user?.tag} (attempt ${this.reconnectAttempts})`);
           this.state = "ready";
           this.metrics.state = "ready";

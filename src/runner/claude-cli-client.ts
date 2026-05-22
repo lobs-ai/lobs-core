@@ -163,6 +163,20 @@ export interface ParsedResult {
   errorSubtype?: string;
   /** result.api_error_status, e.g. "529 overloaded". */
   apiErrorStatus?: string;
+  /**
+   * Most recent rate_limit_event from the stream. Present whether the call
+   * succeeded or failed. When the 5-hour Max subscription bucket is empty and
+   * the org has overage disabled, claude-cli emits an is_error result with a
+   * misleading "Your organization has disabled..." message; the resetsAt here
+   * is what callers should actually back off until.
+   */
+  rateLimit?: {
+    resetsAt?: number;
+    rateLimitType?: string;
+    status?: string;
+    overageStatus?: string;
+    overageDisabledReason?: string;
+  };
 }
 
 export function parseJsonlOutput(stdout: string): ParsedResult {
@@ -179,6 +193,7 @@ export function parseJsonlOutput(stdout: string): ParsedResult {
   let errorMessage: string | undefined;
   let errorSubtype: string | undefined;
   let apiErrorStatus: string | undefined;
+  let rateLimit: ParsedResult["rateLimit"];
 
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
@@ -250,6 +265,21 @@ export function parseJsonlOutput(stdout: string): ParsedResult {
       continue;
     }
 
+    if (type === "rate_limit_event") {
+      const info = (event as { rate_limit_info?: Record<string, unknown> }).rate_limit_info;
+      if (info && typeof info === "object") {
+        rateLimit = {
+          resetsAt: typeof info.resetsAt === "number" ? info.resetsAt : undefined,
+          rateLimitType: typeof info.rateLimitType === "string" ? info.rateLimitType : undefined,
+          status: typeof info.status === "string" ? info.status : undefined,
+          overageStatus: typeof info.overageStatus === "string" ? info.overageStatus : undefined,
+          overageDisabledReason:
+            typeof info.overageDisabledReason === "string" ? info.overageDisabledReason : undefined,
+        };
+      }
+      continue;
+    }
+
     if (type === "assistant") {
       const message = (event as { message?: { content?: unknown[] } }).message;
       const blocks = Array.isArray(message?.content) ? message.content : [];
@@ -277,7 +307,35 @@ export function parseJsonlOutput(stdout: string): ParsedResult {
     errorMessage,
     errorSubtype,
     apiErrorStatus,
+    rateLimit,
   };
+}
+
+/**
+ * Detect the claude-cli quota-exhaustion error. The CLI surfaces this as
+ * "Your organization has disabled Claude subscription access for Claude Code"
+ * even when the underlying cause is a depleted 5-hour Max subscription bucket
+ * with overage billing disabled at the org level. The accompanying
+ * rate_limit_event shows overageStatus=rejected and a resetsAt timestamp.
+ *
+ * Returning a synthetic 429 with retry_after seconds derived from resetsAt
+ * lets ResilientLLMClient apply its normal rate-limit backoff instead of
+ * treating it as an unrecognized error.
+ */
+function detectQuotaExhaustion(parsed: ParsedResult): { retryAfterSec: number } | undefined {
+  const msg = parsed.errorMessage ?? "";
+  const looksLikeQuota =
+    /subscription access|Use an Anthropic API key|overage|rate.?limit/i.test(msg) ||
+    parsed.rateLimit?.overageStatus === "rejected" ||
+    parsed.rateLimit?.status === "exceeded_limit" ||
+    parsed.rateLimit?.status === "blocked";
+  if (!looksLikeQuota) return undefined;
+
+  const resetsAt = parsed.rateLimit?.resetsAt;
+  const nowSec = Math.floor(Date.now() / 1000);
+  // resetsAt looks like a Unix timestamp in seconds (e.g. 1779439200)
+  const retryAfterSec = resetsAt && resetsAt > nowSec ? resetsAt - nowSec : 15 * 60;
+  return { retryAfterSec };
 }
 
 /**
@@ -470,6 +528,19 @@ export class ClaudeCliClient implements LLMClient {
             detail = stderrTail;
           } else {
             detail = stdout.trim().slice(-500) || "no output";
+          }
+          const quota = detectQuotaExhaustion(parsedErr);
+          if (quota) {
+            const resetsAt = parsedErr.rateLimit?.resetsAt;
+            const resetsAtIso = resetsAt ? new Date(resetsAt * 1000).toISOString() : "unknown";
+            const err = new Error(
+              `claude-cli subscription quota exhausted (model=${aliased}, resets_at=${resetsAtIso}) ` +
+              `retry_after: ${quota.retryAfterSec} — overage disabled (${parsedErr.rateLimit?.overageDisabledReason ?? "n/a"}); ` +
+              `underlying: ${detail}`,
+            );
+            Object.assign(err, { status: 429, __lobsQuotaExhausted: true });
+            reject(err);
+            return;
           }
           reject(
             new Error(`claude-cli exited ${code} (model=${aliased}): ${detail}`),
