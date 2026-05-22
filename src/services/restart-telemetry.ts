@@ -168,9 +168,9 @@ function checkGatewayToken(token: string | undefined): TelemetryProbeResult {
   if (!token || token.trim() === "") {
     return {
       probe: "gateway-token",
-      level: "critical",
+      level: "warn",
       message:
-        "[restart-telemetry] CRITICAL: no gateway auth token configured — spawn_agent will fail silently; check lobs.json gateway.auth.token",
+        "[restart-telemetry] WARN: no gateway auth token configured — spawn_agent and paw session resume will be unavailable; set lobs.json gateway.auth.token if you intend to use them",
     };
   }
   return {
