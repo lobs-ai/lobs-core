@@ -315,21 +315,39 @@ export function parseJsonlOutput(stdout: string): ParsedResult {
  * Detect the claude-cli quota-exhaustion error. The CLI surfaces this as
  * "Your organization has disabled Claude subscription access for Claude Code"
  * even when the underlying cause is a depleted 5-hour Max subscription bucket
- * with overage billing disabled at the org level. The accompanying
- * rate_limit_event shows overageStatus=rejected and a resetsAt timestamp.
+ * with overage billing disabled at the org level.
+ *
+ * Authoritative signal: rate_limit_event.status. "allowed" means there is
+ * quota left; "exceeded_limit" / "blocked" / "rejected" means the bucket is
+ * actually empty. overageStatus is NOT a usable signal — orgs with overage
+ * disabled emit overageStatus="rejected" on *every* request, including
+ * successful ones, so keying off it produces false positives on any
+ * unrelated non-zero exit.
  *
  * Returning a synthetic 429 with retry_after seconds derived from resetsAt
- * lets ResilientLLMClient apply its normal rate-limit backoff instead of
- * treating it as an unrecognized error.
+ * lets ResilientLLMClient apply its normal rate-limit backoff.
  */
 function detectQuotaExhaustion(parsed: ParsedResult): { retryAfterSec: number } | undefined {
+  const status = parsed.rateLimit?.status;
+  if (status === "allowed") {
+    // Bucket explicitly has room — whatever caused the non-zero exit, it
+    // isn't quota. Don't mask the real error.
+    return undefined;
+  }
+  const bucketExhausted =
+    status === "exceeded_limit" || status === "blocked" || status === "rejected";
+
+  // If no rate_limit_event was emitted at all, fall back to message matching.
+  // Keep the regex tight: "subscription access" / "Use an Anthropic API key"
+  // are specific to the quota-exhaustion message. Generic words like "overage"
+  // or "rate limit" appear in unrelated messages (including our own retry
+  // logs), so they're omitted.
   const msg = parsed.errorMessage ?? "";
-  const looksLikeQuota =
-    /subscription access|Use an Anthropic API key|overage|rate.?limit/i.test(msg) ||
-    parsed.rateLimit?.overageStatus === "rejected" ||
-    parsed.rateLimit?.status === "exceeded_limit" ||
-    parsed.rateLimit?.status === "blocked";
-  if (!looksLikeQuota) return undefined;
+  const messageLooksLikeQuota =
+    status === undefined &&
+    /subscription access|Use an Anthropic API key/i.test(msg);
+
+  if (!bucketExhausted && !messageLooksLikeQuota) return undefined;
 
   const resetsAt = parsed.rateLimit?.resetsAt;
   const nowSec = Math.floor(Date.now() / 1000);

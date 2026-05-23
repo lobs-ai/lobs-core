@@ -142,6 +142,57 @@ describe("ClaudeCliClient — text-only", () => {
     );
   });
 
+  it("does NOT misclassify as quota exhaustion when status=allowed but overageStatus=rejected", async () => {
+    // Regression: orgs with overage disabled emit overageStatus=rejected on
+    // EVERY rate_limit_event, including successful requests. Earlier logic
+    // keyed off overageStatus alone, so any non-zero exit got rewritten to
+    // "subscription quota exhausted" and the real underlying error was lost.
+    const client = new ClaudeCliClient("opus", { binaryPath: MOCK_BINARY });
+    process.env.MOCK_CLAUDE_MODE = "overage-rejected-but-allowed";
+    process.env.MOCK_CLAUDE_EXIT = "1";
+    delete process.env.MOCK_CLAUDE_STDERR;
+
+    await expect(
+      client.createMessage({
+        model: "opus",
+        system: "",
+        messages: [{ role: "user", content: "x" }],
+        tools: [],
+        maxTokens: 50,
+      }),
+    ).rejects.toThrow(/529 overloaded.*deadbeef/);
+
+    await expect(
+      client.createMessage({
+        model: "opus",
+        system: "",
+        messages: [{ role: "user", content: "x" }],
+        tools: [],
+        maxTokens: 50,
+      }),
+    ).rejects.not.toThrow(/subscription quota exhausted/);
+  });
+
+  it("classifies as quota exhaustion when status=exceeded_limit", async () => {
+    const client = new ClaudeCliClient("opus", { binaryPath: MOCK_BINARY });
+    process.env.MOCK_CLAUDE_MODE = "quota-truly-exhausted";
+    process.env.MOCK_CLAUDE_EXIT = "1";
+    delete process.env.MOCK_CLAUDE_STDERR;
+
+    const err = await client
+      .createMessage({
+        model: "opus",
+        system: "",
+        messages: [{ role: "user", content: "x" }],
+        tools: [],
+        maxTokens: 50,
+      })
+      .catch((e) => e);
+    expect(err.message).toMatch(/subscription quota exhausted/);
+    expect((err as { status?: number }).status).toBe(429);
+    expect((err as { __lobsQuotaExhausted?: boolean }).__lobsQuotaExhausted).toBe(true);
+  });
+
   it("rejects when result event signals is_error", async () => {
     const client = new ClaudeCliClient("haiku", { binaryPath: MOCK_BINARY });
     process.env.MOCK_CLAUDE_MODE = "error-result";

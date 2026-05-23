@@ -3,7 +3,7 @@
  * Mock `claude` binary for tests of ClaudeCliClient.
  *
  * Behavior is driven by env vars:
- *   MOCK_CLAUDE_MODE   = "text" | "fail" | "echo-argv" | "echo-stdin" | "error-result" | "error-result-fail"
+ *   MOCK_CLAUDE_MODE   = "text" | "fail" | "echo-argv" | "echo-stdin" | "error-result" | "error-result-fail" | "overage-rejected-but-allowed" | "quota-truly-exhausted"
  *   MOCK_CLAUDE_TEXT   = canned assistant text (default "ok")
  *   MOCK_CLAUDE_EXIT   = exit code (default 0)
  *   MOCK_CLAUDE_STDERR = text to write to stderr
@@ -48,6 +48,57 @@ process.stdin.on("end", () => {
       stop_reason: "end_turn",
     }) + "\n");
     process.exit(exitCode);
+  }
+
+  if (mode === "overage-rejected-but-allowed") {
+    // Org has overage billing disabled — every rate_limit_event has
+    // overageStatus=rejected, but status=allowed means there IS quota left.
+    // Combined with an unrelated structured error, this used to be
+    // misclassified as quota exhaustion. The error should surface as-is.
+    process.stdout.write(JSON.stringify({
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "allowed",
+        resetsAt: Math.floor(Date.now() / 1000) + 3600,
+        rateLimitType: "five_hour",
+        overageStatus: "rejected",
+        overageDisabledReason: "org_level_disabled_until",
+        isUsingOverage: false,
+      },
+    }) + "\n");
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      result: "Request failed (request id: deadbeef)",
+      api_error_status: "529 overloaded",
+      session_id: "mock-session",
+    }) + "\n");
+    process.exit(exitCode || 1);
+  }
+
+  if (mode === "quota-truly-exhausted") {
+    // status=exceeded_limit — bucket is actually empty. Should be classified
+    // as quota exhaustion with retry_after derived from resetsAt.
+    process.stdout.write(JSON.stringify({
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "exceeded_limit",
+        resetsAt: Math.floor(Date.now() / 1000) + 900,
+        rateLimitType: "five_hour",
+        overageStatus: "rejected",
+        overageDisabledReason: "org_level_disabled_until",
+        isUsingOverage: false,
+      },
+    }) + "\n");
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      subtype: "error",
+      is_error: true,
+      result: "Your organization has disabled Claude subscription access for Claude Code",
+      session_id: "mock-session",
+    }) + "\n");
+    process.exit(exitCode || 1);
   }
 
   if (mode === "error-result-fail") {
