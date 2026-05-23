@@ -3,13 +3,13 @@
  * Mock `claude` binary for tests of ClaudeCliClient.
  *
  * Behavior is driven by env vars:
- *   MOCK_CLAUDE_MODE   = "text" | "fail" | "echo-argv" | "echo-stdin" | "error-result" | "error-result-fail" | "overage-rejected-but-allowed" | "quota-truly-exhausted"
+ *   MOCK_CLAUDE_MODE   = "text" | "fail" | "echo-argv" | "echo-stdin" | "error-result" | "error-result-fail" | "overage-rejected-but-allowed" | "quota-truly-exhausted" | "auth-401" | "auth-401-then-text"
  *   MOCK_CLAUDE_TEXT   = canned assistant text (default "ok")
  *   MOCK_CLAUDE_EXIT   = exit code (default 0)
  *   MOCK_CLAUDE_STDERR = text to write to stderr
  *   MOCK_CLAUDE_LOGFILE = optional path to dump observed argv + stdin
  */
-import { writeFileSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
 
 const mode = process.env.MOCK_CLAUDE_MODE || "text";
 const text = process.env.MOCK_CLAUDE_TEXT || "ok";
@@ -48,6 +48,60 @@ process.stdin.on("end", () => {
       stop_reason: "end_turn",
     }) + "\n");
     process.exit(exitCode);
+  }
+
+  if (mode === "auth-401") {
+    // Synthesizes the exact shape claude-cli emits on 401: subtype="success"
+    // (the turn completed) but is_error=true with the synthetic auth message.
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: true,
+      result: "Failed to authenticate. API Error: 401 Invalid authentication credentials",
+      api_error_status: "401",
+      session_id: "mock-session-58e88",
+    }) + "\n");
+    process.exit(exitCode || 1);
+  }
+
+  if (mode === "auth-401-then-text") {
+    // Stateful via a counter file: first spawn returns 401, second returns text.
+    // Used to verify ClaudeCliClient retries OAuth-race 401s in-process.
+    const counterFile = process.env.MOCK_CLAUDE_STATE_FILE;
+    if (!counterFile) {
+      process.stderr.write("auth-401-then-text mode requires MOCK_CLAUDE_STATE_FILE\n");
+      process.exit(2);
+    }
+    const count = existsSync(counterFile)
+      ? parseInt(readFileSync(counterFile, "utf8").trim() || "0", 10)
+      : 0;
+    writeFileSync(counterFile, String(count + 1));
+    if (count === 0) {
+      process.stdout.write(JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        result: "Failed to authenticate. API Error: 401 Invalid authentication credentials",
+        api_error_status: "401",
+        session_id: "mock-session-retry",
+      }) + "\n");
+      process.exit(1);
+    }
+    // Second spawn: success.
+    process.stdout.write(JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text }] },
+    }) + "\n");
+    process.stdout.write(JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: text,
+      stop_reason: "end_turn",
+      session_id: "mock-session-retry",
+      usage: { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    }) + "\n");
+    process.exit(0);
   }
 
   if (mode === "overage-rejected-but-allowed") {

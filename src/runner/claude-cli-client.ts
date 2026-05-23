@@ -357,6 +357,30 @@ function detectQuotaExhaustion(parsed: ParsedResult): { retryAfterSec: number } 
 }
 
 /**
+ * Detect a 401 from the upstream Anthropic API surfaced through claude-cli.
+ * Two shapes seen in the wild:
+ *   - result.api_error_status starts with "401"
+ *   - result.result is a synthetic "Failed to authenticate. API Error: 401
+ *     Invalid authentication credentials" message
+ *
+ * Almost always a transient OAuth-refresh race: the foreground Claude Code
+ * session rotated the access token and in-flight spawned claudes are briefly
+ * holding a stale one until the credentials file is re-read.
+ */
+export function detectAuthFailure(parsed: ParsedResult): boolean {
+  if (parsed.apiErrorStatus && /^401\b/.test(parsed.apiErrorStatus)) return true;
+  const msg = parsed.errorMessage ?? "";
+  return /401[^\d].*authentic|Invalid authentication credentials|authentication[_ ]failed/i.test(
+    msg,
+  );
+}
+
+/** Delay before a single in-client retry after a 401 from claude-cli. Long
+ * enough for an OAuth refresh in a sibling process to have written the new
+ * token to ~/.claude/.credentials.json. */
+export const CLAUDE_CLI_AUTH_RETRY_DELAY_MS = 3000;
+
+/**
  * Build a human-readable summary of a structured claude -p error event for
  * surfacing in thrown Error messages. Combines subtype + api_error_status +
  * result text so callers (e.g. Discord) see the actual cause instead of a
@@ -433,6 +457,8 @@ export interface ClaudeCliClientOptions {
    * Override how the MCP server is started — used by tests to inject a stub.
    */
   startMcpServer?: typeof startClaudeCliMcpServer;
+  /** Override the in-client OAuth-race retry delay (ms). Used by tests. */
+  authRetryDelayMs?: number;
 }
 
 export class ClaudeCliClient implements LLMClient {
@@ -440,12 +466,14 @@ export class ClaudeCliClient implements LLMClient {
   private readonly sessionId?: string;
   private readonly binary: string;
   private readonly startMcpServer: typeof startClaudeCliMcpServer;
+  private readonly authRetryDelayMs: number;
 
   constructor(modelId: string, options?: ClaudeCliClientOptions) {
     this.defaultModelAlias = resolveClaudeCliModelAlias(modelId);
     this.sessionId = options?.sessionId;
     this.binary = options?.binaryPath || CLAUDE_BINARY;
     this.startMcpServer = options?.startMcpServer ?? startClaudeCliMcpServer;
+    this.authRetryDelayMs = options?.authRetryDelayMs ?? CLAUDE_CLI_AUTH_RETRY_DELAY_MS;
   }
 
   async createMessage(params: {
@@ -490,7 +518,23 @@ export class ClaudeCliClient implements LLMClient {
           : undefined,
       });
       const env = buildClaudeCliChildEnv();
-      return await this.spawnAndCollect({ args, env, prompt, modelLabel: params.model });
+
+      // OAuth-refresh-race retry: if a sibling Claude Code session rotates the
+      // access token mid-flight, our spawn gets a 401 with a *stale* cached
+      // token. The credentials file is updated atomically, so re-spawning a
+      // few seconds later picks up the fresh token. One retry is enough — a
+      // genuine credential failure (logged out, bad refresh token) persists
+      // past the delay and bubbles up to the outer resilient client.
+      try {
+        return await this.spawnAndCollect({ args, env, prompt, modelLabel: params.model });
+      } catch (err) {
+        const isAuth =
+          !!err && typeof err === "object" &&
+          (err as { __lobsAuthFailed?: boolean }).__lobsAuthFailed === true;
+        if (!isAuth) throw err;
+        await new Promise<void>((r) => setTimeout(r, this.authRetryDelayMs));
+        return await this.spawnAndCollect({ args, env, prompt, modelLabel: params.model });
+      }
     } finally {
       if (mcpHandle) {
         await mcpHandle.close();
@@ -557,6 +601,15 @@ export class ClaudeCliClient implements LLMClient {
               `underlying: ${detail}`,
             );
             Object.assign(err, { status: 429, __lobsQuotaExhausted: true });
+            reject(err);
+            return;
+          }
+          if (detectAuthFailure(parsedErr)) {
+            const sessionTail = parsedErr.sessionId?.slice(0, 8) ?? "?";
+            const err = new Error(
+              `claude-cli auth failed 401 (model=${aliased}, session=${sessionTail}): ${detail}`,
+            );
+            Object.assign(err, { status: 401, __lobsAuthFailed: true });
             reject(err);
             return;
           }

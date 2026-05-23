@@ -1309,9 +1309,20 @@ class ResilientLLMClient implements LLMClient {
             }
           }
 
-          // Auth errors — retry to allow key rotation
+          // Auth errors — retry to allow key rotation or OAuth-refresh settle.
+          // The exponential backoff matters specifically for claude-cli's OAuth
+          // subscription: when a sibling Claude Code session rotates the access
+          // token, in-flight spawns see a stale 401 until the credentials file
+          // catches up. Burning all 3 retries in milliseconds (the old behavior)
+          // never gave the refresh time to land.
           if (status === 401 || status === 403) {
             if (attempt < this.maxRetries) {
+              const waitTimeMs = this.exponentialBackoff(attempt) * 1000;
+              console.warn(
+                `[ResilientLLMClient] Auth ${status} for model ${model}, retrying in ${(waitTimeMs / 1000).toFixed(1)}s ` +
+                `(attempt ${attempt}/${this.maxRetries}) session=${this.sessionId?.slice(0, 40) ?? "none"}`,
+              );
+              await this.sleep(waitTimeMs);
               continue;
             }
             throw new Error(`Authentication failed for model ${model}: ${message}`);

@@ -173,6 +173,63 @@ describe("ClaudeCliClient — text-only", () => {
     ).rejects.not.toThrow(/subscription quota exhausted/);
   });
 
+  it("auto-retries once on 401 (OAuth-refresh race) and succeeds if the second spawn returns text", async () => {
+    // Repro of the discord-reported failure: a sibling Claude Code session
+    // rotated the OAuth access token, so our first spawn got 401 with a stale
+    // cached token. The credentials file is updated atomically — the second
+    // spawn a few seconds later picks up the fresh token and succeeds. This
+    // test forces the second spawn to succeed and asserts the client doesn't
+    // bubble up the transient 401.
+    const dir = mkdtempSync(join(tmpdir(), "claude-cli-retry-"));
+    const stateFile = join(dir, "counter");
+    const client = new ClaudeCliClient("opus", {
+      binaryPath: MOCK_BINARY,
+      authRetryDelayMs: 50,
+    });
+    process.env.MOCK_CLAUDE_MODE = "auth-401-then-text";
+    process.env.MOCK_CLAUDE_TEXT = "after-retry";
+    process.env.MOCK_CLAUDE_STATE_FILE = stateFile;
+    delete process.env.MOCK_CLAUDE_STDERR;
+
+    const response = await client.createMessage({
+      model: "opus",
+      system: "",
+      messages: [{ role: "user", content: "x" }],
+      tools: [],
+      maxTokens: 50,
+    });
+
+    expect(response.content).toEqual([{ type: "text", text: "after-retry" }]);
+    // Counter file proves the binary was spawned exactly twice.
+    expect(readFileSync(stateFile, "utf8").trim()).toBe("2");
+    delete process.env.MOCK_CLAUDE_STATE_FILE;
+  }, 10_000);
+
+  it("surfaces a structured 401 when both attempts fail auth", async () => {
+    const client = new ClaudeCliClient("opus", {
+      binaryPath: MOCK_BINARY,
+      authRetryDelayMs: 50,
+    });
+    process.env.MOCK_CLAUDE_MODE = "auth-401";
+    process.env.MOCK_CLAUDE_EXIT = "1";
+    delete process.env.MOCK_CLAUDE_STDERR;
+
+    const err = await client
+      .createMessage({
+        model: "opus",
+        system: "",
+        messages: [{ role: "user", content: "x" }],
+        tools: [],
+        maxTokens: 50,
+      })
+      .catch((e) => e);
+    expect(err.message).toMatch(/auth failed 401.*session=mock-ses/);
+    // Reliable status field — downstream resilient client doesn't have to
+    // regex the message to know it's a 401.
+    expect((err as { status?: number }).status).toBe(401);
+    expect((err as { __lobsAuthFailed?: boolean }).__lobsAuthFailed).toBe(true);
+  }, 10_000);
+
   it("classifies as quota exhaustion when status=exceeded_limit", async () => {
     const client = new ClaudeCliClient("opus", { binaryPath: MOCK_BINARY });
     process.env.MOCK_CLAUDE_MODE = "quota-truly-exhausted";
